@@ -7,8 +7,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions } from "../schema/index.js";
-import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
+import { ONEPASSWORD_SERVICE, OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
+import { UNGRANTED_TEAM_OP_REF } from "../services/team-onepassword-grant.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -200,6 +201,10 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+    await api.providers.engineCredentials.save({ type: "team", id: "team-1" }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      metadata: { refs: ["op://ok/item/field"] },
+    });
     const { token } = await mintSandboxToken(api.providers.db, {
       sessionId: "sess-team-1",
       userId: "user-a",
@@ -212,6 +217,38 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     expect(scopesTried).toEqual(["org"]);
     expect(body.values[0]).toBeNull();
     expect(body.unresolved).toEqual(["op://ok/item/field"]);
+  });
+
+  it("a team-owned session resolves a granted ref and refuses an ungranted one", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess-team-grant",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "team",
+      ownerId: "team-1",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await api.providers.engineCredentials.save({ type: "team", id: "team-1" }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      metadata: { refs: ["op://ok/item/field"] },
+    });
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-team-grant",
+      userId: "local-user",
+      orgId: "local-org",
+    });
+
+    const granted = await resolve(["op://ok/item/field"], token);
+    expect(granted.status).toBe(200);
+    expect(decode(((await granted.json()) as Resp).values[0])).toBe("secret-for-op://ok/item/field");
+
+    const refused = await resolve(["op://ok/other/field"], token);
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as { error: string }).error).toBe(UNGRANTED_TEAM_OP_REF);
   });
 
   it("a user-owned session still reaches that user's personal vault", async () => {

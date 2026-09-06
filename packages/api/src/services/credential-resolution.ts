@@ -40,6 +40,11 @@ import {
   type OnePasswordService,
   OnePasswordScope,
 } from "./onepassword.js";
+import {
+  isTeamOpRefGranted,
+  loadTeamOnePasswordRefs,
+  refuseUngrantedTeamOpRef,
+} from "./team-onepassword-grant.js";
 
 /** Internal services that must never surface as ordinary session/workflow
  * credentials. `onepassword` rows are the service-account tokens themselves;
@@ -264,6 +269,11 @@ export async function resolveTeamCredentialRead(
   if (isDeniedCredentialService(service)) return null;
   const scopes = ctx.scopes ?? ["org"];
   const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
+  const meta = teamRow ? onePasswordMeta(teamRow) : null;
+  if (meta) {
+    const granted = await loadTeamOnePasswordRefs(deps.credentials, ctx.teamId);
+    if (!isTeamOpRefGranted(granted, meta.reference)) refuseUngrantedTeamOpRef();
+  }
   const fromTeam = await resolveRow(
     deps,
     teamRow,

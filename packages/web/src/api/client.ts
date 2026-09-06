@@ -129,6 +129,10 @@ import type {
   DeleteSkillResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
+  DeleteTeamOnePasswordRefsResponse,
+  PutTeamOnePasswordRefsRequest,
+  PutTeamOnePasswordRefsResponse,
+  TeamOnePasswordRefsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   GetTeamChildrenResponse,
@@ -1140,6 +1144,19 @@ export const api = {
     ),
   ensureTeamOrchestrator: (id: string) =>
     request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
+  listTeamOnePasswordRefs: (id: string) =>
+    request<TeamOnePasswordRefsResponse>("GET", `/teams/${encodeURIComponent(id)}/onepassword-refs`),
+  putTeamOnePasswordRefs: (id: string, body: PutTeamOnePasswordRefsRequest) =>
+    request<PutTeamOnePasswordRefsResponse>(
+      "PUT",
+      `/teams/${encodeURIComponent(id)}/onepassword-refs`,
+      body,
+    ),
+  deleteTeamOnePasswordRefs: (id: string) =>
+    request<DeleteTeamOnePasswordRefsResponse>(
+      "DELETE",
+      `/teams/${encodeURIComponent(id)}/onepassword-refs`,
+    ),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),

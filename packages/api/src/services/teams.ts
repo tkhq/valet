@@ -15,6 +15,7 @@ import {
   agentSessions,
   assistants,
   channelBindings,
+  credentials,
   eventSubscriptions,
   followedThreads,
   orgMembers,
@@ -678,6 +679,9 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(followedThreads)
       .where(and(eq(followedThreads.ownerType, "team"), eq(followedThreads.ownerId, opts.teamId)));
+    await tx
+      .delete(credentials)
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, opts.teamId)));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

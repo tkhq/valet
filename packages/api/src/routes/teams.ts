@@ -77,6 +77,7 @@ import {
   IdpManagedTeamError,
   type IdpManagedMutation,
   isLiveIdpMirror,
+  isTeamMember,
   LastAdminError,
   listTeamMembers,
   listTeamsForOrg,
@@ -91,17 +92,26 @@ import type {
   AddTeamMemberRequest,
   CreateTeamRequest,
   CreateTeamResponse,
+  DeleteTeamOnePasswordRefsResponse,
   EnsureOrchestratorResponse,
   GetTeamChildrenResponse,
   TeamChildSummary,
   ListTeamMembersResponse,
   ListTeamsResponse,
   PatchTeamResponse,
+  PutTeamOnePasswordRefsResponse,
   SetTeamMemberRoleRequest,
   SkillSourceSummary,
+  TeamOnePasswordRefsResponse,
   TeamRole,
   TeamSummary,
 } from "../wire/types.js";
+import { ONEPASSWORD_SERVICE } from "../services/onepassword.js";
+import {
+  grantRow,
+  loadTeamOnePasswordRefs,
+  parseTeamOnePasswordRefs,
+} from "../services/team-onepassword-grant.js";
 
 export const teamsRouter = new Hono<AppEnv>();
 
@@ -697,4 +707,56 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
+});
+
+// ── 1Password refs (TKAI-361) ────────────────────────────────────────────
+
+teamsRouter.get("/:id/onepassword-refs", async (c) => {
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  const canRead = (await isTeamMember(db, id, user.id)) || (await canAdministerTeam(db, id, user.id));
+  if (!canRead) return c.json({ error: "team not found" }, 404);
+  const refs = await loadTeamOnePasswordRefs(engineCredentials, id);
+  return c.json({ refs } satisfies TeamOnePasswordRefsResponse);
+});
+
+teamsRouter.put("/:id/onepassword-refs", async (c) => {
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return c.json({ error: "Send refs as an array of op://vault/item/field strings." }, 400);
+  }
+  const parsed = parseTeamOnePasswordRefs("refs" in raw ? raw.refs : undefined);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  if (parsed.refs.length === 0) {
+    await engineCredentials.delete({ type: "team", id }, ONEPASSWORD_SERVICE);
+    return c.json({ refs: [] } satisfies PutTeamOnePasswordRefsResponse);
+  }
+  await engineCredentials.save({ type: "team", id }, ONEPASSWORD_SERVICE, grantRow(parsed.refs));
+  return c.json({ refs: parsed.refs } satisfies PutTeamOnePasswordRefsResponse);
+});
+
+teamsRouter.delete("/:id/onepassword-refs", async (c) => {
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+  await engineCredentials.delete({ type: "team", id }, ONEPASSWORD_SERVICE);
+  return c.json({ ok: true } satisfies DeleteTeamOnePasswordRefsResponse);
 });

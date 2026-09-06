@@ -19,6 +19,11 @@ import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { onePasswordScopesFor } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
+import {
+  isTeamOpRefGranted,
+  loadTeamOnePasswordRefs,
+  UNGRANTED_TEAM_OP_REF,
+} from "../services/team-onepassword-grant.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
@@ -78,7 +83,7 @@ function narrowScopes(
 }
 
 sandboxSecretsRouter.post("/resolve", async (c) => {
-  const { onePassword, db } = c.var.providers;
+  const { onePassword, db, engineCredentials } = c.var.providers;
   // The sandbox principal, never `c.var.user`: the sandbox rung sets only
   // `c.var.sandbox`, and a signed-in browser session must not read plaintext
   // org secrets from a route whose sibling deliberately strips values.
@@ -153,6 +158,14 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
   const scopes = narrowed.scopes;
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
+  const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
+  if (teamId) {
+    const granted = await loadTeamOnePasswordRefs(engineCredentials, teamId);
+    const ungranted = references.filter((reference) => !isTeamOpRefGranted(granted, reference));
+    if (ungranted.length > 0) {
+      return c.json({ error: UNGRANTED_TEAM_OP_REF }, 403);
+    }
+  }
 
   // Every reference in parallel; within one, org scope first. A scope with
   // no token or a disabled toggle has nothing to offer and the next may
@@ -212,7 +225,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
  * a plain-text line can leak.
  */
 sandboxSecretsRouter.post("/find", async (c) => {
-  const { onePassword, db } = c.var.providers;
+  const { onePassword, db, engineCredentials } = c.var.providers;
   const sandbox = c.var.sandbox;
   if (!sandbox) {
     return c.json(
@@ -256,14 +269,18 @@ sandboxSecretsRouter.post("/find", async (c) => {
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
 
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
+  const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
+  const granted = teamId ? await loadTeamOnePasswordRefs(engineCredentials, teamId) : undefined;
   const lines: string[] = [];
   for (const scope of narrowed.scopes) {
     try {
       for (const cand of await onePassword.findCandidates(scope, ctx, query)) {
+        const reference = `op://${cand.vault}/${cand.item}/${cand.field}`;
+        if (granted && !isTeamOpRefGranted(granted, reference)) continue;
         // Scope-tagged, because the same name can sit in an org vault and a
         // personal one, and the resolver takes the org copy first. Seeing both
         // is how a caller knows to pass --scope.
-        lines.push(`${scope}\top://${cand.vault}/${cand.item}/${cand.field}`);
+        lines.push(`${scope}\t${reference}`);
       }
     } catch {
       // A scope with no token, a disabled toggle, or an SDK refusal has
