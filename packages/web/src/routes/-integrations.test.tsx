@@ -206,6 +206,8 @@ vi.mock("~/api/integrations", () => ({
   useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
   useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
   useDisconnectCredential: () => ({ mutateAsync: disconnectMutateAsync, isPending: false, error: null }),
+  useDelegateCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+  useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 
 vi.mock("~/api/onepassword", () => ({
@@ -399,6 +401,11 @@ describe("IntegrationsPage", () => {
 
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith({ service: "slack" }));
+  });
+
+  it("offers Share with a team on a connected personal service", () => {
+    render(<IntegrationsPage />);
+    expect(screen.getByRole("button", { name: "Share Slack with a team" })).toBeTruthy();
   });
 
   it("opens the pre-connect screen for an oauth service instead of redirecting on click", () => {

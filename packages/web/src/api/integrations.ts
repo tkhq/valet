@@ -11,6 +11,8 @@ import {
 } from "@tanstack/react-query";
 import type {
   DeleteCredentialResponse,
+  DelegateCredentialRequest,
+  DelegateCredentialResponse,
   ListCredentialsResponse,
   ListPluginsResponse,
   PutCredentialRequest,
@@ -19,12 +21,16 @@ import type {
 import { api } from "./client";
 import { onePasswordKeys } from "./onepassword";
 
+export type CredentialScope = "user" | "org" | "team";
+
 export const qkIntegrations = {
   plugins: () => ["plugins"] as const,
   /** `scope` defaults to "user" — the caller's own credentials. "org"
    * (admin-only server-side) is a distinct cache entry, not a filter over
-   * the same list. `/integrations` reads both when the caller is an admin. */
-  credentials: (scope: "user" | "org" = "user") => ["credentials", scope] as const,
+   * the same list. `/integrations` reads both when the caller is an admin.
+   * "team" pins one team; `teamId` is part of the key. */
+  credentials: (scope: CredentialScope = "user", teamId?: string) =>
+    ["credentials", scope, teamId ?? ""] as const,
 };
 
 export function usePlugins(opts?: Partial<UseQueryOptions<ListPluginsResponse>>) {
@@ -36,13 +42,15 @@ export function usePlugins(opts?: Partial<UseQueryOptions<ListPluginsResponse>>)
 }
 
 export function useCredentials(
-  scope: "user" | "org" = "user",
-  opts?: Partial<UseQueryOptions<ListCredentialsResponse>>,
+  scope: CredentialScope = "user",
+  opts?: Partial<UseQueryOptions<ListCredentialsResponse>> & { teamId?: string },
 ) {
+  const { teamId, ...queryOpts } = opts ?? {};
   return useQuery<ListCredentialsResponse>({
-    queryKey: qkIntegrations.credentials(scope),
-    queryFn: () => api.listCredentials(scope),
-    ...opts,
+    queryKey: qkIntegrations.credentials(scope, teamId),
+    queryFn: () => api.listCredentials(scope, teamId),
+    enabled: scope !== "team" || Boolean(teamId),
+    ...queryOpts,
   });
 }
 
@@ -56,8 +64,7 @@ export function useConnectCredential() {
     mutationFn: ({ service, body }) => api.putCredential(service, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("user") });
-      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("org") });
+      qc.invalidateQueries({ queryKey: ["credentials"] });
       // The 1Password panel's Connected state reads its own settings query.
       qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
     },
@@ -66,14 +73,42 @@ export function useConnectCredential() {
 
 export function useDisconnectCredential() {
   const qc = useQueryClient();
-  return useMutation<DeleteCredentialResponse, Error, { service: string; scope?: "user" | "org" }>({
-    mutationFn: ({ service, scope }) => api.deleteCredential(service, scope ? { scope } : undefined),
+  return useMutation<
+    DeleteCredentialResponse,
+    Error,
+    { service: string; scope?: CredentialScope; teamId?: string }
+  >({
+    mutationFn: ({ service, scope, teamId }) =>
+      api.deleteCredential(service, scope ? { scope, teamId } : undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("user") });
-      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("org") });
-      // The 1Password panel's Connected state reads its own settings query.
+      qc.invalidateQueries({ queryKey: ["credentials"] });
       qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
     },
+  });
+}
+
+function invalidateCredentialCaches(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+  qc.invalidateQueries({ queryKey: ["credentials"] });
+}
+
+export function useDelegateCredential() {
+  const qc = useQueryClient();
+  return useMutation<
+    DelegateCredentialResponse,
+    Error,
+    { service: string; body: DelegateCredentialRequest }
+  >({
+    mutationFn: ({ service, body }) => api.delegateCredential(service, body),
+    onSuccess: () => invalidateCredentialCaches(qc),
+  });
+}
+
+export function useRevokeDelegation() {
+  const qc = useQueryClient();
+  return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string }>({
+    mutationFn: ({ service, teamId }) => api.revokeDelegation(service, teamId),
+    onSuccess: () => invalidateCredentialCaches(qc),
   });
 }

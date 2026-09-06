@@ -91,6 +91,8 @@ import type {
   DeliverIdentityLinkResponse,
   ListLinkMembersResponse,
   ListCredentialsResponse,
+  DelegateCredentialRequest,
+  DelegateCredentialResponse,
   ListActionLogResponse,
   ListDecisionsResponse,
   ListGrantsResponse,
@@ -1141,11 +1143,13 @@ export const api = {
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
-  listCredentials: (scope?: "user" | "org") =>
-    request<ListCredentialsResponse>(
-      "GET",
-      `/credentials${scope === "org" ? "?scope=org" : ""}`,
-    ),
+  listCredentials: (scope?: "user" | "org" | "team", teamId?: string) => {
+    const qs = new URLSearchParams();
+    if (scope === "org" || scope === "team") qs.set("scope", scope);
+    if (scope === "team" && teamId) qs.set("teamId", teamId);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<ListCredentialsResponse>("GET", `/credentials${tail}`);
+  },
   putCredential: (service: string, body: PutCredentialRequest) =>
     request<PutCredentialResponse>(
       "PUT",
@@ -1154,10 +1158,26 @@ export const api = {
     ),
   // The server defaults a missing `scope` to `"user"`; sending it whenever
   // the caller states one keeps the request self-describing either way.
-  deleteCredential: (service: string, opts?: { scope?: "user" | "org" }) =>
+  deleteCredential: (service: string, opts?: { scope?: "user" | "org" | "team"; teamId?: string }) => {
+    const qs = new URLSearchParams();
+    if (opts?.scope) qs.set("scope", opts.scope);
+    if (opts?.scope === "team" && opts.teamId) qs.set("teamId", opts.teamId);
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<DeleteCredentialResponse>(
+      "DELETE",
+      `/credentials/${encodeURIComponent(service)}${tail}`,
+    );
+  },
+  delegateCredential: (service: string, body: DelegateCredentialRequest) =>
+    request<DelegateCredentialResponse>(
+      "POST",
+      `/credentials/${encodeURIComponent(service)}/delegate`,
+      body,
+    ),
+  revokeDelegation: (service: string, teamId: string) =>
     request<DeleteCredentialResponse>(
       "DELETE",
-      `/credentials/${encodeURIComponent(service)}${opts?.scope ? `?scope=${opts.scope}` : ""}`,
+      `/credentials/${encodeURIComponent(service)}/delegations/${encodeURIComponent(teamId)}`,
     ),
 
   // 1Password picker backend + settings. `scope` selects which
