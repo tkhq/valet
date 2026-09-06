@@ -87,6 +87,18 @@ describe("renderArtifactBody", () => {
     expect(out).toContain('type="checkbox"');
   });
 
+  it("preserves Mermaid fences for the artifact frame renderer", () => {
+    const out = renderArtifactBody("```mermaid\ngraph TD\n  A-->B\n```", "markdown");
+    expect(out).toContain('<code class="language-mermaid">');
+    expect(out).toContain("graph TD");
+  });
+
+  it("keeps ordinary fenced code as code", () => {
+    const out = renderArtifactBody("```typescript\nconst x = 1;\n```", "markdown");
+    expect(out).toContain('<code class="language-typescript">');
+    expect(out).not.toContain("valet-mermaid-diagram");
+  });
+
   it("passes html through verbatim — containment is the frame, not a sanitizer", () => {
     const html = `<h1>Hi</h1><script>draw()</script>`;
     expect(renderArtifactBody(html, "html")).toBe(html);

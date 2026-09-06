@@ -244,6 +244,18 @@ describe("buildArtifactDocument", () => {
     expect(download).not.toContain("valet-artifact:ready");
   });
 
+  it("bridges Mermaid blocks to the parent renderer and preserves failures", () => {
+    const page = buildArtifactDocument({
+      title: "Flow",
+      content: '<pre><code class="language-mermaid">graph TD; A--&gt;B</code></pre>',
+      runtime: true,
+    });
+    expect(page).toContain("pre > code.language-mermaid");
+    expect(page).toContain("valet-artifact:mermaid");
+    expect(page).toContain("valet-artifact:mermaid-result");
+    expect(page).toContain("The source is shown below.");
+  });
+
   it("includes the chart runtime and palette on every page, downloads included", () => {
     const download = buildArtifactDocument({ title: "T", content: "<p>x</p>" });
     expect(download).toContain("window.valetDS");

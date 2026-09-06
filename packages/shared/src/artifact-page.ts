@@ -1,10 +1,9 @@
 /**
  * The artifact page primitive (2026-09-02 artifact-pages design).
  *
- * One published artifact is content plus a format. `markdown` renders through
- * the app's own `Markdown` component, in the app's document. `html` is a
- * self-contained document that Valet wraps in the shell built here and renders
- * inside a sandboxed frame.
+ * One published artifact is content plus a format. The API compiles markdown
+ * to HTML and passes HTML through unchanged. Valet wraps either result in the
+ * shell built here and renders it inside a sandboxed frame.
  *
  * This module lives in `@valet/shared` because both halves need the same
  * strings: the api validates and downloads through them, the web client renders
@@ -371,6 +370,14 @@ a { color: var(--artifact-accent); }
   padding: 0.9rem 1rem;
 }
 .valet-artifact-doc pre code { background: none; padding: 0; }
+.valet-artifact-doc .valet-mermaid-diagram {
+  overflow-x: auto;
+  border: 0;
+  background: transparent;
+  text-align: center;
+}
+.valet-artifact-doc .valet-mermaid-diagram img { margin: 0 auto; }
+.valet-artifact-doc .valet-mermaid-error { color: #b42318; margin-bottom: 0.5rem; }
 .valet-artifact-doc th, .valet-artifact-doc td {
   border: 1px solid var(--artifact-line);
   padding: 0.4rem 0.7rem;
@@ -478,13 +485,15 @@ export const ARTIFACT_DS_RUNTIME_JS = `
 export type ArtifactFrameMessage =
   | { type: "valet-artifact:ready" }
   | { type: "valet-artifact:pick"; vdid: string; rect: ArtifactAnchorRect; label: string }
-  | { type: "valet-artifact:rects"; rects: Record<string, ArtifactAnchorRect> };
+  | { type: "valet-artifact:rects"; rects: Record<string, ArtifactAnchorRect> }
+  | { type: "valet-artifact:mermaid"; id: string; source: string };
 
 /** Messages the parent posts into the frame. */
 export type ArtifactParentMessage =
   | { type: "valet-artifact:mode"; picking: boolean }
   | { type: "valet-artifact:anchors"; vdids: string[] }
-  | { type: "valet-artifact:theme"; theme: "light" | "dark" | null };
+  | { type: "valet-artifact:theme"; theme: "light" | "dark" | null }
+  | { type: "valet-artifact:mermaid-result"; id: string; svg?: string; error?: true };
 
 export interface ArtifactAnchorRect {
   top: number;
@@ -518,6 +527,50 @@ export const ARTIFACT_RUNTIME_JS = `
   var picking = false;
   var tracked = [];
   var hovered = null;
+  var mermaidBlocks = {};
+
+  function discoverMermaid() {
+    var blocks = document.querySelectorAll("pre > code.language-mermaid");
+    for (var i = 0; i < blocks.length && i < 100; i++) {
+      var code = blocks[i];
+      var pre = code.parentElement;
+      if (!pre) continue;
+      var id = "mermaid-" + i;
+      pre.setAttribute("data-valet-mermaid", id);
+      mermaidBlocks[id] = { pre: pre, source: (code.textContent || "").slice(0, 100000), error: null };
+    }
+  }
+
+  function requestMermaid() {
+    Object.keys(mermaidBlocks).forEach(function (id) {
+      post({ type: "valet-artifact:mermaid", id: id, source: mermaidBlocks[id].source });
+    });
+  }
+
+  function applyMermaidResult(message) {
+    var block = typeof message.id === "string" ? mermaidBlocks[message.id] : null;
+    if (!block) return;
+    if (block.error) {
+      block.error.remove();
+      block.error = null;
+    }
+    if (typeof message.svg === "string") {
+      var image = document.createElement("img");
+      image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(message.svg);
+      image.alt = "Mermaid diagram";
+      block.pre.textContent = "";
+      block.pre.appendChild(image);
+      block.pre.className = "valet-mermaid-diagram";
+      return;
+    }
+    block.pre.textContent = block.source;
+    var error = document.createElement("p");
+    error.className = "valet-mermaid-error";
+    error.setAttribute("role", "alert");
+    error.textContent = "Diagram could not render. Check the Mermaid syntax. The source is shown below.";
+    block.pre.parentNode.insertBefore(error, block.pre);
+    block.error = error;
+  }
 
   function fnv(str, seed) {
     var h = seed >>> 0;
@@ -645,6 +698,9 @@ export const ARTIFACT_RUNTIME_JS = `
       } else {
         document.documentElement.removeAttribute("data-theme");
       }
+      requestMermaid();
+    } else if (d.type === "valet-artifact:mermaid-result") {
+      applyMermaidResult(d);
     }
   });
 
@@ -652,6 +708,7 @@ export const ARTIFACT_RUNTIME_JS = `
   window.addEventListener("resize", scheduleRects);
 
   function boot() {
+    discoverMermaid();
     assignIds();
     post({ type: "valet-artifact:ready" });
   }

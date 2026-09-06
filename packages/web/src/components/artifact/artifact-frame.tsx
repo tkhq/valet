@@ -17,6 +17,8 @@ import {
   buildArtifactDocument,
   type ArtifactAnchorRect,
 } from "@valet/shared";
+import { renderMermaid } from "~/lib/mermaid";
+import { useMermaidTheme } from "~/lib/use-mermaid-theme";
 
 export interface ArtifactPick {
   vdid: string;
@@ -70,6 +72,11 @@ export function ArtifactFrame({
 }: ArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const readyRef = useRef(false);
+  const mermaidTheme = useMermaidTheme();
+  const mermaidThemeRef = useRef(mermaidTheme);
+  mermaidThemeRef.current = mermaidTheme;
+  const mermaidRequestRef = useRef(0);
+  const latestMermaidRef = useRef(new Map<string, number>());
   // Live refs so the message listener never rebinds mid-load (rebinding can
   // drop the `ready` handshake and strand the bridge).
   const onPickRef = useRef(onPick);
@@ -106,6 +113,7 @@ export function ArtifactFrame({
   // A srcDoc change reloads the frame's document, so the bridge starts over.
   useEffect(() => {
     readyRef.current = false;
+    latestMermaidRef.current.clear();
   }, [srcDoc]);
 
   const post = (message: unknown) => {
@@ -129,6 +137,34 @@ export function ArtifactFrame({
           post({ type: "valet-artifact:anchors", vdids: anchorsRef.current });
         }
         post({ type: "valet-artifact:theme", theme: themeRef.current ?? null });
+        return;
+      }
+      if (msg.type === "valet-artifact:mermaid") {
+        if (
+          typeof msg.id !== "string" ||
+          !/^mermaid-\d{1,3}$/.test(msg.id) ||
+          typeof msg.source !== "string" ||
+          msg.source.length > 100_000
+        ) {
+          return;
+        }
+        const blockId = msg.id;
+        const source = msg.source;
+        const request = ++mermaidRequestRef.current;
+        latestMermaidRef.current.set(blockId, request);
+        const renderId = `artifact-mermaid-${request}`;
+        void renderMermaid(source, renderId, mermaidThemeRef.current).then(
+          (svg) => {
+            if (latestMermaidRef.current.get(blockId) === request) {
+              post({ type: "valet-artifact:mermaid-result", id: blockId, svg });
+            }
+          },
+          () => {
+            if (latestMermaidRef.current.get(blockId) === request) {
+              post({ type: "valet-artifact:mermaid-result", id: blockId, error: true });
+            }
+          },
+        );
         return;
       }
       if (msg.type === "valet-artifact:pick") {
@@ -172,7 +208,7 @@ export function ArtifactFrame({
     if (readyRef.current) {
       post({ type: "valet-artifact:theme", theme: theme ?? null });
     }
-  }, [theme]);
+  }, [theme, mermaidTheme]);
 
   return (
     <iframe

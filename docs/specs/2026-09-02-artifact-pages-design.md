@@ -143,6 +143,14 @@ containment does not depend on what the compiler emits.
 An `html` artifact must be self-contained. Relative links do not resolve,
 because nothing is deployed beside the page. Use in-page anchors instead.
 
+### Mermaid diagrams
+
+A fenced `mermaid` block compiles to the standard `language-mermaid` code marker. The artifact runtime sends its source to the parent page. The parent uses the same Mermaid renderer as memory and chat content.
+
+The renderer uses Mermaid's `strict` security level and disables HTML labels. A second SVG filter removes executable elements, event handlers, remote links, and remote CSS loads. The UI loads the filtered SVG as an image, so SVG scripts cannot run.
+
+If rendering fails, the frame shows an error and the original source. A theme change requests a new render. A content change remounts the frame and discovers the new blocks.
+
 ### Why one render path
 
 The first draft of this spec kept two: markdown through the app's

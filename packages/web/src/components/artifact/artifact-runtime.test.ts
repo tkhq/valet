@@ -48,6 +48,7 @@ beforeAll(() => {
     <section data-vdid="preexisting-design-id"><p>From a design revision</p></section>
     <div>direct text div</div>
     <div><span>no direct text</span></div>
+    <pre><code class="language-mermaid">graph TD; A--&gt;B</code></pre>
   `;
   // The runtimes are IIFEs; executing them IS the parse test.
   new Function(ARTIFACT_RUNTIME_JS)();
@@ -153,6 +154,37 @@ describe("artifact comment runtime", () => {
     h1.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     await flush();
     expect(received.find((m) => m.type === "valet-artifact:pick")).toBeUndefined();
+  });
+
+  it("requests Mermaid rendering and applies success or source-preserving failure", async () => {
+    window.postMessage({ type: "valet-artifact:theme", theme: "light" }, "*");
+    const request = await waitFor("valet-artifact:mermaid");
+    expect(request.id).toBe("mermaid-0");
+    expect(request.source).toContain("graph TD");
+
+    window.postMessage(
+      {
+        type: "valet-artifact:mermaid-result",
+        id: "mermaid-0",
+        svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>Flow</text></svg>',
+      },
+      "*",
+    );
+    let image: HTMLImageElement | null = null;
+    for (let i = 0; i < 10 && !image; i++) {
+      await flush();
+      image = document.querySelector<HTMLImageElement>('[data-valet-mermaid="mermaid-0"] img');
+    }
+    expect(image?.alt).toBe("Mermaid diagram");
+    expect(image?.src).toContain("data:image/svg+xml");
+
+    window.postMessage(
+      { type: "valet-artifact:mermaid-result", id: "mermaid-0", error: true },
+      "*",
+    );
+    await flush();
+    expect(document.querySelector('[data-valet-mermaid="mermaid-0"]')?.textContent).toContain("graph TD");
+    expect(document.querySelector(".valet-mermaid-error")?.textContent).toContain("Check the Mermaid syntax");
   });
 
   it("stamps and clears data-theme on the theme message", async () => {
