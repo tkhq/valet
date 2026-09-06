@@ -146,6 +146,7 @@ describe("AutomationWizard", () => {
 
     // Step 2 — Reply: channels are required now, so add one, then pick the
     // team's assistant and leave follow ON (default).
+    expect(screen.getByText(/do not reach Platform's assistant/)).toBeTruthy();
     addReplyChannel("C123");
     fireEvent.click(screen.getByLabelText(/Platform's assistant/));
     // Follow is a checkbox, default checked.
@@ -170,6 +171,15 @@ describe("AutomationWizard", () => {
       teamId: "t_platform",
       follow: true,
     });
+  });
+
+  it("reply outcome copy stays creator-scoped when the team assistant is the target", () => {
+    scopeTeamId = "t_platform";
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    expect(screen.getByText(/when you @-mention the app in Slack/)).toBeTruthy();
+    clickNext();
+    expect(screen.getByText(/This rule fires only when/)).toBeTruthy();
+    expect(screen.getByText(/do not reach Platform's assistant/)).toBeTruthy();
   });
 
   it("reply outcome posts several channels as one in filter", () => {

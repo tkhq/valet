@@ -583,7 +583,7 @@ const OUTCOMES: { value: Outcome; title: string; hint: string }[] = [
   {
     value: "reply",
     title: "Reply to Slack mentions",
-    hint: "An assistant answers when someone @-mentions the app in Slack.",
+    hint: "An assistant answers when you @-mention the app in Slack.",
   },
   {
     value: "workflow",
@@ -663,11 +663,17 @@ function ReplyStep({
   const linksQ = useIdentityLinks();
   const slackLink = linksQ.data?.links.find((l) => l.provider === "slack");
   const slackUnlinked = slackLink !== undefined && !slackLink.linked;
+  const reach =
+    target.orchestrator === "team" && scopedTeam
+      ? `${scopedTeam.name}'s assistant`
+      : target.orchestrator === "org"
+        ? "the org assistant"
+        : "your assistant";
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted">
         This rule fires only when <span className="text-ink">you</span> @-mention the app.
-        Mentions by other people do not reach your assistant.
+        Mentions by other people do not reach {reach}.
       </p>
       {slackUnlinked && (
         <p className="text-xs text-danger-500">
