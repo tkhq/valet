@@ -38,6 +38,7 @@
  * shared resource.
  */
 import type { AppDb } from "../lib/drizzle.js";
+import type { RequestPrincipal } from "../lib/request-principal.js";
 import { canAdministerTeam, isTeamMember } from "./teams.js";
 
 export interface SessionOwnerLike {
@@ -69,7 +70,11 @@ export async function canViewSession(
   db: AppDb,
   session: SessionOwnerLike,
   callerId: string,
+  principal?: RequestPrincipal,
 ): Promise<boolean> {
+  if (principal?.type === "team") {
+    return session.ownerType === "team" && session.ownerId === principal.id;
+  }
   if (session.ownerType === "team") return isTeamMember(db, session.ownerId, callerId);
   return session.userId === callerId;
 }
@@ -97,7 +102,11 @@ export async function canAdministerSession(
   db: AppDb,
   session: SessionOwnerLike,
   callerId: string,
+  principal?: RequestPrincipal,
 ): Promise<boolean> {
+  if (principal?.type === "team") {
+    return session.ownerType === "team" && session.ownerId === principal.id;
+  }
   if (session.ownerType === "team") return canAdministerTeam(db, session.ownerId, callerId);
   return session.userId === callerId;
 }
@@ -118,6 +127,7 @@ export async function canResolveSessionGate(
   db: AppDb,
   session: SessionOwnerLike,
   callerId: string,
+  principal?: RequestPrincipal,
 ): Promise<boolean> {
-  return canViewSession(db, session, callerId);
+  return canViewSession(db, session, callerId, principal);
 }

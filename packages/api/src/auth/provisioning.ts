@@ -16,6 +16,7 @@ import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import type { SourceService } from "../bakes/source-service.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
+import { guardPersonalApiKeyRoutes } from "./api-key-hooks.js";
 
 export type Admission =
   | { allowed: true; role: "admin" | "member"; inviteId?: string }
@@ -206,13 +207,17 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
   const pendingAdmissions = new Map<string, Admission>();
 
   const beforeHook = createAuthMiddleware(async (ctx) => {
-    if (ctx.path !== "/sign-up/email") return;
-    const body = (ctx.body ?? undefined) as Record<string, unknown> | undefined;
-    const email = typeof body?.email === "string" ? body.email : "";
-    const admission = await evaluateAdmission(db, cfg, email, readInviteCode(body));
-    if (!admission.allowed) {
-      throw new APIError("FORBIDDEN", { message: INVITE_REQUIRED_MESSAGE });
+    if (ctx.path === "/sign-up/email") {
+      const body = (ctx.body ?? undefined) as Record<string, unknown> | undefined;
+      const email = typeof body?.email === "string" ? body.email : "";
+      const admission = await evaluateAdmission(db, cfg, email, readInviteCode(body));
+      if (!admission.allowed) {
+        throw new APIError("FORBIDDEN", { message: INVITE_REQUIRED_MESSAGE });
+      }
+      return;
     }
+    const query = "query" in ctx && ctx.query && typeof ctx.query === "object" ? (ctx.query as Record<string, unknown>) : null;
+    await guardPersonalApiKeyRoutes({ path: ctx.path, body: ctx.body ?? null, query }, db);
   });
 
   const userCreateBefore = async (

@@ -899,8 +899,8 @@ async function resolveToolSession(
   if (!user) return { failure: c.json({ error: "session not found" }, 404) };
   const allowed =
     access === "mutate"
-      ? await canAdministerSession(db, row, user.id)
-      : await canViewSession(db, row, user.id);
+      ? await canAdministerSession(db, row, user.id, c.var.principal)
+      : await canViewSession(db, row, user.id, c.var.principal);
   if (!allowed) return { failure: c.json({ error: "session not found" }, 404) };
   return { ok: row };
 }
@@ -2300,10 +2300,10 @@ async function resolveHumanSession(
   if (!row) return { failure: c.json({ error: "session not found" }, 404) };
 
   // Named check: canViewSession — the view gate every triage route holds.
-  if (!(await canViewSession(db, row, user.id))) {
+  if (!(await canViewSession(db, row, user.id, c.var.principal))) {
     return { failure: c.json({ error: "session not found" }, 404) };
   }
-  if (access === "administer" && !(await canAdministerSession(db, row, user.id))) {
+  if (access === "administer" && !(await canAdministerSession(db, row, user.id, c.var.principal))) {
     return {
       failure: c.json(
         {

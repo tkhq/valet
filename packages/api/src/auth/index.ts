@@ -146,6 +146,20 @@ export interface ValetAuth {
       headers: Headers;
     }) => Promise<{ session: ValetAuthSession; user: ValetAuthSessionUser } | null>;
     verifyApiKey: (opts: { body: { key: string } }) => Promise<ValetVerifyApiKeyResult>;
+    createApiKey: (opts: {
+      body: {
+        name?: string;
+        metadata?: Record<string, unknown>;
+        userId?: string;
+      };
+      headers?: Headers;
+    }) => Promise<{
+      id: string;
+      key: string;
+      name: string | null;
+      start: string | null;
+      createdAt: Date;
+    } | null>;
   };
 }
 
@@ -241,7 +255,7 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
             }
           : {}),
       }),
-      apiKey({ defaultPrefix: "vlt_", rateLimit: { enabled: false } }),
+      apiKey({ defaultPrefix: "vlt_", rateLimit: { enabled: false }, enableMetadata: true }),
       mcp({ loginPage: "/login" }),
     ],
   });

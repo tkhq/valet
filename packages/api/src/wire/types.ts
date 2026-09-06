@@ -128,10 +128,10 @@ export interface SessionDetail extends SessionSummary {
 export interface CreateSessionRequest {
   workspace: string;
   title?: string;
-  /** Create as a team-owned session instead of personal. Caller must be a
-   * current member of the team; a non-member or unknown id 404s, same as
-   * any other cross-owner access. Mirrors `CreateWorkflowRequest.teamId` —
-   * one spelling for "make this the team's, not mine". */
+  /** Create as a team-owned session instead of personal. A cookie session
+   * must be a live member; a non-member or unknown id 404s. A personal
+   * `vlt_` key cannot send this field. A team key always creates as its
+   * team and may omit it. */
   teamId?: string;
   /** Defaults to "code". A "security" session requires a repo binding and
    * is seeded with a security engagement in the create transaction. */
@@ -1735,6 +1735,34 @@ export interface SetTeamMemberRoleRequest {
   role: TeamRole;
 }
 
+/** `GET /api/teams/:id/api-keys` — metadata only, never the secret. */
+export interface TeamApiKeySummary {
+  id: string;
+  name: string | null;
+  start: string | null;
+  createdAt: number;
+  lastRequest: number | null;
+  createdBy: string | null;
+}
+
+export interface ListTeamApiKeysResponse {
+  keys: TeamApiKeySummary[];
+}
+
+export interface CreateTeamApiKeyRequest {
+  name: string;
+}
+
+/** One-time reveal. `key` is the full `vlt_` secret. */
+export interface CreateTeamApiKeyResponse {
+  id: string;
+  name: string | null;
+  start: string | null;
+  createdAt: number;
+  key: string;
+  createdBy: string;
+}
+
 // ── REST: notifications ──────────────────────────────────────────────────
 //
 // Web delivery for the attention router (Phase 4 decision 19). Own-rows-only
@@ -1820,9 +1848,9 @@ export interface WorkflowDefinitionSummary {
 export interface CreateWorkflowRequest {
   name: string;
   definition: unknown;
-  /** Create as a team-owned workflow instead of personal. Caller must be a
-   * current member of the team; a non-member or unknown id 404s, same as
-   * any other cross-owner access (decision 18's own-rows convention). */
+  /** Create as a team-owned workflow instead of personal. A cookie session
+   * must be a live member. A personal `vlt_` key cannot send this field. A
+   * team key always creates as its team and may omit it. */
   teamId?: string;
 }
 

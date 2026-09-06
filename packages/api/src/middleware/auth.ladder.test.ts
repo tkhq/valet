@@ -7,7 +7,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { users } from "../schema/index.js";
+import { teams, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
 
 let api: TestApi | undefined;
@@ -273,6 +273,44 @@ describe("auth middleware ladder — real-auth boots", () => {
       if (prev === undefined) delete process.env.VALET_LOCAL_AUTH;
       else process.env.VALET_LOCAL_AUTH = prev;
     }
+  });
+
+  it("a team-metadata key authenticates; a deleted team reads as invalid", async () => {
+    api = await bootTestApi({ auth: true });
+    const { db } = api.providers;
+
+    const signUpRes = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Key User", email: "team-key@nowhere.test", password: "correct-horse-battery" }),
+    });
+    expect(signUpRes.status).toBe(200);
+    const cookie = extractSessionCookie(signUpRes.headers.get("set-cookie"));
+
+    const teamRes = await fetch(`${api.baseUrl}/api/teams`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ name: "Platform" }),
+    });
+    expect(teamRes.status).toBe(201);
+    const teamId = ((await teamRes.json()) as { team: { id: string } }).team.id;
+
+    const createRes = await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ name: "CI" }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = (await createRes.json()) as { key: string };
+
+    const meRes = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
+    expect(meRes.status).toBe(200);
+    expect(((await meRes.json()) as { email: string }).email).toBe("team-key@nowhere.test");
+
+    await db.delete(teams).where(eq(teams.id, teamId));
+    const goneRes = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
+    expect(goneRes.status).toBe(401);
+    expect(((await goneRes.json()) as { error: string }).error).toBe("invalid api key");
   });
 
   it("a malformed x-api-key 401s cleanly instead of 500ing", async () => {
