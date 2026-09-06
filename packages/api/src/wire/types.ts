@@ -3038,6 +3038,23 @@ export interface ListOpVaultsResponse {
   vaults: { id: string; title: string }[];
 }
 
+/** GET/PUT `/api/teams/:id/onepassword-refs` — the team's leased `op://` set. */
+export interface TeamOnePasswordRefsResponse {
+  refs: string[];
+}
+
+export interface PutTeamOnePasswordRefsRequest {
+  refs: string[];
+}
+
+export interface PutTeamOnePasswordRefsResponse {
+  refs: string[];
+}
+
+export interface DeleteTeamOnePasswordRefsResponse {
+  ok: true;
+}
+
 /** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
 export interface ResolveSandboxSecretsResponse {
   /** One entry per requested reference, in request order: the base64 of the

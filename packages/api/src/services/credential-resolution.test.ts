@@ -522,6 +522,47 @@ describe("resolveTeamCredentialRead", () => {
     expect(got?.accessToken).toBe("org-bot");
   });
 
+  it("resolves a granted 1Password reference on a team row", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "onepassword", {
+      type: "service_account",
+      metadata: { refs: ["op://Shared/Acme/credential"] },
+    });
+    await credentials.save({ type: "team", id: teamId }, "linear", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Acme/credential", tokenScope: "org" } },
+    });
+    const onePassword = fakeOnePassword(async (row) => ({ ...row, apiKey: "from-vault" }));
+    const got = await resolveTeamCredentialRead(
+      { credentials, onePassword },
+      { orgId, teamId },
+      "linear",
+      "reference-only",
+    );
+    expect(got?.apiKey).toBe("from-vault");
+  });
+
+  it("refuses an ungranted 1Password reference on a team row", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "linear", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Other/password", tokenScope: "org" } },
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve an ungranted ref");
+    });
+    await expect(
+      resolveTeamCredentialRead(
+        { credentials, onePassword },
+        { orgId, teamId },
+        "linear",
+        "reference-only",
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("Ask a team admin"),
+    });
+  });
+
   it("returns null for denied services", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "team", id: teamId }, "onepassword", {

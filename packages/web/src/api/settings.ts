@@ -60,7 +60,11 @@ import type {
   PutCredentialResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
+  PutTeamOnePasswordRefsRequest,
+  PutTeamOnePasswordRefsResponse,
   SetTeamMemberRoleRequest,
+  TeamOnePasswordRefsResponse,
+  DeleteTeamOnePasswordRefsResponse,
   TestLlmProviderRequest,
   TestLlmProviderResponse,
 } from "@valet/api/wire";
@@ -97,6 +101,7 @@ export const qkSettings = {
   orgReasoning: () => ["settings", "orgReasoning"] as const,
   teams: () => ["settings", "teams"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
+  teamOnePasswordRefs: (teamId: string) => ["settings", "teams", teamId, "onepassword-refs"] as const,
   githubApp: () => ["settings", "githubApp"] as const,
   /** Prefix of every `slackApp` key — what the mutations invalidate. */
   slackAppAll: () => ["settings", "slackApp"] as const,
@@ -240,6 +245,34 @@ export function useTeamMembers(teamId: string, opts?: UseQueryOptions<ListTeamMe
     queryKey: qkSettings.teamMembers(teamId),
     queryFn: () => api.listTeamMembers(teamId),
     ...opts,
+  });
+}
+
+export function useTeamOnePasswordRefs(teamId: string, opts?: UseQueryOptions<TeamOnePasswordRefsResponse>) {
+  return useQuery<TeamOnePasswordRefsResponse>({
+    queryKey: qkSettings.teamOnePasswordRefs(teamId),
+    queryFn: () => api.listTeamOnePasswordRefs(teamId),
+    ...opts,
+  });
+}
+
+export function usePutTeamOnePasswordRefs() {
+  const qc = useQueryClient();
+  return useMutation<PutTeamOnePasswordRefsResponse, Error, { teamId: string; body: PutTeamOnePasswordRefsRequest }>({
+    mutationFn: ({ teamId, body }) => api.putTeamOnePasswordRefs(teamId, body),
+    onSuccess: (_data, { teamId }) => {
+      void qc.invalidateQueries({ queryKey: qkSettings.teamOnePasswordRefs(teamId) });
+    },
+  });
+}
+
+export function useDeleteTeamOnePasswordRefs() {
+  const qc = useQueryClient();
+  return useMutation<DeleteTeamOnePasswordRefsResponse, Error, { teamId: string }>({
+    mutationFn: ({ teamId }) => api.deleteTeamOnePasswordRefs(teamId),
+    onSuccess: (_data, { teamId }) => {
+      void qc.invalidateQueries({ queryKey: qkSettings.teamOnePasswordRefs(teamId) });
+    },
   });
 }
 

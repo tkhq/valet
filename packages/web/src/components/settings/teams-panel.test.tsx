@@ -121,6 +121,13 @@ vi.mock("~/api/settings", () => ({
   useRemoveTeamMember: () => ({ mutate: vi.fn(), isPending: false }),
   useSetTeamMemberRole: () => ({ mutate: vi.fn(), isPending: false }),
   usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false, error: null }),
+  useTeamOnePasswordRefs: () => ({
+    data: { refs: teamOpRefs },
+    isLoading: false,
+    error: null,
+  }),
+  usePutTeamOnePasswordRefs: () => ({ mutate: putOpRefsMutate, isPending: false, error: null }),
+  useDeleteTeamOnePasswordRefs: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   // The default-model combobox reads the org catalog through this hook.
   useModels: () => ({
     data: {
@@ -157,6 +164,9 @@ vi.mock("~/api/settings", () => ({
   // The team-defaults reasoning select reads the org cap through this hook.
   useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
 }));
+
+let teamOpRefs: string[] = [];
+const putOpRefsMutate = vi.fn();
 
 let teamCredentials: Array<{
   service: string;
@@ -339,6 +349,39 @@ describe("TeamsPanel role gating", () => {
     orgRole = "admin";
     openTeam();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+  });
+});
+
+describe("TeamsPanel — 1Password references", () => {
+  beforeEach(() => {
+    teamOpRefs = ["op://Shared/Acme/credential"];
+    putOpRefsMutate.mockClear();
+  });
+
+  afterEach(() => {
+    teamOpRefs = [];
+  });
+
+  it("lets a team admin grant a reference", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    openTeam();
+    fireEvent.change(screen.getByLabelText("Grant 1Password reference to Platform"), {
+      target: { value: "op://Shared/Other/password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Grant" }));
+    expect(putOpRefsMutate).toHaveBeenCalledWith({
+      teamId: "team_1",
+      body: { refs: ["op://Shared/Acme/credential", "op://Shared/Other/password"] },
+    });
+  });
+
+  it("hides the grant control from a plain member", () => {
+    callerRole = "member";
+    orgRole = "member";
+    openTeam();
+    expect(screen.getByText("op://Shared/Acme/credential")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
   });
 });
 
