@@ -30,7 +30,7 @@ interface SeedRow {
   runId: string;
   createdAt: number;
   params?: Partial<RunParams>;
-  owner?: { ownerType: string; ownerId: string };
+  owner?: { ownerType: string; ownerId: string; actorUserId?: string };
 }
 
 /** Builds a store whose clock the test drives, plus the seeder that uses it. */
@@ -190,10 +190,30 @@ export function describeListRunsContract(makeStore: MakeListRunsStore): void {
       const owned = page.runs.find((r) => r.runId === 'run-owned');
       const plain = page.runs.find((r) => r.runId === 'run-plain');
       expect(owned?.owner).toEqual({ ownerType: 'team', ownerId: 'team-42' });
+      expect(owned?.actorUserId).toBeUndefined();
       expect(plain?.owner).toBeUndefined();
+      expect(plain?.actorUserId).toBeUndefined();
       expect(plain?.parentRunId).toBeUndefined();
       expect(plain?.parentNodeId).toBeUndefined();
       expect(plain?.parentIteration).toBeUndefined();
+    });
+
+    it('listRuns round-trips actorUserId and leaves it absent when unset', async () => {
+      const store = await seedStore([
+        {
+          runId: 'run-acted',
+          createdAt: 1_000,
+          owner: { ownerType: 'team', ownerId: 'team-42', actorUserId: 'user-7' },
+        },
+        { runId: 'run-plain', createdAt: 2_000, owner: { ownerType: 'user', ownerId: 'u-1' } },
+      ]);
+
+      const page = await store.listRuns({ limit: 10 });
+      const acted = page.runs.find((r) => r.runId === 'run-acted');
+      const plain = page.runs.find((r) => r.runId === 'run-plain');
+      expect(acted?.actorUserId).toBe('user-7');
+      expect(acted?.owner).toEqual({ ownerType: 'team', ownerId: 'team-42' });
+      expect(plain?.actorUserId).toBeUndefined();
     });
 
     it('rejects a cursor it cannot read', async () => {

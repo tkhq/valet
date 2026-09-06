@@ -211,6 +211,59 @@ describe("buildWorkflowEngineDeps: invokeAction", () => {
     expect(result).toEqual({ ok: true, result: { echoed: "no creds here", hasCredential: false } });
     expect(fixture.calls()).toBe(1);
   });
+
+  it("a team-owned run resolves a direct team credential, not the clicker's", async () => {
+    const fixture = makeFixturePlugin();
+    api = await bootTestApi({ plugins: [fixture.plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, {
+      orgId: LOCAL_ORG.id,
+      name: "engine-deps-team",
+      creatorUserId: LOCAL_USER.id,
+    });
+    await engineCredentials.save({ type: "team", id: team.id }, "demo", {
+      type: "api_key",
+      apiKey: "team-demo-key",
+    });
+
+    const now = Date.now();
+    const workflowId = "wf_invoke_team";
+    const runId = "wfrun_invoke_team";
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      orgId: LOCAL_ORG.id,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "team-engine-deps",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id },
+    );
+
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+    const result = await deps.invokeAction({
+      service: "demo",
+      action: "ping",
+      params: { msg: "team" },
+      invocationId: `workflow:${runId}:node1`,
+    });
+    expect(result).toEqual({ ok: true, result: { echoed: "team", hasCredential: true } });
+  });
 });
 
 describe("buildWorkflowEngineDeps: promptOrchestrator", () => {

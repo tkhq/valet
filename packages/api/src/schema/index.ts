@@ -1224,6 +1224,9 @@ export const workflowRuns = pgTable(
     // path once it resolves the workflow's owner.
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
+    // Who clicked Run. Null on a scheduled, event, or webhook start.
+    // Display and audit only — credential resolution uses owner_type/owner_id.
+    actorUserId: text("actor_user_id"),
     // When the settled-run sandbox reclaim destroyed this run's session
     // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
     // AND every session sandbox is gone — the sweep retries NULL rows.
