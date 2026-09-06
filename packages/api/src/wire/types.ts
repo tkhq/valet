@@ -1892,6 +1892,11 @@ export interface WorkflowRunSummary {
   parentRunId?: string;
   parentNodeId?: string;
   parentIteration?: number;
+  /**
+   * Who clicked Run. Absent on a scheduled, event, or webhook start.
+   * Display and audit only.
+   */
+  actorUserId?: string;
 }
 
 export interface ListWorkflowRunsResponse {

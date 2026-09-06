@@ -33,7 +33,7 @@ import type { WorkflowOwner, WorkflowServiceDeps } from "./service.js";
 
 /** Records the owner every start is stamped with; this suite starts no real
  * run, and the owner is the thing under test. */
-const started: Array<{ ownerType: string; ownerId: string } | undefined> = [];
+const started: Array<{ ownerType: string; ownerId: string; actorUserId?: string } | undefined> = [];
 
 const stubRunHost: RunHost = {
   async start(_runId, _params, _definition, owner) {
@@ -279,9 +279,38 @@ describe("a mirrored workflow refuses every product write", () => {
     expect(started).toHaveLength(1);
     expect(started[0]?.ownerType).toBe("user");
     expect(started[0]?.ownerId).toBe(OWNER.userId);
+    expect(started[0]?.actorUserId).toBe(OWNER.userId);
 
     // And the act predicate refuses the same caller, who is not an org admin.
     expect(await armableDefinitionRow(db, OWNER, "wf_org_run")).toBeNull();
+  });
+
+  it("starts a team workflow as the team and records the clicker as actor", async () => {
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, {
+      orgId: OWNER.orgId,
+      name: "Run actor team",
+      creatorUserId: OWNER.userId,
+    });
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: "wf_team_run",
+      orgId: OWNER.orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "Team runnable",
+      definition: GRAPH,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    started.length = 0;
+    const run = await startWorkflowRun(deps, OWNER, "wf_team_run");
+    expect(run).not.toBeNull();
+    expect(started).toHaveLength(1);
+    expect(started[0]?.ownerType).toBe("team");
+    expect(started[0]?.ownerId).toBe(team.id);
+    expect(started[0]?.actorUserId).toBe(OWNER.userId);
   });
 
   // The read/act split has to reach the RUN paths too. A run started by a

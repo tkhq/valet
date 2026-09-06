@@ -220,11 +220,25 @@ export function describeOwnershipContract(makeStore: () => Promise<WorkflowStore
       });
       const owned = await store.getRun('run-owned');
       expect(owned?.owner).toEqual({ ownerType: 'team', ownerId: 'team-42' });
+      expect(owned?.actorUserId).toBeUndefined();
 
       // The suite's own `setup()`-created RUN_ID run never passed an owner.
       const store2 = await setup();
       const unowned = await store2.getRun(RUN_ID);
       expect(unowned?.owner).toBeUndefined();
+      expect(unowned?.actorUserId).toBeUndefined();
+    });
+
+    it('createRun stores actorUserId beside the principal, not inside it', async () => {
+      const store = await makeStore();
+      await store.createRun('run-acted', runParams(), { version: 'dag/v1' }, 'v1', {
+        ownerType: 'team',
+        ownerId: 'team-42',
+        actorUserId: 'user-7',
+      });
+      const acted = await store.getRun('run-acted');
+      expect(acted?.owner).toEqual({ ownerType: 'team', ownerId: 'team-42' });
+      expect(acted?.actorUserId).toBe('user-7');
     });
 
     it('listRunnable surfaces a wake-requested parked run and a due-timer parked run', async () => {

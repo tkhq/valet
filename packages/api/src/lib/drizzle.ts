@@ -564,6 +564,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "workflow_runs" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint',
   },
   {
+    // Who clicked Run. Null on every unattended start, and on every run
+    // written before the column existed.
+    describe: "workflow_runs.actor_user_id column",
+    probe: { kind: "column", table: "workflow_runs", column: "actor_user_id" },
+    sql: 'ALTER TABLE "workflow_runs" ADD COLUMN IF NOT EXISTS "actor_user_id" text',
+  },
+  {
     // The RFC 7591 scope set an MCP OAuth client was registered with
     // (integration-oauth.ts, TKAI-243). Null on rows registered before
     // scopes support, which the compare reads as "no scopes" — a declared
