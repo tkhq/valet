@@ -53,6 +53,23 @@ describe("canViewSession", () => {
     expect(ok).toBe(true);
   });
 
+  it("allows a team principal on that team's session even when the user left", async () => {
+    const ok = await canViewSession(
+      db,
+      { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
+      "departed-admin",
+      { type: "team", id: "team_1" },
+    );
+    expect(ok).toBe(true);
+    const other = await canViewSession(
+      db,
+      { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
+      "departed-admin",
+      { type: "team", id: "team_other" },
+    );
+    expect(other).toBe(false);
+  });
+
   it("rejects a different user for a user-owned session", async () => {
     const ok = await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u2");
     expect(ok).toBe(false);
@@ -207,6 +224,17 @@ describe("canAdministerSession", () => {
 
     const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "org-admin-user");
     expect(ok).toBe(false);
+  });
+
+  it("allows a team principal on that team's session after the creating admin left", async () => {
+    await seedTeam("team_1", []);
+    const ok = await canAdministerSession(db, teamSession, "departed-admin", { type: "team", id: "team_1" });
+    expect(ok).toBe(true);
+    const other = await canAdministerSession(db, teamSession, "departed-admin", {
+      type: "team",
+      id: "team_other",
+    });
+    expect(other).toBe(false);
   });
 
   it("rejects an org-owned session — org-level administration is a separate, not-yet-built decision", async () => {

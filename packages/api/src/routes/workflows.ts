@@ -10,6 +10,9 @@
 import { Hono } from "hono";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
+import { requirePrincipal } from "../middleware/auth.js";
+import { resolveCreateOwner, type RequestPrincipal } from "../lib/request-principal.js";
+import { isTeamMember } from "../services/teams.js";
 import { WorkflowCursorError, type ValidateEnvironment } from "@valet/workflow";
 import {
   cancelWorkflowRun,
@@ -109,12 +112,16 @@ function parseRunLimit(raw: string | undefined): { limit?: number } | { error: s
 }
 
 function serviceCtx(c: {
-  var: { providers: WorkflowServiceDeps; user: { id: string; orgId: string } };
+  var: {
+    providers: WorkflowServiceDeps;
+    user: { id: string; orgId: string };
+    principal?: RequestPrincipal;
+  };
 }): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
   const { db, workflowStore, workflowRunHost, actionPluginByService } = c.var.providers;
   return {
     deps: { db, workflowStore, workflowRunHost, actionPluginByService },
-    owner: { userId: c.var.user.id, orgId: c.var.user.orgId },
+    owner: { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
     env: buildValidateEnvironment(actionPluginByService),
   };
 }
@@ -143,12 +150,24 @@ workflowsRouter.post("/", async (c) => {
     return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
   }
 
+  const principal = requirePrincipal(c);
+  if (!principal) return c.json({ error: "unauthorized" }, 401);
+  const createdOwner = await resolveCreateOwner({
+    principal,
+    authVia: c.var.authVia,
+    bodyTeamId: body.teamId,
+    userId: owner.userId,
+    isTeamMember: (teamId) => isTeamMember(deps.db, teamId, owner.userId),
+  });
+  if (!createdOwner.ok) return c.json({ error: createdOwner.error }, createdOwner.status);
+
   let created;
   try {
     created = await createWorkflowDefinition(deps, owner, {
       name: body.name,
       definition: body.definition,
-      teamId: body.teamId,
+      teamId: createdOwner.owner.type === "team" ? createdOwner.owner.id : undefined,
+      skipMembershipCheck: principal.type === "team",
     });
   } catch (err) {
     // Same "cross-owner 404, never 403" convention as the rest of this

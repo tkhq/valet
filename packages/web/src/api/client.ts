@@ -30,8 +30,11 @@ import type {
   CreateOrgPolicyResponse,
   CreateSessionRequest,
   CreateSessionResponse,
+  CreateTeamApiKeyRequest,
+  CreateTeamApiKeyResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  ListTeamApiKeysResponse,
   PatchTeamRequest,
   PatchTeamResponse,
   CreateInviteRequest,
@@ -1199,6 +1202,12 @@ export const api = {
       "DELETE",
       `/teams/${encodeURIComponent(id)}/onepassword-refs`,
     ),
+  listTeamApiKeys: (id: string) =>
+    request<ListTeamApiKeysResponse>("GET", `/teams/${encodeURIComponent(id)}/api-keys`),
+  createTeamApiKey: (id: string, body: CreateTeamApiKeyRequest) =>
+    request<CreateTeamApiKeyResponse>("POST", `/teams/${encodeURIComponent(id)}/api-keys`, body),
+  revokeTeamApiKey: (id: string, keyId: string) =>
+    request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),

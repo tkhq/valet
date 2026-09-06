@@ -1,13 +1,19 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { eq } from "drizzle-orm";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
-import { users } from "../schema/index.js";
+import { teams, users } from "../schema/index.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
+import {
+  teamApiKeyPathAllowed,
+  teamIdFromApiKeyMetadata,
+  type AuthVia,
+  type RequestPrincipal,
+} from "../lib/request-principal.js";
 
 export interface AuthUser {
   id: string;
@@ -53,6 +59,42 @@ export function requireUser(c: Context<AppEnv>): AuthUser | undefined {
   return c.var.user as AuthUser | undefined;
 }
 
+/** The request principal the ladder set, or `undefined` on a sandbox /
+ * internal-token rung. Routes that create owner-scoped rows read this, not
+ * `user` alone — a team `vlt_` key must act as the team after its creating
+ * admin leaves. */
+export function requirePrincipal(c: Context<AppEnv>): RequestPrincipal | undefined {
+  return c.var.principal as RequestPrincipal | undefined;
+}
+
+/** Cookie, personal key, or stub — not a team key. Team-key mint/revoke
+ * and org-admin writes use this so a CI key cannot administer. */
+export function requireActingUser(c: Context<AppEnv>): AuthUser | undefined {
+  const user = requireUser(c);
+  const principal = requirePrincipal(c);
+  if (!user || principal?.type !== "user") return undefined;
+  return user;
+}
+
+const TEAM_KEY_SCOPE_ERROR =
+  "This team API key can only create and read this team's sessions and workflows. Sign in for other settings.";
+
+/** After the ladder: a team principal stays on sessions, workflows, and GET /api/me. */
+export function refuseTeamKeyOutsideScope(): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    const principal = requirePrincipal(c);
+    if (principal?.type !== "team") {
+      await next();
+      return;
+    }
+    if (teamApiKeyPathAllowed(c.req.path, c.req.method)) {
+      await next();
+      return;
+    }
+    return c.json({ error: TEAM_KEY_SCOPE_ERROR }, 403);
+  };
+}
+
 export interface BuildAuthMiddlewareOpts {
   /** The real better-auth instance, or `null` when `BETTER_AUTH_SECRET`
    * isn't configured (stub-only mode). */
@@ -83,9 +125,15 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
   };
 }
 
-/** The AuthUser behind a valid api key, or `undefined` for an invalid,
- * malformed, or dangling one. Shared by rung 4 and `resolveOptionalUser`. */
-async function userFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<AuthUser | undefined> {
+interface ApiKeyIdentity {
+  user: AuthUser;
+  principal: RequestPrincipal;
+}
+
+/** The AuthUser (and team principal, when metadata carries `teamId`)
+ * behind a valid api key, or `undefined` for an invalid, malformed,
+ * dangling, or orphaned-team key. Shared by rung 4 and `resolveOptionalUser`. */
+async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<ApiKeyIdentity | undefined> {
   let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
   try {
     result = await auth.api.verifyApiKey({ body: { key } });
@@ -96,13 +144,42 @@ async function userFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<
   const rows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
-  return {
+  const user: AuthUser = {
     id: row.id,
     email: row.email,
     name: row.name ?? undefined,
     role: row.role,
     orgId: await resolveOrgId(db),
   };
+  const teamId = teamIdFromApiKeyMetadata(result.key.metadata);
+  if (teamId) {
+    const teamRows = await db
+      .select({ id: teams.id, orgId: teams.orgId })
+      .from(teams)
+      .where(eq(teams.id, teamId))
+      .limit(1);
+    const team = teamRows[0];
+    if (!team || team.orgId !== user.orgId) return undefined;
+    return { user, principal: { type: "team", id: teamId } };
+  }
+  return { user, principal: { type: "user", id: user.id } };
+}
+
+function userPrincipal(user: AuthUser): RequestPrincipal {
+  return { type: "user", id: user.id };
+}
+
+function setCaller(
+  c: Context<AppEnv>,
+  user: AuthUser,
+  via: AuthVia,
+  principal: RequestPrincipal,
+  auth: ValetAuth | null,
+): void {
+  c.set("user", user);
+  c.set("authVia", via);
+  c.set("principal", principal);
+  if (auth) c.set("auth", auth);
 }
 
 /** The seeded local-dev identity (an admin) — rung 5's stub default. */
@@ -135,7 +212,10 @@ export async function resolveOptionalUser(
     const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
     if (sessionUser) return sessionUser;
     const apiKeyHeader = c.req.header("x-api-key");
-    if (apiKeyHeader) return userFromApiKey(auth, db, apiKeyHeader);
+    if (apiKeyHeader) {
+      const identity = await identityFromApiKey(auth, db, apiKeyHeader);
+      return identity?.user;
+    }
     return undefined;
   }
 
@@ -181,9 +261,11 @@ export async function resolveOptionalUser(
  *      so a valid sandbox token against e.g. `/api/me` never reaches a
  *      handler that unconditionally reads `c.var.user`.
  *   3. `auth` configured and a valid session (cookie or session header)
- *      resolves → `c.var.user`.
+ *      resolves → `c.var.user` and a user principal.
  *   4. `auth` configured and `x-api-key` present → `verifyApiKey`; invalid
- *      401s (same "explicit credential beats fallback" rule as #2).
+ *      401s (same "explicit credential beats fallback" rule as #2). A key
+ *      whose metadata carries `teamId` authenticates as that team when the
+ *      team still exists; a deleted team reads as an invalid key.
  *   5. No `auth` instance AND `VALET_LOCAL_AUTH=1` → stub identity (+
  *      `VALET_TEST_AUTH_HEADER` impersonation). The stub and real auth are
  *      mutually exclusive: the stub identity is a seeded ADMIN, so a stub
@@ -245,20 +327,20 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
       // absorbs the throw.
       const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
       if (sessionUser) {
-        c.set("user", sessionUser);
+        setCaller(c, sessionUser, "session", userPrincipal(sessionUser), auth);
         await next();
         return;
       }
 
       // 4. API key — explicit credential, invalid always 401s (malformed,
-      // unverified, and dangling keys all resolve to `undefined`).
+      // unverified, dangling, and team-gone keys all resolve to `undefined`).
       const apiKeyHeader = c.req.header("x-api-key");
       if (apiKeyHeader) {
-        const apiKeyUser = await userFromApiKey(auth, db, apiKeyHeader);
-        if (!apiKeyUser) {
+        const identity = await identityFromApiKey(auth, db, apiKeyHeader);
+        if (!identity) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        c.set("user", apiKeyUser);
+        setCaller(c, identity.user, "apiKey", identity.principal, auth);
         await next();
         return;
       }
@@ -273,19 +355,21 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         const testRows = await db.select().from(users).where(eq(users.id, testUserId)).limit(1);
         const row = testRows[0];
         if (row) {
-          c.set("user", {
+          const impersonated: AuthUser = {
             id: row.id,
             email: row.email,
             name: row.name ?? undefined,
             role: row.role,
             orgId: LOCAL_ORG.id,
-          } satisfies AuthUser);
+          };
+          setCaller(c, impersonated, "stub", userPrincipal(impersonated), null);
           await next();
           return;
         }
       }
 
-      c.set("user", stubUser());
+      const stub = stubUser();
+      setCaller(c, stub, "stub", userPrincipal(stub), null);
       await next();
       return;
     }

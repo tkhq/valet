@@ -9,13 +9,14 @@ import type { Account, BetterAuthOptions, User } from "better-auth";
 import type { CredentialStore } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { orgMembers, orgs, users, invites, teams, teamMembers } from "../schema/index.js";
+import { apikey, orgMembers, orgs, users, invites, teams, teamMembers } from "../schema/index.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createInvite } from "./invites.js";
 import { ensureOrg, setOrgFeatures, setSsoTeamGroups } from "../services/org.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
+import { CLIENT_TEAM_KEY_METADATA_MESSAGE, PERSONAL_TEAM_KEY_MUTATION_MESSAGE } from "./api-key-hooks.js";
 import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
 
 // better-auth's real `GenericEndpointContext` is a large request-plumbing object
@@ -225,6 +226,36 @@ describe("buildAuthHooks", () => {
       const cfg = baseConfig();
       const { beforeHook } = buildAuthHooks({ db, cfg, credentialStore });
       await expect(beforeHook(middlewareCtx({ path: "/callback/google", body: {} }))).resolves.not.toThrow();
+    });
+
+    it("refuses a personal create that stamps metadata.teamId", async () => {
+      const cfg = baseConfig();
+      const { beforeHook } = buildAuthHooks({ db, cfg, credentialStore });
+      await expect(
+        beforeHook(
+          middlewareCtx({
+            path: "/api-key/create",
+            body: { name: "stolen", metadata: { teamId: "team_1" } },
+          }),
+        ),
+      ).rejects.toMatchObject({ message: CLIENT_TEAM_KEY_METADATA_MESSAGE });
+    });
+
+    it("refuses personal delete of a team-pinned key", async () => {
+      const cfg = baseConfig();
+      const { beforeHook } = buildAuthHooks({ db, cfg, credentialStore });
+      await db.insert(apikey).values({
+        id: "key_team",
+        name: "CI",
+        referenceId: "existing",
+        key: "hashed",
+        metadata: JSON.stringify({ teamId: "team_1", createdBy: "existing" }),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await expect(
+        beforeHook(middlewareCtx({ path: "/api-key/delete", body: { keyId: "key_team" } })),
+      ).rejects.toMatchObject({ message: PERSONAL_TEAM_KEY_MUTATION_MESSAGE });
     });
   });
 
