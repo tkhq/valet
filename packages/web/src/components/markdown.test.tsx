@@ -9,11 +9,19 @@
  * navigates in place instead — the memory corpus is written with relative
  * paths between files, which a new tab cannot open.
  */
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+const renderMermaidMock = vi.hoisted(() => vi.fn());
+vi.mock("~/lib/mermaid", () => ({ renderMermaid: renderMermaidMock }));
+
 import { Markdown } from "./markdown";
 
 describe("Markdown", () => {
+  beforeEach(() => {
+    renderMermaidMock.mockReset();
+    renderMermaidMock.mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg"><text>Diagram</text></svg>');
+  });
   it("renders prose text", () => {
     render(<Markdown>{"hello **world**"}</Markdown>);
     expect(screen.getByText("world")).toBeTruthy();
@@ -23,6 +31,33 @@ describe("Markdown", () => {
     const { container } = render(<Markdown>{"```typescript\nconst x = 1;\n```"}</Markdown>);
     expect(container.querySelector(".code-block")).toBeTruthy();
     expect(container.querySelectorAll(".token").length).toBeGreaterThan(0);
+  });
+
+  it("renders a fenced Mermaid block as a diagram", async () => {
+    const { container } = render(<Markdown>{"```mermaid\ngraph TD\n  A-->B\n```"}</Markdown>);
+
+    await waitFor(() => expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy());
+    expect(renderMermaidMock).toHaveBeenCalledWith("graph TD\n  A-->B", expect.any(String), "default");
+    expect(container.querySelector(".code-block")).toBeNull();
+  });
+
+  it("keeps the Mermaid source visible when rendering fails", async () => {
+    renderMermaidMock.mockRejectedValue(new Error("parse failed"));
+    render(<Markdown>{"Before\n\n```mermaid\nnot valid\n```\n\nAfter"}</Markdown>);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.getByText("Before")).toBeTruthy();
+    expect(screen.getByText("not valid")).toBeTruthy();
+    expect(screen.getByText("After")).toBeTruthy();
+  });
+
+  it("re-renders a Mermaid diagram when asynchronous content changes", async () => {
+    const { rerender } = render(<Markdown>{"```mermaid\ngraph TD\n  A\n```"}</Markdown>);
+    await waitFor(() => expect(renderMermaidMock).toHaveBeenCalledTimes(1));
+
+    rerender(<Markdown>{"```mermaid\ngraph TD\n  A-->B\n```"}</Markdown>);
+    await waitFor(() => expect(renderMermaidMock).toHaveBeenCalledTimes(2));
+    expect(renderMermaidMock.mock.calls[1]?.[0]).toBe("graph TD\n  A-->B");
   });
 
   it("leaves inline code as plain text, not a code block", () => {

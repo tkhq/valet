@@ -1147,6 +1147,9 @@ importers:
       lucide-react:
         specifier: ^0.460.0
         version: 0.460.0(react@19.2.3)
+      mermaid:
+        specifier: ^11.12.2
+        version: 11.12.2
       react:
         specifier: ^19.0.0
         version: 19.2.3
