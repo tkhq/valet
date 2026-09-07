@@ -389,7 +389,7 @@ function TeamCredentials({
   return (
     <div>
       <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Credentials</h4>
-      {credsQ.isLoading && <LoadingRow>Loading credentials…</LoadingRow>}
+      {credsQ.isLoading && <LoadingRow label="Loading credentials…" className="py-2 text-xs" />}
       {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
       {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
         <EmptyRow>No credentials in {team.name} yet. Share one from Integrations.</EmptyRow>
