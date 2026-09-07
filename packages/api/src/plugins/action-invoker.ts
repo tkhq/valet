@@ -305,26 +305,6 @@ async function computeResult(
       ? withOwnerSlackIdentity(baseProvider, opts.db, ctx.owner.id)
       : baseProvider;
 
-  // Team refusal (team credentials design, decision 3): a team run with no
-  // resolvable credential refuses here, before any action code runs. A
-  // personal run keeps executing on a null credential because the action's
-  // own guards answer for one person; a team run must fail the same way
-  // for every member, so the refusal is made once, up front, and names the
-  // corrective action. Only a declared service is gated (an undeclared one
-  // never needed a credential), and only when the org does not provide it
-  // (`mode === "org"` means the org row resolved above and the team read
-  // escalates to it). `github` resolves through the installation path,
-  // which throws its own connect hint and never returns a silent null.
-  if (
-    ctx.owner.type === "team" &&
-    declared &&
-    mode !== "org" &&
-    credentialService !== "github"
-  ) {
-    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
-    if (refusal) return refusal;
-  }
-
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
   // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
   // exists once the action is resolved. Discovery may touch credentials (an
@@ -336,6 +316,29 @@ async function computeResult(
     action = findAction(resolved, req.service, req.action);
   }
   if (!action) return unknownAction(req);
+
+  // Team refusal (team credentials design, decision 3): a team run with no
+  // resolvable credential refuses here, before any action code runs. A
+  // personal run keeps executing on a null credential because the action's
+  // own guards answer for one person; a team run must fail the same way
+  // for every member, so the refusal is made once, up front, and names the
+  // corrective action. It runs after the action is found: a node that names
+  // an action which does not exist must hear that, not a credential hint
+  // that sends the author to the wrong settings page. Only a declared
+  // service is gated (an undeclared one never needed a credential), and
+  // only when the org does not provide it (`mode === "org"` means the org
+  // row resolved above and the team read escalates to it). `github`
+  // resolves through the installation path, which throws its own connect
+  // hint and never returns a silent null.
+  if (
+    ctx.owner.type === "team" &&
+    declared &&
+    mode !== "org" &&
+    credentialService !== "github"
+  ) {
+    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+    if (refusal) return refusal;
+  }
 
   // Policy enforcement (action-policies plan, Task 3): `deny` fails the
   // node. `require_approval` does NOT — it returns `requiresApproval`, and

@@ -410,6 +410,32 @@ describe("buildActionInvoker", () => {
     );
   });
 
+  it("team-owned run: an unknown action reports the typo, not a missing credential", async () => {
+    const fixture = countingAction();
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "demo",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    };
+    // No team row: the credential refusal would fire if it ran first. The
+    // action name is what is wrong here, so that is what the error names.
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: new FakeCredentialStore(),
+      actionPluginByService: new Map([["demo", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "demo", action: "pnig", params: { msg: "hi" }, invocationId: "workflow:r1:team-typo" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: false, error: "unknown action: demo.pnig" });
+    expect(fixture.calls()).toBe(0);
+  });
+
   it("execute throw is caught and mapped to {ok:false, error}", async () => {
     const fixture = countingAction({
       execute: async () => {
