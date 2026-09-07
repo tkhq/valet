@@ -45,7 +45,7 @@ import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { qualifiedActionId } from "./action-id.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
-import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
+import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { actionInvocations } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
@@ -252,8 +252,12 @@ async function computeResult(
   // different plugin than the action's owner.
   const registry = registryOf(opts);
   const declared = findCredentialDeclaration(registry, credentialService);
+  // Kept past the gate: the team refusal below reads it to tell an
+  // org-provided service (the org row IS the credential) from one a team
+  // must hold itself.
+  let mode: ConnectMode | null = null;
   if (declared) {
-    const mode = await connectModeFor({
+    mode = await connectModeFor({
       plugins: registry,
       decl: declared,
       service: credentialService,
@@ -300,6 +304,26 @@ async function computeResult(
     credentialService === "slack" && ctx.owner.type === "user"
       ? withOwnerSlackIdentity(baseProvider, opts.db, ctx.owner.id)
       : baseProvider;
+
+  // Team refusal (team credentials design, decision 3): a team run with no
+  // resolvable credential refuses here, before any action code runs. A
+  // personal run keeps executing on a null credential because the action's
+  // own guards answer for one person; a team run must fail the same way
+  // for every member, so the refusal is made once, up front, and names the
+  // corrective action. Only a declared service is gated (an undeclared one
+  // never needed a credential), and only when the org does not provide it
+  // (`mode === "org"` means the org row resolved above and the team read
+  // escalates to it). `github` resolves through the installation path,
+  // which throws its own connect hint and never returns a silent null.
+  if (
+    ctx.owner.type === "team" &&
+    declared &&
+    mode !== "org" &&
+    credentialService !== "github"
+  ) {
+    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+    if (refusal) return refusal;
+  }
 
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
   // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
@@ -395,6 +419,29 @@ async function computeResult(
 
 function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionResult {
   return { ok: false, error: `unknown action: ${req.service}.${req.action}` };
+}
+
+/**
+ * Resolves the team run's credential once, ahead of execute. A null
+ * resolution is the refusal decision 3 asks for. A throw (a broken
+ * delegated reference, a scope refusal) is mapped the way `execute`'s own
+ * try/catch maps it, so the typed message reaches the run unchanged.
+ */
+async function refuseTeamRunWithoutCredential(
+  credentials: CredentialProvider,
+  service: string,
+): Promise<WorkflowInvokeActionResult | null> {
+  try {
+    if ((await credentials.get()) !== null) return null;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  return {
+    ok: false,
+    error:
+      `This team has no ${service} credential. Share one from Integrations, ` +
+      `or store one for the team in Settings → Organization → Teams.`,
+  };
 }
 
 /**

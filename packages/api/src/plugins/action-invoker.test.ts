@@ -336,6 +336,52 @@ describe("buildActionInvoker", () => {
     expect(seenOwnerId).toBeUndefined();
   });
 
+  it("team-owned run: a declared service with no team credential refuses before execute", async () => {
+    const fixture = countingAction();
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "demo",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    };
+    const store = new FakeCredentialStore();
+    // An org row for the same service must stay invisible to the team run
+    // (decision 5) — the refusal fires even though the org has a token.
+    store.seed({ type: "org", id: "org1" }, "demo", { type: "api_key", apiKey: "org-tok" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["demo", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-missing" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "This team has no demo credential. Share one from Integrations, or store one for the team in Settings → Organization → Teams.",
+    });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("team-owned run: a service with no credential declaration still executes", async () => {
+    const fixture = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-undeclared" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: false } });
+    expect(fixture.calls()).toBe(1);
+  });
+
   it("team-owned run: a broken delegated reference returns the typed error", async () => {
     const { TeamCredentialStore, CredentialReferenceBrokenError } = await import(
       "./team-credential-store.js"
