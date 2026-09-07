@@ -947,6 +947,16 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // the shared guard (also called by the channel gate-callback path) and is
   // checked against the SESSION's org, the scope the policy write lands in.
   if (body.actionId === GATE_ACTION_ALWAYS_ALLOW) {
+    // A team key carries the minting admin as `c.var.user` for audit only;
+    // an org-wide policy is that admin's decision to make signed in, never
+    // a CI key's. Every other org-admin gate short-circuits the same way
+    // (`_org-admin.ts`).
+    if (c.var.principal.type === "team") {
+      return c.json(
+        { error: "A team API key cannot grant an always-allow policy. Sign in as an organization admin to apply it." },
+        403,
+      );
+    }
     if (!(await canApplyAlwaysAllow(c.var.providers.db, session.orgId, c.var.user.id))) {
       return c.json({ error: "org admin required for always_allow" }, 403);
     }

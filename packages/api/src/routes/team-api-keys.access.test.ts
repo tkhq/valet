@@ -213,6 +213,39 @@ describe("team API key reach", () => {
     expect(probe.status).toBe(403);
   });
 
+  // The always-allow check used to read the creating admin's user id, so a
+  // CI key minted by an org admin could write an org-wide allow policy.
+  it("cannot grant an always-allow policy: that is an org admin's decision, and a key is not one", async () => {
+    const f = await bootFixture();
+    const res = await fetch(`${f.baseUrl}/api/sessions/${f.teamSessionId}/decisions/gate_nope/resolve`, {
+      method: "POST",
+      headers: { "x-api-key": f.teamKey, "content-type": "application/json" },
+      body: JSON.stringify({ actionId: "always_allow" }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toMatch(/team API key cannot grant/);
+  });
+
+  // Issue filing resolves GitHub or Linear from the acting user's own rows;
+  // for a team key that user is the creating admin, who clicked nothing.
+  it("cannot file issues with the creating admin's credentials", async () => {
+    const f = await bootFixture();
+    const headers = { "x-api-key": f.teamKey, "content-type": "application/json" };
+    const one = await fetch(`${f.baseUrl}/api/sessions/${f.teamSessionId}/security/findings/f_nope/issues`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider: "github" }),
+    });
+    expect(one.status).toBe(403);
+    expect(((await one.json()) as { error: string }).error).toMatch(/team API key cannot file/);
+    const digest = await fetch(`${f.baseUrl}/api/sessions/${f.teamSessionId}/security/issues/digest`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider: "github" }),
+    });
+    expect(digest.status).toBe(403);
+  });
+
   it("cannot mint a sandbox credential: that binds one user, which a team key is not", async () => {
     const f = await bootFixture();
     const headers = { "x-api-key": f.teamKey };

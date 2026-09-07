@@ -2721,6 +2721,15 @@ function parseIssueProvider(value: unknown): IssueProvider | null {
 securityRouter.post("/:id/security/findings/:findingId/issues", async (c) => {
   const sessionId = c.req.param("id");
   const findingId = c.req.param("findingId");
+  // Issue filing resolves GitHub or Linear from the acting user's own rows.
+  // For a team key that user is the minting admin, kept for audit only, so
+  // filing would spend a credential nobody chose to use. Refuse up front.
+  if (requirePrincipal(c)?.type === "team") {
+    return c.json(
+      { error: "A team API key cannot file issues. Sign in and file them from the session." },
+      403,
+    );
+  }
   // View-gated (spec §Filing issues): the named check is canViewSession,
   // inside resolveHumanSession.
   const resolved = await resolveHumanSession(c, sessionId, "view");
@@ -2783,6 +2792,15 @@ securityRouter.post("/:id/security/findings/:findingId/issues", async (c) => {
  */
 securityRouter.post("/:id/security/issues/digest", async (c) => {
   const sessionId = c.req.param("id");
+  // Issue filing resolves GitHub or Linear from the acting user's own rows.
+  // For a team key that user is the minting admin, kept for audit only, so
+  // filing would spend a credential nobody chose to use. Refuse up front.
+  if (requirePrincipal(c)?.type === "team") {
+    return c.json(
+      { error: "A team API key cannot file issues. Sign in and file them from the session." },
+      403,
+    );
+  }
   // View-gated (spec §Filing issues): the named check is canViewSession,
   // inside resolveHumanSession.
   const resolved = await resolveHumanSession(c, sessionId, "view");
