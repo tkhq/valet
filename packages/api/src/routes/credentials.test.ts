@@ -928,6 +928,21 @@ describe("team credential scope (TKAI-205)", () => {
       expect.objectContaining({ service: "linear", delegatedFrom: "test-member", referenceBroken: false }),
     ]);
 
+    // A caller with nothing to share is told to connect first; the slot
+    // check only applies once the caller holds a source credential.
+    const unconnected = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(unconnected.status).toBe(400);
+    expect(((await unconnected.json()) as { error: string }).error).toContain("Connect linear in Integrations first");
+
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "admin-lin" }),
+    });
     const occupied = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
       method: "POST",
       headers: HEADERS,

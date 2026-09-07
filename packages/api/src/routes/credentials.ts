@@ -482,6 +482,9 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   if (!team || !(await isTeamMember(db, body.teamId, user.id))) {
     return c.json({ error: "Team not found." }, 404);
   }
+  // The caller's own credential is checked before the team slot. A caller
+  // with nothing to share is told to connect first; the slot answer only
+  // matters once there is a credential to share.
   const source = await engineCredentials.get({ type: "user", id: user.id }, service);
   if (!source || (!rowHasSecret(source) && !onePasswordMeta(source))) {
     return c.json(
