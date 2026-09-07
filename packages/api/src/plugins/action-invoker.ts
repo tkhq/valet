@@ -327,15 +327,11 @@ async function computeResult(
   // that sends the author to the wrong settings page. Only a declared
   // service is gated (an undeclared one never needed a credential), and
   // only when the org does not provide it (`mode === "org"` means the org
-  // row resolved above and the team read escalates to it). `github`
-  // resolves through the installation path, which throws its own connect
-  // hint and never returns a silent null.
-  if (
-    ctx.owner.type === "team" &&
-    declared &&
-    mode !== "org" &&
-    credentialService !== "github"
-  ) {
+  // row resolved above and the team read escalates to it). `github` is
+  // gated like any other service: its team branch returns `null` when
+  // neither a team row nor an App installation answers, and the refusal
+  // names the github-specific fix.
+  if (ctx.owner.type === "team" && declared && mode !== "org") {
     const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
     if (refusal) return refusal;
   }
@@ -439,12 +435,26 @@ async function refuseTeamRunWithoutCredential(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return {
-    ok: false,
-    error:
-      `This team has no ${service} credential. Share one from Integrations, ` +
-      `or store one for the team in Settings → Organization → Teams.`,
-  };
+  return { ok: false, error: teamRefusalMessage(service) };
+}
+
+/**
+ * The corrective action a team refusal names. GitHub has two fixes a
+ * generic "share one from Integrations" does not cover: the App
+ * installation is per repository owner, and a personal GitHub connection
+ * is never borrowed by a team run.
+ */
+function teamRefusalMessage(service: string): string {
+  if (service === "github") {
+    return (
+      "This team has no github credential. Install the GitHub App on the repository's owner in " +
+      "Settings → Organization → GitHub, or store a github credential for the team in Settings → Organization → Teams."
+    );
+  }
+  return (
+    `This team has no ${service} credential. Share one from Integrations, ` +
+    `or store one for the team in Settings → Organization → Teams.`
+  );
 }
 
 /**
@@ -733,6 +743,16 @@ function withOwnerSlackIdentity(provider: CredentialProvider, db: AppDb, userId:
  *   - `"user"` → `auth: "user"`, equally strict in the other direction.
  *   - `"auto"` or absent → the pre-existing precedence, binding included.
  *     Every definition written before this field existed lands here.
+ *
+ * ── Team owners (team credentials design, decisions 3 and 6) ────────────
+ * A team run acts as the team, never as a person. `"auto"` reads the
+ * team's own github row first (direct or delegated), then mints the App
+ * installation token for the action's repository owner, or the org's sole
+ * installation. `"user"` reads the team row alone. Neither consults a user
+ * credential (`ctx.userId` is the synthetic `team:{id}` and must not be
+ * resolved as a person) nor the org PAT, and a miss returns `null` rather
+ * than throwing, so `computeResult`'s team refusal names the fix. `"app"`
+ * keeps the strict installation path above.
  */
 function buildGithubCredentialProvider(
   opts: ActionInvokerOpts,
@@ -777,6 +797,13 @@ function buildGithubCredentialProvider(
         return token === null ? null : { accessToken: token };
       }
       const selection = req.credential ?? "auto";
+      if (owner.type === "team" && selection !== "app") {
+        const teamRow = await buildCredentialProvider(opts, ctx, owner, "github").get("github");
+        if (teamRow) return teamRow;
+        if (selection === "user") return null;
+        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
+        return token === null ? null : { accessToken: token };
+      }
       // `params` are template-rendered, so a webhook payload can choose this
       // repo. That is safe only because `mintInstallationToken` looks an
       // installation up by `(orgId, accountLogin)` — the reachable set is
@@ -791,7 +818,9 @@ function buildGithubCredentialProvider(
       }
       const resolved = await resolveSessionGitHubToken(deps, {
         orgId: ctx.orgId,
-        userId: ctx.userId,
+        // A team run reaches here only with the "app" selection, which
+        // reads no user; the synthetic `team:{id}` actor is never a person.
+        userId: owner.type === "team" ? undefined : ctx.userId,
         sessionId: ctx.sessionId,
         purpose: "api",
         // `auto` means "keep the default precedence", so it must NOT

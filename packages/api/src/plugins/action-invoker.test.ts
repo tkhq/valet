@@ -950,6 +950,126 @@ describe("buildActionInvoker: github service resolution", () => {
     });
   }
 
+  /** The github plugin with its credential declared, so the team refusal
+   * gate sees `github` as a service a team must hold a credential for. */
+  function declaredGithubActionPluginByService(
+    actions: PluginAction[],
+  ): Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }> {
+    const actionPlugin: ActionPlugin = { service: "github", actions };
+    const plugin: ValetPlugin = {
+      name: "github",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "oauth2", configKeys: ["accessToken"] }],
+    };
+    return new Map([["github", { plugin, actionPlugin }]]);
+  }
+
+  /** `githubWhoamiAction` plus a call counter, so a refusal can be told
+   * apart from the action's own missing-token throw. */
+  function countingGithubWhoami(): { action: PluginAction; calls: () => number } {
+    let count = 0;
+    const base = githubWhoamiAction();
+    const action: PluginAction = {
+      ...base,
+      execute: async (args, ctx) => {
+        count += 1;
+        return base.execute(args, ctx);
+      },
+    };
+    return { action, calls: () => count };
+  }
+
+  const teamOwner: ActionInvocationContext = {
+    userId: "team:gh-team",
+    orgId,
+    owner: { type: "team", id: "gh-team" },
+  };
+  const TEAM_GITHUB_REFUSAL =
+    "This team has no github credential. Install the GitHub App on the repository's owner in " +
+    "Settings → Organization → GitHub, or store a github credential for the team in Settings → Organization → Teams.";
+
+  it("team-owned: no installation and no team row refuses before execute and names the fix", async () => {
+    const { appDb, credentials } = await harness();
+    fixture = startGithubFixture();
+    const whoami = countingGithubWhoami();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: declaredGithubActionPluginByService([whoami.action]),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:team-gh-none" },
+      teamOwner,
+    );
+
+    expect(result).toEqual({ ok: false, error: TEAM_GITHUB_REFUSAL });
+    expect(whoami.calls()).toBe(0);
+  });
+
+  it("team-owned: an App installation resolves the installation token", async () => {
+    const { appDb, credentials } = await harness();
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_team_1",
+      orgId,
+      installationId: 4242,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const whoami = countingGithubWhoami();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: declaredGithubActionPluginByService([whoami.action]),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:team-gh-inst" },
+      teamOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-4242" } });
+    expect(whoami.calls()).toBe(1);
+  });
+
+  it("team-owned: a stored team github credential is the identity the run acts as", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "team", id: "gh-team" }, "github", {
+      type: "oauth2",
+      accessToken: "team-tok",
+    });
+    fixture = startGithubFixture();
+    const whoami = countingGithubWhoami();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: declaredGithubActionPluginByService([whoami.action]),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:team-gh-row" },
+      teamOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "team-tok" } });
+  });
+
   it("user-connected: resolves the user's healthy github credential", async () => {
     const { appDb, credentials } = await harness();
     await credentials.save({ type: "user", id: userId }, "github", {
