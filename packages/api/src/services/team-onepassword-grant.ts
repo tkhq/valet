@@ -66,9 +66,25 @@ export function refuseUngrantedTeamOpRef(): never {
   throw new OnePasswordAuthError(UNGRANTED_TEAM_OP_REF, "scope");
 }
 
-export function grantRow(refs: string[]): StoredCredential {
+/**
+ * The row to save for a grant. `(team, "onepassword")` is also the slot a
+ * team-owned service-account token will use, so a grant write keeps the
+ * token and the rest of the metadata the row already holds.
+ */
+export function withGrantRefs(existing: StoredCredential | null, refs: string[]): StoredCredential {
   return {
-    type: "service_account",
-    metadata: { refs },
+    ...(existing ?? { type: "service_account" }),
+    metadata: { ...existing?.metadata, refs },
   };
+}
+
+/**
+ * The row to save after a grant is cleared, or `null` when the row held
+ * only the grant and the caller should delete it.
+ */
+export function withoutGrantRefs(existing: StoredCredential | null): StoredCredential | null {
+  if (!existing) return null;
+  const { refs: _refs, ...metadata } = existing.metadata ?? {};
+  if (!existing.apiKey && !existing.accessToken) return null;
+  return { ...existing, metadata };
 }

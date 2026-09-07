@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { ONEPASSWORD_SERVICE } from "./onepassword.js";
 import {
-  grantRow,
   isTeamOpRefGranted,
   loadTeamOnePasswordRefs,
   parseTeamOnePasswordRefs,
   refsFromGrantRow,
+  withGrantRefs,
+  withoutGrantRefs,
 } from "./team-onepassword-grant.js";
 
 describe("parseTeamOnePasswordRefs", () => {
@@ -32,7 +33,7 @@ describe("parseTeamOnePasswordRefs", () => {
 describe("loadTeamOnePasswordRefs", () => {
   it("reads metadata.refs from the team-owned onepassword row", async () => {
     const credentials = new InMemoryCredentialStore();
-    await credentials.save({ type: "team", id: "team_1" }, ONEPASSWORD_SERVICE, grantRow(["op://Shared/Acme/credential"]));
+    await credentials.save({ type: "team", id: "team_1" }, ONEPASSWORD_SERVICE, withGrantRefs(null, ["op://Shared/Acme/credential"]));
     await expect(loadTeamOnePasswordRefs(credentials, "team_1")).resolves.toEqual(["op://Shared/Acme/credential"]);
   });
 
@@ -56,5 +57,33 @@ describe("isTeamOpRefGranted", () => {
 describe("refsFromGrantRow", () => {
   it("ignores a token-shaped row with no refs", () => {
     expect(refsFromGrantRow({ type: "service_account", apiKey: "tok" })).toEqual([]);
+  });
+});
+
+describe("withGrantRefs / withoutGrantRefs", () => {
+  it("builds a secret-free row when the team has none", () => {
+    expect(withGrantRefs(null, ["op://Shared/Acme/credential"])).toEqual({
+      type: "service_account",
+      metadata: { refs: ["op://Shared/Acme/credential"] },
+    });
+  });
+
+  it("keeps a token and its other metadata when the row already holds one", () => {
+    const token = { type: "service_account" as const, apiKey: "tok", metadata: { note: "keep" } };
+    expect(withGrantRefs(token, ["op://Shared/Acme/credential"])).toEqual({
+      type: "service_account",
+      apiKey: "tok",
+      metadata: { note: "keep", refs: ["op://Shared/Acme/credential"] },
+    });
+  });
+
+  it("clears the refs but keeps a row that holds a token", () => {
+    const token = { type: "service_account" as const, apiKey: "tok", metadata: { refs: ["op://a/b/c"] } };
+    expect(withoutGrantRefs(token)).toEqual({ type: "service_account", apiKey: "tok", metadata: {} });
+  });
+
+  it("returns null for a row that held only the grant, so the caller deletes it", () => {
+    expect(withoutGrantRefs({ type: "service_account", metadata: { refs: ["op://a/b/c"] } })).toBeNull();
+    expect(withoutGrantRefs(null)).toBeNull();
   });
 });

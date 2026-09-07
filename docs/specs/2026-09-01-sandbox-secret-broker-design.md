@@ -102,6 +102,13 @@ caller to settle.
    row passes through, and `UserReadCtx.scopes` is required so no reader can
    skip the decision.
 
+   A team-owned session reads the org scope in full (product decision
+   2026-09-06). A team admin may narrow that to a list of `op://` references
+   (`docs/specs/2026-09-04-team-onepassword-vaults-design.md`). The lease is
+   an optional restriction, never a default denial. When one exists, `resolve`
+   refuses a reference outside it and names the fix, and `find` omits it.
+   When none exists, the broker behaves as it did before the lease.
+
    The broker asks a second question the api side does not have to: is this
    token's holder the session's owner? A session changes hands through
    `PATCH /api/sessions/:id`, and tokens minted before the move stay valid
@@ -215,8 +222,9 @@ than a fallback. `persona.test.ts` pins each of those properties.
   misses, requires a sandbox token and names the fix without one, names every
   unsupported reference, and round-trips a value containing a quote, a
   backslash, and a newline; refuses the personal scope on a team-owned session
-  while keeping it for a user-owned one; and returns positional `values` with
-  `null` for a miss.
+  while keeping it for a user-owned one; reads every org reference for a team
+  session with no lease and only the granted ones with a lease; and returns
+  positional `values` with `null` for a miss.
 - `packages/api/src/engine/prompt-rules.test.ts` — the composed prompt names
   the command and the reference shape.
 - `packages/api/src/engine/sandbox-spec.test.ts` — golden spec hashes cover the

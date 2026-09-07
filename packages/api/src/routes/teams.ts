@@ -47,6 +47,7 @@
 import { Hono } from "hono";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
+import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
 import {
@@ -111,9 +112,10 @@ import type {
 } from "../wire/types.js";
 import { ONEPASSWORD_SERVICE } from "../services/onepassword.js";
 import {
-  grantRow,
   loadTeamOnePasswordRefs,
   parseTeamOnePasswordRefs,
+  withGrantRefs,
+  withoutGrantRefs,
 } from "../services/team-onepassword-grant.js";
 
 export const teamsRouter = new Hono<AppEnv>();
@@ -713,7 +715,7 @@ teamsRouter.get("/:id/onepassword-refs", async (c) => {
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
-  const refs = (await loadTeamOnePasswordRefs(engineCredentials, id)) ?? [];
+  const refs = [...((await loadTeamOnePasswordRefs(engineCredentials, id)) ?? [])];
   return c.json({ refs } satisfies TeamOnePasswordRefsResponse);
 });
 
@@ -736,13 +738,26 @@ teamsRouter.put("/:id/onepassword-refs", async (c) => {
   }
   const parsed = parseTeamOnePasswordRefs("refs" in raw ? raw.refs : undefined);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const owner = { type: "team", id } satisfies CredentialOwner;
+  const existing = await engineCredentials.get(owner, ONEPASSWORD_SERVICE);
   if (parsed.refs.length === 0) {
-    await engineCredentials.delete({ type: "team", id }, ONEPASSWORD_SERVICE);
+    await clearTeamOnePasswordRefs(engineCredentials, owner, existing);
     return c.json({ refs: [] } satisfies PutTeamOnePasswordRefsResponse);
   }
-  await engineCredentials.save({ type: "team", id }, ONEPASSWORD_SERVICE, grantRow(parsed.refs));
+  await engineCredentials.save(owner, ONEPASSWORD_SERVICE, withGrantRefs(existing, parsed.refs));
   return c.json({ refs: parsed.refs } satisfies PutTeamOnePasswordRefsResponse);
 });
+
+/** Drops the grant. A token that shares the row stays; a grant-only row goes. */
+async function clearTeamOnePasswordRefs(
+  store: CredentialStore,
+  owner: CredentialOwner,
+  existing: StoredCredential | null,
+): Promise<void> {
+  const remaining = withoutGrantRefs(existing);
+  if (remaining) await store.save(owner, ONEPASSWORD_SERVICE, remaining);
+  else await store.delete(owner, ONEPASSWORD_SERVICE);
+}
 
 teamsRouter.delete("/:id/onepassword-refs", async (c) => {
   const { db, engineCredentials } = c.var.providers;
@@ -751,6 +766,7 @@ teamsRouter.delete("/:id/onepassword-refs", async (c) => {
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
-  await engineCredentials.delete({ type: "team", id }, ONEPASSWORD_SERVICE);
+  const owner = { type: "team", id } satisfies CredentialOwner;
+  await clearTeamOnePasswordRefs(engineCredentials, owner, await engineCredentials.get(owner, ONEPASSWORD_SERVICE));
   return c.json({ ok: true } satisfies DeleteTeamOnePasswordRefsResponse);
 });

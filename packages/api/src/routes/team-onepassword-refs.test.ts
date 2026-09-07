@@ -112,6 +112,38 @@ describe("GET/PUT/DELETE /api/teams/:id/onepassword-refs", () => {
     expect(body.error).toContain("onepassword-refs");
   });
 
+  // The row at (team, "onepassword") is the slot a team-owned service-account
+  // token will use. The grant list rides on that row as metadata.refs, so a
+  // grant write must leave a token in place and a grant clear must not drop
+  // the row while a token still lives there.
+  it("PUT and DELETE keep a team token that shares the onepassword row", async () => {
+    const team = await teamWithMember();
+    const owner = { type: "team" as const, id: team.id };
+    await api!.providers.engineCredentials.save(owner, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "ops_team_token",
+    });
+
+    const put = await fetch(`${api!.baseUrl}/api/teams/${team.id}/onepassword-refs`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ refs: ["op://Shared/Acme/credential"] }),
+    });
+    expect(put.status).toBe(200);
+    const granted = await api!.providers.engineCredentials.get(owner, ONEPASSWORD_SERVICE);
+    expect(granted?.apiKey).toBe("ops_team_token");
+    expect(granted?.metadata).toEqual({ refs: ["op://Shared/Acme/credential"] });
+
+    const del = await fetch(`${api!.baseUrl}/api/teams/${team.id}/onepassword-refs`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(del.status).toBe(200);
+    const cleared = await api!.providers.engineCredentials.get(owner, ONEPASSWORD_SERVICE);
+    expect(cleared?.apiKey).toBe("ops_team_token");
+    expect(cleared?.metadata?.refs).toBeUndefined();
+  });
+
   it("DELETE drops the grant row", async () => {
     const team = await teamWithMember();
     await fetch(`${api!.baseUrl}/api/teams/${team.id}/onepassword-refs`, {

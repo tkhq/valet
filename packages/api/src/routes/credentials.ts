@@ -337,7 +337,7 @@ credentialsRouter.put("/:service", async (c) => {
     return c.json(
       {
         error:
-          "A team does not hold a 1Password token. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
+          "A team 1Password token is not supported yet. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
       },
       400,
     );
@@ -550,7 +550,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     return c.json(
       {
         error:
-          "A team does not hold a 1Password token. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
+          "A team 1Password token is not supported yet. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
       },
       400,
     );
@@ -687,7 +687,7 @@ credentialsRouter.delete("/:service", async (c) => {
     return c.json(
       {
         error:
-          "A team does not hold a 1Password token. Revoke op:// references at DELETE /api/teams/:id/onepassword-refs.",
+          "A team 1Password token is not supported yet. Revoke op:// references at DELETE /api/teams/:id/onepassword-refs.",
       },
       400,
     );
