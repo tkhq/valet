@@ -473,7 +473,7 @@ function TeamOnePasswordRefs({
   return (
     <div>
       <h4 className="text-xs font-medium uppercase tracking-wide text-muted">1Password references</h4>
-      {refsQ.isLoading && <LoadingRow>Loading 1Password references…</LoadingRow>}
+      {refsQ.isLoading && <LoadingRow label="Loading 1Password references…" className="py-2 text-xs" />}
       {refsQ.error && <ErrorRow>Could not load 1Password references. Reload the page.</ErrorRow>}
       {!refsQ.isLoading && !refsQ.error && refs.length === 0 && (
         <EmptyRow>
