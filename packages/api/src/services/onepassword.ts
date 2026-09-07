@@ -29,6 +29,22 @@ import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/
 /** Reserved credential service name for 1Password service-account tokens. */
 export const ONEPASSWORD_SERVICE = "onepassword";
 
+/**
+ * The one `op://` grammar. `op://vault/item/field` or
+ * `op://vault/item/section/field`, the two forms the SDK resolves. Segments
+ * may contain spaces ("ProDex Labs" is an ordinary vault name) but not a
+ * slash or a control character. The prefix and the segment count keep this
+ * from becoming a general read primitive: a path, an env var name, or a URL
+ * does not match. The credential write path, the sandbox broker, and the
+ * team grant all test with this, so a reference one of them stores is one
+ * the others accept.
+ */
+export const OP_REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+(?:\/[^/\u0000-\u001f]+){1,2}$/;
+
+export function isOnePasswordReference(value: string): boolean {
+  return OP_REFERENCE.test(value);
+}
+
 const RESOLVE_TTL_MS = 5 * 60_000;
 
 // ── Public shapes ──────────────────────────────────────────────────────

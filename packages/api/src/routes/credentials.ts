@@ -50,7 +50,12 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
-import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../services/onepassword.js";
+import {
+  isOnePasswordReference,
+  ONEPASSWORD_SERVICE,
+  OnePasswordAuthError,
+  onePasswordMeta,
+} from "../services/onepassword.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
@@ -154,8 +159,9 @@ function parseOnePasswordField(
   }
   const candidate = value as Record<string, unknown>;
   const { reference, tokenScope } = candidate;
-  if (typeof reference !== "string" || !reference.startsWith("op://")) {
-    return { ok: false, error: "onepassword.reference must be a string that starts with op://" };
+  // The grant grammar, so a stored reference is one a team admin can lease.
+  if (typeof reference !== "string" || !isOnePasswordReference(reference)) {
+    return { ok: false, error: "onepassword.reference must be an op://vault/item/field reference" };
   }
   if (tokenScope !== "org" && tokenScope !== "personal") {
     return { ok: false, error: "onepassword.tokenScope must be org or personal" };

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import {
   createOnePasswordService,
+  isOnePasswordReference,
   onePasswordMeta,
   OnePasswordAuthError,
   ONEPASSWORD_SERVICE,
@@ -556,5 +557,21 @@ describe("findCredentialForService", () => {
     });
     await expect(svc.findCredentialForService("org", ctx, "linear")).rejects.toMatchObject({ kind: "no_token" });
     expect(calls).toEqual([]);
+  });
+});
+
+describe("isOnePasswordReference", () => {
+  it("accepts the three- and four-segment forms the SDK resolves", () => {
+    expect(isOnePasswordReference("op://vault/item/field")).toBe(true);
+    expect(isOnePasswordReference("op://ProDex Labs/Claude API Key/notesPlain")).toBe(true);
+    expect(isOnePasswordReference("op://vault/item/section/field")).toBe(true);
+  });
+
+  it("refuses a bare prefix, a short path, a long path, and anything else", () => {
+    expect(isOnePasswordReference("op://vault")).toBe(false);
+    expect(isOnePasswordReference("op://vault/item")).toBe(false);
+    expect(isOnePasswordReference("op://a/b/c/d/e")).toBe(false);
+    expect(isOnePasswordReference("vault/item/field")).toBe(false);
+    expect(isOnePasswordReference("op://vault/item/fi\u0000eld")).toBe(false);
   });
 });

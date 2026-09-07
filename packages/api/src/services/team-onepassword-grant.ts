@@ -8,10 +8,7 @@
  * with one, an ungranted ref is refused and names the fix.
  */
 import type { CredentialStore, StoredCredential } from "@valet/engine";
-import { ONEPASSWORD_SERVICE, OnePasswordAuthError } from "./onepassword.js";
-
-/** Same shape the sandbox broker accepts: vault/item/field or one extra section. */
-export const OP_REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+(?:\/[^/\u0000-\u001f]+){1,2}$/;
+import { isOnePasswordReference, ONEPASSWORD_SERVICE, OnePasswordAuthError } from "./onepassword.js";
 
 export const MAX_TEAM_OP_REFS = 25;
 
@@ -29,7 +26,7 @@ export function parseTeamOnePasswordRefs(value: unknown): { ok: true; refs: stri
   const seen = new Set<string>();
   for (const raw of value) {
     const ref = raw.trim();
-    if (!OP_REFERENCE.test(ref)) {
+    if (!isOnePasswordReference(ref)) {
       return { ok: false, error: `${raw} is not a supported secret reference. Use op://vault/item/field.` };
     }
     if (seen.has(ref)) continue;
@@ -43,7 +40,7 @@ export function refsFromGrantRow(row: StoredCredential | null): string[] {
   if (!row?.metadata || typeof row.metadata !== "object" || Array.isArray(row.metadata)) return [];
   const raw = row.metadata.refs;
   if (!Array.isArray(raw)) return [];
-  return raw.filter((item): item is string => typeof item === "string" && OP_REFERENCE.test(item));
+  return raw.filter((item): item is string => typeof item === "string" && isOnePasswordReference(item));
 }
 
 /**

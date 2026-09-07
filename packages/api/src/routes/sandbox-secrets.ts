@@ -18,7 +18,7 @@ import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { onePasswordScopesFor } from "../services/credential-resolution.js";
-import { OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
+import { isOnePasswordReference, OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
 import {
   isTeamOpRefGranted,
   loadTeamOnePasswordRefs,
@@ -28,16 +28,8 @@ import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
 
-/**
- * References this broker resolves. Only 1Password today.
- *
- * `op://vault/item/field` or `op://vault/item/section/field`, the two forms
- * the 1Password SDK accepts. Segments may contain spaces ("ProDex Labs" is an
- * ordinary vault name) but not a slash or a control character. The prefix and
- * the segment count are what keep this from becoming a general read
- * primitive: a path, an env var name, or a URL does not match.
- */
-const REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+(?:\/[^/\u0000-\u001f]+){1,2}$/;
+// References this broker resolves: only 1Password today, on the one `op://`
+// grammar `services/onepassword.ts` exports (`isOnePasswordReference`).
 
 /** One `run` injecting hundreds of secrets is a mistake, and each reference
  * costs a round trip. */
@@ -114,7 +106,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // Every bad reference, not the first: the CLI rejects the whole batch on
   // this error, and naming one of several sends the reader to debug a
   // reference that was fine.
-  const unsupported = references.filter((r) => !REFERENCE.test(r));
+  const unsupported = references.filter((r) => !isOnePasswordReference(r));
   if (unsupported.length > 0) {
     return c.json(
       {
