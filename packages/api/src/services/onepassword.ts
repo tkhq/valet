@@ -141,6 +141,18 @@ export interface OnePasswordService {
 }
 
 /** One `findCandidates` hit. Titles and a field segment, never a value. */
+/**
+ * A reference segment 1Password will accept: letters, digits, spaces, "_",
+ * "." and "-". A title outside that set (an apostrophe is the common case)
+ * parses as invalid on resolve, so the segment falls back to the vault or
+ * item id, which the SDK resolves the same way.
+ */
+const SDK_SEGMENT = /^[A-Za-z0-9 _.-]+$/;
+
+export function referenceSegment(title: string | undefined, id: string): string {
+  return title !== undefined && SDK_SEGMENT.test(title) ? title : id;
+}
+
 export interface OpCandidate {
   vault: string;
   item: string;
@@ -550,7 +562,11 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
         }
         const field = itemSecretSegment(detail);
         if (!field) continue;
-        out.push({ vault: vaultTitle.get(match.vaultId) ?? match.vaultId, item: match.title, field });
+        out.push({
+          vault: referenceSegment(vaultTitle.get(match.vaultId), match.vaultId),
+          item: referenceSegment(match.title, match.id),
+          field,
+        });
       }
       return out;
     },
