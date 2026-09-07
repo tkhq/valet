@@ -1243,10 +1243,42 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
     (row) => `index:${String(row["indexname"])}`,
   );
 
-  return SCHEMA_REPAIRS.filter(({ probe: p }) => {
+  const pending = SCHEMA_REPAIRS.filter(({ probe: p }) => {
     const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
     return !present.has(key);
   });
+  return tablesBeforeTheirColumns(pending);
+}
+
+/**
+ * List order is apply order, and a column repair may sit ahead of the
+ * repair that creates its table (the table arrived later than the column
+ * entries that were written against it). On a database that has neither,
+ * the ALTER would run against a table that does not exist yet and the boot
+ * would fail. Hoist each pending table repair ahead of the first pending
+ * column repair on that table; everything else keeps its place.
+ */
+function tablesBeforeTheirColumns(pending: SchemaRepair[]): SchemaRepair[] {
+  const creates = new Map<string, SchemaRepair>();
+  for (const repair of pending) {
+    if (repair.probe.kind === "table") creates.set(repair.probe.table, repair);
+  }
+  const ordered: SchemaRepair[] = [];
+  const placed = new Set<SchemaRepair>();
+  for (const repair of pending) {
+    if (repair.probe.kind === "column") {
+      const create = creates.get(repair.probe.table);
+      if (create && !placed.has(create)) {
+        ordered.push(create);
+        placed.add(create);
+      }
+    }
+    if (!placed.has(repair)) {
+      ordered.push(repair);
+      placed.add(repair);
+    }
+  }
+  return ordered;
 }
 
 const REPAIR_LOCK_TIMEOUT = "5s";
