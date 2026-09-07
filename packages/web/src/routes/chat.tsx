@@ -97,9 +97,13 @@ function ChatPage() {
   const choice = chooseChatAssistant(groups, scope.key, assistant);
   const chosen = choice.kind === "open" || choice.kind === "personal" ? choice.assistant : undefined;
   // Two different facts, two different messages: the list says this
-  // assistant is not yours to open, or the list never arrived.
+  // assistant is not yours to open, or the list never arrived. The second
+  // covers a team workspace as well as a named assistant: without the list
+  // there is no team assistant to open, and the page falls back to your
+  // own conversation and says so, rather than replacing the page with an
+  // error the rail already shows.
   const unavailable = assistant !== undefined && scopeResolved && named === undefined;
-  const unresolved = assistant !== undefined && listFailed;
+  const unresolved = listFailed && (assistant !== undefined || scope.key !== PERSONAL);
 
   // `GET /api/orchestrator/info` stays the fallback for your own default:
   // it answers before the list does on a cold load, and it still answers if
@@ -181,16 +185,6 @@ function ChatPage() {
           )
         }
       />
-    );
-  }
-
-  if (scope.key !== PERSONAL && listFailed) {
-    return (
-      <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
-        <div>
-          Cannot load your assistants. Reload the page.
-        </div>
-      </div>
     );
   }
 

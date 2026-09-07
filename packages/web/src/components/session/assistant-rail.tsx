@@ -257,6 +257,12 @@ export function scopedDefaultAssistant(
  * a personal conversation. An unreachable `?assistant=` on a team opens
  * that team's default, or the empty-team notice. It never opens yours.
  *
+ * `canonicalize` asks the page to write the chosen id into the URL. Only
+ * an EMPTY `?assistant=` is rewritten. A supplied id that went nowhere
+ * stays in the URL: rewriting it would clear the "not available" notice a
+ * frame after it appeared, and the reader would never learn their link
+ * was stale.
+ *
  * The team arm applies only when `scopeKey` names a group in `groups`. A
  * key with no group is a team the caller cannot open (left, or hidden by
  * the organizations flag), not an empty one; that resolves like the
@@ -278,7 +284,9 @@ export function chooseChatAssistant(
   const teamScope = scopeKey !== PERSONAL && groups.some((group) => group.key === scopeKey);
   if (teamScope) {
     const scoped = scopedDefaultAssistant(groups, scopeKey);
-    if (scoped) return { kind: "open", assistant: scoped, canonicalize: true };
+    if (scoped) {
+      return { kind: "open", assistant: scoped, canonicalize: requestedId === undefined };
+    }
     return { kind: "empty-team" };
   }
 

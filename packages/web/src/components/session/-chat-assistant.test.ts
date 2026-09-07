@@ -13,6 +13,7 @@ function team(id: string, name = id): TeamSummary {
     createdAt: 0,
     memberCount: 2,
     callerRole: "member",
+    defaultModel: null,
   };
 }
 
@@ -109,10 +110,12 @@ describe("chooseChatAssistant", () => {
   });
 
   it("opens the team's default when the named assistant is unreachable on a team workspace", () => {
+    // Without rewriting the URL: the page shows a "not available" notice
+    // keyed on the requested id, and a rewrite would clear it at once.
     expect(chooseChatAssistant(groups, "t1", "asst_nope")).toEqual({
       kind: "open",
       assistant: expect.objectContaining({ id: "p2" }),
-      canonicalize: true,
+      canonicalize: false,
     });
   });
 
