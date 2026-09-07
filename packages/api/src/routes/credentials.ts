@@ -43,7 +43,7 @@
  * `services/slack-connect.ts`.
  */
 import { Hono, type Context } from "hono";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
@@ -55,6 +55,7 @@ import { isDeniedCredentialService } from "../services/credential-resolution.js"
 import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { deleteDelegationsFrom } from "../services/credential-delegations.js";
 import { credentials } from "../schema/index.js";
 import type {
   CredentialSummary,
@@ -640,15 +641,7 @@ credentialsRouter.delete("/:service", async (c) => {
 
   await engineCredentials.delete(owner, service);
   if (owner.type === "user") {
-    await db
-      .delete(credentials)
-      .where(
-        and(
-          eq(credentials.ownerType, "team"),
-          eq(credentials.service, service),
-          sql`${credentials.metadata}->>'delegatedFrom' = ${user.id}`,
-        ),
-      );
+    await deleteDelegationsFrom(db, { userId: user.id, service });
   }
 
   const resp: DeleteCredentialResponse = { ok: true };

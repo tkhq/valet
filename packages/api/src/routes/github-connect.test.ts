@@ -4,10 +4,11 @@
  * GitHub API server (`startGithubFixture`) subbed in via `GITHUB_API_URL`.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { githubInstallations } from "../schema/index.js";
+import { credentials, githubInstallations } from "../schema/index.js";
+import { createTeam } from "../services/teams.js";
 import type {
   GetGithubOrgStatusResponse,
   ListCredentialsResponse,
@@ -366,6 +367,43 @@ describe("DELETE /api/me/github", () => {
       .from(githubInstallations)
       .where(eq(githubInstallations.installationId, 556));
     expect(row?.linkedUserId).toBeNull();
+  });
+
+  // A team reference never outlives its source (team credentials design,
+  // decision 4). This route deletes the same user row `DELETE
+  // /api/credentials/github` does, so it cascades the same way.
+  it("deletes the team references delegated from the user's github connection", async () => {
+    api = await bootTestApi();
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2",
+      accessToken: "connect-access-token",
+      metadata: { login: "octouser" },
+    });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org",
+      name: "Platform",
+      creatorUserId: "local-user",
+    });
+    // The row shape `POST /api/credentials/:service/delegate` writes.
+    const now = Date.now();
+    await api.providers.db.insert(credentials).values({
+      ownerType: "team",
+      ownerId: team.id,
+      service: "github",
+      type: "oauth2",
+      metadata: { delegatedFrom: "local-user", sourceType: "oauth2" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/me/github`, { method: "DELETE", headers: HEADERS });
+    expect(res.status).toBe(204);
+
+    const teamRows = await api.providers.db
+      .select({ service: credentials.service })
+      .from(credentials)
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id)));
+    expect(teamRows).toEqual([]);
   });
 });
 
