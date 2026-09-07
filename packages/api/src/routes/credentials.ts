@@ -92,6 +92,11 @@ function rowHasSecret(stored: StoredCredential): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
+/** The service key as a sentence subject (`slack` → `Slack`). */
+function displayName(service: string): string {
+  return service.charAt(0).toUpperCase() + service.slice(1);
+}
+
 /**
  * Team / org / user owner for a credential route. A failed team check
  * returns 404, same as the other team surfaces — existence-hiding.
@@ -503,7 +508,7 @@ credentialsRouter.put("/:service", async (c) => {
 });
 
 credentialsRouter.post("/:service/delegate", async (c) => {
-  const { engineCredentials, db } = c.var.providers;
+  const { engineCredentials, db, plugins } = c.var.providers;
   const user = c.var.user;
   const service = c.req.param("service");
   let body: DelegateCredentialRequest;
@@ -519,6 +524,25 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   if (!team || !(await isTeamMember(db, body.teamId, user.id))) {
     return c.json({ error: "Team not found." }, 404);
   }
+  // An org-provided service (`requires.orgCredential`, Slack today) is
+  // never shared from a personal row: that row is one person's identity.
+  // A team runs on a verified token stored at team scope (the team PUT
+  // checks it the way the org PUT does) or on the org credential. This is
+  // decided before the caller's row is read, because connecting one would
+  // not change the answer.
+  const declared = findCredentialDeclaration(plugins, service);
+  if (declared?.requires?.orgCredential) {
+    const label = displayName(service);
+    return c.json(
+      {
+        error:
+          `${label} cannot be shared from a personal connection. ` +
+          `Store a team ${declared.type.replace("_", " ")} in Settings → Organization → Teams, ` +
+          `or use the organization's ${label}.`,
+      },
+      400,
+    );
+  }
   // The caller's own credential is checked before the team slot. A caller
   // with nothing to share is told to connect first; the slot answer only
   // matters once there is a credential to share.
@@ -526,6 +550,20 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   if (!source || (!rowHasSecret(source) && !onePasswordMeta(source))) {
     return c.json(
       { error: `Connect ${service} in Integrations first, then share it with the team.` },
+      400,
+    );
+  }
+  // A team read resolves 1Password references with org-scoped tokens only
+  // (`resolveTeamCredentialRead`), the same rule the team PUT applies. A
+  // reference-only source row with a personal token would leave the team
+  // with a reference that never resolves.
+  if (!rowHasSecret(source) && onePasswordMeta(source)?.tokenScope === "personal") {
+    return c.json(
+      {
+        error:
+          `${service} is stored as a personal 1Password reference, which a team cannot read. ` +
+          "Store it again with tokenScope org, or store the secret directly, then share it.",
+      },
       400,
     );
   }

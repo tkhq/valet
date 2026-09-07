@@ -987,6 +987,29 @@ describe("team credential scope (TKAI-205)", () => {
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
   });
 
+  // The same scope rule holds for a delegated reference: the team read
+  // runs on org-scoped tokens, so a personal reference on the source row
+  // would never resolve for the team.
+  it("refuses to delegate a personal-scope 1Password reference, naming the fix", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "personal" } },
+    });
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(400);
+    const { error } = (await share.json()) as { error: string };
+    expect(error).toBe(
+      "linear is stored as a personal 1Password reference, which a team cannot read. " +
+        "Store it again with tokenScope org, or store the secret directly, then share it.",
+    );
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+  });
+
   // A team may store its own Slack bot token. It is checked against Slack
   // the same way the org token is (bot token, required scopes), but it
   // needs no signing secret because Slack events route through the org app.
@@ -1042,6 +1065,29 @@ describe("team credential scope (TKAI-205)", () => {
       expect(stored?.metadata).toMatchObject({ teamId: "T0FIXTURE", teamName: "Fixture Workspace", botUserId: "U0BOTFIXTURE" });
       expect(stored?.metadata?.webhookSecret).toBeUndefined();
       expect(stored?.scopes).toContain("assistant:write");
+    });
+
+    // A personal Slack token is one person's identity. A team runs on a
+    // verified bot token stored at team scope, or on the org bot; the
+    // delegate route must refuse the personal row the way PUT already does.
+    it("refuses to delegate a personal Slack connection, naming the team token path", async () => {
+      const team = await teamWithMember([slackDeclaration]);
+      await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "slack", {
+        type: "bot_token",
+        accessToken: "xoxp-personal",
+      });
+      const share = await fetch(`${api!.baseUrl}/api/credentials/slack/delegate`, {
+        method: "POST",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ teamId: team.id }),
+      });
+      expect(share.status).toBe(400);
+      const { error } = (await share.json()) as { error: string };
+      expect(error).toBe(
+        "Slack cannot be shared from a personal connection. " +
+          "Store a team bot token in Settings → Organization → Teams, or use the organization's Slack.",
+      );
+      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack")).toBeNull();
     });
   });
 
