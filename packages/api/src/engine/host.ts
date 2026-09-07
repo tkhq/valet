@@ -3300,6 +3300,10 @@ export class EngineHost {
     // bake). Image resolution is single-lineage today (resolve-snapshot pins
     // profile "full"), so they no longer select the image — but the meta is
     // what later consumers and the spec provider see; keep it complete.
+    // `ownerId` MUST reach the meta with `ownerType`: the loader sets
+    // `ownerTeamId` only from the pair, and `sessionPrincipal` rejects a
+    // team meta without it, so a team child with a repo binding silently
+    // resolved default prebuild flags.
     const meta = this.opts.db
       ? await loadSessionMeta(this.opts.db, {
           id: childSessionId,
@@ -3307,6 +3311,7 @@ export class EngineHost {
           orgId: opts.orgId,
           workspace: opts.workspace,
           ownerType: opts.owner.type,
+          ownerId: opts.owner.id,
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         })
