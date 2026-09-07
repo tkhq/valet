@@ -240,7 +240,7 @@ profilePicturesRouter.post("/assistants/:id/avatar", limitUploadBody, async (c) 
   if (!user) return c.json({ error: "unauthorized" }, 401);
   const row = await loadAssistant(c.var.providers.db, c.req.param("id"));
   if (!row || row.orgId !== user.orgId) return c.json({ error: "assistant not found" }, 404);
-  if (!(await canAdministerAssistantOwner(c.var.providers.db, assistantOwner(row), user.id))) {
+  if (!(await canAdministerAssistantOwner(c.var.providers.db, assistantOwner(row), c.var.principal))) {
     return c.json({ error: "assistant not found" }, 404);
   }
   return storePicture(c, "assistants", row.id, row.avatarUrl, async (avatarUrl) => {
