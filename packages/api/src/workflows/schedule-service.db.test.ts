@@ -15,7 +15,6 @@ import type { AppDb } from "../lib/drizzle.js";
 let db: AppDb;
 let cleanup: () => Promise<void>;
 
-const USER = { id: "user_1", orgId: "org_1" };
 const OWNER = { userId: "user_1", orgId: "org_1" };
 const NOW = Date.UTC(2026, 0, 15, 12, 30, 0);
 
@@ -33,7 +32,7 @@ describe("updateWorkflowSchedule", () => {
   it("updates name and enabled without recomputing nextFireAt", async () => {
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "daily digest", name: "digest", cron: "0 9 * * *" },
       NOW,
     );
@@ -57,7 +56,7 @@ describe("updateWorkflowSchedule", () => {
   it("recomputes nextFireAt when cron changes", async () => {
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
     );
@@ -80,7 +79,7 @@ describe("updateWorkflowSchedule", () => {
   it("recomputes nextFireAt on re-enable so a stale slot does not fire immediately", async () => {
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
     );
@@ -109,7 +108,7 @@ describe("updateWorkflowSchedule", () => {
   it("rejects an invalid cron with a corrective error and 400", async () => {
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
     );
@@ -140,14 +139,14 @@ describe("updateWorkflowSchedule", () => {
 
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
     );
     if (!created.ok) throw new Error(created.error);
     const crossOrg = await updateWorkflowSchedule(
       db,
-      { userId: USER.id, orgId: "org_other" },
+      { userId: OWNER.userId, orgId: "org_other" },
       created.schedule.scheduleId,
       { name: "x" },
       NOW,
@@ -160,9 +159,9 @@ describe("updateWorkflowSchedule", () => {
     const now = NOW;
     await db.insert(workflowDefinitions).values({
       id: "wf_1",
-      orgId: USER.orgId,
+      orgId: OWNER.orgId,
       ownerType: "user",
-      ownerId: USER.id,
+      ownerId: OWNER.userId,
       name: "test workflow",
       definition: { version: "dag/v1", nodes: [], edges: [] },
       createdAt: now,
@@ -171,7 +170,7 @@ describe("updateWorkflowSchedule", () => {
 
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { workflowId: "wf_1", name: "s", cron: "0 9 * * *" },
       NOW,
     );

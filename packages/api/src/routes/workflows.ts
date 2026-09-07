@@ -674,11 +674,13 @@ workflowsRouter.post("/:id/schedules", async (c) => {
     return c.json({ error: "input must be a JSON object" }, 400);
   }
 
-  const result = await createWorkflowSchedule(
-    deps.db,
-    { id: owner.userId, orgId: owner.orgId },
-    { workflowId: id, name, cron: body.cron, timezone: body.timezone, input: body.input },
-  );
+  const result = await createWorkflowSchedule(deps.db, owner, {
+    workflowId: id,
+    name,
+    cron: body.cron,
+    timezone: body.timezone,
+    input: body.input,
+  });
   if (!result.ok) return c.json({ error: result.error }, 400);
   const resp: CreateWorkflowScheduleResponse = toScheduleWire(result.schedule, id);
   return c.json(resp, 201);

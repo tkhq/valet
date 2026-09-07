@@ -88,7 +88,7 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
 
 export async function createWorkflowSchedule(
   db: AppDb,
-  user: { id: string; orgId: string },
+  owner: WorkflowOwner,
   input: {
     /** Exactly one of `workflowId` (start a run) or `prompt` (prompt the
      * orchestrator — V1's `schedule_target=orchestrator`). */
@@ -134,7 +134,7 @@ export async function createWorkflowSchedule(
   // target, which `deliverToOrchestrator` reads.
   let scheduleOwner: { ownerType: "user" | "team" | "org"; ownerId: string } = {
     ownerType: "user",
-    ownerId: user.id,
+    ownerId: owner.userId,
   };
 
   if (hasWorkflow) {
@@ -143,8 +143,9 @@ export async function createWorkflowSchedule(
     // `scheduler.ts` used to bill the SCHEDULE's owner (this function's
     // `user`) rather than the workflow's, that org member became the
     // owner of runs against someone else's resource. See `scheduler.ts`'s
-    // `fire()` for the matching run-ownership fix.
-    const owned = await armableDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
+    // `fire()` for the matching run-ownership fix. The owner carries the
+    // request principal, so a team key reaches its team's workflows only.
+    const owned = await armableDefinitionRow(db, owner, input.workflowId!);
     if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
     // Follow the workflow's own owner, with org as the one exception. Copying
     // the owner used to widen a team workflow's schedule to the ORG, because
@@ -162,7 +163,7 @@ export async function createWorkflowSchedule(
     // `routes/events.ts` already refuse to copy an org owner for this reason.
     scheduleOwner =
       owned.ownerType === "org"
-        ? { ownerType: "user", ownerId: user.id }
+        ? { ownerType: "user", ownerId: owner.userId }
         : { ownerType: owned.ownerType, ownerId: owned.ownerId };
   } else if (input.teamId) {
     // Orchestrator-prompt schedule created in a team workspace: the team owns
@@ -177,7 +178,7 @@ export async function createWorkflowSchedule(
   if (hasPrompt && input.assistantId !== undefined) {
     const bad = await checkAssistantForOwner(
       db,
-      user.orgId,
+      owner.orgId,
       { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId },
       input.assistantId,
     );
@@ -188,7 +189,7 @@ export async function createWorkflowSchedule(
     .insert(workflowSchedules)
     .values({
       id: randomUUID(),
-      orgId: user.orgId,
+      orgId: owner.orgId,
       ownerType: scheduleOwner.ownerType,
       ownerId: scheduleOwner.ownerId,
       targetKind: hasWorkflow ? "workflow" : "orchestrator",
@@ -203,7 +204,7 @@ export async function createWorkflowSchedule(
       input: input.input ?? null,
       enabled: true,
       nextFireAt: next.at,
-      createdBy: user.id,
+      createdBy: owner.userId,
       createdAt: now,
       updatedAt: now,
     })

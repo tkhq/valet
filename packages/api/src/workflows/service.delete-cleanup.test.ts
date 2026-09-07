@@ -46,7 +46,6 @@ let deps: WorkflowServiceDeps;
 
 const OWNER: WorkflowOwner = { userId: "user_1", orgId: "org_1" };
 // schedule-service and trigger-service use { id, orgId } for the user arg
-const USER = { id: OWNER.userId, orgId: OWNER.orgId };
 const NOW = Date.UTC(2026, 0, 15, 12, 30, 0);
 
 beforeAll(async () => {
@@ -72,14 +71,14 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
     // Seed a schedule targeting this workflow
     const sched = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { workflowId: def.id, name: "daily", cron: "0 9 * * *" },
       NOW,
     );
     if (!sched.ok) throw new Error(sched.error);
 
     // Seed an event trigger targeting this workflow
-    const trigger = await createWorkflowTrigger(db, [githubPlugin], USER, {
+    const trigger = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
       workflowId: def.id,
       name: "on-pr",
       eventKeys: ["github.pull_request.opened"],
@@ -92,7 +91,7 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
       definition: { version: "dag/v1", nodes: [], edges: [] },
     });
 
-    const trigger2 = await createWorkflowTrigger(db, [githubPlugin], USER, {
+    const trigger2 = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
       workflowId: def2.id,
       name: "survivor-trigger",
       eventKeys: ["github.pull_request.closed"],
@@ -199,12 +198,12 @@ describe("reapTeamWorkflows", () => {
 
     const sched = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { workflowId: one.id, name: "daily", cron: "0 9 * * *" },
       NOW,
     );
     if (!sched.ok) throw new Error(sched.error);
-    const trigger = await createWorkflowTrigger(db, [githubPlugin], USER, {
+    const trigger = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
       workflowId: two.id,
       name: "on-pr",
       eventKeys: ["github.pull_request.opened"],

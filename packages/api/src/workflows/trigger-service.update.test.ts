@@ -17,7 +17,6 @@ import type { AppDb } from "../lib/drizzle.js";
 let db: AppDb;
 let cleanup: () => Promise<void>;
 
-const USER = { id: "user_1", orgId: "org_1" };
 const OWNER = { userId: "user_1", orgId: "org_1" };
 
 beforeAll(async () => {
@@ -28,9 +27,9 @@ beforeAll(async () => {
   const now = Date.now();
   await db.insert(workflowDefinitions).values({
     id: "wf_1",
-    orgId: USER.orgId,
+    orgId: OWNER.orgId,
     ownerType: "user",
-    ownerId: USER.id,
+    ownerId: OWNER.userId,
     name: "test workflow",
     definition: { version: "dag/v1", nodes: [], edges: [] },
     createdAt: now,
@@ -44,7 +43,7 @@ afterAll(async () => {
 
 describe("updateWorkflowTrigger", () => {
   it("updates name/eventKeys/enabled and returns the summary", async () => {
-    const created = await createWorkflowTrigger(db, [githubPlugin], USER, {
+    const created = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
       workflowId: "wf_1",
       name: "original",
       eventKeys: ["github.pull_request.opened"],
@@ -64,7 +63,7 @@ describe("updateWorkflowTrigger", () => {
   });
 
   it("re-validates merged eventKeys/filters and 400s with the validator message", async () => {
-    const created = await createWorkflowTrigger(db, [githubPlugin], USER, {
+    const created = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
       workflowId: "wf_1",
       name: "to-invalidate",
       eventKeys: ["github.pull_request.opened"],
@@ -88,7 +87,7 @@ describe("updateWorkflowTrigger", () => {
     if (!missing.ok) expect(missing.status).toBe(404);
 
     // Cross-org: trigger exists under a different org
-    const created = await createWorkflowTrigger(db, [githubPlugin], USER, {
+    const created = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
       workflowId: "wf_1",
       name: "cross-org trigger",
       eventKeys: ["github.pull_request.opened"],
@@ -97,7 +96,7 @@ describe("updateWorkflowTrigger", () => {
     const crossOrg = await updateWorkflowTrigger(
       db,
       [githubPlugin],
-      { userId: USER.id, orgId: "org_other" },
+      { userId: OWNER.userId, orgId: "org_other" },
       created.trigger.triggerId,
       { name: "x" },
     );
@@ -109,15 +108,15 @@ describe("updateWorkflowTrigger", () => {
     const orchId = randomUUID();
     await db.insert(eventSubscriptions).values({
       id: orchId,
-      orgId: USER.orgId,
+      orgId: OWNER.orgId,
       ownerType: "user",
-      ownerId: USER.id,
+      ownerId: OWNER.userId,
       name: "orch sub",
       eventKeys: ["github.pull_request.opened"],
       filters: [],
       target: { kind: "orchestrator" },
       enabled: true,
-      createdBy: USER.id,
+      createdBy: OWNER.userId,
       createdAt: now,
       updatedAt: now,
     });

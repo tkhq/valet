@@ -16,6 +16,7 @@ import {
   triggerAccessSets,
   type WorkflowOwner,
 } from "../workflows/service.js";
+import { resolveCreateOwner } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
 import {
   createWorkflowSchedule,
@@ -45,9 +46,11 @@ import type {
 export const workflowTriggersRouter = new Hono<AppEnv>();
 
 /** The caller as a `WorkflowOwner` — one construction for every handler,
- * so a change to the user context or the owner shape lands in one place. */
+ * so a change to the user context or the owner shape lands in one place.
+ * The principal rides along: a team key reaches its team's rows only, and
+ * keeps reaching them after the creating admin leaves. */
 function ownerFrom(c: Context<AppEnv>): WorkflowOwner {
-  return { userId: c.var.user.id, orgId: c.var.user.orgId };
+  return { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal };
 }
 
 const CRON_HINT = ' Use 5 fields, for example "0 9 * * 1-5" (09:00 on weekdays).';
@@ -124,7 +127,7 @@ workflowTriggersRouter.get("/trigger-catalog", (c) => {
 
 workflowTriggersRouter.post("/schedules", async (c) => {
   const { db } = c.var.providers;
-  const user = { id: c.var.user.id, orgId: c.var.user.orgId };
+  const owner = ownerFrom(c);
 
   let body: CreateWorkflowScheduleRequest;
   try {
@@ -159,19 +162,25 @@ workflowTriggersRouter.post("/schedules", async (c) => {
   }
 
   // An orchestrator-prompt schedule created in a team workspace fires the
-  // TEAM's assistant, so it is team-owned. Validate membership here, before
-  // anything is written — a non-member's team id 404s exactly like an unknown
-  // one, the existence-hiding convention every cross-owner route uses. A
+  // TEAM's assistant, so it is team-owned. `resolveCreateOwner` settles the
+  // owner before anything is written: a cookie caller's team id needs live
+  // membership (a non-member's id 404s like an unknown one), a personal key
+  // cannot name a team, and a team key always schedules as its own team. A
   // workflow-target schedule ignores teamId (its owner follows the workflow).
   let teamId: string | undefined;
-  if (body.target.kind === "orchestrator" && typeof body.teamId === "string") {
-    if (!(await isTeamMember(db, body.teamId, user.id))) {
-      return c.json({ error: "team not found" }, 404);
-    }
-    teamId = body.teamId;
+  if (body.target.kind === "orchestrator") {
+    const created = await resolveCreateOwner({
+      principal: c.var.principal,
+      authVia: c.var.authVia,
+      bodyTeamId: body.teamId,
+      userId: owner.userId,
+      isTeamMember: (id) => isTeamMember(db, id, owner.userId),
+    });
+    if (!created.ok) return c.json({ error: created.error }, created.status);
+    teamId = created.owner.type === "team" ? created.owner.id : undefined;
   }
 
-  const result = await createWorkflowSchedule(db, user, {
+  const result = await createWorkflowSchedule(db, owner, {
     name: body.name,
     cron: body.cron,
     timezone: body.timezone,
@@ -230,7 +239,7 @@ workflowTriggersRouter.post("/schedules/:id/run", async (c) => {
 
 workflowTriggersRouter.post("/event-triggers", async (c) => {
   const { db, plugins } = c.var.providers;
-  const user = { id: c.var.user.id, orgId: c.var.user.orgId };
+  const owner = ownerFrom(c);
   let body: CreateWorkflowEventTriggerRequest;
   try {
     body = (await c.req.json()) as CreateWorkflowEventTriggerRequest;
@@ -240,7 +249,7 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  const result = await createWorkflowTrigger(db, plugins, user, {
+  const result = await createWorkflowTrigger(db, plugins, owner, {
     workflowId: body.workflowId,
     name: body.name,
     eventKeys: body.eventKeys,
