@@ -23,7 +23,7 @@ import type {
   ListMessagesResponse,
   ListSessionsResponse,
   ListThreadsResponse,
-  MeResponse,
+  GetMeResponse,
   PostSessionFileUploadResponse,
   ResolveDecisionRequest,
   SendPromptRequest,
@@ -105,9 +105,11 @@ export class InstanceClient {
     return this.request<HealthResponse>("GET", "/api/health");
   }
 
-  /** `GET /api/me` — whoami/verify (200 ⇒ valid credential + identity). */
-  me(): Promise<MeResponse> {
-    return this.request<MeResponse>("GET", "/api/me");
+  /** `GET /api/me` — whoami/verify (200 ⇒ valid credential + identity).
+   * A team key answers with the team (`role: "team"`), a personal key or
+   * cookie with the user. */
+  me(): Promise<GetMeResponse> {
+    return this.request<GetMeResponse>("GET", "/api/me");
   }
 
   // ── orchestrator ───────────────────────────────────────────────────────

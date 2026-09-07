@@ -13,6 +13,7 @@ import { teamMembers, teams, users } from "../schema/index.js";
 import type {
   CreateTeamApiKeyResponse,
   CreateTeamResponse,
+  GetMeResponse,
   ListTeamApiKeysResponse,
   SessionDetail,
 } from "../wire/types.js";
@@ -170,6 +171,33 @@ describe("team API keys", () => {
     });
     expect(res.status).toBe(201);
     expect(((await res.json()) as SessionDetail).owner).toEqual({ type: "team", id: teamId });
+  });
+
+  it("GET /api/me for a team key answers with the team, not the creating admin", async () => {
+    api = await bootTestApi({ auth: true });
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const teamId = await createTeam(api.baseUrl, cookie, "Platform");
+    const created = (await (
+      await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ name: "CI" }),
+      })
+    ).json()) as CreateTeamApiKeyResponse;
+
+    const res = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
+    expect(res.status).toBe(200);
+    const me = (await res.json()) as GetMeResponse;
+    expect(me.role).toBe("team");
+    expect(me).toMatchObject({ id: teamId, name: "Platform" });
+    expect(me).not.toHaveProperty("email");
+    // PATCH stays outside the allow-list: a key cannot edit a person's profile.
+    const patched = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-api-key": created.key },
+      body: JSON.stringify({ name: "renamed" }),
+    });
+    expect(patched.status).toBe(403);
   });
 
   it("a gone team rejects the key", async () => {

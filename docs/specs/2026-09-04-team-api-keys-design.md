@@ -33,6 +33,8 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
    Every session and workflow check reads the request principal, never `c.var.user`. On a team key `c.var.user` is the creating admin, and `agent_sessions.userId` on every row that admin touched is that admin, so a check on the user would hand the key the admin's personal sessions. `canViewSession`, `canAdministerSession`, `canResolveSessionGate` and `WorkflowOwner` all take the principal. The gateway proxy, sandbox replace and `sandbox-jwt` gate on direct ownership (`isSessionDirectOwner`); `sandbox-jwt` refuses a team key because the token binds one user.
 
+   `GET /api/me` answers a team key with the team (`TeamMeResponse`: id, name, orgId, `role: "team"`, no email), not the creating admin. The route stays on the allow-list rather than refusing, because `valet login` verifies a key through it and `valet send` reads the team id off the answer to find the team's default assistant. `PATCH /api/me` stays refused.
+
    The LLM gateway (`/proxy/*`) refuses a team key with a 401 that names the fix. The gateway bills a user, and the only user on a team key is the creating admin, kept for audit. The refusal stands until a team billing principal exists.
 
    Routes mounted before the scope gate apply it themselves. The pre-auth artifact router resolves its caller through `resolveOptionalIdentity`, which returns the principal with the user. A team key there counts as anonymous: it reads a public artifact, and it is refused with a 403 that names the fix on an org-visibility artifact and on every comment route.

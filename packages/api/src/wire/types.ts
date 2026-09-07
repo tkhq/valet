@@ -3159,6 +3159,22 @@ export interface MeResponse {
   newThreadBehavior: NewThreadBehavior;
 }
 
+/**
+ * `GET /api/me` for a team `vlt_` key: the team the key acts as, not the
+ * creating admin. No email and no profile settings — a team has neither.
+ * `role: "team"` is the discriminator; a CLI holding a team key reads the
+ * team id from `id` to reach `POST /api/teams/:id/orchestrator`.
+ */
+export interface TeamMeResponse {
+  id: string;
+  name: string;
+  orgId: string;
+  role: "team";
+}
+
+/** What `GET /api/me` answers: the user for a cookie or personal key, the team for a team key. */
+export type GetMeResponse = MeResponse | TeamMeResponse;
+
 /** Whitelisted fields only — unknown keys 400. `defaultModel: null` clears the override. */
 export interface PatchMeRequest {
   name?: string;

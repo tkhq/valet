@@ -303,9 +303,11 @@ describe("auth middleware ladder — real-auth boots", () => {
     expect(createRes.status).toBe(201);
     const created = (await createRes.json()) as { key: string };
 
+    // The key authenticates as the TEAM: /api/me answers with the team,
+    // never with the admin who minted it.
     const meRes = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
     expect(meRes.status).toBe(200);
-    expect(((await meRes.json()) as { email: string }).email).toBe("team-key@nowhere.test");
+    expect(await meRes.json()).toMatchObject({ id: teamId, role: "team" });
 
     await db.delete(teams).where(eq(teams.id, teamId));
     const goneRes = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });

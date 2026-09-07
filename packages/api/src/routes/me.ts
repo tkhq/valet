@@ -1,6 +1,9 @@
 /**
  * `/api/me` — settings-shell per-user profile surface (split-settings
  * design). Returns `MeResponse` with user profile and org membership info.
+ * A team `vlt_` key gets the team (`TeamMeResponse`), never the creating
+ * admin: `valet login` verifies a key through this route, and the CLI
+ * reads the team id off the answer.
  *
  * `GET` joins `users` with `org_members` for `orgRole` — a caller with no
  * membership row (shouldn't happen outside tests, but the query doesn't
@@ -20,13 +23,14 @@ import { Hono } from "hono";
 import { eq, and } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { requireUser } from "../middleware/auth.js";
+import { requirePrincipal, requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
+import { getTeamInOrg } from "../services/teams.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import type { MeResponse, NewThreadBehavior, PatchMeResponse } from "../wire/types.js";
+import type { GetMeResponse, MeResponse, NewThreadBehavior, PatchMeResponse, TeamMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
 
@@ -69,9 +73,18 @@ async function loadMeResponse(
 
 meRouter.get("/", async (c) => {
   const user = requireUser(c);
-  if (!user) return c.json({ error: "unauthorized" }, 401);
+  const principal = requirePrincipal(c);
+  if (!user || !principal) return c.json({ error: "unauthorized" }, 401);
   const { db } = c.var.providers;
-  const body = await loadMeResponse(db, user);
+  if (principal.type === "team") {
+    // The ladder checked the team exists in this org; a delete can still
+    // land between the ladder and here, and then the key is invalid.
+    const team = await getTeamInOrg(db, user.orgId, principal.id);
+    if (!team) return c.json({ error: "invalid api key" }, 401);
+    const body: TeamMeResponse = { id: team.id, name: team.name, orgId: user.orgId, role: "team" };
+    return c.json(body);
+  }
+  const body: GetMeResponse | undefined = await loadMeResponse(db, user);
   if (!body) return c.json({ error: "user not found" }, 404);
   return c.json(body);
 });
