@@ -166,7 +166,15 @@ function reportAdoptedWorkspacePvcError(args: {
  * served. Past this age, unscheduled means capacity is genuinely absent —
  * fail with the cause instead of re-queueing forever (the 2026-08-22
  * incident's sessions waited 47h behind retryable timeouts). */
-const PENDING_TERMINAL_GRACE_MS = 5 * 60_000;
+const PENDING_TERMINAL_GRACE_MS = 10 * 60_000;
+
+interface PendingPodDiagnosis {
+  detail: string;
+  requests: {
+    cpu?: string | number;
+    memory?: string | number;
+  };
+}
 
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
@@ -1173,9 +1181,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * provider must not return until the CR has actually reconciled.
    *
    * `state: "error"` is a FAST FAIL: `sandboxStatus` (when `podStatusApi` is
-   * wired) classifies terminal pod failures — `ImagePullBackOff`,
-   * `CrashLoopBackOff`, `PodFailed`, `Unschedulable` — as `error` within a
-   * few poll intervals of the failure actually occurring, well under
+   * wired) classifies terminal pod failures as `error`. These failures include
+   * `ImagePullBackOff`, `CrashLoopBackOff`, `PodFailed`, and non-capacity
+   * `Unschedulable` conditions. Classification takes a few poll intervals, well under
    * `READY_TIMEOUT_MS`. That's thrown as `SandboxStartupError` (a definite,
    * non-retryable startup failure carrying the specific cause), NOT the
    * generic timeout error below — `SandboxAttachment.doProvision` branches
@@ -1239,12 +1247,34 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         lastReadError = err instanceof Error ? err.message : String(err);
       }
       if (Date.now() >= deadline) {
-        const pending = await this.podPendingReason(name);
+        const pending = await this.podPendingDiagnosis(name);
         if (pending !== null) {
+          const requests = [
+            ...(pending.requests.cpu === undefined ? [] : [`cpu=${pending.requests.cpu}`]),
+            ...(pending.requests.memory === undefined ? [] : [`memory=${pending.requests.memory}`]),
+          ];
+          const requestDetail = requests.length === 0 ? "" : ` Pod requests: ${requests.join(", ")}.`;
+          const cpuOrMemoryShortage = /Insufficient (cpu|memory)/.test(pending.detail);
+          const ephemeralStorageShortage = /Insufficient ephemeral-storage/.test(pending.detail);
+          const actions: string[] = [];
+          if (cpuOrMemoryShortage) {
+            actions.push(
+              "For the CPU or memory shortage, retry the child with a lower task.resources value. " +
+              "Reduce the value in .valet/prebuild.yaml to set a durable default. " +
+              "If a lower value fails, check the largest node's available CPU and memory.",
+            );
+          }
+          if (ephemeralStorageShortage) {
+            actions.push(
+              "Check node ephemeral-storage capacity. Check the deployment ephemeral-storage request. " +
+              "If you correct the capacity mismatch, retry.",
+            );
+          }
+          const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
           throw new SandboxStartupError(
             name,
-            `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes (${pending}). ` +
-              "The cluster has no schedulable capacity for this sandbox. Free or add node capacity, then retry.",
+            `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
+              `(${pending.detail}).${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`,
           );
         }
         const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
@@ -1262,7 +1292,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * younger than `PENDING_TERMINAL_GRACE_MS` — transient API errors and
    * autoscaler-scale-up windows keep the generic retryable timeout (which
    * retains the CR), never a terminal verdict. */
-  private async podPendingReason(name: string): Promise<string | null> {
+  private async podPendingDiagnosis(name: string): Promise<PendingPodDiagnosis | null> {
     if (!this.deps.podStatusApi) return null;
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, name).catch(() => null);
     const bornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
@@ -1270,6 +1300,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name).catch(() => null);
     if (!podName) return null;
     const pod = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName).catch(() => null);
-    return classifyPodPending(pod);
+    const detail = classifyPodPending(pod);
+    if (detail === null) return null;
+    return { detail, requests: pod?.sandboxResources?.requests ?? {} };
   }
 }

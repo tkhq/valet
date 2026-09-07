@@ -317,13 +317,31 @@ describe("classifyPodFailure (pure)", () => {
     expect(classifyPodFailure(pod, crReady)).toBe("pod failed: container exited 1");
   });
 
-  it("classifies an Unschedulable Pending pod", () => {
+  it.each(["cpu", "memory", "ephemeral-storage"])(
+    "keeps Insufficient %s on the Pending path",
+    (resource) => {
+      const pod: PodStatusInfo = {
+        phase: "Pending",
+        conditions: [{
+          type: "PodScheduled",
+          status: "False",
+          reason: "Unschedulable",
+          message: `0/3 nodes are available: 3 Insufficient ${resource}.`,
+        }],
+      };
+      expect(classifyPodFailure(pod)).toBeNull();
+    },
+  );
+
+  it.each([
+    "0/3 nodes had untolerated taint {dedicated: platform}",
+    "0/3 nodes did not match Pod's node affinity/selector",
+  ])("fails structural Unschedulable conditions: %s", (message) => {
     const pod: PodStatusInfo = {
       phase: "Pending",
-      containerStatuses: [],
-      conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message: "0/3 nodes available" }],
+      conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message }],
     };
-    expect(classifyPodFailure(pod)).toBe("unschedulable: 0/3 nodes available");
+    expect(classifyPodFailure(pod)).toBe(`unschedulable: ${message}`);
   });
 
   it("does not classify a Pending pod with a non-Unschedulable PodScheduled=False condition", () => {

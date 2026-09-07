@@ -873,6 +873,9 @@ const IMAGE_PULL_WAITING_REASONS = new Set([
   "CreateContainerConfigError",
 ]);
 
+/** This pattern identifies node resource capacity shortages in scheduler messages. */
+const CAPACITY_UNSCHEDULABLE_PATTERN = /Insufficient (cpu|memory|ephemeral-storage)/;
+
 /** Minimal per-container status this module reads — just enough to detect
  * a stuck `waiting` state. Extracted separately from `PodSummary` (which is
  * scoped to `resolvePodName`'s ownerReference-scan) since this one carries
@@ -1108,8 +1111,9 @@ export async function livePodDrift(
  *      "container crash-looping (CrashLoopBackOff)"
  *   3. `pod.phase === "Failed"`, or the CR's `Ready` condition has
  *      `reason === "PodFailed"` → "pod failed: <detail>"
- *   4. `pod.phase === "Pending"` with a `PodScheduled=False,
- *      reason=Unschedulable` condition → "unschedulable: <message>"
+ *   4. `pod.phase === "Pending"` with a non-capacity `PodScheduled=False,
+ *      reason=Unschedulable` condition → "unschedulable: <message>".
+ *      Capacity shortages stay Pending so the autoscaler can observe them.
  *   5. otherwise `null` (defer to `mapConditionsToStatus`'s CR-Ready mapping)
  *
  * `pod === null` (CR has no backing pod yet, or the GET 404'd) always
@@ -1140,7 +1144,9 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
   if (pod.phase === "Pending") {
     const scheduled = pod.conditions?.find((c) => c.type === "PodScheduled");
     if (scheduled?.status === "False" && scheduled.reason === "Unschedulable") {
-      return `unschedulable: ${scheduled.message ?? "no message"}`;
+      const message = scheduled.message ?? "no message";
+      if (CAPACITY_UNSCHEDULABLE_PATTERN.test(message)) return null;
+      return `unschedulable: ${message}`;
     }
   }
 
@@ -1149,8 +1155,8 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
 
 /**
  * Whether a pod is stuck in phase `Pending` at the end of a readiness
- * window, and why. `classifyPodFailure` only treats `Unschedulable` as
- * terminal because the scheduler already stamped that verdict; a pod the
+ * window, and why. `classifyPodFailure` keeps capacity shortages Pending,
+ * but treats non-capacity `Unschedulable` conditions as terminal. A pod the
  * scheduler has not judged (quota webhooks, scheduling gates, a saturated
  * queue) stays `Pending` with no condition and previously read as ordinary
  * in-progress provisioning forever — the 2026-08-22 saturation incident
