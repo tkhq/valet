@@ -979,6 +979,22 @@ describe("pg app schema + migrations", () => {
       expect(await columnExists("orgs", "sso_team_groups")).toBe(true);
     });
 
+    // The auto-follow table arrived with two of its columns as separate
+    // column repairs that sit ahead of the table repair in the list. A
+    // database from before the table must get the CREATE first, or the
+    // ALTERs fail and the api never boots.
+    it("creates a table before adding columns to it, whatever the list order", async () => {
+      await db.query('DROP TABLE "followed_threads"');
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing.indexOf("followed_threads table")).toBeGreaterThanOrEqual(0);
+      expect(missing.indexOf("followed_threads table")).toBeLessThan(
+        missing.indexOf("followed_threads.last_seen_ts column"),
+      );
+
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
     it("detects a missing table and index independently", async () => {
       await db.query('DROP TABLE "artifacts"'); // drops its indexes too
       const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
