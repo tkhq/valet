@@ -1681,7 +1681,10 @@ export class EngineHost {
           { credentials, onePassword },
           { orgId, teamId: owner.id, userId, scopes: onePasswordScopesFor("team") },
           service,
-          fallback === "org-provided" ? "org-provided" : "none",
+          // The raw policy, not a clamp: "reference-only" lets the read
+          // reach an org-scoped 1Password item by service name while still
+          // refusing the org credential row (decision 5).
+          fallback,
         );
       }
       if (owner.type === "org") {
