@@ -455,6 +455,44 @@ describe("titleNamesService", () => {
   });
 });
 
+describe("findCandidates", () => {
+  // 1Password accepts letters, digits, spaces, "_", "." and "-" in a
+  // reference segment and rejects everything else, an apostrophe included.
+  // A title outside that set must come back as the vault or item id, which
+  // the SDK resolves, instead of a reference that reads well and fails.
+  function client(vaultTitle: string, itemTitle: string): OpClient {
+    return fakeClient({
+      vaults: { list: async () => [{ id: "v-apostrophe", title: vaultTitle }] },
+      items: {
+        list: async () => [{ id: "i-linkedin", title: itemTitle, vaultId: "v-apostrophe" }],
+        getWithSecrets: async () => ({
+          title: itemTitle,
+          fields: [{ id: "f1", title: "password", fieldType: "Concealed", value: "hunter2" }],
+        }),
+      },
+    });
+  }
+  async function svcFor(vaultTitle: string, itemTitle: string) {
+    const credentials = memStore();
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, { type: "service_account", apiKey: "org-token" });
+    return createOnePasswordService({ credentials, getAllowPersonal: async () => true, createClient: async () => client(vaultTitle, itemTitle) });
+  }
+
+  it("keeps titles the SDK can resolve, spaces included", async () => {
+    const svc = await svcFor("ProDex Labs", "LinkedIn Account");
+    expect(await svc.findCandidates("org", ctx, "linkedin")).toEqual([
+      { vault: "ProDex Labs", item: "LinkedIn Account", field: "password" },
+    ]);
+  });
+
+  it("falls back to the id for a vault or item title the SDK rejects", async () => {
+    const svc = await svcFor("Ahmed's Vault", "Bob's LinkedIn");
+    expect(await svc.findCandidates("org", ctx, "linkedin")).toEqual([
+      { vault: "v-apostrophe", item: "i-linkedin", field: "password" },
+    ]);
+  });
+});
+
 describe("findCredentialForService", () => {
   function inventoryClient(calls: string[], overrides?: Partial<OpClient>): OpClient {
     return fakeClient({

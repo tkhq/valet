@@ -40,7 +40,9 @@ reach. `POST /find` answers a search term with vault, item, and field TITLES
 and no values, which is the smallest thing that closes that gap. It requires
 a term, so it never lists a vault, and it returns every match rather than the
 first, because two items that both name a service is an ambiguity for the
-caller to settle.
+caller to settle. A vault or item title outside the character set 1Password
+accepts in a reference (letters, digits, spaces, `_`, `.`, `-`) comes back as
+the vault or item id instead, so every reference `find` prints resolves.
 
 ## Decisions
 
