@@ -27,7 +27,7 @@ import {
   type AssistantRow,
   type TeamRow,
 } from "../schema/index.js";
-import { insertDefaultAssistantForPrincipal, retireAssistant } from "../assistants/service.js";
+import { resolveDefaultAssistant, retireAssistant } from "../assistants/service.js";
 import { getOrgFeatures, isOrgAdmin } from "./org.js";
 import { deleteMirroredContent } from "./content-sources.js";
 
@@ -247,7 +247,7 @@ async function getMember(
 }
 
 /** Seeds the default assistant for one principal inside the caller's
- * transaction. Same shape as `insertDefaultAssistantForPrincipal`. */
+ * transaction. Same shape as `resolveDefaultAssistant`. */
 export type SeedDefaultAssistant = (
   tx: AppQueryable,
   orgId: string,
@@ -288,7 +288,7 @@ export type CreatedTeam = TeamRow & {
  * conversation. The seed and the team insert live and die together.
  */
 export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<CreatedTeam> {
-  const seedDefaultAssistant = opts.seedDefaultAssistant ?? insertDefaultAssistantForPrincipal;
+  const seedDefaultAssistant = opts.seedDefaultAssistant ?? resolveDefaultAssistant;
   const id = newTeamId();
   const now = Date.now();
   // A team created through this service is always `local`: it belongs to the

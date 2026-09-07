@@ -213,13 +213,17 @@ function newAssistantRow(args: {
  * number of assistants, so only this lookup can say which one automation
  * means.
  *
+ * Takes `AppQueryable` so a writer that creates the principal can seed its
+ * default inside the same transaction (`createTeam`, TKAI-337): if the
+ * team insert rolls back, the assistant goes with it.
+ *
  * Concurrent first calls (two tabs, or a workflow racing a human) both see
  * no default and both insert. The partial unique index picks one winner;
  * `onConflictDoNothing` turns the loser's insert into a no-op instead of an
  * uncaught constraint throw, and the re-read returns the winner's row.
  */
 export async function resolveDefaultAssistant(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   principal: Principal,
 ): Promise<AssistantRow> {
@@ -231,33 +235,6 @@ export async function resolveDefaultAssistant(
   if (inserted[0]) return inserted[0];
 
   const winner = await findDefaultAssistant(db, orgId, principal);
-  if (!winner) {
-    throw new Error(
-      `assistants: no default assistant for ${principal.type}:${principal.id} after an insert conflict — ` +
-        `the partial unique index rejected the insert but no default row exists`,
-    );
-  }
-  return winner;
-}
-
-/**
- * Seeds a default assistant for `principal` inside the caller's
- * transaction. Used by `createTeam` (TKAI-337) so a brand-new team owns an
- * assistant the moment it exists. Takes `AppQueryable` so the seed joins
- * the team-creation transaction: if the team insert rolls back, the
- * assistant goes with it. Returns the surviving default when a concurrent
- * path already seeded one, so the caller can rely on "the principal has a
- * default afterwards".
- */
-export async function insertDefaultAssistantForPrincipal(
-  tx: AppQueryable,
-  orgId: string,
-  principal: Principal,
-): Promise<AssistantRow> {
-  const row = newAssistantRow({ orgId, principal, name: null, isDefault: true });
-  const inserted = await tx.insert(assistants).values(row).onConflictDoNothing().returning();
-  if (inserted[0]) return inserted[0];
-  const winner = await findDefaultAssistant(tx, orgId, principal);
   if (!winner) {
     throw new Error(
       `assistants: no default assistant for ${principal.type}:${principal.id} after an insert conflict — ` +
