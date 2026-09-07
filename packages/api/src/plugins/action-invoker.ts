@@ -310,28 +310,39 @@ async function computeResult(
   // exists once the action is resolved. Discovery may touch credentials (an
   // MCP-proxy plugin lists its tools over an authenticated upstream), but no
   // action is EXECUTED here; enforcement below still gates the actual call.
-  let action = findAction(entry.actionPlugin.actions, req.service, req.action);
-  if (!action && entry.actionPlugin.resolveActions) {
-    const resolved = await entry.actionPlugin.resolveActions({ credentials });
-    action = findAction(resolved, req.service, req.action);
-  }
-  if (!action) return unknownAction(req);
-
   // Team refusal (team credentials design, decision 3): a team run with no
   // resolvable credential refuses here, before any action code runs. A
   // personal run keeps executing on a null credential because the action's
   // own guards answer for one person; a team run must fail the same way
   // for every member, so the refusal is made once, up front, and names the
-  // corrective action. It runs after the action is found: a node that names
-  // an action which does not exist must hear that, not a credential hint
-  // that sends the author to the wrong settings page. Only a declared
-  // service is gated (an undeclared one never needed a credential), and
-  // only when the org does not provide it (`mode === "org"` means the org
-  // row resolved above and the team read escalates to it). `github` is
-  // gated like any other service: its team branch returns `null` when
-  // neither a team row nor an App installation answers, and the refusal
-  // names the github-specific fix.
-  if (ctx.owner.type === "team" && declared && mode !== "org") {
+  // corrective action. Only a declared service is gated (an undeclared one
+  // never needed a credential), and only when the org does not provide it
+  // (`mode === "org"` means the org row resolved above and the team read
+  // escalates to it). `github` is gated like any other service: its team
+  // branch returns `null` when neither a team row nor an App installation
+  // answers, and the refusal names the github-specific fix.
+  //
+  // Ordering against the unknown-action check: a node that names an action
+  // which does not exist must hear that, not a credential hint that sends
+  // the author to the wrong settings page, so a statically listed plugin is
+  // checked after the action is found. A dynamic plugin cannot list its
+  // actions without the credential (an MCP proxy discovers its tools over
+  // the authenticated upstream), so for one of those the refusal runs
+  // before discovery: discovery would only echo the plugin's own generic
+  // "no credential connected" message, which names no fix.
+  const teamGated = ctx.owner.type === "team" && declared !== null && mode !== "org";
+  let action = findAction(entry.actionPlugin.actions, req.service, req.action);
+  if (!action && entry.actionPlugin.resolveActions) {
+    if (teamGated) {
+      const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+      if (refusal) return refusal;
+    }
+    const resolved = await entry.actionPlugin.resolveActions({ credentials });
+    action = findAction(resolved, req.service, req.action);
+  }
+  if (!action) return unknownAction(req);
+
+  if (teamGated) {
     const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
     if (refusal) return refusal;
   }

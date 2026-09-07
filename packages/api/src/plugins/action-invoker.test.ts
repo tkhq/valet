@@ -368,6 +368,46 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(0);
   });
 
+  it("team-owned run: a dynamic plugin with no team credential refuses before discovery", async () => {
+    // An MCP-backed plugin lists its actions over the credential, so
+    // discovery itself throws the plugin's generic message when the team
+    // holds nothing. The team refusal must win: its copy names the fix.
+    const fixture = countingAction();
+    const actionPlugin: ActionPlugin = {
+      service: "demo",
+      actions: [],
+      async resolveActions({ credentials }) {
+        if ((await credentials.get()) === null) throw new Error("demo: no credential connected");
+        return [fixture.action];
+      },
+    };
+    const plugin: ValetPlugin = {
+      name: "demo",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "personal-tok" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["demo", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-dynamic" },
+      { userId: "u1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "This team has no demo credential. Share one from Integrations, or store one for the team in Settings → Organization → Teams.",
+    });
+    expect(fixture.calls()).toBe(0);
+  });
+
   it("team-owned run: a service with no credential declaration still executes", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
