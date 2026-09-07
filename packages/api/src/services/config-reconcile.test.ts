@@ -20,6 +20,7 @@ import {
   type ReconcileDeps,
 } from "./config-reconcile.js";
 import { InstanceConfigError, type InstanceConfig } from "../config/instance-config.js";
+import { findDefaultAssistant } from "../assistants/service.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -443,6 +444,23 @@ describe("reconcileInstanceConfig — teams pass", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.origin).toBe("config");
     expect(rows[0]!.id).toBe(configTeamId("Engineering"));
+  });
+
+  it("seeds the default assistant of a team it creates", async () => {
+    // Every `/chat` affordance for a team keys off "the team owns an
+    // assistant" (TKAI-337). A declared team is inserted here, not through
+    // `createTeam`, so it has to seed the default itself.
+    const org = await ensureOrg(db);
+    const cfg: InstanceConfig = {
+      version: 1,
+      teams: [{ name: "Engineering" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const teamId = configTeamId("Engineering");
+    const seeded = await findDefaultAssistant(db, org.id, { type: "team", id: teamId });
+    expect(seeded?.isDefault).toBe(true);
+    expect(seeded?.archivedAt).toBeNull();
   });
 
   it("adopts an existing UI team, keeping its id and promoting its origin", async () => {

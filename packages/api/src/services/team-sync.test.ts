@@ -10,6 +10,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, teamMembers, teams, users, type TeamRow } from "../schema/index.js";
 import { addMember, createTeam, deleteTeam } from "./teams.js";
+import { findDefaultAssistant } from "../assistants/service.js";
 import {
   desiredTeamsFromPaths,
   readTeamClaim,
@@ -331,6 +332,18 @@ describe("reconcileIdpTeams", () => {
     expect(await membershipsOf(db, "u1")).toEqual([
       { team: "platform", origin: "idp", externalId: "/platform", role: "member" },
     ]);
+  });
+
+  it("seeds the default assistant of a mirror it creates", async () => {
+    // Every `/chat` affordance for a team keys off "the team owns an
+    // assistant" (TKAI-337). A mirror is inserted here, not through
+    // `createTeam`, so it has to seed the default itself.
+    await signInWith(db, "u1", ["/platform"]);
+
+    const mirror = await teamNamed(db, "platform");
+    const seeded = await findDefaultAssistant(db, ORG, { type: "team", id: mirror!.id });
+    expect(seeded?.isDefault).toBe(true);
+    expect(seeded?.archivedAt).toBeNull();
   });
 
   it("reuses the mirror on the next sign-in and writes nothing", async () => {

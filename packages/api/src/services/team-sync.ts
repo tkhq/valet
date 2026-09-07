@@ -75,6 +75,7 @@ import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { teamMembers, teams, type TeamRow } from "../schema/index.js";
 import type { TeamRole } from "./teams.js";
+import { resolveDefaultAssistant } from "../assistants/service.js";
 
 /**
  * Where a team row came from. Read off the column, so a new origin cannot
@@ -474,14 +475,19 @@ async function resolveIdpTeam(
     // Not `createTeam`: that admits the creator as admin, so the first
     // person through the door would hold admin on every mirrored team
     // regardless of what the identity provider says. A mirror starts empty
-    // and the diff below fills it.
-    await db.insert(teams).values({
-      id,
-      orgId,
-      name: want.name,
-      origin: "idp",
-      externalId: want.path,
-      createdAt: Date.now(),
+    // and the diff below fills it. The default assistant is seeded in the
+    // same transaction, as `createTeam` does (TKAI-337): every `/chat`
+    // affordance for a team keys off "the team owns an assistant".
+    await db.transaction(async (tx) => {
+      await tx.insert(teams).values({
+        id,
+        orgId,
+        name: want.name,
+        origin: "idp",
+        externalId: want.path,
+        createdAt: Date.now(),
+      });
+      await resolveDefaultAssistant(tx, orgId, { type: "team", id });
     });
     return { ok: true, teamId: id, created: true };
   } catch (err) {
