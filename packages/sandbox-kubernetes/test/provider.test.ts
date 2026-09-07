@@ -4,7 +4,7 @@
  * lifecycle wired through KubernetesSandboxProvider.
  */
 import { describe, expect, it, vi } from "vitest";
-import { SandboxStartupError } from "@valet/engine";
+import { SandboxAttachment, SandboxStartupError } from "@valet/engine";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
@@ -1024,6 +1024,7 @@ class ErrorStatefulObjectsApi implements SandboxCustomObjectsApi {
 /** This stateful capacity fake stores one CR and one stable backing pod. */
 class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
   cr: SandboxCRRead | null;
+  podPresent = true;
   createCalls = 0;
   replaceCalls = 0;
   deleteCalls = 0;
@@ -1092,6 +1093,7 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
   async deleteNamespacedCustomObject(): Promise<unknown> {
     this.deleteCalls++;
     this.cr = null;
+    this.podPresent = false;
     return {};
   }
 
@@ -1114,6 +1116,7 @@ function makeCapacityPendingProvider(opts: {
   const podReads: { name: string; uid: string }[] = [];
   const podStatusApi: SandboxPodStatusApi = {
     async getPodStatus(_namespace, podName) {
+      if (!objectsApi.podPresent) return null;
       podReads.push({ name: podName, uid: podIdentity.uid });
       return {
         phase: "Pending",
@@ -1197,22 +1200,57 @@ describe("create() capacity retention and diagnosis", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
     try {
-      const schedulerMessage = "0/3 nodes are available: 3 Insufficient cpu, 3 Insufficient memory.";
-      const { provider } = makeCapacityPendingProvider({
+      const schedulerReason = "0/3 nodes are available: 3 Insufficient cpu, 3 Insufficient memory";
+      const { provider, objectsApi } = makeCapacityPendingProvider({
         createdAt: "2026-09-07T12:00:00.000Z",
-        schedulerMessage,
+        schedulerMessage: `${schedulerReason}.`,
         requests: { cpu: "4", memory: "8Gi" },
       });
 
       const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
       expect(error).toBeInstanceOf(SandboxStartupError);
       expect(error.message).toContain("over 10 minutes");
-      expect(error.message).toContain(schedulerMessage);
+      expect(error.message).toContain(schedulerReason);
       expect(error.message).toContain("cpu=4");
       expect(error.message).toContain("memory=8Gi");
       expect(error.message).toContain("task.resources");
       expect(error.message).toContain(".valet/prebuild.yaml");
       expect(error.message).toMatch(/largest node/i);
+      expect(error.message).not.toContain(".).");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+      expect(objectsApi.podPresent).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("beats the engine readiness timeout for an adopted CR past the grace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider, objectsApi } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        requests: { cpu: "4", memory: "8Gi" },
+      });
+      const attachment = new SandboxAttachment(provider, { workspace: "/ws/capacity" });
+      const startedAt = Date.now();
+      let failedAt: number | undefined;
+      const waiting = attachment.ensureReady({ timeoutMs: 60_000 }).then(
+        () => null,
+        (error: unknown) => {
+          failedAt = Date.now();
+          return error;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const error = expectError(await waiting);
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(failedAt).toBe(startedAt);
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+      expect(objectsApi.podPresent).toBe(false);
     } finally {
       vi.useRealTimers();
     }

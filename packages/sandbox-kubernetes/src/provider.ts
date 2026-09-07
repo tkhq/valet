@@ -95,6 +95,7 @@ import {
 import { cancelJobInPod, execJobInPod, pollJobInPod } from "./jobs.js";
 import {
   applySandbox,
+  classifyPodCapacityShortages,
   classifyPodPending,
   deleteSandbox,
   getSandbox,
@@ -175,6 +176,9 @@ interface PendingPodDiagnosis {
     memory?: string | number;
   };
 }
+
+/** This error marks post-grace capacity failures that require CR cleanup. */
+class CapacityStartupError extends SandboxStartupError {}
 
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
@@ -799,12 +803,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
     }
 
-    // `adopted` decides cleanup on startup failure below: a CR this call
-    // CREATED (and its empty PVC) is ours to delete; an adopted CR may
-    // hold a prior workspace and must stand (decision 5's
-    // workspace-survival intent). The flag comes from applySandbox's own
-    // create/409 branch, so it cannot race the way an existence pre-GET
-    // would.
+    // `adopted` decides cleanup for ordinary startup failures below. A CR
+    // that this call created is safe to delete because its pod never ran.
+    // An adopted CR can hold prior work and stays for those failures.
+    // Post-grace capacity failures are different: the provider retained the
+    // CR across earlier attempts, and no attempt returned a sandbox handle.
     const { cpu, memory } = opts.resources ?? {};
     const { cr: applied, adopted, previousSession, resourceOverrides } = await applySandbox(
       this.deps.objectsApi, this.cfg, manifest,
@@ -991,13 +994,15 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         resourceFingerprint: podTemplateResourceFingerprint(applied.spec.podTemplate),
       });
     } catch (err) {
-      if (!adopted && err instanceof SandboxStartupError) {
+      if (err instanceof SandboxStartupError && (!adopted || err instanceof CapacityStartupError)) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
         // pod terminally failed to start. Left standing it queues phantom
         // demand against the scheduler (the 2026-08-22 incident held 433
         // Pending pods for 47h), and its PVC holds nothing — the pod never
-        // ran. Adopted CRs are never cleaned up here.
+        // ran. A post-grace capacity error also cleans up the retained CR.
+        // Earlier attempts never returned a sandbox handle, so no owner can
+        // clean it up after the engine settles the failed provision.
         // No destroyed-counter record here: the created counter only fires
         // on a READY provision, so counting this cleanup would add a
         // destroy with no matching create and drive the created−destroyed
@@ -1200,6 +1205,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
     for (;;) {
+      const pendingError = await this.pendingTerminalError(name);
+      if (pendingError !== null) throw pendingError;
       try {
         const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
         lastState = status.state;
@@ -1247,36 +1254,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         lastReadError = err instanceof Error ? err.message : String(err);
       }
       if (Date.now() >= deadline) {
-        const pending = await this.podPendingDiagnosis(name);
-        if (pending !== null) {
-          const requests = [
-            ...(pending.requests.cpu === undefined ? [] : [`cpu=${pending.requests.cpu}`]),
-            ...(pending.requests.memory === undefined ? [] : [`memory=${pending.requests.memory}`]),
-          ];
-          const requestDetail = requests.length === 0 ? "" : ` Pod requests: ${requests.join(", ")}.`;
-          const cpuOrMemoryShortage = /Insufficient (cpu|memory)/.test(pending.detail);
-          const ephemeralStorageShortage = /Insufficient ephemeral-storage/.test(pending.detail);
-          const actions: string[] = [];
-          if (cpuOrMemoryShortage) {
-            actions.push(
-              "For the CPU or memory shortage, retry the child with a lower task.resources value. " +
-              "Reduce the value in .valet/prebuild.yaml to set a durable default. " +
-              "If a lower value fails, check the largest node's available CPU and memory.",
-            );
-          }
-          if (ephemeralStorageShortage) {
-            actions.push(
-              "Check node ephemeral-storage capacity. Check the deployment ephemeral-storage request. " +
-              "If you correct the capacity mismatch, retry.",
-            );
-          }
-          const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
-          throw new SandboxStartupError(
-            name,
-            `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
-              `(${pending.detail}).${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`,
-          );
-        }
         const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
         throw new Error(
           `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${readDetail} ` +
@@ -1287,11 +1264,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
   }
 
-  /** The backing pod's Pending diagnosis at readiness timeout, or null
-   * when the pod is absent, past Pending, unresolvable, or the CR is
-   * younger than `PENDING_TERMINAL_GRACE_MS` — transient API errors and
-   * autoscaler-scale-up windows keep the generic retryable timeout (which
-   * retains the CR), never a terminal verdict. */
+  /** Return the backing pod's post-grace Pending diagnosis. Return null if
+   * the pod is absent, past Pending, unresolvable, or inside the grace period.
+   * Transient API errors and autoscaler scale-up windows stay retryable. */
   private async podPendingDiagnosis(name: string): Promise<PendingPodDiagnosis | null> {
     if (!this.deps.podStatusApi) return null;
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, name).catch(() => null);
@@ -1303,5 +1278,38 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const detail = classifyPodPending(pod);
     if (detail === null) return null;
     return { detail, requests: pod?.sandboxResources?.requests ?? {} };
+  }
+
+  /** Return a terminal error when an unscheduled pod is past the grace period. */
+  private async pendingTerminalError(name: string): Promise<SandboxStartupError | null> {
+    const pending = await this.podPendingDiagnosis(name);
+    if (pending === null) return null;
+    const requests = [
+      ...(pending.requests.cpu === undefined ? [] : [`cpu=${pending.requests.cpu}`]),
+      ...(pending.requests.memory === undefined ? [] : [`memory=${pending.requests.memory}`]),
+    ];
+    const requestDetail = requests.length === 0 ? "" : ` Pod requests: ${requests.join(", ")}.`;
+    const shortages = classifyPodCapacityShortages(pending.detail);
+    const actions: string[] = [];
+    if (shortages.includes("cpu") || shortages.includes("memory")) {
+      actions.push(
+        "For the CPU or memory shortage, retry the child with a lower task.resources value. " +
+        "Reduce the value in .valet/prebuild.yaml to set a durable default. " +
+        "If a lower value fails, check the largest node's available CPU and memory.",
+      );
+    }
+    if (shortages.includes("ephemeral-storage")) {
+      actions.push(
+        "Check node ephemeral-storage capacity. Check the deployment ephemeral-storage request. " +
+        "If you correct the capacity mismatch, retry.",
+      );
+    }
+    const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
+    const schedulerDetail = pending.detail.replace(/[.!?]+$/, "");
+    const message = `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
+      `(${schedulerDetail}).${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
+    return shortages.length === 0
+      ? new SandboxStartupError(name, message)
+      : new CapacityStartupError(name, message);
   }
 }

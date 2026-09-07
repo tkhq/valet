@@ -874,7 +874,24 @@ const IMAGE_PULL_WAITING_REASONS = new Set([
 ]);
 
 /** This pattern identifies node resource capacity shortages in scheduler messages. */
-const CAPACITY_UNSCHEDULABLE_PATTERN = /Insufficient (cpu|memory|ephemeral-storage)/;
+const CAPACITY_UNSCHEDULABLE_PATTERN = /Insufficient (cpu|memory|ephemeral-storage)/g;
+
+export type PodCapacityShortage = "cpu" | "memory" | "ephemeral-storage";
+
+/** Return each capacity shortage that appears in a scheduler message. */
+export function classifyPodCapacityShortages(message: string): PodCapacityShortage[] {
+  const shortages: PodCapacityShortage[] = [];
+  for (const match of message.matchAll(CAPACITY_UNSCHEDULABLE_PATTERN)) {
+    const shortage = match[1];
+    if (
+      (shortage === "cpu" || shortage === "memory" || shortage === "ephemeral-storage") &&
+      !shortages.includes(shortage)
+    ) {
+      shortages.push(shortage);
+    }
+  }
+  return shortages;
+}
 
 /** Minimal per-container status this module reads — just enough to detect
  * a stuck `waiting` state. Extracted separately from `PodSummary` (which is
@@ -1145,7 +1162,7 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
     const scheduled = pod.conditions?.find((c) => c.type === "PodScheduled");
     if (scheduled?.status === "False" && scheduled.reason === "Unschedulable") {
       const message = scheduled.message ?? "no message";
-      if (CAPACITY_UNSCHEDULABLE_PATTERN.test(message)) return null;
+      if (classifyPodCapacityShortages(message).length > 0) return null;
       return `unschedulable: ${message}`;
     }
   }
