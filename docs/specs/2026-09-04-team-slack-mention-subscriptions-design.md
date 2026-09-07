@@ -1,15 +1,15 @@
 # Team Slack mention subscriptions
 
 **Date:** 2026-09-04
-**Status:** Accepted (decision 3)
+**Status:** Interim (decisions 3 and 7). Decision 4 is the target design.
 **Tickets:** [TKAI-304](https://linear.app/turnkey/issue/TKAI-304), [TKAI-364](https://linear.app/turnkey/issue/TKAI-364)
 **Relates to:** TKAI-299 (`packages/api/src/events/mention-scope.ts`), `docs/specs/2026-07-20-event-system-design.md`, `docs/specs/2026-08-17-team-workspace-ui-design.md`
 
-This PR ships **decision 3**: a team-owned mention subscription stays creator-scoped. Only the member who armed the rule wakes the team assistant. Member B's `@mention` does not match member A's team subscription. TKAI-364's repro is current design, not a bug.
+This cut ships **decision 3** as an interim state: a team-owned mention subscription stays creator-scoped. Only the member who armed the rule wakes the team assistant. Member B's `@mention` does not match member A's team subscription. TKAI-364's repro is the current behavior, not the design. The design is decision 4. Until it ships, the wizard does not offer a team target for a mention rule (decision 7).
 
 ## What already works on `dev-v2`
 
-Channel `@mentions` of the bot already reach Valet. This is not a new Slack ingress. Conner's work (PR #443, #476 / TKAI-299, #448, #538) is the contract this ticket must extend, not replace.
+Channel `@mentions` of the bot already reach Valet. This is not a new Slack ingress. Earlier work (PR #443, #476 / TKAI-299, #448, #538) is the contract this ticket must extend, not replace.
 
 1. Slack delivers `app_mention`. `SLACK_BOT_EVENTS` includes it (`packages/api/src/services/slack-app.ts`). The bot needs `app_mentions:read` and a current app install.
 
@@ -33,15 +33,15 @@ A team-owned subscription can already be created. The dispatcher already forward
 
 2. **Team subscriptions keep the same Slack thread model.** One Slack thread maps to one Valet conversation, owned by the subscription owner (the team). Follow still binds `followed_threads` to that owner. Later replies in that thread stay on that conversation. The original creator of the Slack chat remains `createdBy` on the follow row.
 
-3. **Chosen: keep creator scope on team subscriptions too.** Only the member who armed the team rule wakes the team assistant with an `@mention`. That matches how personal rules work and how followed threads already attribute the actor. The wizard hint says the assistant answers when **you** @-mention the app. The reply step says mentions by other people do not reach that team's assistant.
+3. **Interim: keep creator scope on team subscriptions.** Only the member who armed the team rule wakes the team assistant with an `@mention`. That matches how personal rules work and how followed threads already attribute the actor. This is the interim state, not the design. The wizard hint says the assistant answers when **you** @-mention the app. The reply step says mentions by other people do not reach your assistant. An existing team-owned mention rule keeps this creator-scoped copy.
 
-4. **Not this cut: any-member wake.** At match time, for `ownerType === "team"`, drop the creator `user` filter and require `identityForExternal` plus `isTeamMember`. Unlinked or non-member: no delivery, drop-log `unlinked_sender` or `not_team_member`. Re-check membership at match time. `actorUserId` on the first delivery becomes the linked mentioner. Follow `createdBy` stays the person who started that Slack thread, so a later reply does not rebind the chat to a new owner.
+4. **Target design, not this cut: any-member wake.** At match time, for `ownerType === "team"`, drop the creator `user` filter and require `identityForExternal` plus `isTeamMember`. Unlinked or non-member: no delivery, drop-log `unlinked_sender` or `not_team_member`. Re-check membership at match time. `actorUserId` on the first delivery becomes the linked mentioner. Follow `createdBy` stays the person who started that Slack thread, so a later reply does not rebind the chat to a new owner.
 
 5. **Orchestrator targets only.** Workflow `slack.app_mention` triggers already have their own channel and creator scope (`workflow-triggers.test.ts`). This ticket does not change them.
 
 6. **Who may create does not change.** Any team member may create or disable a team subscription.
 
-7. **Show the team radio.** It already shipped. Decision 3 only needed the copy to match creator-only wake.
+7. **Show the team radio, disabled.** The reply outcome lists the team's assistant but does not let the reader pick it. The copy under it says: "Team-wide mentions are not available yet. This rule would only answer your own mentions." A team target held from the workspace seed narrows to the caller's own assistant on create. The radio goes live with decision 4. TKAI-304 asks for this: the subscription UI must not offer a working-looking team path until the gate is live.
 
 ## Out of scope
 
@@ -52,10 +52,11 @@ A team-owned subscription can already be created. The dispatcher already forward
 
 ## Implementation (decision 3)
 
-1. Update automation-wizard copy for a team target: the team's assistant answers when **you** @-mention the bot. Mentions by other people do not reach that team's assistant.
-2. Add a route test: team-owned `slack.app_mention` still receives the creator `user` filter from `enforceMentionScope`.
-3. TKAI-364: after TKAI-337, have member B `@mention` the bot. Expect no team delivery. That is current behavior.
+1. Update the automation-wizard copy: the assistant answers when **you** @-mention the bot. Mentions by other people do not reach your assistant.
+2. Disable the team's assistant option under the reply outcome and explain why (decision 7). The create posts the caller's own assistant.
+3. Add a route test: team-owned `slack.app_mention` still receives the creator `user` filter from `enforceMentionScope`.
+4. TKAI-364: after TKAI-337, have member B `@mention` the bot. Expect no team delivery. That is current behavior.
 
 ## Done when
 
-The team radio copy matches creator-only wake, and a team-owned mention subscription still stores the creator `user` filter.
+The wizard does not offer a team target for a mention rule, its copy matches creator-only wake, and a team-owned mention subscription still stores the creator `user` filter. Decision 4 removes the disabled state.
