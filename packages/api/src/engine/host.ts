@@ -1267,7 +1267,8 @@ export class EngineHost {
     // deployment/org prerequisite is missing never reaches the catalog, so
     // `list_tools` has nothing to hide. Per-build, not process-static: the
     // org-credential half of availability changes when an admin connects or
-    // removes the org app.
+    // removes the org app. `owner` lets a team session keep a service the
+    // team holds its own row for.
     const gated = gateUnavailableActions(
       allPlugins,
       await unavailableServiceSet({
@@ -1275,6 +1276,7 @@ export class EngineHost {
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
+        owner,
       }),
     );
     // Behavior filter AFTER availability gating: both subtract, order only

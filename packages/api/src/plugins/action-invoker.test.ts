@@ -573,6 +573,67 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(0);
   });
 
+  // A team may hold its own verified token for an org-provided service
+  // (team credentials design). With no org row, that token is the service
+  // for this team; the gate must read it before it refuses.
+  it("team-owned run: a team's own token satisfies an org-credential prerequisite with no org row", async () => {
+    const fixture = countingAction({ id: "gated.ping" });
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "team", id: "t1" }, "gated", {
+      type: "bot_token",
+      accessToken: "xoxb-team",
+      scopes: ["assistant:write"],
+      metadata: { teamId: "T0TEAM", teamName: "Team Workspace", botUserId: "U0BOT" },
+    });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["gated", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "gated", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-own-gated" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+    expect(fixture.calls()).toBe(1);
+  });
+
+  it("team-owned run: with neither an org row nor a team row the unconfigured refusal is unchanged", async () => {
+    const fixture = countingAction({ id: "gated.ping" });
+    const actionPlugin: ActionPlugin = { service: "gated", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: new FakeCredentialStore(),
+      actionPluginByService: new Map([["gated", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "gated", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-none-gated" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "gated is not configured for this organization. An admin can set it up in Settings → Organization.",
+    });
+    expect(fixture.calls()).toBe(0);
+  });
+
   it("gates on a shared oauth declaration held by a different plugin (full registry scan)", async () => {
     // The declaration for the credential service lives on plugin B; the
     // action lives on plugin A. The gate must scan the full plugin set, not

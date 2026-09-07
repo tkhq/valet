@@ -14,7 +14,10 @@
  *      secret, so token entry can never produce a working credential.
  *   4. `requires.orgCredential` unmet     → "unconfigured". The org-scoped
  *      credential (an admin connects it in Settings → Organization) is the
- *      integration's foundation — e.g. the Slack app.
+ *      integration's foundation — e.g. the Slack app. One exception: a
+ *      team owner that holds its own row for the service (team credentials
+ *      design) resolves "manual" — the team token is the integration for
+ *      that team alone, and no other owner reads it.
  *   5. `requires.orgCredential` met       → "org". The org credential IS the
  *      integration; sessions resolve it by owner escalation. There is
  *      nothing for a user to connect, so the UI offers no token entry —
@@ -35,6 +38,7 @@
 import type {
   ActionPlugin,
   CredentialDeclaration,
+  CredentialOwner,
   CredentialStore,
   ValetPlugin,
 } from "@valet/engine";
@@ -61,6 +65,12 @@ export interface AvailabilityContext {
   orgId: string;
   credentials: CredentialStore;
   env: Record<string, string | undefined>;
+  /**
+   * The principal the answer is for. Only a team owner changes it: a team
+   * row satisfies a `requires.orgCredential` prerequisite for that team
+   * (rule 4). Absent for org-wide answers (`/api/plugins`, the user PUT).
+   */
+  owner?: CredentialOwner;
 }
 
 /** Resolves one declaration to the connect affordance the org gets. */
@@ -77,7 +87,12 @@ export async function connectModeFor(
       { type: "org", id: params.orgId },
       params.service,
     );
-    return orgCredential === null ? "unconfigured" : "org";
+    if (orgCredential !== null) return "org";
+    if (params.owner?.type === "team") {
+      const teamCredential = await params.credentials.get(params.owner, params.service);
+      if (teamCredential !== null) return "manual";
+    }
+    return "unconfigured";
   }
   return "manual";
 }

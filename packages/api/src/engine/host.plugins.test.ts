@@ -142,6 +142,45 @@ describe("EngineHost + plugin extras", () => {
     expect((after.options.tools ?? []).map((t) => t.name)).toContain("list_tools");
   });
 
+  it("keeps a service's tools for a team session when the team holds its own token and no org row exists", async () => {
+    // Team credentials design: a team may store its own verified token for
+    // an org-provided service. The gate must read the team row before it
+    // strips the service, or the token a team admin stored is never used.
+    const gatedPlugin: ValetPlugin = {
+      name: "gated",
+      version: "0.0.1",
+      actions: [{ service: "gated", actions: [makeAction("gated.ping")] } satisfies ActionPlugin],
+      credentials: [
+        { type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } },
+      ],
+    };
+    api = await bootTestApi({ plugins: [gatedPlugin] });
+    const { engineHost, engineCredentials } = api.providers;
+    await engineCredentials.save({ type: "team", id: "team_1" }, "gated", {
+      type: "bot_token",
+      accessToken: "team-token",
+      metadata: { teamId: "T0TEAM" },
+    });
+
+    const teamSession = await engineHost.sessionFor("gate-team-own", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      ownerType: "team",
+      ownerTeamId: "team_1",
+    });
+    expect((teamSession.options.tools ?? []).map((t) => t.name)).toContain("list_tools");
+
+    // The row is that team's alone: a user session in the same org still
+    // sees the service as unconfigured.
+    const userSession = await engineHost.sessionFor("gate-user-still-unconfigured", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    expect((userSession.options.tools ?? []).map((t) => t.name)).not.toContain("list_tools");
+  });
+
   it("with plugins: [] a generic session gets no tools/skills/roles at all", async () => {
     api = await bootTestApi({ plugins: [] });
     const { engineHost } = api.providers;
