@@ -34,6 +34,7 @@ import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
+import type { RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { memoryFiles } from "../schema/index.js";
@@ -99,9 +100,10 @@ function ownerLike(owner: Principal): SessionOwnerLike {
 }
 
 /**
- * May `callerId` reach `owner`'s memory for this access? One membership
+ * May `caller` reach `owner`'s memory for this access? One membership
  * rule, taken from `services/session-access.ts` — this file adds no query
- * of its own against `team_members`.
+ * of its own against `team_members`. The caller is the request principal:
+ * a team key reaches its own team's memory and nothing personal.
  *
  * Reads follow membership (`canViewSession`): a live member of a team may
  * read what the team remembers, the same rule that lets that member open
@@ -126,10 +128,10 @@ function ownerLike(owner: Principal): SessionOwnerLike {
  *     does not. Team-owned sessions and assistants behave the same way
  *     today.
  */
-function authorizeOwner(db: AppDb, owner: Principal, callerId: string, access: ScopeAccess): Promise<boolean> {
+function authorizeOwner(db: AppDb, owner: Principal, caller: RequestPrincipal, access: ScopeAccess): Promise<boolean> {
   return access === "write"
-    ? canAdministerSession(db, ownerLike(owner), callerId)
-    : canViewSession(db, ownerLike(owner), callerId);
+    ? canAdministerSession(db, ownerLike(owner), caller)
+    : canViewSession(db, ownerLike(owner), caller);
 }
 
 /**
@@ -175,14 +177,16 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
   }
 
   const user = c.var.user;
+  const caller = c.var.principal;
   const requested = readOwnerParam(c.req.query("ownerType"), c.req.query("ownerId"));
-  // No owner named: the caller's own memory, exactly as before.
+  // No owner named: the caller's own memory — the principal's, so a team
+  // key lands on the team corpus and never on the creating admin's.
   if (!requested) {
-    return { owner: { type: "user", id: user.id }, actorUserId: user.id };
+    return { owner: caller, actorUserId: user.id };
   }
 
   const { db } = c.var.providers;
-  if (!(await authorizeOwner(db, requested, user.id, access))) {
+  if (!(await authorizeOwner(db, requested, caller, access))) {
     // 404, not 403 — the existence-hiding convention `routes/assistants.ts`
     // and `routes/teams.ts` follow. A refusal must not tell the caller
     // whether the team exists.

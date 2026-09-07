@@ -8,6 +8,13 @@ export type AuthVia = "session" | "apiKey" | "stub";
 
 export type RequestPrincipal = { type: "user"; id: string } | { type: "team"; id: string };
 
+/** The principal for a caller known to be a user: the auth ladder's user
+ * rungs, and agent-facing paths that hold only a user id (a channel
+ * identity link, an assistant tool's actor). */
+export function userPrincipal(id: string): RequestPrincipal {
+  return { type: "user", id };
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }

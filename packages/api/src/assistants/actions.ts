@@ -38,6 +38,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { AssistantBehavior } from "../wire/types.js";
 import { listTeamsForUser } from "../services/teams.js";
 import { canAdministerAssistantOwner, assistantOwner } from "./access.js";
+import { userPrincipal } from "../lib/request-principal.js";
 import {
   applyProfilePatch,
   archiveAssistant,
@@ -165,7 +166,7 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
       const owner: Principal = args.team_id
         ? { type: "team", id: args.team_id }
         : { type: "user", id: caller.userId };
-      if (!(await canAdministerAssistantOwner(db, owner, caller.userId))) {
+      if (!(await canAdministerAssistantOwner(db, owner, userPrincipal(caller.userId)))) {
         return {
           success: false,
           error:
@@ -232,7 +233,7 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
 
       const row = await loadAssistant(db, args.assistant_id);
       if (!row || row.orgId !== caller.orgId) return NOT_FOUND(args.assistant_id);
-      if (!(await canAdministerAssistantOwner(db, assistantOwner(row), caller.userId))) {
+      if (!(await canAdministerAssistantOwner(db, assistantOwner(row), userPrincipal(caller.userId)))) {
         return NOT_FOUND(args.assistant_id);
       }
 
@@ -277,7 +278,7 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
       if (!caller) return NO_OWNER;
       const row = await loadAssistant(db, args.assistant_id);
       if (!row || row.orgId !== caller.orgId) return NOT_FOUND(args.assistant_id);
-      if (!(await canAdministerAssistantOwner(db, assistantOwner(row), caller.userId))) {
+      if (!(await canAdministerAssistantOwner(db, assistantOwner(row), userPrincipal(caller.userId)))) {
         return NOT_FOUND(args.assistant_id);
       }
       try {

@@ -49,6 +49,7 @@ import {
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { canResolveSessionGate } from "../services/session-access.js";
+import { userPrincipal } from "../lib/request-principal.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { EVENTS_THREAD_KEY } from "../events/orchestrator-target.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
@@ -1388,7 +1389,7 @@ export class ChannelHost {
       .where(eq(agentSessions.id, mapped.sessionId))
       .limit(1);
     const sessionRow = rows[0];
-    if (!sessionRow || !(await canResolveSessionGate(this.deps.db, sessionRow, userId))) {
+    if (!sessionRow || !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
       return;
@@ -1494,7 +1495,7 @@ export class ChannelHost {
                 .where(eq(agentSessions.id, event.sessionId))
                 .limit(1);
               const sessionRow = rows[0];
-              if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userId))) {
+              if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
                 await this.sendAndRecordGatePrompt(
                   transport,
                   conversationKey,

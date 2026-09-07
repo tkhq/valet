@@ -7,6 +7,9 @@
  * and the `user_id` on the row — the member who opened the assistant first
  * — buys nothing.
  *
+ * Every check takes the request principal. `user(id)` below is the cookie
+ * and personal-key shape; a team key passes `{ type: "team", id }`.
+ *
  * Real PGlite db (membership is re-checked per call, never cached), not a
  * mock — these are security-relevant checks.
  */
@@ -15,6 +18,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { orgMembers, teamMembers, teams } from "../schema/index.js";
+import { userPrincipal as user } from "../lib/request-principal.js";
 import { canAdministerSession, canResolveSessionGate, canViewSession } from "./session-access.js";
 
 let db: AppDb;
@@ -49,7 +53,7 @@ async function seedOrgMember(userId: string, role: "admin" | "member"): Promise<
 
 describe("canViewSession", () => {
   it("allows the session's direct owner", async () => {
-    const ok = await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u1");
+    const ok = await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("u1"));
     expect(ok).toBe(true);
   });
 
@@ -57,21 +61,19 @@ describe("canViewSession", () => {
     const ok = await canViewSession(
       db,
       { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
-      "departed-admin",
       { type: "team", id: "team_1" },
     );
     expect(ok).toBe(true);
     const other = await canViewSession(
       db,
       { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
-      "departed-admin",
       { type: "team", id: "team_other" },
     );
     expect(other).toBe(false);
   });
 
   it("rejects a different user for a user-owned session", async () => {
-    const ok = await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u2");
+    const ok = await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("u2"));
     expect(ok).toBe(false);
   });
 
@@ -82,7 +84,7 @@ describe("canViewSession", () => {
     const ok = await canViewSession(
       db,
       { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
-      "member-user",
+      user("member-user"),
     );
     expect(ok).toBe(true);
   });
@@ -93,7 +95,7 @@ describe("canViewSession", () => {
     const ok = await canViewSession(
       db,
       { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
-      "outsider",
+      user("outsider"),
     );
     expect(ok).toBe(false);
   });
@@ -105,7 +107,7 @@ describe("canViewSession", () => {
     const before = await canViewSession(
       db,
       { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
-      "member-user",
+      user("member-user"),
     );
     expect(before).toBe(true);
 
@@ -114,13 +116,13 @@ describe("canViewSession", () => {
     const after = await canViewSession(
       db,
       { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
-      "member-user",
+      user("member-user"),
     );
     expect(after).toBe(false);
   });
 
   it("rejects an org-owned session — org-level view access is a separate, not-yet-built decision", async () => {
-    const ok = await canViewSession(db, { userId: "org:org-1", ownerType: "org", ownerId: "org-1" }, "any-user");
+    const ok = await canViewSession(db, { userId: "org:org-1", ownerType: "org", ownerId: "org-1" }, user("any-user"));
     expect(ok).toBe(false);
   });
 });
@@ -132,7 +134,7 @@ describe("canAdministerSession", () => {
   it("allows a team admin of the owning team", async () => {
     await seedTeam("team_1", [{ userId: "team-admin-user", role: "admin" }]);
 
-    const ok = await canAdministerSession(db, teamSession, "team-admin-user");
+    const ok = await canAdministerSession(db, teamSession, user("team-admin-user"));
     expect(ok).toBe(true);
   });
 
@@ -140,14 +142,14 @@ describe("canAdministerSession", () => {
     await seedTeam("team_1", []);
     await seedOrgMember("org-admin-user", "admin");
 
-    const ok = await canAdministerSession(db, teamSession, "org-admin-user");
+    const ok = await canAdministerSession(db, teamSession, user("org-admin-user"));
     expect(ok).toBe(true);
   });
 
   it("denies a plain team member — membership grants viewing, not administration", async () => {
     await seedTeam("team_1", [{ userId: "member-user", role: "member" }]);
 
-    const ok = await canAdministerSession(db, teamSession, "member-user");
+    const ok = await canAdministerSession(db, teamSession, user("member-user"));
     expect(ok).toBe(false);
   });
 
@@ -155,14 +157,14 @@ describe("canAdministerSession", () => {
     await seedTeam("team_1", []);
     await seedOrgMember("plain-org-user", "member");
 
-    const ok = await canAdministerSession(db, teamSession, "plain-org-user");
+    const ok = await canAdministerSession(db, teamSession, user("plain-org-user"));
     expect(ok).toBe(false);
   });
 
   it("denies a non-member", async () => {
     await seedTeam("team_1", [{ userId: "team-admin-user", role: "admin" }]);
 
-    const ok = await canAdministerSession(db, teamSession, "outsider");
+    const ok = await canAdministerSession(db, teamSession, user("outsider"));
     expect(ok).toBe(false);
   });
 
@@ -176,14 +178,14 @@ describe("canAdministerSession", () => {
       { userId: "team-admin-user", role: "admin" },
     ]);
 
-    const ok = await canAdministerSession(db, teamSession, "first-opener");
+    const ok = await canAdministerSession(db, teamSession, user("first-opener"));
     expect(ok).toBe(false);
   });
 
   it("drops access the moment an admin is demoted — no caching across calls", async () => {
     await seedTeam("team_1", [{ userId: "team-admin-user", role: "admin" }]);
 
-    const before = await canAdministerSession(db, teamSession, "team-admin-user");
+    const before = await canAdministerSession(db, teamSession, user("team-admin-user"));
     expect(before).toBe(true);
 
     await db
@@ -191,49 +193,46 @@ describe("canAdministerSession", () => {
       .set({ role: "member" })
       .where(eq(teamMembers.userId, "team-admin-user"));
 
-    const after = await canAdministerSession(db, teamSession, "team-admin-user");
+    const after = await canAdministerSession(db, teamSession, user("team-admin-user"));
     expect(after).toBe(false);
   });
 
   it("denies everyone when the owning team row is gone — no team, no authority", async () => {
     await seedOrgMember("org-admin-user", "admin");
 
-    const ok = await canAdministerSession(db, teamSession, "org-admin-user");
+    const ok = await canAdministerSession(db, teamSession, user("org-admin-user"));
     expect(ok).toBe(false);
   });
 
   it("allows the owner of a user-owned session", async () => {
-    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u1");
+    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("u1"));
     expect(ok).toBe(true);
   });
 
   it("rejects a different user for a user-owned session", async () => {
-    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u2");
+    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("u2"));
     expect(ok).toBe(false);
   });
 
   it("rejects a team admin of an unrelated team for a user-owned session — the user case does not widen", async () => {
     await seedTeam("team_2", [{ userId: "other-team-admin", role: "admin" }]);
 
-    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "other-team-admin");
+    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("other-team-admin"));
     expect(ok).toBe(false);
   });
 
   it("rejects an org admin for a user-owned session — org admin is a team recovery path, not a session master key", async () => {
     await seedOrgMember("org-admin-user", "admin");
 
-    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "org-admin-user");
+    const ok = await canAdministerSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("org-admin-user"));
     expect(ok).toBe(false);
   });
 
   it("allows a team principal on that team's session after the creating admin left", async () => {
     await seedTeam("team_1", []);
-    const ok = await canAdministerSession(db, teamSession, "departed-admin", { type: "team", id: "team_1" });
+    const ok = await canAdministerSession(db, teamSession, { type: "team", id: "team_1" });
     expect(ok).toBe(true);
-    const other = await canAdministerSession(db, teamSession, "departed-admin", {
-      type: "team",
-      id: "team_other",
-    });
+    const other = await canAdministerSession(db, teamSession, { type: "team", id: "team_other" });
     expect(other).toBe(false);
   });
 
@@ -243,7 +242,7 @@ describe("canAdministerSession", () => {
     const ok = await canAdministerSession(
       db,
       { userId: "org:org-1", ownerType: "org", ownerId: "org-1" },
-      "org-admin-user",
+      user("org-admin-user"),
     );
     expect(ok).toBe(false);
   });
@@ -251,12 +250,12 @@ describe("canAdministerSession", () => {
 
 describe("canResolveSessionGate", () => {
   it("allows the owner of a user-owned session", async () => {
-    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u1");
+    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("u1"));
     expect(ok).toBe(true);
   });
 
   it("rejects a different user for a user-owned session", async () => {
-    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u2");
+    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("u2"));
     expect(ok).toBe(false);
   });
 
@@ -266,7 +265,7 @@ describe("canResolveSessionGate", () => {
     const ok = await canResolveSessionGate(
       db,
       { userId: "first-opener", ownerType: "team", ownerId: "team_1" },
-      "member-user",
+      user("member-user"),
     );
     expect(ok).toBe(true);
   });
@@ -277,7 +276,7 @@ describe("canResolveSessionGate", () => {
     const ok = await canResolveSessionGate(
       db,
       { userId: "first-opener", ownerType: "team", ownerId: "team_1" },
-      "first-opener",
+      user("first-opener"),
     );
     expect(ok).toBe(false);
   });
@@ -285,7 +284,7 @@ describe("canResolveSessionGate", () => {
   it("rejects an org admin for a user-owned session — resolving is not an admin power", async () => {
     await seedOrgMember("org-admin-user", "admin");
 
-    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "org-admin-user");
+    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("org-admin-user"));
     expect(ok).toBe(false);
   });
 
@@ -295,7 +294,7 @@ describe("canResolveSessionGate", () => {
     const ok = await canResolveSessionGate(
       db,
       { userId: "org:org-1", ownerType: "org", ownerId: "org-1" },
-      "org-admin-user",
+      user("org-admin-user"),
     );
     expect(ok).toBe(false);
   });
@@ -315,14 +314,14 @@ describe("canViewSession — a team session is not owned by whoever opened it", 
 
   it("admits the first opener while they are still on the team", async () => {
     await seedTeam("team-1", [{ userId: "alice", role: "member" }]);
-    expect(await canViewSession(db, openedByAlice, "alice")).toBe(true);
+    expect(await canViewSession(db, openedByAlice, user("alice"))).toBe(true);
   });
 
   it("refuses the first opener once they leave the team", async () => {
     // Seeded with a different member, so the team still exists and alice is
     // simply no longer on it — the state after removeMember.
     await seedTeam("team-1", [{ userId: "bob", role: "admin" }]);
-    expect(await canViewSession(db, openedByAlice, "alice")).toBe(false);
+    expect(await canViewSession(db, openedByAlice, user("alice"))).toBe(false);
   });
 
   it("admits any other current member, who never appears in the row", async () => {
@@ -330,18 +329,18 @@ describe("canViewSession — a team session is not owned by whoever opened it", 
       { userId: "alice", role: "member" },
       { userId: "bob", role: "member" },
     ]);
-    expect(await canViewSession(db, openedByAlice, "bob")).toBe(true);
+    expect(await canViewSession(db, openedByAlice, user("bob"))).toBe(true);
   });
 
   it("refuses a non-member who is not the stamped opener either", async () => {
     await seedTeam("team-1", [{ userId: "alice", role: "member" }]);
-    expect(await canViewSession(db, openedByAlice, "carol")).toBe(false);
+    expect(await canViewSession(db, openedByAlice, user("carol"))).toBe(false);
   });
 
   it("still admits the direct owner of a NON-team session", async () => {
     // The replaced comparison must survive for every other owner type.
     expect(
-      await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u1"),
+      await canViewSession(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, user("u1")),
     ).toBe(true);
   });
 });

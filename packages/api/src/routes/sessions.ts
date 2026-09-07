@@ -14,7 +14,7 @@ import {
   type RunStateRow,
   type SessionRunFields,
 } from "../sessions/run-state.js";
-import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { canAdministerSession, canViewSession, isSessionDirectOwner } from "../services/session-access.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
@@ -505,7 +505,7 @@ sessionsRouter.post("/", async (c) => {
     const prior = priorRows[0];
     // Existence-hiding: an unknown id, a session the caller cannot view, or a
     // non-security session all answer the same 404.
-    if (!prior || prior.kind !== "security" || !(await canViewSession(db, prior, user.id, requirePrincipal(c)))) {
+    if (!prior || prior.kind !== "security" || !(await canViewSession(db, prior, c.var.principal))) {
       return c.json({ error: "The prior review was not found, or you cannot view it." }, 404);
     }
     const priorSecurity = createSecurityEngagementService({ db });
@@ -875,7 +875,7 @@ sessionsRouter.get("/:id", async (c) => {
   // other session route in this file stays direct-owner-only.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, userId, requirePrincipal(c)))) {
+  if (!row || !(await canViewSession(db, row, c.var.principal))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -941,7 +941,7 @@ sessionsRouter.patch("/:id", async (c) => {
   // an unauthorized caller still gets the same 404 a missing id gets.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, userId, requirePrincipal(c)))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1247,7 +1247,7 @@ sessionsRouter.post("/:id/auto-title", async (c) => {
   // Titling a thread is part of prompting, not administering — anyone who
   // can read and reply may title what they said. Gating this on ownership
   // left a team member's threads permanently untitled.
-  if (!(await canViewSession(db, sessionRow, userId, requirePrincipal(c)))) {
+  if (!(await canViewSession(db, sessionRow, c.var.principal))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1282,22 +1282,26 @@ sessionsRouter.post("/:id/auto-title", async (c) => {
 // ── Sandbox JWT ───────────────────────────────────────────────────────────
 
 // Mints a short-lived service JWT the session's sandbox uses to call back
-// into the API (Task 8, auth-v2 plan). Owner-gated like every other
-// `/api/sessions/:id` route — unknown or not-owned ids 404.
+// into the API (Task 8, auth-v2 plan). Direct-owner-gated
+// (`isSessionDirectOwner`) — unknown or not-owned ids 404. A team key owns
+// its team's sessions but is refused here: the token binds one user, and
+// the only user on a team key is the creating admin, for audit.
 sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
   const { db, engineHost } = c.var.providers;
   const id = c.req.param("id");
-  const userId = c.var.user.id;
+  const caller = c.var.principal;
 
-  const rows = await db
-    .select()
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId)))
-    .limit(1);
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !isSessionDirectOwner(row, caller)) return c.json({ error: "session not found" }, 404);
+  if (caller.type === "team") {
+    return c.json(
+      { error: "A team API key cannot mint a sandbox credential. Use a personal API key or the web app." },
+      403,
+    );
+  }
 
-  const { token, expiresAt } = engineHost.mintSandboxJwtFor(id, userId);
+  const { token, expiresAt } = engineHost.mintSandboxJwtFor(id, caller.id);
   const body: SandboxJwtResponse = { token, expiresAt };
   return c.json(body);
 });
@@ -1332,7 +1336,7 @@ sessionsRouter.post("/:id/pause", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, userId, requirePrincipal(c)))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1379,15 +1383,14 @@ sessionsRouter.post("/:id/pause", async (c) => {
 sessionsRouter.post("/:id/sandbox/replace", async (c) => {
   const { db, engineHost, engineStore } = c.var.providers;
   const id = c.req.param("id");
-  const userId = c.var.user.id;
 
   const rows = await db
     .select()
     .from(agentSessions)
-    .where(and(eq(agentSessions.id, id), eq(agentSessions.userId, userId), eq(agentSessions.status, "active")))
+    .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !isSessionDirectOwner(row, c.var.principal)) return c.json({ error: "session not found" }, 404);
 
   const unsettled = await engineStore.listUnsettledSubmissions(id);
   if (unsettled.length > 0) {
@@ -1435,7 +1438,7 @@ sessionsRouter.delete("/:id", async (c) => {
 
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, userId, requirePrincipal(c)))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
     return c.json({ error: "session not found" }, 404);
   }
 

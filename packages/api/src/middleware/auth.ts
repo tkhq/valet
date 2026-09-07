@@ -11,6 +11,7 @@ import { verifySandboxToken } from "../auth/sandbox-tokens.js";
 import {
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
+  userPrincipal,
   type AuthVia,
   type RequestPrincipal,
 } from "../lib/request-principal.js";
@@ -162,11 +163,7 @@ async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Prom
     if (!team || team.orgId !== user.orgId) return undefined;
     return { user, principal: { type: "team", id: teamId } };
   }
-  return { user, principal: { type: "user", id: user.id } };
-}
-
-function userPrincipal(user: AuthUser): RequestPrincipal {
-  return { type: "user", id: user.id };
+  return { user, principal: userPrincipal(user.id) };
 }
 
 function setCaller(
@@ -327,7 +324,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
       // absorbs the throw.
       const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
       if (sessionUser) {
-        setCaller(c, sessionUser, "session", userPrincipal(sessionUser), auth);
+        setCaller(c, sessionUser, "session", userPrincipal(sessionUser.id), auth);
         await next();
         return;
       }
@@ -362,14 +359,14 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
             role: row.role,
             orgId: LOCAL_ORG.id,
           };
-          setCaller(c, impersonated, "stub", userPrincipal(impersonated), null);
+          setCaller(c, impersonated, "stub", userPrincipal(impersonated.id), null);
           await next();
           return;
         }
       }
 
       const stub = stubUser();
-      setCaller(c, stub, "stub", userPrincipal(stub), null);
+      setCaller(c, stub, "stub", userPrincipal(stub.id), null);
       await next();
       return;
     }

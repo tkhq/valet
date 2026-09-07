@@ -18,7 +18,7 @@
  */
 import { Hono } from "hono";
 import { and, count, desc, eq, isNull, sql } from "drizzle-orm";
-import { parseAssistantSessionId, type Principal } from "@valet/engine";
+import { parseAssistantSessionId } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches } from "../schema/index.js";
@@ -34,6 +34,7 @@ import {
 import { assistantOwner, canViewAssistantOwner } from "../assistants/access.js";
 import { readOwnFile, writeFile, type MemoryScope } from "../services/memory.js";
 import { canViewSession } from "../services/session-access.js";
+import { userPrincipal, type RequestPrincipal } from "../lib/request-principal.js";
 import type {
   EnsureOrchestratorResponse,
   GetOrchestratorChildrenResponse,
@@ -46,10 +47,6 @@ import type {
 } from "../wire/types.js";
 
 export const orchestratorRouter = new Hono<AppEnv>();
-
-function userPrincipal(userId: string): Principal {
-  return { type: "user", id: userId };
-}
 
 /**
  * May the caller view the children of `parentSessionId`? A child run's parent
@@ -65,12 +62,12 @@ function userPrincipal(userId: string): Principal {
 async function canViewChildrenOf(
   db: AppDb,
   parentSessionId: string,
-  callerId: string,
+  caller: RequestPrincipal,
 ): Promise<boolean> {
   const assistantId = parseAssistantSessionId(parentSessionId);
   if (assistantId !== null) {
     const row = await loadAssistant(db, assistantId);
-    return row ? canViewAssistantOwner(db, assistantOwner(row), callerId) : false;
+    return row ? canViewAssistantOwner(db, assistantOwner(row), caller) : false;
   }
   const rows = await db
     .select()
@@ -78,7 +75,7 @@ async function canViewChildrenOf(
     .where(eq(agentSessions.id, parentSessionId))
     .limit(1);
   const row = rows[0];
-  return row ? canViewSession(db, row, callerId) : false;
+  return row ? canViewSession(db, row, caller) : false;
 }
 
 // ── Ensure (create-if-absent) ───────────────────────────────────────────────
@@ -282,7 +279,7 @@ orchestratorRouter.get("/children", async (c) => {
   if (scopedSessionId !== undefined) {
     // Existence-hiding: an unknown id and one the caller cannot view answer
     // the same 404 every cross-owner session read here uses.
-    if (!(await canViewChildrenOf(db, scopedSessionId, user.id))) {
+    if (!(await canViewChildrenOf(db, scopedSessionId, c.var.principal))) {
       return c.json({ error: "session not found" }, 404);
     }
     parentSessionId = scopedSessionId;
@@ -348,7 +345,7 @@ orchestratorRouter.post("/children/:childSessionId/dismiss", async (c) => {
 
   // Existence-hiding: a child whose parent assistant the caller cannot view
   // answers the same "not found" a missing child does.
-  if (!(await canViewChildrenOf(db, watch.parentSessionId, user.id))) {
+  if (!(await canViewChildrenOf(db, watch.parentSessionId, c.var.principal))) {
     return c.json({ error: "child not found" }, 404);
   }
   if (!watch.settled) {

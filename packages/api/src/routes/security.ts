@@ -74,7 +74,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { requireUser, type AuthUser } from "../middleware/auth.js";
+import { requirePrincipal, requireUser, type AuthUser } from "../middleware/auth.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildActionInvoker } from "../plugins/action-invoker.js";
 import { persistInvocationAudit } from "../policies/service.js";
@@ -189,8 +189,8 @@ async function resolveViewableSession(
   const row = rows[0];
   if (!row) return null;
   if (isValidInternalToken(c.req.header("x-valet-internal"))) return row;
-  const user = c.var.user;
-  if (!user || !(await canViewSession(db, row, user.id))) return null;
+  const caller = requirePrincipal(c);
+  if (!caller || !(await canViewSession(db, row, caller))) return null;
   return row;
 }
 
@@ -895,12 +895,12 @@ async function resolveToolSession(
     };
   }
 
-  const user = c.var.user;
-  if (!user) return { failure: c.json({ error: "session not found" }, 404) };
+  const caller = requirePrincipal(c);
+  if (!caller) return { failure: c.json({ error: "session not found" }, 404) };
   const allowed =
     access === "mutate"
-      ? await canAdministerSession(db, row, user.id, c.var.principal)
-      : await canViewSession(db, row, user.id, c.var.principal);
+      ? await canAdministerSession(db, row, caller)
+      : await canViewSession(db, row, caller);
   if (!allowed) return { failure: c.json({ error: "session not found" }, 404) };
   return { ok: row };
 }
@@ -2292,7 +2292,8 @@ async function resolveHumanSession(
   // The internal-token rung sets no user; every other rung does. Read the
   // variable through its true runtime type.
   const user = requireUser(c);
-  if (!user) return { failure: c.json({ error: "session not found" }, 404) };
+  const caller = requirePrincipal(c);
+  if (!user || !caller) return { failure: c.json({ error: "session not found" }, 404) };
 
   const { db } = c.var.providers;
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
@@ -2300,10 +2301,10 @@ async function resolveHumanSession(
   if (!row) return { failure: c.json({ error: "session not found" }, 404) };
 
   // Named check: canViewSession — the view gate every triage route holds.
-  if (!(await canViewSession(db, row, user.id, c.var.principal))) {
+  if (!(await canViewSession(db, row, caller))) {
     return { failure: c.json({ error: "session not found" }, 404) };
   }
-  if (access === "administer" && !(await canAdministerSession(db, row, user.id, c.var.principal))) {
+  if (access === "administer" && !(await canAdministerSession(db, row, caller))) {
     return {
       failure: c.json(
         {

@@ -74,7 +74,7 @@ assistantsRouter.get("/", async (c) => {
   if (filter.error) return c.json({ error: filter.error }, 400);
 
   if (filter.owner) {
-    if (!(await canViewAssistantOwner(db, filter.owner, user.id))) {
+    if (!(await canViewAssistantOwner(db, filter.owner, c.var.principal))) {
       return c.json({ error: "owner not found" }, 404);
     }
     const rows = await listAssistantsForOwners(db, user.orgId, [filter.owner]);
@@ -118,7 +118,7 @@ assistantsRouter.post("/", async (c) => {
   const personaErr = validateProfilePatch(body);
   if (personaErr) return c.json({ error: personaErr }, 400);
 
-  if (!(await canAdministerAssistantOwner(db, owner, user.id))) {
+  if (!(await canAdministerAssistantOwner(db, owner, c.var.principal))) {
     return c.json({ error: "owner not found" }, 404);
   }
 
@@ -176,7 +176,7 @@ assistantsRouter.patch("/:id", async (c) => {
 
   const row = await loadAssistant(db, c.req.param("id"));
   if (!row || row.orgId !== user.orgId) return c.json({ error: "assistant not found" }, 404);
-  if (!(await canAdministerAssistantOwner(db, assistantOwner(row), user.id))) {
+  if (!(await canAdministerAssistantOwner(db, assistantOwner(row), c.var.principal))) {
     return c.json({ error: "assistant not found" }, 404);
   }
 
@@ -242,7 +242,7 @@ assistantsRouter.post("/:id/session", async (c) => {
 
   const row = await loadAssistant(db, c.req.param("id"));
   if (!row || row.orgId !== user.orgId) return c.json({ error: "assistant not found" }, 404);
-  if (!(await canViewAssistantOwner(db, assistantOwner(row), user.id))) {
+  if (!(await canViewAssistantOwner(db, assistantOwner(row), c.var.principal))) {
     return c.json({ error: "assistant not found" }, 404);
   }
   if (row.archivedAt !== null) {
@@ -272,7 +272,7 @@ assistantsRouter.delete("/:id", async (c) => {
 
   const row = await loadAssistant(db, c.req.param("id"));
   if (!row || row.orgId !== user.orgId) return c.json({ error: "assistant not found" }, 404);
-  if (!(await canAdministerAssistantOwner(db, assistantOwner(row), user.id))) {
+  if (!(await canAdministerAssistantOwner(db, assistantOwner(row), c.var.principal))) {
     return c.json({ error: "assistant not found" }, 404);
   }
 

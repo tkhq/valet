@@ -33,9 +33,16 @@
  *     needs team-admin authority. Administering follows authority, not
  *     membership.
  *
- * `POST /api/sessions/:id/sandbox-jwt` stays direct-owner-only and uses
- * neither check. It mints a credential bound to one user, not a view of a
- * shared resource.
+ * Every check takes the REQUEST PRINCIPAL, not a user id. The auth ladder
+ * sets one on every rung that sets `c.var.user`; a team `vlt_` key sets the
+ * team. Reading `c.var.user.id` instead would hand the key the creating
+ * admin's personal sessions, because that admin is what `userId` holds on
+ * every row they touched. Agent-facing callers that hold only a user id
+ * build the principal with `userPrincipal`.
+ *
+ * `POST /api/sessions/:id/sandbox-jwt` stays direct-owner-only
+ * (`isSessionDirectOwner`) and uses neither check. It mints a credential
+ * bound to one user, not a view of a shared resource.
  */
 import type { AppDb } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
@@ -51,7 +58,8 @@ export interface SessionOwnerLike {
  * True when `caller` may view/prompt `session` — its direct owner, or a
  * live member of the team it belongs to (re-checked every call, never
  * cached, matching `isTeamMember`'s own contract: leaving a team drops
- * access on the very next request).
+ * access on the very next request). A team principal reaches its own
+ * team's rows only.
  *
  * The team branch REPLACES the direct-owner comparison rather than adding
  * to it, exactly as `canAdministerSession` does below, and for the same
@@ -69,14 +77,11 @@ export interface SessionOwnerLike {
 export async function canViewSession(
   db: AppDb,
   session: SessionOwnerLike,
-  callerId: string,
-  principal?: RequestPrincipal,
+  caller: RequestPrincipal,
 ): Promise<boolean> {
-  if (principal?.type === "team") {
-    return session.ownerType === "team" && session.ownerId === principal.id;
-  }
-  if (session.ownerType === "team") return isTeamMember(db, session.ownerId, callerId);
-  return session.userId === callerId;
+  if (caller.type === "team") return isSessionDirectOwner(session, caller);
+  if (session.ownerType === "team") return isTeamMember(db, session.ownerId, caller.id);
+  return session.userId === caller.id;
 }
 
 /**
@@ -101,14 +106,11 @@ export async function canViewSession(
 export async function canAdministerSession(
   db: AppDb,
   session: SessionOwnerLike,
-  callerId: string,
-  principal?: RequestPrincipal,
+  caller: RequestPrincipal,
 ): Promise<boolean> {
-  if (principal?.type === "team") {
-    return session.ownerType === "team" && session.ownerId === principal.id;
-  }
-  if (session.ownerType === "team") return canAdministerTeam(db, session.ownerId, callerId);
-  return session.userId === callerId;
+  if (caller.type === "team") return isSessionDirectOwner(session, caller);
+  if (session.ownerType === "team") return canAdministerTeam(db, session.ownerId, caller.id);
+  return session.userId === caller.id;
 }
 
 /**
@@ -126,8 +128,23 @@ export async function canAdministerSession(
 export async function canResolveSessionGate(
   db: AppDb,
   session: SessionOwnerLike,
-  callerId: string,
-  principal?: RequestPrincipal,
+  caller: RequestPrincipal,
 ): Promise<boolean> {
-  return canViewSession(db, session, callerId, principal);
+  return canViewSession(db, session, caller);
+}
+
+/**
+ * True when `caller` owns `session` outright: no membership, no admin
+ * recovery path. A user owns the row stamped with its id. A team principal
+ * owns every row its team owns, and nothing else — `agent_sessions.userId`
+ * on a team row is the creating admin, which a team key must never inherit.
+ *
+ * The three routes that hand out a shell or a credential (`sandbox-jwt`,
+ * the gateway proxy, sandbox replace) gate on this, not on
+ * `canViewSession`: viewing follows membership, but a terminal into the
+ * sandbox does not widen with it.
+ */
+export function isSessionDirectOwner(session: SessionOwnerLike, caller: RequestPrincipal): boolean {
+  if (caller.type === "team") return session.ownerType === "team" && session.ownerId === caller.id;
+  return session.userId === caller.id;
 }

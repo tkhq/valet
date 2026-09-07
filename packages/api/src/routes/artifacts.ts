@@ -31,6 +31,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
 import { agentSessions, users } from "../schema/index.js";
 import { requireUser, resolveOptionalUser, type AuthUser } from "../middleware/auth.js";
+import { userPrincipal } from "../lib/request-principal.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -200,7 +201,8 @@ async function loadCommentContext(
 /** Whether `user`'s `sendToSession` would deliver: the artifact records a
  * source session and the caller could open that session and type into it
  * (`canViewSession` — the exact check the messages route applies), so
- * sending a comment grants nothing new. */
+ * sending a comment grants nothing new. The comment routes admit users
+ * only (`loadCommentContext`), so the caller is that user's principal. */
 async function canSendToSourceSession(
   db: AppDb,
   artifact: ArtifactRow,
@@ -214,7 +216,7 @@ async function canSendToSourceSession(
     .limit(1);
   const row = rows[0];
   if (!row) return { ok: false };
-  if (!(await canViewSession(db, row, user.id))) return { ok: false };
+  if (!(await canViewSession(db, row, userPrincipal(user.id)))) return { ok: false };
   return { ok: true, row };
 }
 
