@@ -17,6 +17,7 @@ import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
 import { buildAuthMiddleware, refuseTeamKeyOutsideScope } from "./middleware/auth.js";
 import { filterTeamKeysFromPersonalApiKeyList } from "./lib/personal-api-key-list.js";
+import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
@@ -165,8 +166,15 @@ export function createApp(
     verifyApiKey: auth
       ? async (opts) => {
           const r = await auth.api.verifyApiKey({ body: opts });
-          // Bridge ValetApiKeyRecord (referenceId) → PrincipalDeps (userId).
-          return { valid: r.valid, key: r.key ? { id: r.key.id, userId: r.key.referenceId } : null };
+          // Bridge ValetApiKeyRecord (referenceId, metadata) → PrincipalDeps
+          // (userId, teamId). The team id rides along so the gateway can
+          // refuse a team key instead of billing the creating admin.
+          return {
+            valid: r.valid,
+            key: r.key
+              ? { id: r.key.id, userId: r.key.referenceId, teamId: teamIdFromApiKeyMetadata(r.key.metadata) }
+              : null,
+          };
         }
       : async () => ({ valid: false, key: null }),
   });
