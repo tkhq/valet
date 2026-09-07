@@ -36,9 +36,9 @@ describe("loadTeamOnePasswordRefs", () => {
     await expect(loadTeamOnePasswordRefs(credentials, "team_1")).resolves.toEqual(["op://Shared/Acme/credential"]);
   });
 
-  it("returns an empty list when the team has no grant", async () => {
+  it("returns null when the team has no grant, so nothing is restricted", async () => {
     const credentials = new InMemoryCredentialStore();
-    await expect(loadTeamOnePasswordRefs(credentials, "team_1")).resolves.toEqual([]);
+    await expect(loadTeamOnePasswordRefs(credentials, "team_1")).resolves.toBeNull();
   });
 });
 
@@ -46,6 +46,10 @@ describe("isTeamOpRefGranted", () => {
   it("matches the exact granted string", () => {
     expect(isTeamOpRefGranted(["op://Shared/Acme/credential"], "op://Shared/Acme/credential")).toBe(true);
     expect(isTeamOpRefGranted(["op://Shared/Acme/credential"], "op://Shared/Other/password")).toBe(false);
+  });
+
+  it("grants every reference when the team has no lease", () => {
+    expect(isTeamOpRefGranted(null, "op://Shared/Other/password")).toBe(true);
   });
 });
 

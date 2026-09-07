@@ -158,13 +158,12 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
   const scopes = narrowed.scopes;
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
+  // A team lease, when an admin wrote one, narrows the org scope to named
+  // refs. With no lease the team session reads every ref the org token can.
   const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
-  if (teamId) {
-    const granted = await loadTeamOnePasswordRefs(engineCredentials, teamId);
-    const ungranted = references.filter((reference) => !isTeamOpRefGranted(granted, reference));
-    if (ungranted.length > 0) {
-      return c.json({ error: UNGRANTED_TEAM_OP_REF }, 403);
-    }
+  const granted = teamId ? await loadTeamOnePasswordRefs(engineCredentials, teamId) : null;
+  if (references.some((reference) => !isTeamOpRefGranted(granted, reference))) {
+    return c.json({ error: UNGRANTED_TEAM_OP_REF }, 403);
   }
 
   // Every reference in parallel; within one, org scope first. A scope with
@@ -270,13 +269,13 @@ sandboxSecretsRouter.post("/find", async (c) => {
 
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
   const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
-  const granted = teamId ? await loadTeamOnePasswordRefs(engineCredentials, teamId) : undefined;
+  const granted = teamId ? await loadTeamOnePasswordRefs(engineCredentials, teamId) : null;
   const lines: string[] = [];
   for (const scope of narrowed.scopes) {
     try {
       for (const cand of await onePassword.findCandidates(scope, ctx, query)) {
         const reference = `op://${cand.vault}/${cand.item}/${cand.field}`;
-        if (granted && !isTeamOpRefGranted(granted, reference)) continue;
+        if (!isTeamOpRefGranted(granted, reference)) continue;
         // Scope-tagged, because the same name can sit in an org vault and a
         // personal one, and the resolver takes the org copy first. Seeing both
         // is how a caller knows to pass --scope.

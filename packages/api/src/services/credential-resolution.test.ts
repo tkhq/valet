@@ -591,8 +591,28 @@ describe("resolveTeamCredentialRead", () => {
     expect(got?.apiKey).toBe("from-vault");
   });
 
+  it("resolves a team row reference when the team has no grant row", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "linear", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Acme/credential", tokenScope: "org" } },
+    });
+    const onePassword = fakeOnePassword(async (row) => ({ ...row, apiKey: "from-vault" }));
+    const got = await resolveTeamCredentialRead(
+      { credentials, onePassword },
+      { orgId, teamId },
+      "linear",
+      "reference-only",
+    );
+    expect(got?.apiKey).toBe("from-vault");
+  });
+
   it("refuses an ungranted 1Password reference on a team row", async () => {
     const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "onepassword", {
+      type: "service_account",
+      metadata: { refs: ["op://Shared/Acme/credential"] },
+    });
     await credentials.save({ type: "team", id: teamId }, "linear", {
       type: "api_key",
       metadata: { onepassword: { reference: "op://Shared/Other/password", tokenScope: "org" } },

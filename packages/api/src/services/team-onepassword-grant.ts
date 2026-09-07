@@ -1,9 +1,11 @@
 /**
- * Team 1Password access is a lease of explicit `op://` refs, not a third
- * service-account token. The grant lives on a team-owned `onepassword` row
- * with no encrypted secret and `metadata.refs`. Resolve and the sandbox
- * broker consult this list; an ungranted ref does not fall through to the
- * org vault or a member's personal token.
+ * A team 1Password grant is an optional restriction, not a default denial.
+ * A team session reads the org scope (product decision 2026-09-06). A team
+ * admin may narrow that to an explicit list of `op://` refs. The list lives
+ * on the team-owned `onepassword` row as `metadata.refs`, with no encrypted
+ * secret today. Resolve and the sandbox broker consult the list only when
+ * one exists: with no grant row, every ref the org token can see resolves;
+ * with one, an ungranted ref is refused and names the fix.
  */
 import type { CredentialStore, StoredCredential } from "@valet/engine";
 import { ONEPASSWORD_SERVICE, OnePasswordAuthError } from "./onepassword.js";
@@ -44,16 +46,23 @@ export function refsFromGrantRow(row: StoredCredential | null): string[] {
   return raw.filter((item): item is string => typeof item === "string" && OP_REFERENCE.test(item));
 }
 
+/**
+ * The team's lease, or `null` when the team has none. An absent row and a
+ * row with no valid refs both read as no lease: the PUT route deletes the
+ * row for an empty list, so an empty list never means "grant nothing".
+ */
 export async function loadTeamOnePasswordRefs(
   credentials: CredentialStore,
   teamId: string,
-): Promise<string[]> {
+): Promise<readonly string[] | null> {
   const row = await credentials.get({ type: "team", id: teamId }, ONEPASSWORD_SERVICE);
-  return refsFromGrantRow(row);
+  const refs = refsFromGrantRow(row);
+  return refs.length > 0 ? refs : null;
 }
 
-export function isTeamOpRefGranted(refs: readonly string[], reference: string): boolean {
-  return refs.includes(reference);
+/** `null` is no lease, so every reference the org scope can read is granted. */
+export function isTeamOpRefGranted(refs: readonly string[] | null, reference: string): boolean {
+  return refs === null || refs.includes(reference);
 }
 
 export function refuseUngrantedTeamOpRef(): never {
