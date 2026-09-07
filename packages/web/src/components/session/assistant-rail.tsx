@@ -27,7 +27,7 @@ import {
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { cn } from "~/lib/cn";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
 import { ThreadTree } from "./thread-tree";
 
 /**
@@ -252,6 +252,11 @@ export function scopedDefaultAssistant(
  * A team workspace with no assistant is empty — the page must not open
  * a personal conversation. An unreachable `?assistant=` on a team opens
  * that team's default, or the empty-team notice. It never opens yours.
+ *
+ * The team arm applies only when `scopeKey` names a group in `groups`. A
+ * key with no group is a team the caller cannot open (left, or hidden by
+ * the organizations flag), not an empty one; that resolves like the
+ * personal workspace.
  */
 export type ChatAssistantChoice =
   | { kind: "open"; assistant: AssistantSummary; canonicalize: boolean }
@@ -266,11 +271,10 @@ export function chooseChatAssistant(
   const named = findAssistant(groups, requestedId);
   if (named) return { kind: "open", assistant: named, canonicalize: false };
 
-  if (requestedId !== undefined && scopeKey !== "user") {
-    const scopedNamed = scopedDefaultAssistant(groups, scopeKey);
-    if (scopedNamed) {
-      return { kind: "open", assistant: scopedNamed, canonicalize: true };
-    }
+  const teamScope = scopeKey !== PERSONAL && groups.some((group) => group.key === scopeKey);
+  if (teamScope) {
+    const scoped = scopedDefaultAssistant(groups, scopeKey);
+    if (scoped) return { kind: "open", assistant: scoped, canonicalize: true };
     return { kind: "empty-team" };
   }
 
@@ -278,13 +282,9 @@ export function chooseChatAssistant(
     return { kind: "personal", assistant: ownDefaultAssistant(groups) };
   }
 
-  const scoped = scopedDefaultAssistant(groups, scopeKey);
-  if (scoped) {
-    return { kind: "open", assistant: scoped, canonicalize: scopeKey !== "user" };
-  }
-
-  if (scopeKey !== "user") return { kind: "empty-team" };
-  return { kind: "personal", assistant: ownDefaultAssistant(groups) };
+  const own = ownDefaultAssistant(groups);
+  if (own) return { kind: "open", assistant: own, canonicalize: false };
+  return { kind: "personal", assistant: undefined };
 }
 
 /** What the row is called. An assistant nobody has named says so, rather

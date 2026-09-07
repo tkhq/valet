@@ -444,6 +444,20 @@ describe("AssistantRail", () => {
     );
   });
 
+  it("falls back to your own default when ?assistant= names a team hidden by the organizations flag", () => {
+    // The team is still in `GET /api/teams`, but the feature gate drops it
+    // from the eligible list, so its assistant has no group either.
+    orgData = org(false);
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_team" };
+    renderRail();
+    expect(screen.getByText("Your assistants")).toBeTruthy();
+    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
+      "assistant:asst_own",
+    );
+  });
+
   it("offers a new assistant for each owner you may administer", () => {
     teamsData = { teams: [team({ callerRole: "admin" })] };
     assistantsData = { assistants: [mine(), teamAssistant()] };

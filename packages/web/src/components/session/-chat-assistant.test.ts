@@ -128,6 +128,24 @@ describe("chooseChatAssistant", () => {
     });
   });
 
+  it("opens your own default when the scope names a team with no group", () => {
+    // A stored key can outlive membership: the team was left, or the
+    // organizations flag hid it. No group means no team arm — not an empty
+    // team, which would blank the page for a workspace that is not there.
+    expect(chooseChatAssistant(groups, "t_left", undefined)).toEqual({
+      kind: "open",
+      assistant: expect.objectContaining({ id: "mine" }),
+      canonicalize: false,
+    });
+  });
+
+  it("falls back to your own default when the scope has no group and the named assistant is unreachable", () => {
+    expect(chooseChatAssistant(groups, "t_left", "asst_nope")).toEqual({
+      kind: "personal",
+      assistant: expect.objectContaining({ id: "mine" }),
+    });
+  });
+
   it("reports an empty team instead of opening a personal conversation", () => {
     const emptyTeam = groupAssistants([own("mine", { isDefault: true })], teams);
     const choice = chooseChatAssistant(emptyTeam, "t1", undefined);

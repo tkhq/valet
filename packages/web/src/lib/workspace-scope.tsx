@@ -30,7 +30,7 @@ import {
   type ReactNode,
 } from "react";
 import { useSearch } from "@tanstack/react-router";
-import type { AssistantSummary } from "@valet/api/wire";
+import type { AssistantSummary, TeamSummary } from "@valet/api/wire";
 import { useAssistants } from "~/api/assistants";
 import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
@@ -71,10 +71,22 @@ const WorkspaceScopeContext = createContext<WorkspaceScope | null>(null);
 /**
  * The workspace the open assistant belongs to, or `undefined` when no
  * assistant is open — which is every route except `/chat`.
+ *
+ * A team assistant counts only when its team is one the caller may open
+ * (`eligibleTeams`). The list still carries the row for a team you left, or
+ * one the `organizations` flag hides, and `?assistant=` can name it from a
+ * stale bookmark. Scoping to that team would put `/chat` on a workspace
+ * with no group, which the page reads as an empty team: no name, no create
+ * action, and the rail drops the thread tree. So the stored key stands.
  */
-export function workspaceOfAssistant(active: AssistantSummary | undefined): string | undefined {
+export function workspaceOfAssistant(
+  active: AssistantSummary | undefined,
+  teams: readonly TeamSummary[],
+): string | undefined {
   if (!active) return undefined;
-  return active.owner.type === "team" ? active.owner.id : PERSONAL;
+  if (active.owner.type !== "team") return PERSONAL;
+  const teamId = active.owner.id;
+  return teams.some((t) => t.id === teamId) ? teamId : undefined;
 }
 
 /**
@@ -126,7 +138,7 @@ export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
   const available = useMemo(() => [PERSONAL, ...teams.map((t) => t.id)], [teams]);
 
   const open = (assistantsQ.data?.assistants ?? []).find((a) => a.id === search.assistant);
-  const derived = workspaceOfAssistant(open);
+  const derived = workspaceOfAssistant(open, teams);
 
   // Both queries, not either: `available` is derived from the two together.
   const membershipKnown = teamsQ.data !== undefined && orgQ.data !== undefined;
