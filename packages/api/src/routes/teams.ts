@@ -63,7 +63,6 @@ import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import {
   ensureDefaultAssistantSession,
-  findDefaultAssistant,
   listAssistantsForOwners,
   toAssistantSummary,
 } from "../assistants/service.js";
@@ -398,13 +397,9 @@ teamsRouter.post("/", async (c) => {
 
   try {
     const team = await createTeam(db, { orgId: user.orgId, name: body.name, creatorUserId: user.id });
-    const seeded = await findDefaultAssistant(db, user.orgId, { type: "team", id: team.id });
-    if (!seeded) {
-      throw new Error(`createTeam left ${team.id} without a default assistant`);
-    }
     const resp: CreateTeamResponse = {
       team: await rowToSummary(db, team, user.id),
-      defaultAssistant: toAssistantSummary(seeded),
+      defaultAssistant: toAssistantSummary(team.defaultAssistant),
     };
     return c.json(resp, 201);
   } catch (err) {

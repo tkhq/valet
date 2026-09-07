@@ -90,6 +90,20 @@ describe("teams service", () => {
     expect(owned[0]?.sessionId).toBe(`assistant:${owned[0]!.id}`);
   });
 
+  it("createTeam returns the seeded default assistant with the team", async () => {
+    // The route answers POST with the assistant so the client can open it
+    // at once. A re-read after commit would be a second query for a row the
+    // transaction already holds, and a miss there would surface as a 500.
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+
+    const owned = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
+    expect(team.defaultAssistant).toEqual(owned[0]);
+    expect(team.defaultAssistant.isDefault).toBe(true);
+  });
+
   it("createTeam rolls the assistant back with the team on a name conflict", async () => {
     // The seed lives inside the create transaction, so a duplicate name
     // must leave neither row behind — otherwise a retry after a rejected

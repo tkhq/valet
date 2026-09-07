@@ -23,6 +23,7 @@ import {
   teamMembers,
   teams,
   workflowDefinitions,
+  type AssistantRow,
   type TeamRow,
 } from "../schema/index.js";
 import { insertDefaultAssistantForPrincipal, retireAssistant } from "../assistants/service.js";
@@ -251,6 +252,15 @@ export interface CreateTeamOptions {
 }
 
 /**
+ * The new team row plus what the create transaction seeded beside it. The
+ * route answers POST from this, so it never re-reads rows it already holds.
+ */
+export type CreatedTeam = TeamRow & {
+  /** The default assistant seeded in the same transaction as the team. */
+  defaultAssistant: AssistantRow;
+};
+
+/**
  * Creates a team; the creator is auto-admitted as its first admin. The
  * name-conflict check runs inside the same transaction as the insert (plus
  * a belt-and-suspenders catch on the `teams_org_name` unique constraint) so
@@ -263,7 +273,7 @@ export interface CreateTeamOptions {
  * brand-new team as a dead end that silently opened the caller's personal
  * conversation. The seed and the team insert live and die together.
  */
-export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<TeamRow> {
+export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<CreatedTeam> {
   const id = newTeamId();
   const now = Date.now();
   // A team created through this service is always `local`: it belongs to the
@@ -280,7 +290,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
   };
 
   try {
-    await db.transaction(async (tx) => {
+    const defaultAssistant = await db.transaction(async (tx) => {
       const existingRows = await tx
         .select()
         .from(teams)
@@ -290,14 +300,13 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
 
       await tx.insert(teams).values(row);
       await tx.insert(teamMembers).values({ teamId: id, userId: opts.creatorUserId, role: "admin" });
-      await insertDefaultAssistantForPrincipal(tx, opts.orgId, { type: "team", id });
+      return insertDefaultAssistantForPrincipal(tx, opts.orgId, { type: "team", id });
     });
+    return { ...row, defaultAssistant };
   } catch (err) {
     if (isTeamNameUniqueViolation(err)) throw new TeamNameConflictError(opts.orgId, opts.name);
     throw err;
   }
-
-  return row;
 }
 
 export interface AddMemberOptions {

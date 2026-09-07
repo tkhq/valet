@@ -45,6 +45,13 @@ describe("teams routes", () => {
     expect(team.name).toBe("Platform");
     expect(defaultAssistant.isDefault).toBe(true);
     expect(defaultAssistant.owner).toEqual({ type: "team", id: team.id });
+    // The response carries the row the create transaction seeded, not a
+    // second one minted by a re-read.
+    const seeded = await api.providers.db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
+    expect(seeded.map((r) => r.id)).toEqual([defaultAssistant.id]);
 
     const listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
     expect(listRes.status).toBe(200);
