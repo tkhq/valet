@@ -9,7 +9,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { teamMembers, teams, users } from "../schema/index.js";
+import { apikey, teamMembers, teams, users } from "../schema/index.js";
 import type {
   CreateTeamApiKeyResponse,
   CreateTeamResponse,
@@ -68,6 +68,15 @@ describe("team API keys", () => {
     const created = (await createRes.json()) as CreateTeamApiKeyResponse;
     expect(created.key.startsWith("vlt_")).toBe(true);
     expect(created.createdBy).toBeTruthy();
+    // The indexed column is what the list filters on; it must agree with
+    // the metadata the auth ladder reads.
+    const pinned = await api.providers.db
+      .select({ teamId: apikey.teamId, metadata: apikey.metadata })
+      .from(apikey)
+      .where(eq(apikey.id, created.id))
+      .limit(1);
+    expect(pinned[0]?.teamId).toBe(teamId);
+    expect(JSON.parse(pinned[0]?.metadata ?? "{}")).toMatchObject({ teamId });
 
     const workspace = await mkdtemp(join(tmpdir(), "valet-team-key-"));
     const teamSession = await fetch(`${api.baseUrl}/api/sessions`, {

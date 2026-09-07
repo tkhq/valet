@@ -21,7 +21,7 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
 ## Decisions
 
-1. **Keep the better-auth table.** Do not add `team_api_keys`. Put `{ teamId, createdBy }` in `apikey.metadata`. `referenceId` stays the creating admin so the vendor plugin keeps a user row.
+1. **Keep the better-auth table.** Do not add `team_api_keys`. Put `{ teamId, createdBy }` in `apikey.metadata`, and the same team id in a Valet-owned nullable `apikey.team_id` column with an index. The auth ladder reads the metadata (it is what `verifyApiKey` returns); the team list and revoke read the column. One UPDATE writes both, and create re-reads both before it returns the secret. The list projects the summary columns only; the hash never leaves the table. `referenceId` stays the creating admin so the vendor plugin keeps a user row. The personal list filter recomputes `total` and refuses an unknown response shape instead of passing it through.
 
 2. **The key survives the creating admin leaving.** Revoke is `canAdministerTeam` or org admin. A membership check on the creating admin at request time would kill CI when that person leaves, which is the failure this ticket exists to close. Record `createdBy` in metadata for audit.
 

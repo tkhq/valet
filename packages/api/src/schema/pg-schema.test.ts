@@ -995,6 +995,17 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
+    it("restores apikey.team_id and its index on a database migrated before team keys", async () => {
+      await db.query('ALTER TABLE "apikey" DROP COLUMN "team_id"'); // drops the index too
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("apikey.team_id column");
+      expect(missing).toContain("apikey_teamId_idx index");
+
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      expect(await columnExists("apikey", "team_id")).toBe(true);
+    });
+
     it("detects a missing table and index independently", async () => {
       await db.query('DROP TABLE "artifacts"'); // drops its indexes too
       const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);

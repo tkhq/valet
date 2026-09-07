@@ -1,11 +1,16 @@
 /**
  * Team-scoped `vlt_` keys (TKAI-396). Create, list, and revoke live on
  * `/api/teams/:id/api-keys`. The better-auth `apikey` table stays; `{ teamId,
- * createdBy }` go in metadata. Revoke is a row delete so a later team
- * admin can kill a key the creating admin no longer owns.
+ * createdBy }` go in metadata, and the same team id lands in the indexed
+ * `team_id` column. The auth ladder reads the metadata (it is what
+ * `verifyApiKey` returns); the list and revoke paths read the column. One
+ * UPDATE writes both, and create re-reads both before it returns the
+ * secret, so the two cannot disagree on a row this route made. Revoke is
+ * a row delete so a later team admin can kill a key the creating admin no
+ * longer owns.
  */
 import { Hono } from "hono";
-import { eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { apikey } from "../schema/index.js";
@@ -34,7 +39,26 @@ function createdByFromMetadata(metadata: Record<string, unknown> | null): string
   return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
 
-function toSummary(row: typeof apikey.$inferSelect): TeamApiKeySummary {
+/** The summary columns, and nothing else: the hash never leaves the table. */
+const SUMMARY_COLUMNS = {
+  id: apikey.id,
+  name: apikey.name,
+  start: apikey.start,
+  createdAt: apikey.createdAt,
+  lastRequest: apikey.lastRequest,
+  metadata: apikey.metadata,
+};
+
+type SummaryRow = {
+  id: string;
+  name: string | null;
+  start: string | null;
+  createdAt: Date;
+  lastRequest: Date | null;
+  metadata: string | null;
+};
+
+function toSummary(row: SummaryRow): TeamApiKeySummary {
   const metadata = parseApiKeyMetadata(row.metadata);
   return {
     id: row.id,
@@ -56,10 +80,7 @@ teamApiKeysRouter.get("/:id/api-keys", async (c) => {
     return c.json({ error: "team not found" }, 404);
   }
 
-  const rows = await db
-    .select()
-    .from(apikey)
-    .where(sql`coalesce(${apikey.metadata}, '{}')::jsonb ->> 'teamId' = ${teamId}`);
+  const rows = await db.select(SUMMARY_COLUMNS).from(apikey).where(eq(apikey.teamId, teamId));
   const body: ListTeamApiKeysResponse = { keys: rows.map(toSummary) };
   return c.json(body);
 });
@@ -93,7 +114,8 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   }
 
   // No metadata on the plugin call: better-auth treats that field as
-  // client-writable. The SQL stamp below is the only writer of teamId.
+  // client-writable. The SQL stamp below is the only writer of the team
+  // pin, in both places at once.
   const created = await auth.api.createApiKey({
     body: { name: name.trim() },
     headers: c.req.raw.headers,
@@ -102,9 +124,15 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
     return c.json({ error: "Couldn't create the API key. Sign in again and retry." }, 500);
   }
   const pin = JSON.stringify({ teamId, createdBy: user.id });
-  await db.update(apikey).set({ metadata: pin }).where(eq(apikey.id, created.id));
-  const stamped = await db.select({ metadata: apikey.metadata }).from(apikey).where(eq(apikey.id, created.id)).limit(1);
-  if (teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0]?.metadata)) !== teamId) {
+  await db.update(apikey).set({ metadata: pin, teamId }).where(eq(apikey.id, created.id));
+  const stamped = await db
+    .select({ metadata: apikey.metadata, teamId: apikey.teamId })
+    .from(apikey)
+    .where(eq(apikey.id, created.id))
+    .limit(1);
+  const pinned =
+    stamped[0]?.teamId === teamId && teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId;
+  if (!pinned) {
     await db.delete(apikey).where(eq(apikey.id, created.id));
     return c.json({ error: "Couldn't pin the API key to this team. Retry the create." }, 500);
   }
@@ -131,11 +159,12 @@ teamApiKeysRouter.delete("/:id/api-keys/:keyId", async (c) => {
     return c.json({ error: "team not found" }, 404);
   }
 
-  const rows = await db.select().from(apikey).where(eq(apikey.id, keyId)).limit(1);
-  const row = rows[0];
-  if (!row || teamIdFromApiKeyMetadata(parseApiKeyMetadata(row.metadata)) !== teamId) {
-    return c.json({ error: "api key not found" }, 404);
-  }
-  await db.delete(apikey).where(eq(apikey.id, keyId));
+  // The delete is scoped to the team in the same statement, so a key that
+  // another team owns is never touched, whatever the earlier read said.
+  const deleted = await db
+    .delete(apikey)
+    .where(and(eq(apikey.id, keyId), eq(apikey.teamId, teamId)))
+    .returning({ id: apikey.id });
+  if (deleted.length === 0) return c.json({ error: "api key not found" }, 404);
   return c.json({ ok: true as const });
 });
