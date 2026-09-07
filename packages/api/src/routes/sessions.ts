@@ -1293,7 +1293,7 @@ sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
 
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !isSessionDirectOwner(row, caller)) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await isSessionDirectOwner(db, row, caller))) return c.json({ error: "session not found" }, 404);
   if (caller.type === "team") {
     return c.json(
       { error: "A team API key cannot mint a sandbox credential. Use a personal API key or the web app." },
@@ -1390,7 +1390,7 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !isSessionDirectOwner(row, c.var.principal)) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await isSessionDirectOwner(db, row, c.var.principal))) return c.json({ error: "session not found" }, 404);
 
   const unsettled = await engineStore.listUnsettledSubmissions(id);
   if (unsettled.length > 0) {

@@ -19,7 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { orgMembers, teamMembers, teams } from "../schema/index.js";
 import { userPrincipal as user } from "../lib/request-principal.js";
-import { canAdministerSession, canResolveSessionGate, canViewSession } from "./session-access.js";
+import { canAdministerSession, canResolveSessionGate, canViewSession, isSessionDirectOwner } from "./session-access.js";
 
 let db: AppDb;
 let pglite: PGlite;
@@ -124,6 +124,40 @@ describe("canViewSession", () => {
   it("rejects an org-owned session — org-level view access is a separate, not-yet-built decision", async () => {
     const ok = await canViewSession(db, { userId: "org:org-1", ownerType: "org", ownerId: "org-1" }, user("any-user"));
     expect(ok).toBe(false);
+  });
+});
+
+describe("isSessionDirectOwner", () => {
+  // The member stamped on a team row is its direct owner only while still
+  // on the team: sandbox-jwt, the gateway shell and sandbox replace read
+  // this, and a creator who left must not keep them.
+  it("keeps the stamped creator while they are still a member", async () => {
+    await seedTeam("team_1", [{ userId: "u_creator", role: "member" }]);
+    expect(
+      await isSessionDirectOwner(db, { userId: "u_creator", ownerType: "team", ownerId: "team_1" }, { type: "user", id: "u_creator" }),
+    ).toBe(true);
+  });
+
+  it("drops the stamped creator once they left the team", async () => {
+    await seedTeam("team_1", []);
+    expect(
+      await isSessionDirectOwner(db, { userId: "u_creator", ownerType: "team", ownerId: "team_1" }, { type: "user", id: "u_creator" }),
+    ).toBe(false);
+  });
+
+  it("never treats another member as the direct owner", async () => {
+    await seedTeam("team_1", [{ userId: "u_creator", role: "member" }, { userId: "u_other", role: "admin" }]);
+    expect(
+      await isSessionDirectOwner(db, { userId: "u_creator", ownerType: "team", ownerId: "team_1" }, { type: "user", id: "u_other" }),
+    ).toBe(false);
+  });
+
+  it("answers the team principal for its own rows and a user for theirs", async () => {
+    expect(
+      await isSessionDirectOwner(db, { userId: "u_creator", ownerType: "team", ownerId: "team_1" }, { type: "team", id: "team_1" }),
+    ).toBe(true);
+    expect(await isSessionDirectOwner(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, { type: "user", id: "u1" })).toBe(true);
+    expect(await isSessionDirectOwner(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, { type: "user", id: "u2" })).toBe(false);
   });
 });
 

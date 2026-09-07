@@ -79,7 +79,7 @@ export async function canViewSession(
   session: SessionOwnerLike,
   caller: RequestPrincipal,
 ): Promise<boolean> {
-  if (caller.type === "team") return isSessionDirectOwner(session, caller);
+  if (caller.type === "team") return isSessionDirectOwner(db, session, caller);
   if (session.ownerType === "team") return isTeamMember(db, session.ownerId, caller.id);
   return session.userId === caller.id;
 }
@@ -108,7 +108,7 @@ export async function canAdministerSession(
   session: SessionOwnerLike,
   caller: RequestPrincipal,
 ): Promise<boolean> {
-  if (caller.type === "team") return isSessionDirectOwner(session, caller);
+  if (caller.type === "team") return isSessionDirectOwner(db, session, caller);
   if (session.ownerType === "team") return canAdministerTeam(db, session.ownerId, caller.id);
   return session.userId === caller.id;
 }
@@ -139,12 +139,23 @@ export async function canResolveSessionGate(
  * owns every row its team owns, and nothing else — `agent_sessions.userId`
  * on a team row is the creating admin, which a team key must never inherit.
  *
+ * On a team row the stamped user stays the direct owner only while still
+ * on the team. The stamp never changes, so without that re-check an admin
+ * who minted a team key and later left would keep a terminal into every
+ * session that key created. Read live, never cached, as `isTeamMember` is.
+ *
  * The three routes that hand out a shell or a credential (`sandbox-jwt`,
  * the gateway proxy, sandbox replace) gate on this, not on
  * `canViewSession`: viewing follows membership, but a terminal into the
  * sandbox does not widen with it.
  */
-export function isSessionDirectOwner(session: SessionOwnerLike, caller: RequestPrincipal): boolean {
+export async function isSessionDirectOwner(
+  db: AppDb,
+  session: SessionOwnerLike,
+  caller: RequestPrincipal,
+): Promise<boolean> {
   if (caller.type === "team") return session.ownerType === "team" && session.ownerId === caller.id;
-  return session.userId === caller.id;
+  if (session.userId !== caller.id) return false;
+  if (session.ownerType === "team" && session.ownerId) return isTeamMember(db, session.ownerId, caller.id);
+  return true;
 }

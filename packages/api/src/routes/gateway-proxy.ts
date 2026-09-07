@@ -72,7 +72,7 @@ async function loadOwnedSession(
 ): Promise<SessionRow | null> {
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
   const row = rows[0];
-  if (!row || !isSessionDirectOwner(row, caller)) return null;
+  if (!row || !(await isSessionDirectOwner(db, row, caller))) return null;
   return row;
 }
 
