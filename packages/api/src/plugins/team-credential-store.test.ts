@@ -59,6 +59,31 @@ describe("TeamCredentialStore", () => {
     expect(seen).toEqual(["team_1:u1"]);
   });
 
+  it("follows a reference to a user row that is itself a 1Password reference", async () => {
+    // An org-scoped 1Password reference holds no secret of its own; the
+    // caller dereferences it on the team's scopes. The row must come back
+    // with its metadata intact, or the reference is lost.
+    const sourceRow: StoredCredential = {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Acme/credential", tokenScope: "org" } },
+    };
+    const inner = makeStore({
+      "team:team_1:acme": { type: "api_key", metadata: { delegatedFrom: "u1" } },
+      "user:u1:acme": sourceRow,
+    });
+    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+    await expect(store.get(team, "acme")).resolves.toBe(sourceRow);
+  });
+
+  it("throws when the source user row has neither a secret nor a reference", async () => {
+    const inner = makeStore({
+      "team:team_1:acme": { type: "api_key", metadata: { delegatedFrom: "u1" } },
+      "user:u1:acme": { type: "api_key", metadata: { note: "empty" } },
+    });
+    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+    await expect(store.get(team, "acme")).rejects.toBeInstanceOf(CredentialReferenceBrokenError);
+  });
+
   it("throws when the source user credential is gone", async () => {
     const inner = makeStore({
       "team:team_1:github": { type: "oauth2", metadata: { delegatedFrom: "u1" } },
