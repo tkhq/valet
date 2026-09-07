@@ -81,7 +81,6 @@ import {
   IdpManagedTeamError,
   type IdpManagedMutation,
   isLiveIdpMirror,
-  isTeamMember,
   LastAdminError,
   listTeamMembers,
   listTeamsForOrg,
@@ -713,9 +712,8 @@ teamsRouter.get("/:id/onepassword-refs", async (c) => {
   const id = c.req.param("id");
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  const canRead = (await isTeamMember(db, id, user.id)) || (await canAdministerTeam(db, id, user.id));
-  if (!canRead) return c.json({ error: "team not found" }, 404);
-  const refs = await loadTeamOnePasswordRefs(engineCredentials, id);
+  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  const refs = (await loadTeamOnePasswordRefs(engineCredentials, id)) ?? [];
   return c.json({ refs } satisfies TeamOnePasswordRefsResponse);
 });
 
