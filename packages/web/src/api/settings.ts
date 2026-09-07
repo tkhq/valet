@@ -477,9 +477,14 @@ export function useCreateTeam() {
   return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
     mutationFn: (body) => api.createTeam(body),
     onSuccess: (created) => {
+      // Write the seeded row into a WARM cache only, same as
+      // `usePatchAssistant`. A cold cache stays cold and the invalidation
+      // below fetches the real list: a one-row list seeded here would
+      // satisfy every "list resolved" gate with the caller's own
+      // assistants missing until the refetch landed.
       qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) => {
+        if (prev === undefined) return prev;
         const row = created.defaultAssistant;
-        if (!prev) return { assistants: [row] };
         if (prev.assistants.some((a) => a.id === row.id)) return prev;
         return { assistants: [...prev.assistants, row] };
       });
