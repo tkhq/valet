@@ -7,7 +7,7 @@
  *   - `buildArtifactsPublicRouter` — the token-addressed surface, mounted
  *     BEFORE `buildAuthMiddleware` in app.ts (the webhook-mount pattern).
  *     The token is the capability; each handler resolves the caller itself
- *     via `resolveOptionalUser` because `org`-visibility artifacts serve
+ *     via `resolveOptionalIdentity` because `org`-visibility artifacts serve
  *     logged-in org members and 401 everyone else, while `public` ones
  *     (org opt-in) serve anonymously. Comments live here too — the page
  *     only knows its token — but always REQUIRE a resolved same-org user.
@@ -30,7 +30,7 @@ import type { ValetAuth } from "../auth/index.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
 import { agentSessions, users } from "../schema/index.js";
-import { requireUser, resolveOptionalUser, type AuthUser } from "../middleware/auth.js";
+import { requireUser, resolveOptionalIdentity, type AuthUser, type RequestIdentity } from "../middleware/auth.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -171,6 +171,26 @@ function mayComment(artifact: ArtifactRow, user: AuthUser | undefined): user is 
   return user !== undefined && user.orgId === artifact.orgId;
 }
 
+const TEAM_KEY_ARTIFACT_MESSAGE =
+  "A team API key can only read public artifacts. Sign in or use a personal API key for org pages and comments.";
+
+/**
+ * The caller on the pre-auth artifact surface. This router is mounted
+ * before `refuseTeamKeyOutsideScope`, so it applies that gate itself: a
+ * team key never reads as the creating admin here. It counts as anonymous
+ * (`user` undefined), which lets it read a public artifact and nothing
+ * else, and `teamKey` lets the route name the fix instead of asking a
+ * key to log in.
+ */
+async function resolveArtifactCaller(
+  c: Context<AppEnv>,
+  auth: ValetAuth | null,
+): Promise<{ user: AuthUser | undefined; teamKey: boolean }> {
+  const identity: RequestIdentity | undefined = await resolveOptionalIdentity(c, { auth, db: c.var.providers.db });
+  if (identity?.principal.type === "team") return { user: undefined, teamKey: true };
+  return { user: identity?.user, teamKey: false };
+}
+
 /** Resolve the artifact + caller for a token-addressed comment route.
  * Returns a Response for every failure so handlers stay linear. */
 async function loadCommentContext(
@@ -178,11 +198,13 @@ async function loadCommentContext(
   auth: ValetAuth | null,
 ): Promise<{ artifact: ArtifactRow; user: AuthUser } | { error: Response }> {
   const { db } = c.var.providers;
-  const [artifact, user] = await Promise.all([
+  const [artifact, caller] = await Promise.all([
     getArtifactByToken(db, c.req.param("token")),
-    resolveOptionalUser(c, { auth, db }),
+    resolveArtifactCaller(c, auth),
   ]);
   if (!artifact) return { error: c.json({ error: "not found" }, 404) };
+  if (caller.teamKey) return { error: c.json({ error: TEAM_KEY_ARTIFACT_MESSAGE }, 403) };
+  const { user } = caller;
   const allowPublic =
     artifact.visibility === "public" ? await getAllowPublicArtifacts(db, artifact.orgId) : false;
   const access = decideArtifactAccess({ artifact, allowPublicArtifacts: allowPublic, user });
@@ -269,11 +291,12 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
 
     const { db } = c.var.providers;
     // Independent lookups — overlap them; this is the anonymous hot path.
-    const [artifact, user] = await Promise.all([
+    const [artifact, caller] = await Promise.all([
       getArtifactByToken(db, c.req.param("token")),
-      resolveOptionalUser(c, { auth, db }),
+      resolveArtifactCaller(c, auth),
     ]);
     if (!artifact) return c.json({ error: "not found" }, 404);
+    const { user } = caller;
     // The opt-in only matters for `public` rows — skip the orgs read for
     // the default `org` visibility (`decideArtifactAccess` ignores it).
     const allowPublic =
@@ -284,6 +307,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       return c.json({ error: "not found" }, 404);
     }
     if (access.kind === "login") {
+      if (caller.teamKey) return c.json({ error: TEAM_KEY_ARTIFACT_MESSAGE }, 403);
       return c.json({ error: "This document is shared with a Valet organization. Log in to view it." }, 401);
     }
 

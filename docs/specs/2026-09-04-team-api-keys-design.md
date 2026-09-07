@@ -31,6 +31,10 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
 5. **Authority equals a team member, not an org admin.** A team key may create team-owned sessions, start team-owned workflows, and read team-owned rows. It cannot change org settings, other teams, or personal resources. The middleware allowlist is GET `/api/me`, `/api/sessions*`, and `/api/workflows*`.
 
+   Every session and workflow check reads the request principal, never `c.var.user`. On a team key `c.var.user` is the creating admin, and `agent_sessions.userId` on every row that admin touched is that admin, so a check on the user would hand the key the admin's personal sessions. `canViewSession`, `canAdministerSession`, `canResolveSessionGate` and `WorkflowOwner` all take the principal. The gateway proxy, sandbox replace and `sandbox-jwt` gate on direct ownership (`isSessionDirectOwner`); `sandbox-jwt` refuses a team key because the token binds one user.
+
+   Routes mounted before the scope gate apply it themselves. The pre-auth artifact router resolves its caller through `resolveOptionalIdentity`, which returns the principal with the user. A team key there counts as anonymous: it reads a public artifact, and it is refused with a 403 that names the fix on an org-visibility artifact and on every comment route.
+
 6. **One-time reveal stays as it is.** The secret is shown once at create, same as personal keys.
 
 7. **`metadata.teamId` is server-only.** better-auth `enableMetadata` lets a signed-in caller write metadata on `/api/auth/api-key/create` and `/update`. A before hook refuses `teamId` on those routes. The team create path mints a key with no metadata, then stamps `{ teamId, createdBy }` in SQL and re-reads it before it returns the secret. Personal list, get, update, and delete refuse a row that already has `teamId`.

@@ -2,7 +2,7 @@
  * Unit tests for the artifact read-authorization matrix. Every branch of
  * `decideArtifactAccess` lives here because the HTTP layer cannot exercise
  * anonymity in stub-auth mode (the stub answers for everyone) — see
- * `resolveOptionalUser` in `middleware/auth.ts`.
+ * `resolveOptionalIdentity` in `middleware/auth.ts`.
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";

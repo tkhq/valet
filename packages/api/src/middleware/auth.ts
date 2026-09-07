@@ -107,7 +107,7 @@ export interface BuildAuthMiddlewareOpts {
  * The AuthUser for a resolved better-auth session, or `undefined` when
  * none resolves. The try/catch is the "don't trust the auth provider not
  * to throw" rule — a malformed/oversized cookie must read as no-session,
- * not a 500. Shared by rung 3 of the ladder and `resolveOptionalUser`.
+ * not a 500. Shared by rung 3 of the ladder and `resolveOptionalIdentity`.
  */
 async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Promise<AuthUser | undefined> {
   let sessionResult: Awaited<ReturnType<ValetAuth["api"]["getSession"]>> = null;
@@ -126,15 +126,18 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
   };
 }
 
-interface ApiKeyIdentity {
+/** Who is asking: the user the ladder loaded, and the principal the
+ * request acts as. The two differ on a team `vlt_` key, where `user` is
+ * the creating admin (audit only) and `principal` is the team. */
+export interface RequestIdentity {
   user: AuthUser;
   principal: RequestPrincipal;
 }
 
 /** The AuthUser (and team principal, when metadata carries `teamId`)
  * behind a valid api key, or `undefined` for an invalid, malformed,
- * dangling, or orphaned-team key. Shared by rung 4 and `resolveOptionalUser`. */
-async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<ApiKeyIdentity | undefined> {
+ * dangling, or orphaned-team key. Shared by rung 4 and `resolveOptionalIdentity`. */
+async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<RequestIdentity | undefined> {
   let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
   try {
     result = await auth.api.verifyApiKey({ body: { key } });
@@ -199,20 +202,22 @@ function stubUser(): AuthUser {
  * response: `undefined` means anonymous, and the route decides what that
  * means. Deliberately narrower than the middleware — no internal-token or
  * sandbox rungs, because those principals carry no user identity.
+ *
+ * Returns the whole identity, principal included. A route mounted before
+ * `refuseTeamKeyOutsideScope` never passes that gate, so it must read the
+ * principal itself: handing out only `user` would make a team key read as
+ * the creating admin on every pre-auth surface.
  */
-export async function resolveOptionalUser(
+export async function resolveOptionalIdentity(
   c: Context<AppEnv>,
   opts: BuildAuthMiddlewareOpts,
-): Promise<AuthUser | undefined> {
+): Promise<RequestIdentity | undefined> {
   const { auth, db } = opts;
   if (auth) {
     const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
-    if (sessionUser) return sessionUser;
+    if (sessionUser) return { user: sessionUser, principal: userPrincipal(sessionUser.id) };
     const apiKeyHeader = c.req.header("x-api-key");
-    if (apiKeyHeader) {
-      const identity = await identityFromApiKey(auth, db, apiKeyHeader);
-      return identity?.user;
-    }
+    if (apiKeyHeader) return identityFromApiKey(auth, db, apiKeyHeader);
     return undefined;
   }
 
@@ -230,16 +235,18 @@ export async function resolveOptionalUser(
       const rows = await db.select().from(users).where(eq(users.id, testUserId)).limit(1);
       const row = rows[0];
       if (row) {
-        return {
+        const impersonated: AuthUser = {
           id: row.id,
           email: row.email,
           name: row.name ?? undefined,
           role: row.role,
           orgId: LOCAL_ORG.id,
         };
+        return { user: impersonated, principal: userPrincipal(impersonated.id) };
       }
     }
-    return stubUser();
+    const stub = stubUser();
+    return { user: stub, principal: userPrincipal(stub.id) };
   }
 
   return undefined;

@@ -209,7 +209,7 @@ export function createApp(
 
   // PUBLIC artifact read (artifacts design) — `GET /api/artifacts/:token`.
   // The token in the URL is the capability; the handler resolves the
-  // caller itself (`resolveOptionalUser`) because `org`-visibility
+  // caller itself (`resolveOptionalIdentity`) because `org`-visibility
   // artifacts still serve logged-in members. Mounted BEFORE
   // `buildAuthMiddleware` like the webhook mounts above — do not move it
   // below that line. The share/list/manage half of the surface is the
