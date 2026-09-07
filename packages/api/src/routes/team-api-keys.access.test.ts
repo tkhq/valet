@@ -12,7 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import type { CreateTeamApiKeyResponse, CreateTeamResponse, SessionDetail } from "../wire/types.js";
+import { teamMembers } from "../schema/index.js";
+import type {
+  CreateTeamApiKeyResponse,
+  CreateTeamResponse,
+  EnsureOrchestratorResponse,
+  SessionDetail,
+} from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -183,6 +189,28 @@ describe("team API key reach", () => {
     expect(personal).toEqual({ kind: "close", code: 4040 });
     const team = await openWs(f.wsUrl, f.teamSessionId, f.teamKey);
     expect(team).toEqual({ kind: "frame", type: "init" });
+  });
+
+  it("reaches its own team's default assistant and no other orchestrator surface", async () => {
+    const f = await bootFixture();
+    const headers = { "x-api-key": f.teamKey };
+
+    // The key survives the admin leaving: membership is not re-checked.
+    await api!.providers.db.delete(teamMembers);
+    const own = await fetch(`${f.baseUrl}/api/teams/${f.teamId}/orchestrator`, { method: "POST", headers });
+    expect(own.status).toBe(200);
+    const { sessionId } = (await own.json()) as EnsureOrchestratorResponse;
+    const detail = await fetch(`${f.baseUrl}/api/sessions/${sessionId}`, { headers });
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as SessionDetail).owner).toEqual({ type: "team", id: f.teamId });
+
+    const otherTeamId = await createTeam(f.baseUrl, f.cookie, "Other");
+    const other = await fetch(`${f.baseUrl}/api/teams/${otherTeamId}/orchestrator`, { method: "POST", headers });
+    expect(other.status).toBe(403);
+    const personal = await fetch(`${f.baseUrl}/api/orchestrator`, { method: "POST", headers });
+    expect(personal.status).toBe(403);
+    const probe = await fetch(`${f.baseUrl}/api/teams/${f.teamId}/orchestrator`, { headers });
+    expect(probe.status).toBe(403);
   });
 
   it("cannot mint a sandbox credential: that binds one user, which a team key is not", async () => {

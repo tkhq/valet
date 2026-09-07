@@ -47,14 +47,24 @@ export function clientMetadataHasTeamId(body: unknown): boolean {
   return teamIdFromApiKeyMetadata(body.metadata) !== undefined;
 }
 
+/** True when `path` is `root` itself or a path below it. A prefix match
+ * would also admit `/api/sessionsX`; the boundary is the segment. */
+function underSegment(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}/`);
+}
+
 /**
  * Surfaces a team `vlt_` key may call. Everything else is personal, org, or
  * membership admin — a CI key must not inherit the creating user's rights.
+ * `teamId` is the key's own team: the one orchestrator it may wake is that
+ * team's default assistant, which is what `valet send` targets when no
+ * session is named.
  */
-export function teamApiKeyPathAllowed(path: string, method: string): boolean {
+export function teamApiKeyPathAllowed(path: string, method: string, teamId: string): boolean {
   if (path === "/api/me" && method === "GET") return true;
-  if (path.startsWith("/api/sessions")) return true;
-  if (path.startsWith("/api/workflows")) return true;
+  if (underSegment(path, "/api/sessions")) return true;
+  if (underSegment(path, "/api/workflows")) return true;
+  if (path === `/api/teams/${teamId}/orchestrator` && method === "POST") return true;
   return false;
 }
 

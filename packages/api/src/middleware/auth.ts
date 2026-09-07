@@ -80,7 +80,8 @@ export function requireActingUser(c: Context<AppEnv>): AuthUser | undefined {
 const TEAM_KEY_SCOPE_ERROR =
   "This team API key can only create and read this team's sessions and workflows. Sign in for other settings.";
 
-/** After the ladder: a team principal stays on sessions, workflows, and GET /api/me. */
+/** After the ladder: a team principal stays on sessions, workflows, GET
+ * /api/me, and its own team's orchestrator. */
 export function refuseTeamKeyOutsideScope(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const principal = requirePrincipal(c);
@@ -88,7 +89,7 @@ export function refuseTeamKeyOutsideScope(): MiddlewareHandler<AppEnv> {
       await next();
       return;
     }
-    if (teamApiKeyPathAllowed(c.req.path, c.req.method)) {
+    if (teamApiKeyPathAllowed(c.req.path, c.req.method, principal.id)) {
       await next();
       return;
     }

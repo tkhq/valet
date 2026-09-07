@@ -121,14 +121,33 @@ describe("clientMetadataHasTeamId", () => {
 });
 
 describe("teamApiKeyPathAllowed", () => {
+  const TEAM = "team_1";
+
   it("allows session, workflow, and GET /api/me only", () => {
-    expect(teamApiKeyPathAllowed("/api/me", "GET")).toBe(true);
-    expect(teamApiKeyPathAllowed("/api/me", "PATCH")).toBe(false);
-    expect(teamApiKeyPathAllowed("/api/me/identity-links", "GET")).toBe(false);
-    expect(teamApiKeyPathAllowed("/api/sessions", "POST")).toBe(true);
-    expect(teamApiKeyPathAllowed("/api/workflows/wf_1/runs", "GET")).toBe(true);
-    expect(teamApiKeyPathAllowed("/api/assistants", "POST")).toBe(false);
-    expect(teamApiKeyPathAllowed("/api/credentials", "GET")).toBe(false);
-    expect(teamApiKeyPathAllowed("/api/org/settings", "PATCH")).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/me", "GET", TEAM)).toBe(true);
+    expect(teamApiKeyPathAllowed("/api/me", "PATCH", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/me/identity-links", "GET", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/sessions", "POST", TEAM)).toBe(true);
+    expect(teamApiKeyPathAllowed("/api/workflows/wf_1/runs", "GET", TEAM)).toBe(true);
+    expect(teamApiKeyPathAllowed("/api/assistants", "POST", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/credentials", "GET", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/org/settings", "PATCH", TEAM)).toBe(false);
+  });
+
+  it("anchors on path segments, not prefixes", () => {
+    expect(teamApiKeyPathAllowed("/api/sessions/s1/messages", "POST", TEAM)).toBe(true);
+    expect(teamApiKeyPathAllowed("/api/sessionsX", "GET", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/sessions-export", "GET", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/workflowsX/wf_1", "GET", TEAM)).toBe(false);
+  });
+
+  it("reaches the orchestrator of its own team only, and only by POST", () => {
+    expect(teamApiKeyPathAllowed("/api/teams/team_1/orchestrator", "POST", TEAM)).toBe(true);
+    expect(teamApiKeyPathAllowed("/api/teams/team_2/orchestrator", "POST", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/teams/team_1/orchestrator", "GET", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/teams/team_1/orchestrator/x", "POST", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/teams/team_1", "GET", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/teams/team_1/members", "POST", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/orchestrator", "POST", TEAM)).toBe(false);
   });
 });

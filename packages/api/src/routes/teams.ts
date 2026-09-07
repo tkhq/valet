@@ -309,15 +309,23 @@ teamsRouter.get("/", async (c) => {
  * case this only backfills the `agent_sessions` app row the viewing routes
  * (`GET /api/sessions/:id`, messages, the WS) need, rather than creating a
  * second session.
+ *
+ * A team `vlt_` key reaches this for its own team, with no membership
+ * check on the creating admin: the key survives them leaving (decision 2
+ * of the team-api-keys design). The scope gate already refuses every
+ * other team's id; the principal comparison here is the route's own
+ * guard, so it holds even if that gate changes.
  */
 teamsRouter.post("/:id/orchestrator", async (c) => {
   const { db, engineHost } = c.var.providers;
   const user = c.var.user;
+  const principal = c.var.principal;
   const id = c.req.param("id");
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  const admitted = principal.type === "team" ? principal.id === id : await canViewTeam(db, id, user);
+  if (!admitted) return c.json({ error: "team not found" }, 404);
 
   const { sessionId } = await ensureDefaultAssistantSession(
     { db, engineHost },

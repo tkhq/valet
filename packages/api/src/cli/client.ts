@@ -47,6 +47,9 @@ export interface ListMessagesOpts {
 export class InstanceClient {
   private readonly base: string;
   private readonly apiKey?: string;
+  /** `GET /api/me`, read once per client: a client lives for one command,
+   * and the credential does not change under it. */
+  private identity?: Promise<GetMeResponse>;
 
   constructor(opts: InstanceClientOpts) {
     // Normalize: strip a single trailing slash so `${base}${path}` is clean.
@@ -114,9 +117,19 @@ export class InstanceClient {
 
   // ── orchestrator ───────────────────────────────────────────────────────
 
-  /** `POST /api/orchestrator` — ensure-if-absent, returns the session id. */
-  ensureOrchestrator(): Promise<EnsureOrchestratorResponse> {
-    return this.request<EnsureOrchestratorResponse>("POST", "/api/orchestrator");
+  /**
+   * The caller's default assistant session, ensure-if-absent. A personal
+   * credential posts `/api/orchestrator`. A team key posts
+   * `/api/teams/:id/orchestrator` for its own team, because the key acts
+   * as the team and `/api/orchestrator` would name the person who minted
+   * it. Which one applies is read off `GET /api/me`.
+   */
+  async ensureOrchestrator(): Promise<EnsureOrchestratorResponse> {
+    this.identity ??= this.me();
+    const me = await this.identity;
+    const path =
+      me.role === "team" ? `/api/teams/${encodeURIComponent(me.id)}/orchestrator` : "/api/orchestrator";
+    return this.request<EnsureOrchestratorResponse>("POST", path);
   }
 
   // ── sessions ───────────────────────────────────────────────────────────
