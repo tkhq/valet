@@ -1,16 +1,4 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
-
-const seedDefaultAssistant = vi.hoisted(() => vi.fn());
-vi.mock("../assistants/service.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../assistants/service.js")>();
-  seedDefaultAssistant.mockImplementation(actual.insertDefaultAssistantForPrincipal);
-  return {
-    ...actual,
-    insertDefaultAssistantForPrincipal: (
-      ...args: Parameters<typeof actual.insertDefaultAssistantForPrincipal>
-    ) => seedDefaultAssistant(...args),
-  };
-});
+import { describe, expect, it, beforeEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -120,11 +108,19 @@ describe("teams service", () => {
   });
 
   it("createTeam rolls the team back when the assistant seed throws", async () => {
-    seedDefaultAssistant.mockRejectedValueOnce(new Error("seed failed"));
-
-    await expect(createTeam(db, { orgId, name: "Rollback", creatorUserId: "u1" })).rejects.toThrow(
-      "seed failed",
-    );
+    // The seed is injected rather than module-mocked: a `vi.mock` of the
+    // assistants module resolved to a different instance under CI and the
+    // real seed ran, so the create resolved instead of rejecting.
+    await expect(
+      createTeam(db, {
+        orgId,
+        name: "Rollback",
+        creatorUserId: "u1",
+        seedDefaultAssistant: async () => {
+          throw new Error("seed failed");
+        },
+      }),
+    ).rejects.toThrow("seed failed");
 
     const leftoverTeams = await db.select().from(teams).where(eq(teams.name, "Rollback"));
     const leftoverAssistants = await db

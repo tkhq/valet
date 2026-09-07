@@ -8,6 +8,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
+import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
@@ -245,10 +246,23 @@ async function getMember(
   return rows[0];
 }
 
+/** Seeds the default assistant for one principal inside the caller's
+ * transaction. Same shape as `insertDefaultAssistantForPrincipal`. */
+export type SeedDefaultAssistant = (
+  tx: AppQueryable,
+  orgId: string,
+  principal: Principal,
+) => Promise<AssistantRow>;
+
 export interface CreateTeamOptions {
   orgId: string;
   name: string;
   creatorUserId: string;
+  /**
+   * Replaces the assistant seed. Only a test sets this, to prove the team
+   * insert rolls back when the seed throws. Defaults to the real seed.
+   */
+  seedDefaultAssistant?: SeedDefaultAssistant;
 }
 
 /**
@@ -274,6 +288,7 @@ export type CreatedTeam = TeamRow & {
  * conversation. The seed and the team insert live and die together.
  */
 export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<CreatedTeam> {
+  const seedDefaultAssistant = opts.seedDefaultAssistant ?? insertDefaultAssistantForPrincipal;
   const id = newTeamId();
   const now = Date.now();
   // A team created through this service is always `local`: it belongs to the
@@ -300,7 +315,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Cr
 
       await tx.insert(teams).values(row);
       await tx.insert(teamMembers).values({ teamId: id, userId: opts.creatorUserId, role: "admin" });
-      return insertDefaultAssistantForPrincipal(tx, opts.orgId, { type: "team", id });
+      return seedDefaultAssistant(tx, opts.orgId, { type: "team", id });
     });
     return { ...row, defaultAssistant };
   } catch (err) {
