@@ -450,6 +450,41 @@ describe("buildActionInvoker", () => {
     );
   });
 
+  // Discovery reads the credential before any try/catch the invoker has. A
+  // lease refusal raised there must come back as a failed result that names
+  // the fix, not as a rejected promise the workflow node reports bare.
+  it("team-owned run: a lease refusal during resolveActions returns the typed error", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "team", id: "t1" }, "onepassword", {
+      type: "service_account",
+      metadata: { refs: ["op://Shared/Acme/credential"] },
+    });
+    store.seed({ type: "team", id: "t1" }, "demo", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Shared/Other/password", tokenScope: "org" } },
+    });
+    const dynamicAction = countingAction({ id: "demo.dyn" });
+    const actionPlugin: ActionPlugin = {
+      service: "demo",
+      actions: [],
+      resolveActions: async ({ credentials }) => {
+        await credentials.get();
+        return [dynamicAction.action];
+      },
+    };
+    const actionPluginByService = actionPluginByServiceOf("demo", actionPlugin);
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "dyn", params: { msg: "hi" }, invocationId: "workflow:r1:team-lease-dyn" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && "error" in result ? result.error : "").toContain("Ask a team admin");
+    expect(dynamicAction.calls()).toBe(0);
+  });
+
   it("team-owned run: an unknown action reports the typo, not a missing credential", async () => {
     const fixture = countingAction();
     const actionPlugin: ActionPlugin = { service: "demo", actions: [fixture.action] };

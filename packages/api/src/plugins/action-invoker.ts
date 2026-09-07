@@ -339,7 +339,15 @@ async function computeResult(
       const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
       if (refusal) return refusal;
     }
-    const resolved = await entry.actionPlugin.resolveActions({ credentials });
+    // A credential read can throw a typed refusal (a broken delegation, a
+    // ref outside the team's 1Password lease). That message names the fix,
+    // so it comes back as a failed result, the same way execute reports.
+    let resolved: PluginAction[];
+    try {
+      resolved = await entry.actionPlugin.resolveActions({ credentials });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     action = findAction(resolved, req.service, req.action);
   }
   if (!action) return unknownAction(req);
