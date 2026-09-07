@@ -949,6 +949,7 @@ describe("team credential scope (TKAI-205)", () => {
       body: JSON.stringify({ teamId: team.id }),
     });
     expect(occupied.status).toBe(409);
+    expect(((await occupied.json()) as { error: string }).error).toContain("Ask a team admin to disconnect it first.");
 
     const revoke = await fetch(
       `${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`,
@@ -1005,6 +1006,74 @@ describe("team credential scope (TKAI-205)", () => {
         "slack is provided by the organization. Team runs use the organization's slack connection; configure it in Settings → Organization.",
     });
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack")).toBeNull();
+  });
+
+  it("lists a team row's health fields and 1Password reference like a user row", async () => {
+    const team = await teamWithMember();
+    api!.providers.onePassword = new FakeOnePasswordService();
+    const putDirect = await fetch(`${api!.baseUrl}/api/credentials/github-team`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "oauth2",
+        accessToken: "team-gh",
+        scope: "team",
+        teamId: team.id,
+        metadata: { login: "octo", identityOnly: true, refreshFailedAt: 1700000000000 },
+      }),
+    });
+    expect(putDirect.status).toBe(200);
+    const putRef = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        scope: "team",
+        teamId: team.id,
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(putRef.status).toBe(200);
+
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          service: "github-team",
+          type: "oauth2",
+          login: "octo",
+          identityOnly: true,
+          refreshFailedAt: 1700000000000,
+        }),
+        expect.objectContaining({ service: "linear", type: "api_key", onepasswordRef: "op://vault/item/field" }),
+      ]),
+    );
+    expect(JSON.stringify(listed)).not.toContain("team-gh");
+  });
+
+  it("names the corrective action on a malformed delegate body and a non-shareable credential", async () => {
+    const team = await teamWithMember();
+    const malformed = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: "{not json",
+    });
+    expect(malformed.status).toBe(400);
+    expect(((await malformed.json()) as { error: string }).error).toContain("Send a JSON body with teamId.");
+
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "app_install",
+      accessToken: "ghs_install",
+    });
+    const unshareable = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(unshareable.status).toBe(400);
+    expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect github for the team instead.");
   });
 
   it("refuses to overwrite a direct team credential, even when a pre-read saw the slot empty", async () => {

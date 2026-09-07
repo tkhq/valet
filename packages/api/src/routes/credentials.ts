@@ -44,6 +44,7 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq, sql } from "drizzle-orm";
+import { fromJsonbColumn } from "@valet/store-postgres";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
@@ -224,7 +225,6 @@ credentialsRouter.get("/", async (c) => {
       .from(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, owner.id)));
     for (const row of rows) {
-      if (!isCredentialKind(row.type)) continue;
       const from = delegatedFromMeta(row.metadata);
       let referenceBroken: boolean | undefined;
       if (from) {
@@ -232,21 +232,21 @@ credentialsRouter.get("/", async (c) => {
         const source = stillMember ? await engineCredentials.get({ type: "user", id: from }, row.service) : null;
         referenceBroken = !stillMember || source === null || !rowHasSecret(source);
       }
-      listed.push({
-        service: row.service,
-        type: row.type,
-        scopes: Array.isArray(row.scopes) ? row.scopes.filter((s): s is string => typeof s === "string") : undefined,
-        connectedAt: new Date(row.createdAt).toISOString(),
-        expiresAt: row.expiresAt ?? undefined,
-        login:
-          row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
-            ? typeof (row.metadata as Record<string, unknown>).login === "string"
-              ? ((row.metadata as Record<string, unknown>).login as string)
-              : undefined
-            : undefined,
-        delegatedFrom: from,
-        referenceBroken,
-      });
+      // The same summary a user row gets, so health fields and the
+      // 1Password reference are not lost. Secret columns are left out;
+      // `toSummary` never reads them.
+      const summary = await toSummary(
+        row.service,
+        {
+          type: row.type,
+          expiresAt: row.expiresAt ?? undefined,
+          scopes: Array.isArray(row.scopes) ? row.scopes.filter((s): s is string => typeof s === "string") : undefined,
+          metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata),
+        },
+        new Date(row.createdAt).toISOString(),
+        { delegatedFrom: from, referenceBroken },
+      );
+      if (summary) listed.push(summary);
     }
     return c.json({ credentials: listed } satisfies ListCredentialsResponse);
   }
@@ -498,7 +498,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   try {
     body = (await c.req.json()) as DelegateCredentialRequest;
   } catch {
-    return c.json({ error: "invalid JSON body" }, 400);
+    return c.json({ error: "invalid JSON body. Send a JSON body with teamId." }, 400);
   }
   if (!body.teamId || typeof body.teamId !== "string") {
     return c.json({ error: "teamId is required. Pass the team to share this credential with." }, 400);
@@ -518,7 +518,10 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     );
   }
   if (!isCredentialKind(source.type)) {
-    return c.json({ error: `${service} cannot be shared with a team.` }, 400);
+    return c.json(
+      { error: `${service} cannot be shared with a team. Ask a team admin to connect ${service} for the team instead.` },
+      400,
+    );
   }
   // Insert-only. `engineCredentials.save` upserts on the owner+service key,
   // so a list-then-save would let a concurrent delegation, or an admin's
@@ -540,7 +543,10 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     .onConflictDoNothing()
     .returning({ service: credentials.service });
   if (inserted.length === 0) {
-    return c.json({ error: `This team already has a ${service} credential.` }, 409);
+    return c.json(
+      { error: `This team already has a ${service} credential. Ask a team admin to disconnect it first.` },
+      409,
+    );
   }
   const resp: DelegateCredentialResponse = { ok: true };
   return c.json(resp, 201);
