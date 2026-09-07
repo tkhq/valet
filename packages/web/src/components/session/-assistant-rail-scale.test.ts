@@ -65,14 +65,18 @@ describe("groupAssistants", () => {
       [ownedBy("t1", "p1"), ownedBy("t1", "p2"), ownedBy("t1", "p3")],
       teams,
     );
-    expect(groups.map((g) => g.assistants.map((a) => a.id))).toEqual([["p1", "p2", "p3"], []]);
+    expect(groups.map((g) => g.assistants.map((a) => a.id))).toEqual([[], ["p1", "p2", "p3"], []]);
   });
 
   it("drops assistants of a team the caller may not open", () => {
     // `eligibleTeams` has already removed the team, so its assistant has no
     // group to sit in — an org admin does not get a team's assistant in
     // their own sidebar just because they administer the org.
-    expect(groupAssistants([ownedBy("t9", "x1")], teams).map((g) => g.key)).toEqual(["t1", "t2"]);
+    expect(groupAssistants([ownedBy("t9", "x1")], teams).map((g) => g.key)).toEqual([
+      "user",
+      "t1",
+      "t2",
+    ]);
     expect(groupAssistants([ownedBy("t9", "x1")], teams).flatMap((g) => g.assistants)).toEqual([]);
   });
 
@@ -83,6 +87,15 @@ describe("groupAssistants", () => {
 
   it("renders nothing while the list is unresolved", () => {
     expect(groupAssistants(undefined, teams)).toEqual([]);
+  });
+
+  it("emits your own group when you own nothing yet, so the create action has a home", () => {
+    // The `+` lives in the group header. A caller with no assistant of
+    // their own is exactly who needs it, and without the group the rail
+    // drew an empty strip with no header and no way to create one.
+    const groups = groupAssistants([], teams);
+    expect(groups.map((g) => g.key)).toEqual(["user", "t1", "t2"]);
+    expect(groups[0]?.assistants).toEqual([]);
   });
 
   it("still emits a group for a team that owns no assistant", () => {

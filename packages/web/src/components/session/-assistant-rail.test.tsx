@@ -277,6 +277,20 @@ describe("AssistantRail", () => {
     expect(screen.getByTestId("thread-tree")).toBeTruthy();
   });
 
+  it("draws your own group and `+` when you own no assistant yet", () => {
+    // A new user has nothing to list, and the block is the only place the
+    // create action lives. An empty bordered strip with no header would
+    // leave them no path to a first assistant.
+    assistantsData = { assistants: [] };
+    renderRail();
+    expect(screen.getByText("Your assistants")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "New assistant for Your assistants" }),
+    ).toBeTruthy();
+    // No assistant to scope to: the tree falls back to your own session.
+    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe("own");
+  });
+
   it("keeps a team group out of the block when the organizations feature is off", () => {
     orgData = org(false);
     teamsData = { teams: [team()] };

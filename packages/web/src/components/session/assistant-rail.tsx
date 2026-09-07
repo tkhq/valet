@@ -191,6 +191,10 @@ export interface AssistantGroup {
  * A user-owned assistant is yours by definition — the API returns only the
  * assistants you can view, and a user's assistant is visible to that user
  * alone.
+ *
+ * Your own group is always present, empty or not, for the same reason an
+ * empty team's is: the `+` create action lives in the group header, and a
+ * caller with no assistant yet is exactly who needs it.
  */
 export function groupAssistants(
   assistants: AssistantSummary[] | undefined,
@@ -200,7 +204,7 @@ export function groupAssistants(
   const groups: AssistantGroup[] = [];
 
   const own = assistants.filter((a) => a.owner.type === "user");
-  if (own.length > 0) groups.push({ key: "user", label: "Your assistants", assistants: own });
+  groups.push({ key: PERSONAL, label: "Your assistants", assistants: own });
 
   for (const team of teams) {
     const owned = assistants.filter((a) => a.owner.type === "team" && a.owner.id === team.id);
