@@ -868,8 +868,8 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
 });
 
 describe("team credential scope (TKAI-205)", () => {
-  async function teamWithMember() {
-    api = await bootTestApi();
+  async function teamWithMember(plugins: ValetPlugin[] = []) {
+    api = await bootTestApi({ plugins });
     const team = await createTeam(api.providers.db, {
       orgId: "local-org",
       name: "Platform",
@@ -959,6 +959,52 @@ describe("team credential scope (TKAI-205)", () => {
       await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
     ).json()) as ListCredentialsResponse;
     expect(after.credentials).toEqual([]);
+  });
+
+  // A team row is read with org-scoped 1Password tokens only, so a
+  // personal-scope reference stored at team scope could never resolve.
+  it("refuses a team-scope 1Password reference with a personal token, naming the fix", async () => {
+    const team = await teamWithMember();
+    const fake = new FakeOnePasswordService();
+    api!.providers.onePassword = fake;
+    const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        scope: "team",
+        teamId: team.id,
+        onepassword: { reference: "op://vault/item/field", tokenScope: "personal" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    const body = (await put.json()) as { error: string };
+    expect(body.error).toContain("tokenScope to org");
+    expect(body.error).toContain("store the secret directly");
+    expect(fake.resolveCalls).toEqual([]);
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+  });
+
+  // Team runs use the org connection for a service the org provides
+  // (design decision 8), so a team row for it would never be read.
+  it("refuses a team-scope PUT for an org-provided service and stores nothing", async () => {
+    const orgProvided: ValetPlugin = {
+      name: "slack",
+      version: "0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const team = await teamWithMember([orgProvided]);
+    const put = await fetch(`${api!.baseUrl}/api/credentials/slack`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "bot_token", accessToken: "xoxb-team", scope: "team", teamId: team.id }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error:
+        "slack is provided by the organization. Team runs use the organization's slack connection; configure it in Settings → Organization.",
+    });
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack")).toBeNull();
   });
 
   it("refuses to overwrite a direct team credential, even when a pre-read saw the slot empty", async () => {

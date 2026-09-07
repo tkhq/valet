@@ -280,6 +280,19 @@ credentialsRouter.put("/:service", async (c) => {
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
 
+  // Team runs use the org connection for a service the org provides
+  // (team-credentials design, decision 8). A team row for it would never
+  // be read, so the write is refused and the caller is sent to the org
+  // path.
+  if (scope === "team" && findCredentialDeclaration(plugins, service)?.requires?.orgCredential) {
+    return c.json(
+      {
+        error: `${service} is provided by the organization. Team runs use the organization's ${service} connection; configure it in Settings → Organization.`,
+      },
+      400,
+    );
+  }
+
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
   // rejected — the token could never power a working integration. Org-scope
@@ -389,6 +402,18 @@ credentialsRouter.put("/:service", async (c) => {
     if (scope === "org" && parsed.tokenScope === "personal") {
       return c.json(
         { error: "An org-scoped credential cannot use a personal 1Password token. Set tokenScope to org." },
+        400,
+      );
+    }
+    // A team row is resolved with org-scoped tokens only
+    // (`resolveTeamCredentialRead`), so a personal reference would never
+    // resolve.
+    if (scope === "team" && parsed.tokenScope === "personal") {
+      return c.json(
+        {
+          error:
+            "A team credential cannot use a personal 1Password token. Set tokenScope to org, or store the secret directly.",
+        },
         400,
       );
     }
