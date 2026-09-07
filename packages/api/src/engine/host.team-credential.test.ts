@@ -13,9 +13,11 @@ import { githubInstallations } from "../schema/index.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
+import { GitHubAuthError } from "../services/github-tokens.js";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
 import { EngineHost, sessionPrincipal } from "./host.js";
+import { githubTokenArgsForOwner } from "../services/session-github-token.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 
@@ -130,6 +132,86 @@ describe("EngineHost team-owned session credentials", () => {
     await expect(session.credentialProvider().get("github")).rejects.toThrow(
       /no GitHub credential|GitHub App/,
     );
+  });
+
+  it("unbound team GitHub with an org PAT and no installation does not use the org PAT", async () => {
+    const { appDb, credentials } = await harness();
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await credentials.save({ type: "org", id: orgId }, "github", {
+      type: "api_key",
+      accessToken: "org-pat-must-not-win",
+      metadata: { login: "acme-bot" },
+    });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-team-gh-org-pat", teamMeta);
+    const read = session.credentialProvider().get("github");
+    await expect(read).rejects.toBeInstanceOf(GitHubAuthError);
+    await expect(read).rejects.toThrow(/install/);
+  });
+
+  it("unbound team GitHub with an org PAT and an installation resolves the installation token", async () => {
+    const { appDb, credentials } = await harness();
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await credentials.save({ type: "org", id: orgId }, "github", {
+      type: "api_key",
+      accessToken: "org-pat-must-not-win",
+      metadata: { login: "acme-bot" },
+    });
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_team_pat",
+      orgId,
+      installationId: 444,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-team-gh-org-pat-inst", teamMeta);
+    const cred = await session.credentialProvider().get("github");
+
+    expect(cred?.accessToken).toBe("inst-444");
+  });
+
+  it("githubTokenArgsForOwner selects the App for a non-user owner with or without a repo", () => {
+    const team = { type: "team", id: teamId };
+    expect(githubTokenArgsForOwner(team, orgId, "sess", undefined)).toEqual({
+      orgId,
+      sessionId: "sess",
+      purpose: "api",
+      auth: "app",
+    });
+    expect(githubTokenArgsForOwner(team, orgId, "sess", { owner: "acme", name: "repo" })).toEqual({
+      orgId,
+      sessionId: "sess",
+      purpose: "api",
+      auth: "app",
+      repo: { owner: "acme", name: "repo" },
+    });
+    expect(githubTokenArgsForOwner({ type: "org", id: orgId }, orgId, "sess", undefined)).toEqual({
+      orgId,
+      sessionId: "sess",
+      purpose: "api",
+      auth: "app",
+    });
+    expect(githubTokenArgsForOwner({ type: "user", id: userId }, orgId, "sess", undefined)).toEqual({
+      orgId,
+      userId,
+      sessionId: "sess",
+      purpose: "api",
+    });
   });
 
   it("resolves Slack to the org bot token with no owner_slack_user_id", async () => {

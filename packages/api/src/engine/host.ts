@@ -1506,11 +1506,12 @@ export class EngineHost {
    *
    *  - `github` (when `githubTokenDeps`+`db` are wired) → `resolveSessionGitHubToken`
    *    (`purpose: "api"`). A user owner keeps `userId` so their PAT or
-   *    App-OAuth can win. A team or org owner omits `userId`. `auth: "app"`
-   *    is set only when a repo is known (primary `session_repos` binding).
-   *    Without a binding, resolution stays `auto` so a sole installation or
-   *    org PAT can win. A `GitHubAuthError` propagates unchanged — the
-   *    engine surfaces it as the tool's error result, hint text intact.
+   *    App-OAuth can win. A team or org owner omits `userId` and always
+   *    selects `auth: "app"`: the primary `session_repos` binding names the
+   *    installation, else the org's sole installation. A member credential
+   *    or the org PAT never backs a team session. A `GitHubAuthError`
+   *    propagates unchanged — the engine surfaces it as the tool's error
+   *    result, hint text intact.
    *    Synthesizes a `StoredCredential` the engine's `credentialProvider`
    *    maps to `{ accessToken }`.
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit

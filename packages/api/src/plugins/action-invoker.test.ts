@@ -1373,7 +1373,8 @@ describe("buildActionInvoker: github service resolution", () => {
     // No silent fallback to `user-tok` — the whole point of the strict tier.
     expect(result).toEqual({
       ok: false,
-      error: "the GitHub App is not installed on other-org",
+      error:
+        "the GitHub App is not installed on other-org — open Settings → Organization → GitHub and install it on other-org",
     });
   });
 

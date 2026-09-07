@@ -126,14 +126,31 @@ describe("resolveGitHubToken", () => {
 
       await expect(
         resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "acme", name: "repo" }, auth: "app" }),
-      ).rejects.toThrow(new GitHubAuthError("the GitHub App is not installed on acme"));
+      ).rejects.toThrow(
+        new GitHubAuthError("the GitHub App is not installed on acme — open Settings → Organization → GitHub and install it on acme"),
+      );
     });
 
-    it("THROWS when no repo owner is provided", async () => {
+    it("returns the org's sole installation token when no repo owner is provided", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      // A healthy org PAT IS available — must be ignored under explicit "app".
+      await saveOrgGithub({ type: "api_key", accessToken: "org-pat-tok", metadata: { login: "acme-bot" } });
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+      });
+
+      const result = await resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app" });
+      expect(result).toEqual({ token: "inst-999", source: "installation" });
+    });
+
+    it("THROWS when no repo owner is provided and no sole installation exists — never falls back to an org PAT", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await saveOrgGithub({ type: "api_key", accessToken: "org-pat-tok", metadata: { login: "acme-bot" } });
       fixture = startGithubFixture();
-      await expect(resolveGitHubToken(deps(), { orgId, userId, purpose: "api", auth: "app" })).rejects.toBeInstanceOf(
-        GitHubAuthError,
-      );
+      const read = resolveGitHubToken(deps(), { orgId, userId, purpose: "api", auth: "app" });
+      await expect(read).rejects.toBeInstanceOf(GitHubAuthError);
+      await expect(read).rejects.toThrow(/bind a repository|install the App/);
     });
   });
 

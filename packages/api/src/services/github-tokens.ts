@@ -8,8 +8,10 @@
  * ── Resolution contract (spec decision 3, verbatim) ─────────────────────
  * `resolveGitHubToken(deps, { orgId, userId?, purpose, repo?, auth? })`:
  *
- *   - Explicit `auth: "app"`  → installation token for `repo.owner`, or THROW
- *     (`GitHubAuthError`). Never falls back to a user credential.
+ *   - Explicit `auth: "app"`  → installation token for `repo.owner`, or the
+ *     org's SOLE non-suspended installation when no repo is given, or THROW
+ *     (`GitHubAuthError`). Never falls back to a user credential or an org
+ *     PAT.
  *   - Explicit `auth: "user"` → the USER's healthy App-OAuth/PAT credential,
  *     or THROW naming the gap. Never falls back to an installation token,
  *     and never matches an org-owned PAT (see below) — "user" means the
@@ -490,12 +492,22 @@ export async function resolveGitHubToken(
 
   // ── Explicit selections are strict — no fallback across them. ──
   if (auth === "app") {
-    if (!req.repo) {
-      throw new GitHubAuthError("the GitHub App requires a repository owner but none was provided");
+    if (req.repo) {
+      const token = await mintInstallation(deps, req.orgId, req.repo.owner);
+      if (!token) {
+        throw new GitHubAuthError(
+          `the GitHub App is not installed on ${req.repo.owner} — open Settings → Organization → GitHub and install it on ${req.repo.owner}`,
+        );
+      }
+      return { token, source: "installation" };
     }
-    const token = await mintInstallation(deps, req.orgId, req.repo.owner);
-    if (!token) throw new GitHubAuthError(`the GitHub App is not installed on ${req.repo.owner}`);
-    return { token, source: "installation" };
+    // No repo names an owner: only the org's SOLE installation is
+    // unambiguous. Zero or several installations throw, never an org PAT.
+    const sole = await resolveSoleInstallationToken(deps, req.orgId);
+    if (sole) return { token: sole, source: "installation" };
+    throw new GitHubAuthError(
+      "the GitHub App has no single installation to use and no repository names an owner — bind a repository to the session, or open Settings → Organization → GitHub and install the App on exactly one account",
+    );
   }
 
   if (auth === "user") {

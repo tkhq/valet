@@ -218,7 +218,9 @@ describe("api integration: github tool node credential selection", () => {
 
     const checkpoint = detail.checkpoints.find((c) => c.nodeId === "comment");
     expect(checkpoint?.status).toBe("failed");
-    expect(checkpoint?.error).toBe("the GitHub App is not installed on acme");
+    expect(checkpoint?.error).toBe(
+      "the GitHub App is not installed on acme — open Settings → Organization → GitHub and install it on acme",
+    );
     expect(detail.run.outcome).toBe("failed");
   }, 30_000);
 });

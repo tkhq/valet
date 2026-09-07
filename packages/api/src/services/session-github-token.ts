@@ -56,11 +56,13 @@ export async function primaryRepoBinding(
 }
 
 /**
- * GitHub token args for a session owner. A user principal keeps `userId` so
- * their PAT or App-OAuth can win. A team or org principal omits `userId` so
- * a member PAT cannot. `auth: "app"` is set only when a repo is known —
- * `resolveGitHubToken` requires a repo owner for that selection. Without a
- * repo, resolution stays `auto` so a sole installation or org PAT can win.
+ * GitHub token args for a session owner. A user principal keeps `userId`
+ * so their PAT or App-OAuth can win. A team or org principal omits `userId`
+ * and always selects `auth: "app"`, so only an installation token can back
+ * the run: never a member credential, and never the org PAT row, because
+ * `github` declares no org credential. With a repo the App must be
+ * installed on that repo's owner. Without one, the org's sole installation
+ * is used. Either miss is a `GitHubAuthError` that names the install step.
  */
 export function githubTokenArgsForOwner(
   owner: { type: string; id: string },
@@ -81,7 +83,7 @@ export function githubTokenArgsForOwner(
   if (knownRepo) {
     return { orgId, sessionId, purpose: "api", auth: "app", repo: knownRepo };
   }
-  return { orgId, sessionId, purpose: "api" };
+  return { orgId, sessionId, purpose: "api", auth: "app" };
 }
 
 /**
