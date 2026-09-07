@@ -476,7 +476,7 @@ describe("POST /api/workflows/:id/runs", () => {
 
     expect(stub.started).toHaveLength(1);
     expect(stub.started[0].runId).toBe(runId);
-    expect(stub.started[0].owner).toEqual({ ownerType: "user", ownerId: "local-user" });
+    expect(stub.started[0].owner).toEqual({ ownerType: "user", ownerId: "local-user", actorUserId: "local-user" });
   });
 
   it("404s starting a run against another owner's workflow", async () => {
