@@ -106,8 +106,12 @@ A default cannot be archived while it is the default. Promote another first.
 engine. `/chat` materializes the session on open. The web client invalidates
 the assistants list on that write (`qkAssistants.list()`, the bare prefix)
 so `/chat` sees the new default instead of treating the team as empty.
-A team workspace with no assistant (sync-created, or older than this
-change) shows a notice. It must not open the caller's personal conversation.
+Identity-provider mirrors and config-declared teams seed the same way, and
+a team from before this change gets its default from a one-time pass at
+boot (`seedMissingTeamDefaults`). A team workspace with no assistant is
+then one whose default was retired (TKAI-296 below); it shows a notice with
+a create action for an admin. It must not open the caller's personal
+conversation.
 
 Amended 2026-08-31 (TKAI-296): one exception, session delete. `DELETE
 /api/sessions/:id` on a team assistant's session retires the assistant in
