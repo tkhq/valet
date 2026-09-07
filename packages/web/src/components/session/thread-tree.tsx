@@ -180,15 +180,23 @@ export function ThreadTree({ sessionId: override, showChildren = true }: ThreadT
   // the default behavior.
   const sessionId = override ?? info.data?.sessionId;
 
-  if (!sessionId) {
-    return (
-      <div className="px-4 py-6 text-center text-xs text-muted">
-        <Spinner size={14} />
-      </div>
-    );
-  }
+  if (!sessionId) return <ThreadTreeWaiting />;
 
   return <ThreadTreeInner sessionId={sessionId} showChildren={showChildren} />;
+}
+
+/**
+ * The tree's empty state: what stands in its place while the session it
+ * would list is not yet known, or not yet created. The rail draws it for an
+ * assistant whose session the page is still ensuring, so the tree's reads
+ * do not run against a session that does not exist.
+ */
+export function ThreadTreeWaiting() {
+  return (
+    <div className="px-4 py-6 text-center text-xs text-muted">
+      <Spinner size={14} />
+    </div>
+  );
 }
 
 export interface ThreadTreeProps {

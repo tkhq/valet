@@ -3,7 +3,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import type { TeamSummary } from "@valet/api/wire";
 import { useEnsureOrchestrator, useOrchestratorInfo } from "~/api/orchestrator";
-import { useAssistants, useCreateAssistant, useEnsureAssistantSession } from "~/api/assistants";
+import { useAssistants, useCreateAssistant, useEnsuredAssistantSession } from "~/api/assistants";
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { ChildPanel } from "~/components/session/child-panel";
@@ -69,14 +69,14 @@ function ChatPage() {
   const scope = useWorkspaceScope();
   const navigate = useNavigate({ from: Route.fullPath });
   const ensure = useEnsureOrchestrator();
-  const ensureAssistantSession = useEnsureAssistantSession();
-  // Session ids this page has confirmed exist, so it never mounts the
-  // conversation on one that is still being created. `POST /api/assistants`
-  // writes no session, so the read below would 404 and `SessionView` renders
-  // that as a terminal "Failed to load session" with no retry — the first
-  // thing you see after creating an assistant. Nothing recovers it, because
-  // the read already resolved; only a reload does. Waiting for the ensure is
-  // deterministic where invalidating after the fact is a race.
+  // Session ids the `GET /info` fallback below has confirmed exist, so the
+  // page never mounts the conversation on one that is still being created.
+  // The read would 404 and `SessionView` renders that as a terminal "Failed
+  // to load session" with no retry. Nothing recovers it, because the read
+  // already resolved; only a reload does. Waiting for the ensure is
+  // deterministic where invalidating after the fact is a race. An assistant
+  // chosen from the list goes through `useEnsuredAssistantSession` instead,
+  // which the rail shares.
   const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
   const markOpened = useCallback(
     ({ sessionId: id }: { sessionId: string }) =>
@@ -139,17 +139,19 @@ function ChatPage() {
   //
   // One call for every assistant, default or not: `POST
   // /api/assistants/:id/session` is addressed by assistant, so nothing here
-  // branches on which one is default or who owns it. The owner-addressed
-  // routes remain the fallback for exactly one case — a cold load where the
-  // assistants list has not arrived, so there is no id to send yet and only
-  // `GET /info` knows the caller's own session.
+  // branches on which one is default or who owns it. Since a team's default
+  // assistant is seeded as a row alone, the id can name a session no call
+  // has created yet, so no read of it may run before this answers — the
+  // gate below holds `SessionView` back, and the rail holds its thread tree
+  // on the same query. The owner-addressed route remains the fallback for
+  // exactly one case — a cold load where the assistants list has not
+  // arrived, so there is no id to send yet and only `GET /info` knows the
+  // caller's own session.
   const activeId = chosen?.id;
+  const ensured = useEnsuredAssistantSession(activeId);
   useEffect(() => {
-    if (choice.kind === "empty-team") return;
-    if (activeId) ensureAssistantSession.mutate(activeId, { onSuccess: markOpened });
-    else if (choice.kind === "personal" && personalSessionId) {
-      ensure.mutate(undefined, { onSuccess: markOpened });
-    }
+    if (activeId || choice.kind !== "personal" || !personalSessionId) return;
+    ensure.mutate(undefined, { onSuccess: markOpened });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, personalSessionId, choice.kind]);
 
@@ -219,9 +221,27 @@ function ChatPage() {
 
   if (!sessionId) return null;
 
+  if (activeId && ensured.error) {
+    return (
+      <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
+        <div>
+          Couldn’t open this assistant. {errorText(ensured.error)}
+          <div className="mt-2">
+            <button type="button" className="underline" onClick={() => ensured.refetch()}>
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // The ensure for this session has not come back yet. A spinner for the few
-  // milliseconds it takes beats an error the page cannot clear.
-  if (!opened.has(sessionId)) {
+  // milliseconds it takes beats an error the page cannot clear. `opened`
+  // covers the `GET /info` fallback, which can answer before the list does;
+  // once the list names the same session, the query's answer is not waited
+  // on again, so the conversation stays mounted.
+  if (!opened.has(sessionId) && !ensured.isSuccess) {
     return (
       <div className="flex-1 grid place-items-center text-sm text-muted">
         <Spinner /> Opening…

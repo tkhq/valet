@@ -6,8 +6,10 @@ import {
   useArchiveAssistant,
   useAssistants,
   useCreateAssistant,
+  useEnsuredAssistantSession,
   usePatchAssistant,
 } from "~/api/assistants";
+import { useOrchestratorInfo } from "~/api/orchestrator";
 import { useNotifications } from "~/api/queries";
 import { attentionSessionIds } from "~/lib/use-attention-ping";
 import { useLivePendingGates } from "~/hooks/use-live-pending-gates";
@@ -28,7 +30,7 @@ import {
 import { errorText } from "~/lib/error-text";
 import { cn } from "~/lib/cn";
 import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
-import { ThreadTree } from "./thread-tree";
+import { ThreadTree, ThreadTreeWaiting } from "./thread-tree";
 
 /**
  * The `/chat` sidebar: every assistant you can talk to, grouped by who owns
@@ -80,6 +82,19 @@ export function AssistantRail() {
   // stale `?assistant=` on a team stays on that team.
   const choice = chooseChatAssistant(groups, scope.key, search.assistant);
   const active = choice.kind === "open" || choice.kind === "personal" ? choice.assistant : undefined;
+
+  // The active assistant's session may not exist yet: creating a team seeds
+  // its default assistant as a row alone, and the tree's reads 404 on a
+  // session nobody has opened. The chat page ensures it; this rail waits on
+  // the same call (one POST, shared through the query cache) and draws the
+  // tree's empty state until it answers. Your own session is the exception:
+  // the tree already mounted on it through the `GET /info` fallback before
+  // the list arrived, and unmounting it for the beat the ensure takes would
+  // blank the sidebar on every cold load.
+  const ensured = useEnsuredAssistantSession(active?.id);
+  const info = useOrchestratorInfo();
+  const treeReady =
+    active !== undefined && (ensured.isSuccess || active.sessionId === info.data?.sessionId);
 
   // Costs no request: the bell is already polling this query. For the
   // session with an open WS (the open conversation), the stream store's
@@ -134,8 +149,9 @@ export function AssistantRail() {
           `GET /api/orchestrator/children?sessionId=` scopes the list to that
           assistant's session (access-checked), so a team worker trigger's
           child appears under the team assistant that spawned it. */}
-      {choice.kind !== "empty-team" &&
-        (active ? <ThreadTree sessionId={active.sessionId} /> : <ThreadTree />)}
+      {choice.kind !== "empty-team" && active === undefined && <ThreadTree />}
+      {active !== undefined &&
+        (treeReady ? <ThreadTree sessionId={active.sessionId} /> : <ThreadTreeWaiting />)}
       {renaming && (
         <RenameAssistantDialog
           key={renaming.id}

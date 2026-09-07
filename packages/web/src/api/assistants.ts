@@ -8,6 +8,7 @@
  * session header all resolve an assistant from it.
  */
 import {
+  skipToken,
   useMutation,
   useQuery,
   useQueryClient,
@@ -25,12 +26,15 @@ import type {
 import type { OwnerFilter } from "./client";
 import { api } from "./client";
 import { useOrchestratorInfo } from "./orchestrator";
-import { qk } from "./queries";
+import { qk, refetchSessionReads } from "./queries";
 
 export const qkAssistants = {
   // Derived from the central factory: useDeleteSession invalidates the same
   // key, and two spellings of it would drift apart.
   list: () => qk.assistants(),
+  /** One assistant's ensured session. Its own root, not under `list()`: a
+   * list invalidation must not re-run the ensure. */
+  session: (assistantId: string) => ["assistant-session", assistantId] as const,
 };
 
 export function useAssistants(opts?: Partial<UseQueryOptions<ListAssistantsResponse>>) {
@@ -163,29 +167,58 @@ export function useArchiveAssistant() {
 }
 
 /**
- * Get-or-create one assistant's session.
+ * Get-or-create one assistant's session, as a mutation for a caller that
+ * needs the id once (the workflow editor's panel). A component that mounts
+ * on the session reads `useEnsuredAssistantSession` instead.
  *
  * Creating an assistant writes only its row, so a new assistant has no
  * session until somebody opens it — and every ordinary session route reads
  * the app row this call creates. Without it a freshly created assistant
  * lists correctly and 404s on the first click.
  *
- * Idempotent, so the chat page calls it on mount for whichever assistant is
- * active, default or not. It does NOT invalidate the assistants list: the
- * list's contents do not change, only the session behind one of its rows.
+ * Idempotent. It does NOT invalidate the assistants list: the list's
+ * contents do not change, only the session behind one of its rows.
  */
 export function useEnsureAssistantSession() {
   const qc = useQueryClient();
   return useMutation<EnsureAssistantSessionResponse, Error, string>({
     mutationFn: (assistantId) => api.ensureAssistantSession(assistantId),
     onSuccess: ({ sessionId }) => {
-      // The session query almost certainly ran first and 404'd: the chat page
-      // knows the session id from the assistants list and mounts on it while
-      // this call is still in flight. On a first-ever load nothing has
-      // created the row yet, so that read fails and the page shows "Failed
-      // to load session" — the one screen a brand-new install opens on.
-      // Invalidating here makes the read retry the moment the row exists.
-      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      // A read of this session may have run first and 404'd. Re-read it now
+      // that the row exists.
+      void refetchSessionReads(qc, sessionId);
     },
+  });
+}
+
+/**
+ * The session behind one assistant, created on first use.
+ *
+ * Creating a team seeds its default assistant as a row alone, so an id from
+ * the assistants list can name a session that no call has created yet, and
+ * `GET /sessions/:id` 404s on it until this one runs. Two components mount
+ * on that session — the chat page's conversation and the rail's thread
+ * tree — and neither may read it before it exists. A query keyed by
+ * assistant gives them one shared answer and one POST; `skipToken` is the
+ * gate, so nothing fires without an id. `staleTime: Infinity` because the
+ * answer cannot change within a page: once created, the session stays.
+ *
+ * The ensure re-reads the session before it reports success, so a reader
+ * that asked too early (an earlier visit, a component outside the gate)
+ * holds fresh data by the time `isSuccess` flips, not a cached 404.
+ */
+export function useEnsuredAssistantSession(assistantId: string | undefined) {
+  const qc = useQueryClient();
+  return useQuery<EnsureAssistantSessionResponse>({
+    queryKey: qkAssistants.session(assistantId ?? ""),
+    queryFn:
+      assistantId === undefined
+        ? skipToken
+        : async () => {
+            const ensured = await api.ensureAssistantSession(assistantId);
+            await refetchSessionReads(qc, ensured.sessionId);
+            return ensured;
+          },
+    staleTime: Infinity,
   });
 }

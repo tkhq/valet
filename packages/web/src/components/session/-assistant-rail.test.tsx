@@ -75,6 +75,9 @@ vi.mock("~/api/settings", () => ({
 // the module for other files sharing the worker. Spreading the real module
 // keeps every export present.
 const createMutate = vi.fn();
+// Which assistants' sessions the page has ensured. `null` means every one
+// of them, the state most cases run in; the gate cases name a set.
+let ensuredAssistantIds: ReadonlySet<string> | null = null;
 vi.mock("~/api/assistants", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/assistants")>();
   return {
@@ -84,6 +87,15 @@ vi.mock("~/api/assistants", async (importOriginal) => {
       isLoading: false,
       error: assistantsError,
     }),
+    useEnsuredAssistantSession: (id: string | undefined) => {
+      const ensured = id !== undefined && (ensuredAssistantIds === null || ensuredAssistantIds.has(id));
+      return {
+        data: ensured ? { sessionId: `assistant:${id}` } : undefined,
+        isSuccess: ensured,
+        isLoading: !ensured,
+        error: null,
+      };
+    },
     useCreateAssistant: () => ({ mutate: createMutate, isPending: false, error: null }),
     usePatchAssistant: () => ({ mutate: vi.fn(), isPending: false, error: null }),
     useArchiveAssistant: () => ({ mutate: vi.fn(), isPending: false, error: null }),
@@ -113,6 +125,7 @@ vi.mock("./thread-tree", () => ({
   ThreadTree: ({ sessionId }: { sessionId?: string }) => (
     <div data-testid="thread-tree" data-session={sessionId ?? "own"} />
   ),
+  ThreadTreeWaiting: () => <div data-testid="thread-tree-waiting" />,
 }));
 
 import { TooltipProvider } from "~/components/primitives";
@@ -239,6 +252,7 @@ beforeEach(() => {
   assistantsError = null;
   notifications = [];
   searchParams = {};
+  ensuredAssistantIds = null;
   createMutate.mockClear();
 });
 
@@ -421,6 +435,46 @@ describe("AssistantRail", () => {
     renderRail();
     expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
       "assistant:asst_team",
+    );
+  });
+
+  it("waits for the selected assistant's session before mounting its threads", () => {
+    // Creating a team seeds its default assistant as a row alone. The tree
+    // reads the session and its threads on mount, and both 404 until the
+    // ensure creates the session, so the tree must not mount before it.
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_team" };
+    ensuredAssistantIds = new Set();
+    const { rerender } = renderRail();
+    expect(screen.queryByTestId("thread-tree")).toBeNull();
+    expect(screen.getByTestId("thread-tree-waiting")).toBeTruthy();
+
+    ensuredAssistantIds = new Set(["asst_team"]);
+    rerender(
+      <TooltipProvider>
+        <WorkspaceScopeProvider>
+          <AssistantRail />
+        </WorkspaceScopeProvider>
+      </TooltipProvider>,
+    );
+    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
+      "assistant:asst_team",
+    );
+    expect(screen.queryByTestId("thread-tree-waiting")).toBeNull();
+  });
+
+  it("keeps your own tree mounted while the list's ensure is still out", () => {
+    // Your own session opens through the `GET /info` fallback before the
+    // list arrives, and the tree is already on it. Unmounting it for the
+    // beat the assistant-addressed ensure takes would blank the sidebar on
+    // every cold load.
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    ensuredAssistantIds = new Set();
+    renderRail();
+    expect(screen.getByTestId("thread-tree").getAttribute("data-session")).toBe(
+      "assistant:asst_own",
     );
   });
 
