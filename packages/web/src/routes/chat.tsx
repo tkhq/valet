@@ -90,8 +90,14 @@ function ChatPage() {
   // session the viewer cannot read.
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
   const groups = groupAssistants(assistantsQ.data?.assistants, teams);
+  // `/api/me` is part of the gate: the empty-team notice reads the caller's
+  // org role to decide between the create action and "ask a team admin",
+  // and deciding before it lands shows an org admin the wrong copy.
   const scopeResolved =
-    teamsQ.data !== undefined && orgQ.data !== undefined && assistantsQ.data !== undefined;
+    teamsQ.data !== undefined &&
+    orgQ.data !== undefined &&
+    assistantsQ.data !== undefined &&
+    meQ.data !== undefined;
   const listFailed = assistantsQ.error != null;
   const named = findAssistant(groups, assistant);
   const choice = chooseChatAssistant(groups, scope.key, assistant);

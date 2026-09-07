@@ -225,6 +225,16 @@ describe("ChatPage on an empty team", () => {
     assistantsData = { assistants: [mine()] };
   });
 
+  it("waits for /api/me before choosing the notice copy", () => {
+    // `canAdminister` reads the caller's org role. Deciding before it lands
+    // shows an org admin "Ask a team admin" for a beat, with no button.
+    meData = undefined;
+    render(<ChatPage />);
+    expect(screen.queryByText(/Ask a team admin/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Create an assistant/ })).toBeNull();
+    expect(screen.getByText(/Loading/)).toBeTruthy();
+  });
+
   it("offers the create action to an org admin who is a plain team member", () => {
     meData = me("admin");
     render(<ChatPage />);
