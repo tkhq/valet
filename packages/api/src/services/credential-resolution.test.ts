@@ -607,6 +607,42 @@ describe("resolveTeamCredentialRead", () => {
     expect(got?.apiKey).toBe("from-vault");
   });
 
+  // The org-provided row is the other place a team read dereferences an
+  // op:// ref. A lease narrows that read too, or the grant is a fence with a
+  // gate left open for every service a plugin declares org-provided.
+  it("refuses an ungranted 1Password reference on the org-provided row", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "onepassword", {
+      type: "service_account",
+      metadata: { refs: ["op://Shared/Acme/credential"] },
+    });
+    await credentials.save({ type: "org", id: orgId }, "slack", {
+      type: "bot_token",
+      metadata: { onepassword: { reference: "op://Shared/Other/bot", tokenScope: "org" } },
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve an ungranted ref");
+    });
+    await expect(
+      resolveTeamCredentialRead({ credentials, onePassword }, { orgId, teamId }, "slack", "org-provided"),
+    ).rejects.toMatchObject({ message: expect.stringContaining("Ask a team admin") });
+  });
+
+  it("resolves a granted 1Password reference on the org-provided row", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "onepassword", {
+      type: "service_account",
+      metadata: { refs: ["op://Shared/Acme/bot"] },
+    });
+    await credentials.save({ type: "org", id: orgId }, "slack", {
+      type: "bot_token",
+      metadata: { onepassword: { reference: "op://Shared/Acme/bot", tokenScope: "org" } },
+    });
+    const onePassword = fakeOnePassword(async (row) => ({ ...row, accessToken: "bot-from-vault" }));
+    const got = await resolveTeamCredentialRead({ credentials, onePassword }, { orgId, teamId }, "slack", "org-provided");
+    expect(got?.accessToken).toBe("bot-from-vault");
+  });
+
   it("refuses an ungranted 1Password reference on a team row", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "team", id: teamId }, "onepassword", {
