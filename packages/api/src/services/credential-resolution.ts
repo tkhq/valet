@@ -249,7 +249,15 @@ export async function resolveOrgCredentialRead(
  * Team-row-only read, plus 1Password resolution on that row. A team run
  * never borrows a member's personal credential. The org row is consulted
  * only when `orgFallback` is `"org-provided"` — a plugin declared the
- * service as the org bot. `"reference-only"` and `"none"` stop at the team.
+ * service as the org bot. `"reference-only"` stops at the team row;
+ * `"none"` stops there and skips the vaults too, the same escalation line
+ * the user read draws.
+ *
+ * When no row answers, the vaults are searched by service name on the
+ * scopes the caller passed (`onePasswordScopesFor("team")` is the org
+ * scope alone). That is not an org-row fallback: an org-connected 1Password
+ * token is the configured path for the whole org, and a team session read
+ * it before team rows existed. A plain org credential row stays invisible.
  *
  * `ctx.teamId` is the team principal. `ctx.userId` is unused for the team
  * row itself; a personal-tokenScope 1Password pointer on a team row fails
@@ -263,14 +271,14 @@ export async function resolveTeamCredentialRead(
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
   const scopes = ctx.scopes ?? ["org"];
+  const readCtx = { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes };
   const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
-  const fromTeam = await resolveRow(
-    deps,
-    teamRow,
-    { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes },
-    "resolve",
-  );
+  const fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
   if (fromTeam) return fromTeam;
-  if (orgFallback !== "org-provided") return null;
-  return resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes }, service);
+  if (orgFallback === "none") return null;
+  if (orgFallback === "org-provided") {
+    const fromOrg = await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes }, service);
+    if (fromOrg) return fromOrg;
+  }
+  return lookupInOnePassword(deps, readCtx, service);
 }

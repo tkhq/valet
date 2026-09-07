@@ -522,6 +522,55 @@ describe("resolveTeamCredentialRead", () => {
     expect(got?.accessToken).toBe("org-bot");
   });
 
+  function vaultWithLookup(secret: string | null, onLookup: (scope: string) => void): OnePasswordService {
+    const unused = (): never => {
+      throw new Error("not exercised by this suite");
+    };
+    return {
+      tokenConnected: unused,
+      listVaults: unused,
+      resolveReference: unused,
+      findCandidates: async () => [],
+      findCredentialForService: async (scope) => {
+        onLookup(scope);
+        return secret;
+      },
+      resolveCredential: async (row: StoredCredential) => row,
+    };
+  }
+
+  it("team-row miss reaches the org-scoped 1Password item, on the caller's scopes alone", async () => {
+    const scopesTried: string[] = [];
+    const credentials = fakeCredentialStore();
+    const onePassword = vaultWithLookup("vault-secret", (scope) => scopesTried.push(scope));
+    const got = await resolveTeamCredentialRead(
+      { credentials, onePassword },
+      { orgId, teamId, scopes: onePasswordScopesFor("team") },
+      "linear",
+      "reference-only",
+    );
+    expect(scopesTried).toEqual(["org"]);
+    expect(got?.apiKey).toBe("vault-secret");
+  });
+
+  it("a team row wins without consulting the vault", async () => {
+    const scopesTried: string[] = [];
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "linear", {
+      type: "api_key",
+      apiKey: "team-secret",
+    });
+    const onePassword = vaultWithLookup("vault-secret", (scope) => scopesTried.push(scope));
+    const got = await resolveTeamCredentialRead(
+      { credentials, onePassword },
+      { orgId, teamId, scopes: onePasswordScopesFor("team") },
+      "linear",
+      "reference-only",
+    );
+    expect(scopesTried).toEqual([]);
+    expect(got?.apiKey).toBe("team-secret");
+  });
+
   it("returns null for denied services", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "team", id: teamId }, "onepassword", {

@@ -619,7 +619,8 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
  * instead of a raw `CredentialStore.get`. A user-owned run resolves via
  * `resolveUserCredentialRead` (user row shadows org row, `owner.id` as the
  * acting user); a team-owned run resolves via `resolveTeamCredentialRead`
- * (team row, then org only when the service is org-provided); an org-owned
+ * (team row, then org only when the service is org-provided, then the
+ * org-scoped vault item); an org-owned
  * run resolves via `resolveOrgCredentialRead` (org row only), with
  * `ctx.userId` — the run's actor bookkeeping field — threaded through for a
  * personal-tokenScope 1Password reference to resolve against. Either path
