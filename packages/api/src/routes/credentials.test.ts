@@ -961,6 +961,43 @@ describe("team credential scope (TKAI-205)", () => {
     expect(after.credentials).toEqual([]);
   });
 
+  it("refuses to overwrite a direct team credential, even when a pre-read saw the slot empty", async () => {
+    const team = await teamWithMember();
+    const putDirect = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "team-lin", scope: "team", teamId: team.id }),
+    });
+    expect(putDirect.status).toBe(200);
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+
+    // Models the read-then-write window of a concurrent delegation or an
+    // admin's direct PUT: whatever a pre-read reports, the write itself
+    // must refuse an occupied slot.
+    const store = api!.providers.engineCredentials;
+    api!.providers.engineCredentials = {
+      get: (owner, service) => store.get(owner, service),
+      save: (owner, service, credential) => store.save(owner, service, credential),
+      delete: (owner, service) => store.delete(owner, service),
+      list: async () => [],
+    };
+
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(409);
+
+    const direct = await store.get({ type: "team", id: team.id }, "linear");
+    expect(direct).toMatchObject({ type: "api_key", apiKey: "team-lin" });
+    expect(direct?.metadata).toBeUndefined();
+  });
+
   it("deletes matching team references when the source user credential is deleted", async () => {
     const team = await teamWithMember();
     await fetch(`${api!.baseUrl}/api/credentials/linear`, {

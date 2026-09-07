@@ -495,14 +495,28 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   if (!isCredentialKind(source.type)) {
     return c.json({ error: `${service} cannot be shared with a team.` }, 400);
   }
-  const occupied = await engineCredentials.list({ type: "team", id: body.teamId });
-  if (occupied.some((item) => item.service === service)) {
+  // Insert-only. `engineCredentials.save` upserts on the owner+service key,
+  // so a list-then-save would let a concurrent delegation, or an admin's
+  // direct team PUT, be overwritten with a 201 to both callers. The row
+  // shape matches what `PgCredentialStore.save` writes for a reference row
+  // with no secret: every secret column NULL, no scopes, no expiry.
+  const now = Date.now();
+  const inserted = await db
+    .insert(credentials)
+    .values({
+      ownerType: "team",
+      ownerId: body.teamId,
+      service,
+      type: source.type,
+      metadata: { delegatedFrom: user.id, sourceType: source.type },
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing()
+    .returning({ service: credentials.service });
+  if (inserted.length === 0) {
     return c.json({ error: `This team already has a ${service} credential.` }, 409);
   }
-  await engineCredentials.save({ type: "team", id: body.teamId }, service, {
-    type: source.type,
-    metadata: { delegatedFrom: user.id, sourceType: source.type },
-  });
   const resp: DelegateCredentialResponse = { ok: true };
   return c.json(resp, 201);
 });
