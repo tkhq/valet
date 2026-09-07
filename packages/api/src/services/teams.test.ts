@@ -25,11 +25,13 @@ import {
   NotOrgMemberError,
   NotTeamMemberError,
   removeMember,
+  seedMissingTeamDefaults,
   setRole,
   TeamNameConflictError,
   TeamOwnsWorkflowsError,
 } from "./teams.js";
 import { setOrgFeatures } from "./org.js";
+import { createAssistant, findDefaultAssistant } from "../assistants/service.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -46,6 +48,29 @@ describe("teams service", () => {
     await seedUser(db, "u1", orgId);
     await seedUser(db, "u2", orgId);
     await seedUser(db, "u3", orgId);
+  });
+
+  // Teams written before the seed shipped have no default assistant, and a
+  // member switching to one would hit a notice with no create path. The boot
+  // backfill gives every such team its default once and leaves teams that
+  // already hold one alone.
+  it("seedMissingTeamDefaults gives a pre-existing team its default once", async () => {
+    const now = Date.now();
+    await db.insert(teams).values({ id: "team_old", orgId, name: "Old", origin: "local", createdAt: now });
+    await db.insert(teams).values({ id: "team_named", orgId, name: "Named", origin: "local", createdAt: now });
+    await createAssistant(db, orgId, { type: "team", id: "team_named" }, "Bot");
+    const seeded = await createTeam(db, { orgId, name: "Fresh", creatorUserId: "u1" });
+
+    // "Named" already holds a default: its first assistant became one.
+    expect(await seedMissingTeamDefaults(db)).toEqual(["team_old"]);
+    for (const id of ["team_old", "team_named", seeded.id]) {
+      const row = await findDefaultAssistant(db, orgId, { type: "team", id });
+      expect(row?.isDefault).toBe(true);
+    }
+    const namedRows = await db.select().from(assistants).where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, "team_named")));
+    expect(namedRows.map((r) => r.name)).toEqual(["Bot"]);
+
+    expect(await seedMissingTeamDefaults(db)).toEqual([]);
   });
 
   it("createTeam auto-admits the creator as admin", async () => {

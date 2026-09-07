@@ -7,7 +7,7 @@
  * never both succeed.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
@@ -253,6 +253,37 @@ export type SeedDefaultAssistant = (
   orgId: string,
   principal: Principal,
 ) => Promise<AssistantRow>;
+
+/**
+ * One-time backfill for teams written before every team writer seeded a
+ * default assistant. Runs at boot, after migrations: each team with no
+ * default gets one through the same seed the writers use. Idempotent, and
+ * a team that already holds a default, or one that was seeded by a
+ * concurrent boot, is skipped by the seed's own conflict handling. Returns
+ * the ids it seeded so the boot log can name them.
+ */
+export async function seedMissingTeamDefaults(db: AppDb): Promise<string[]> {
+  const rows = await db
+    .select({ id: teams.id, orgId: teams.orgId })
+    .from(teams)
+    .leftJoin(
+      assistants,
+      and(
+        eq(assistants.ownerType, "team"),
+        eq(assistants.ownerId, teams.id),
+        eq(assistants.orgId, teams.orgId),
+        eq(assistants.isDefault, true),
+      ),
+    )
+    .where(isNull(assistants.id))
+    .orderBy(teams.createdAt);
+  const seeded: string[] = [];
+  for (const row of rows) {
+    await resolveDefaultAssistant(db, row.orgId, { type: "team", id: row.id });
+    seeded.push(row.id);
+  }
+  return seeded;
+}
 
 export interface CreateTeamOptions {
   orgId: string;
