@@ -249,10 +249,14 @@ vi.mock("~/api/skill-sources", () => ({
 
 // The Teams page's per-team credentials block reads the team's credential
 // list; stubbed empty so the route test needs no QueryClientProvider.
-vi.mock("~/api/integrations", () => ({
-  useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
-  useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
-}));
+vi.mock("~/api/integrations", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/integrations")>();
+  return {
+    ...actual,
+    useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
+    useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+  };
+});
 
 // The Library page's org skills panel reads the shared skills catalog.
 vi.mock("~/api/skills", () => ({
