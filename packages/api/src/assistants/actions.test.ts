@@ -93,6 +93,25 @@ describe("assistantsActionPlugin", () => {
     expect(rows.some((a) => a.owner.type === "user" && a.owner.id === "u2")).toBe(false);
   });
 
+  it("lists a seeded team default with no name, and says so in the description", async () => {
+    // `createTeam` seeds each team's default unnamed. The agent sees the
+    // row with `name` absent and `isDefault: true`; the description tells
+    // it to expect that instead of treating the gap as a broken row.
+    const team = await createTeam(db, { orgId: ORG, name: "Security", creatorUserId: "u1" });
+
+    const listAction = actionById("assistants.list_assistants");
+    expect(listAction.description).toMatch(/unnamed/);
+    expect(listAction.description).toMatch(/name.*absent|absent.*name|no name/i);
+
+    const result = await listAction.execute({}, ctx());
+    const rows = (result.data as { assistants: { name?: string; isDefault: boolean; owner: { id: string } }[] })
+      .assistants;
+    const seeded = rows.find((a) => a.owner.id === team.id);
+    expect(seeded).toBeDefined();
+    expect(seeded?.isDefault).toBe(true);
+    expect(seeded).not.toHaveProperty("name");
+  });
+
   it("creates for a team only when the caller administers it", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Security", creatorUserId: "u2" });
     await addMember(db, { teamId: team.id, userId: "u1", role: "member" });

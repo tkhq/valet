@@ -117,7 +117,9 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
     name: "List assistants",
     description:
       "List the assistants you can reach: your own, plus one set per team you belong to. " +
-      "Returns each assistant's id, name, owner, default flag, personality, and behavior config.",
+      "Returns each assistant's id, name, owner, default flag, personality, and behavior config. " +
+      "A team's seeded default is unnamed: its name is absent until someone names it. " +
+      "Refer to such a row by id, or by its owner and default flag.",
     riskLevel: "low",
     execute: async (_args, ctx) => {
       const caller = callerFromContext(ctx);
