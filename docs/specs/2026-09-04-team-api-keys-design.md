@@ -57,18 +57,29 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 
 ## Implementation
 
-1. On create, require `canAdministerTeam` for the workspace `teamId`. Stamp `{ teamId, createdBy }` in SQL after `createApiKey`.
-2. List filters `metadata.teamId` in SQL. Personal list omits team keys on the server.
+1. On create, require `canAdministerTeam` for the workspace `teamId`. Stamp `{ teamId, createdBy }` in metadata and `team_id` in one SQL statement after `createApiKey`; re-read both before returning the secret.
+2. List filters on the indexed `team_id` column and projects the summary columns. Personal list omits team keys on the server and recomputes `total`.
 3. Extend the auth ladder to promote a team-metadata key to a team principal. Reject the key if the team is gone or belongs to another org.
 4. Session and workflow create paths use `resolveCreateOwner`. A team principal skips membership but still requires the team row under the ownership lock.
-5. Web: `/settings/api-keys` follows the switcher. `CreateScopeLine`. No owner dropdown.
+5. Every session and workflow read gates on `c.var.principal` (`canViewSession`, `canAdministerSession`, `canResolveSessionGate`, `WorkflowOwner.principal`); the gateway proxy, sandbox replace and `sandbox-jwt` gate on `isSessionDirectOwner`.
+6. Pre-auth and out-of-band surfaces apply the scope themselves: the public artifact router treats a team key as anonymous, the LLM gateway refuses it.
+7. `GET /api/me` answers a team key with `TeamMeResponse`; the CLI posts `/api/teams/:id/orchestrator` for a team identity.
+8. Web: `/settings/api-keys` follows the switcher. `CreateScopeLine`. No owner dropdown.
 
 ## Testing
 
-- `packages/api/src/middleware/auth.ladder.test.ts` — team-metadata key authenticates; a deleted team is an invalid key.
-- `packages/api/src/routes/team-api-keys.test.ts` — create/list/revoke gates; departed admin does not kill the key; a personal create cannot stamp `teamId`; a team key cannot create a personal assistant.
+- `packages/api/src/middleware/auth.ladder.test.ts` — team-metadata key authenticates as the team; a deleted team is an invalid key.
+- `packages/api/src/routes/team-api-keys.test.ts` — create/list/revoke gates; the `team_id` column agrees with the metadata; departed admin does not kill the key; a personal create cannot stamp `teamId`; a team key cannot create a personal assistant; `GET /api/me` answers with the team and `PATCH` is refused.
+- `packages/api/src/routes/team-api-keys.access.test.ts` — one admin, one personal and one team session: the key reads, rates, opens the socket, reaches the gateway and the security surface of the team session only, is refused on `sandbox-jwt`, and wakes its own team's orchestrator only.
+- `packages/api/src/routes/team-api-keys.workflows.test.ts` — the key lists, schedules and previews team workflows only.
+- `packages/api/src/routes/team-api-keys.artifacts.test.ts` — the pre-auth artifact router: public read as anonymous, org read and comments refused.
+- `packages/api/src/proxy/principal.test.ts` — the LLM gateway refuses a team key before the org lookup.
+- `packages/api/src/lib/request-principal.test.ts` — the allow-list matches path segments and the key's own team orchestrator.
+- `packages/api/src/cli/client.test.ts` — `ensureOrchestrator` follows `GET /api/me`.
+- `packages/api/src/lib/personal-api-key-list.test.ts` — the personal list drops team rows, recomputes `total`, and refuses an unknown shape.
+- `packages/api/src/schema/pg-schema.test.ts` — the `team_id` column and index are restored by the repair pass.
 - Web test on `/settings/api-keys`: create states the workspace; no owner picker.
 
 ## Done when
 
-A `vlt_` key created in a team workspace starts a team-owned session. A personal key cannot. Revoke from the team workspace kills the key. The creating admin can leave the team and the key still works until a team admin revokes it. A signed-in user cannot mint a team principal through `/api/auth/api-key/create`.
+A `vlt_` key created in a team workspace starts a team-owned session. A personal key cannot. Revoke from the team workspace kills the key. The creating admin can leave the team and the key still works until a team admin revokes it. A signed-in user cannot mint a team principal through `/api/auth/api-key/create`. The key reads nothing outside its team: not the creating admin's sessions, workflows, triggers, memory or artifacts, and not another team's orchestrator. `valet send` with the key and no `--session` prompts the team's default assistant.
