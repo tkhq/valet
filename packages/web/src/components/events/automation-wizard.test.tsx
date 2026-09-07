@@ -250,6 +250,34 @@ describe("AutomationWizard", () => {
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("drops a picked team target when the workspace switches back to personal", () => {
+    scopeTeamId = "t_platform";
+    const view = render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Send a notification/);
+    clickNext(); // What
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext(); // Match
+
+    // The reader moves off the seeded team target and then picks it by hand
+    // (a pick, not the seed, is what a workspace switch must not keep), then
+    // leaves the team workspace.
+    fireEvent.click(screen.getByLabelText(/Notify your assistant/));
+    fireEvent.click(screen.getByLabelText(/Notify Platform's assistant/));
+    scopeTeamId = undefined;
+    view.rerender(<AutomationWizard open onOpenChange={() => {}} />);
+
+    // The team option is gone, and the held target followed the workspace.
+    expect(screen.queryByLabelText(/Notify Platform's assistant/)).toBeNull();
+    expect((screen.getByLabelText(/Notify your assistant/) as HTMLInputElement).checked).toBe(true);
+    clickNext(); // Then
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "PR ping" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false });
+  });
+
   it("workflow outcome posts a subscription with a workflow target", () => {
     workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
     render(<AutomationWizard open onOpenChange={() => {}} />);

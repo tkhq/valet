@@ -219,15 +219,23 @@ export function AutomationWizard({
   // A manual target choice wins: once the reader picks a target, a later
   // workspace switch must not overwrite it. The default target seeds from the
   // active workspace, so it must follow a workspace change until then (see
-  // CLAUDE.md "Mount-time state from props").
+  // CLAUDE.md "Mount-time state from props"). One exception: a picked team
+  // target whose team is no longer the active workspace is stale. The Then
+  // step would show no team radio while the create still posts that team, so
+  // the target drops back to the workspace seed and follows it again.
   const userTouched = useRef(false);
   function chooseTarget(next: TargetChoice) {
     userTouched.current = true;
     setTarget(next);
   }
   useEffect(() => {
-    if (userTouched.current) return;
-    setTarget(initialTarget(scopedTeamId));
+    setTarget((held) => {
+      const stale =
+        held.kind === "orchestrator" && held.orchestrator === "team" && held.teamId !== scopedTeamId;
+      if (userTouched.current && !stale) return held;
+      userTouched.current = false;
+      return initialTarget(scopedTeamId);
+    });
   }, [scopedTeamId]);
 
   const workflows = workflowsQ.data?.workflows ?? [];
