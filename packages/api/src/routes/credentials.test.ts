@@ -11,6 +11,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, users } from "../schema/index.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { addMember, createTeam } from "../services/teams.js";
+import { startSlackFixture, type SlackFixture } from "../test-helpers/slack-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -986,26 +987,62 @@ describe("team credential scope (TKAI-205)", () => {
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
   });
 
-  // Team runs use the org connection for a service the org provides
-  // (design decision 8), so a team row for it would never be read.
-  it("refuses a team-scope PUT for an org-provided service and stores nothing", async () => {
-    const orgProvided: ValetPlugin = {
+  // A team may store its own Slack bot token. It is checked against Slack
+  // the same way the org token is (bot token, required scopes), but it
+  // needs no signing secret because Slack events route through the org app.
+  describe("team Slack token", () => {
+    const slackDeclaration: ValetPlugin = {
       name: "slack",
       version: "0",
       credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
     };
-    const team = await teamWithMember([orgProvided]);
-    const put = await fetch(`${api!.baseUrl}/api/credentials/slack`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ type: "bot_token", accessToken: "xoxb-team", scope: "team", teamId: team.id }),
+    let slack: SlackFixture | undefined;
+    const savedApiBase = process.env.VALET_SLACK_API_BASE;
+
+    afterEach(async () => {
+      await slack?.close();
+      slack = undefined;
+      if (savedApiBase === undefined) delete process.env.VALET_SLACK_API_BASE;
+      else process.env.VALET_SLACK_API_BASE = savedApiBase;
     });
-    expect(put.status).toBe(400);
-    expect(await put.json()).toEqual({
-      error:
-        "slack is provided by the organization. Team runs use the organization's slack connection; configure it in Settings → Organization.",
+
+    function useFixture(fixture: SlackFixture): void {
+      slack = fixture;
+      process.env.VALET_SLACK_API_BASE = fixture.url;
+    }
+
+    it("rejects a token Slack rejects, naming the fix, and stores nothing", async () => {
+      const team = await teamWithMember([slackDeclaration]);
+      useFixture(startSlackFixture({ body: { ok: false, error: "invalid_auth" } }));
+      const put = await fetch(`${api!.baseUrl}/api/credentials/slack`, {
+        method: "PUT",
+        headers: HEADERS,
+        body: JSON.stringify({ type: "bot_token", accessToken: "xoxb-team", scope: "team", teamId: team.id }),
+      });
+      expect(put.status).toBe(400);
+      const { error } = (await put.json()) as { error: string };
+      expect(error).toContain("invalid_auth");
+      expect(error).toContain("OAuth & Permissions");
+      expect(slack?.calls).toEqual(["Bearer xoxb-team"]);
+      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack")).toBeNull();
     });
-    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack")).toBeNull();
+
+    it("stores a verified bot token without a signing secret and records the workspace", async () => {
+      const team = await teamWithMember([slackDeclaration]);
+      useFixture(startSlackFixture());
+      const put = await fetch(`${api!.baseUrl}/api/credentials/slack`, {
+        method: "PUT",
+        headers: HEADERS,
+        body: JSON.stringify({ type: "bot_token", accessToken: "xoxb-team", scope: "team", teamId: team.id }),
+      });
+      expect(put.status).toBe(200);
+      expect(slack?.calls).toEqual(["Bearer xoxb-team"]);
+      const stored = await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack");
+      expect(stored?.accessToken).toBe("xoxb-team");
+      expect(stored?.metadata).toMatchObject({ teamId: "T0FIXTURE", teamName: "Fixture Workspace", botUserId: "U0BOTFIXTURE" });
+      expect(stored?.metadata?.webhookSecret).toBeUndefined();
+      expect(stored?.scopes).toContain("assistant:write");
+    });
   });
 
   it("lists a team row's health fields and 1Password reference like a user row", async () => {

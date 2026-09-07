@@ -147,27 +147,19 @@ function parseOnePasswordField(
 }
 
 /**
- * The org Slack credential drives the agent surface, so it is checked against
- * Slack before it is stored. Every failure this catches is otherwise
- * invisible: a wrong signing secret only shows up as 401s on an
- * unauthenticated webhook, and a missing scope only shows up hours later on
- * one API call. The check also records the workspace identity the rest of
- * the integration depends on. Returns the rejection to send, or `undefined`
- * when the credential may be saved. A user-scoped Slack credential is a
- * personal token for the action plugin and is not checked.
+ * Checks a Slack bot token against Slack before it is stored, and records
+ * the workspace identity the rest of the integration depends on. Every
+ * failure this catches is otherwise invisible: a user token posts as a
+ * human, and a missing scope only shows up hours later on one API call.
+ * Returns the rejection to send, or `undefined` when the token may be
+ * saved. Shared by the org and team scopes. A user-scoped Slack credential
+ * is a personal token for the action plugin and is not checked.
  */
-async function verifyOrgSlackCredential(
+async function verifySlackCredentialToken(
   c: Context<AppEnv>,
   credential: StoredCredential,
   token: string,
 ): Promise<Response | undefined> {
-  const webhookSecret = credential.metadata?.webhookSecret;
-  if (typeof webhookSecret !== "string" || webhookSecret === "") {
-    return c.json(
-      { error: "Slack needs metadata.webhookSecret. Copy the Signing Secret from Basic Information in your Slack app settings." },
-      400,
-    );
-  }
   const check = await verifySlackBotToken(token);
   if (!check.ok) return c.json({ error: check.error }, 400);
   const scopeError = requiredScopeError(check.identity.grantedScopes);
@@ -184,6 +176,39 @@ async function verifyOrgSlackCredential(
   // Recorded so the setup route can report missing optional scopes without
   // calling Slack again. `undefined` when Slack sent no scope header.
   credential.scopes = check.identity.grantedScopes ?? undefined;
+  return undefined;
+}
+
+/**
+ * The org Slack credential also receives Slack events, so it needs the
+ * app's signing secret on top of the token check. A wrong secret only
+ * shows up as 401s on an unauthenticated webhook, so it is required here.
+ * A team token needs no secret: events route through the org app.
+ */
+async function verifyOrgSlackCredential(
+  c: Context<AppEnv>,
+  credential: StoredCredential,
+  token: string,
+): Promise<Response | undefined> {
+  const webhookSecret = credential.metadata?.webhookSecret;
+  if (typeof webhookSecret !== "string" || webhookSecret === "") {
+    return c.json(
+      { error: "Slack needs metadata.webhookSecret. Copy the Signing Secret from Basic Information in your Slack app settings." },
+      400,
+    );
+  }
+  return verifySlackCredentialToken(c, credential, token);
+}
+
+/** Routes a Slack save to the check its scope needs. */
+async function verifySlackCredential(
+  c: Context<AppEnv>,
+  scope: CredentialScope,
+  credential: StoredCredential,
+  token: string,
+): Promise<Response | undefined> {
+  if (scope === "org") return verifyOrgSlackCredential(c, credential, token);
+  if (scope === "team") return verifySlackCredentialToken(c, credential, token);
   return undefined;
 }
 
@@ -279,19 +304,6 @@ credentialsRouter.put("/:service", async (c) => {
   const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, "write");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
-
-  // Team runs use the org connection for a service the org provides
-  // (team-credentials design, decision 8). A team row for it would never
-  // be read, so the write is refused and the caller is sent to the org
-  // path.
-  if (scope === "team" && findCredentialDeclaration(plugins, service)?.requires?.orgCredential) {
-    return c.json(
-      {
-        error: `${service} is provided by the organization. Team runs use the organization's ${service} connection; configure it in Settings → Organization.`,
-      },
-      400,
-    );
-  }
 
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
@@ -436,10 +448,10 @@ credentialsRouter.put("/:service", async (c) => {
       type: body.type,
       metadata: { ...body.metadata, onepassword: { reference, tokenScope } },
     };
-    // A reference-backed Slack org credential drives the same agent surface
-    // as a pasted one, so it passes the same check before it is stored.
-    if (service === "slack" && scope === "org") {
-      const rejected = await verifyOrgSlackCredential(c, credential, resolved);
+    // A reference-backed Slack credential drives the same agent surface as
+    // a pasted one, so it passes the same check before it is stored.
+    if (service === "slack") {
+      const rejected = await verifySlackCredential(c, scope, credential, resolved);
       if (rejected) return rejected;
     }
     await engineCredentials.save(owner, service, credential);
@@ -479,8 +491,8 @@ credentialsRouter.put("/:service", async (c) => {
     metadata: body.metadata,
   };
 
-  if (service === "slack" && scope === "org") {
-    const rejected = await verifyOrgSlackCredential(c, credential, accessToken ?? apiKey ?? "");
+  if (service === "slack") {
+    const rejected = await verifySlackCredential(c, scope, credential, accessToken ?? apiKey ?? "");
     if (rejected) return rejected;
   }
 
