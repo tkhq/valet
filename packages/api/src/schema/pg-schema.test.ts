@@ -1010,6 +1010,40 @@ describe("pg app schema + migrations", () => {
     // column repairs that sit ahead of the table repair in the list. A
     // database from before the table must get the CREATE first, or the
     // ALTERs fail and the api never boots.
+    // The credential owner mode arrives with the column: the same repair
+    // transaction stamps every team session that already exists as
+    // `actor`, once. A team row written later with no mode stays NULL,
+    // which reads as `owner`, so a writer that forgets the column is never
+    // quietly repaired into member resolution on a later boot.
+    it("stamps existing team sessions actor in the same repair that adds the mode column", async () => {
+      await db.query('ALTER TABLE "agent_sessions" DROP COLUMN "credential_owner_mode"');
+      const now = Date.now();
+      await db.query(
+        `INSERT INTO "agent_sessions" (id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
+         VALUES ('s-team', 'u1', 'org1', '/w', 'active', 'team', 'team_1', $1, $1),
+                ('s-user', 'u1', 'org1', '/w', 'active', 'user', 'u1', $1, $1)`,
+        [now],
+      );
+      await applyAppMigrations(db);
+      const modes = await db.query(
+        `SELECT id, credential_owner_mode AS mode FROM "agent_sessions" WHERE id IN ('s-team', 's-user') ORDER BY id`,
+      );
+      expect(modes.rows).toEqual([
+        { id: "s-team", mode: "actor" },
+        { id: "s-user", mode: null },
+      ]);
+
+      await db.query(
+        `INSERT INTO "agent_sessions" (id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
+         VALUES ('s-late', 'u1', 'org1', '/w', 'active', 'team', 'team_1', $1, $1)`,
+        [now],
+      );
+      await applyAppMigrations(db);
+      const late = await db.query(`SELECT credential_owner_mode AS mode FROM "agent_sessions" WHERE id = 's-late'`);
+      expect(late.rows).toEqual([{ mode: null }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
     it("creates a table before adding columns to it, whatever the list order", async () => {
       await db.query('DROP TABLE "followed_threads"');
       const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);

@@ -526,6 +526,23 @@ export async function isTeamMember(db: AppQueryable, teamId: string, userId: str
 }
 
 /**
+ * Live view check — the one definition of "may see this team's resources
+ * without changing them": a member of the team, or an admin of the team's
+ * org, who manages every team in it (the roster, the credential list, the
+ * 1Password lease). Looser than `canAdministerTeam`, which requires
+ * team-admin. Reads the org from the team row, the way `canAdministerTeam`
+ * does, so an admin of some other org is not admitted. Membership is
+ * re-read on every call, never cached, same contract as `isTeamMember`.
+ */
+export async function canViewTeam(db: AppQueryable, teamId: string, userId: string): Promise<boolean> {
+  const teamRows = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, teamId)).limit(1);
+  const team = teamRows[0];
+  if (!team) return false;
+  if (await isOrgAdmin(db, team.orgId, userId)) return true;
+  return isTeamMember(db, teamId, userId);
+}
+
+/**
  * Live administration check — the one definition of "may administer this
  * team". True for a team admin of `teamId`, and for an admin of the team's
  * org (per `org_members.role`, not the global `users.role` operator flag).

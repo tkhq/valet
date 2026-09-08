@@ -55,6 +55,10 @@ export interface SessionMetaSource {
    */
   ownerType?: string;
   ownerId?: string;
+  /** `agent_sessions.credential_owner_mode`, present on the app row. Carried
+   * onto the meta so a team session stamped `actor` keeps resolving
+   * credentials as the acting member across every rebuild. */
+  credentialOwnerMode?: SessionMeta["credentialOwnerMode"];
 }
 
 /**
@@ -117,6 +121,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
       : {}),
     ...(src.ownerType !== undefined ? { ownerType: src.ownerType } : {}),
     ...(src.ownerType === "team" && src.ownerId ? { ownerTeamId: src.ownerId } : {}),
+    ...(src.credentialOwnerMode != null ? { credentialOwnerMode: src.credentialOwnerMode } : {}),
     repos: reposWithDirs,
     userName: userRows[0]?.name,
     userEmail: userRows[0]?.email,

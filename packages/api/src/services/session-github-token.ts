@@ -8,6 +8,8 @@
  * (third-caller rule — extracted here now that host.ts is the third caller).
  */
 import { eq } from "drizzle-orm";
+import { isUsableGithubUserRow } from "./github-tokens.js";
+import { credentialSecret, type StoredCredential } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { sessionRepos } from "../schema/index.js";
 import {
@@ -56,6 +58,28 @@ export async function primaryRepoBinding(
 }
 
 /**
+ * Whether a stored `github` row can back an API call: it carries a secret
+ * and is neither identity-only (sign-in scopes, no repo access) nor marked
+ * by a failed refresh, or expired without a refresh token. The same rule `resolveGitHubToken`
+ * applies to a user row, so a team row is held to the user row's bar. A
+ * row that fails here is skipped, and the caller falls through to the App.
+ */
+export function isUsableGithubRow(row: StoredCredential | null | undefined): row is StoredCredential {
+  if (!row) return false;
+  // One health rule for a GitHub user row everywhere it is read: the same
+  // predicate `resolveUserCredential` and the delegate route apply.
+  return isUsableGithubUserRow(
+    {
+      accessToken: credentialSecret(row),
+      refreshToken: row.refreshToken,
+      expiresAt: row.expiresAt,
+      metadata: row.metadata,
+    },
+    Date.now(),
+  );
+}
+
+/**
  * GitHub token args for a session owner. A user principal keeps `userId`
  * so their PAT or App-OAuth can win. A team or org principal omits `userId`
  * and always selects `auth: "app"`, so only an installation token can back
@@ -63,6 +87,9 @@ export async function primaryRepoBinding(
  * `github` declares no org credential. With a repo the App must be
  * installed on that repo's owner. Without one, the org's sole installation
  * is used. Either miss is a `GitHubAuthError` that names the install step.
+ * The team's own `github` row, when it holds one, is read BEFORE these args
+ * apply (`engine/host.ts`, `plugins/action-invoker.ts`); this is the
+ * fallback behind it.
  */
 export function githubTokenArgsForOwner(
   owner: { type: string; id: string },

@@ -83,3 +83,7 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 ## Done when
 
 A `vlt_` key created in a team workspace starts a team-owned session. A personal key cannot. Revoke from the team workspace kills the key. The creating admin can leave the team and the key still works until a team admin revokes it. A signed-in user cannot mint a team principal through `/api/auth/api-key/create`. The key reads nothing outside its team: not the creating admin's sessions, workflows, triggers, memory or artifacts, and not another team's orchestrator. `valet send` with the key and no `--session` prompts the team's default assistant.
+
+## Deviations from this design (recorded at implementation)
+
+1. **A team key is refused on sandbox replace as well as on `sandbox-jwt`.** Decision 5 gates `POST /api/sessions/:id/sandbox/replace` on direct ownership and names `sandbox-jwt` as the one route that refuses a team key outright. A team key is the direct owner of its team's sessions, so the ownership gate alone admitted it to a rebuild of a live team session. What shipped refuses a team principal on sandbox replace with the same 403 that `sandbox-jwt` gives, naming a personal key or the web app as the fix. Rebuilding a sandbox is a person's act on a session, not a key's. Recorded 2026-09-07.

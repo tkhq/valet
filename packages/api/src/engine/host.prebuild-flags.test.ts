@@ -517,6 +517,69 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(contentsCall?.authHeader).toBe("Bearer inst-222");
   });
 
+  it("a team session stamped actor reads the repo's flags with the acting member's token; owner mode does not", async () => {
+    fixture = startGithubFixture({
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/prebuild.yaml"
+          ? contentsBody("docker: true\n", "blob-actor")
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const { engineHost, db, engineCredentials } = api.providers;
+    // No App at all: only the member's own token can back the read.
+    await engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2",
+      accessToken: "member-tok",
+      metadata: { login: "octocat" },
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const [sessionId, credentialOwnerMode] of [
+        ["team-actor-prebuild-flags", "actor"],
+        ["team-owner-prebuild-flags", "owner"],
+      ] as const) {
+        clearRepoPrebuildFlagsCache();
+        await db.insert(sessionRepos).values({
+          sessionId,
+          host: "github",
+          fullName: "acme/team-widgets",
+          cloneUrl: "https://github.com/acme/team-widgets.git",
+          ref: null,
+          auth: "auto",
+          position: 0,
+          targetDir: "team-widgets",
+        });
+        const session = await engineHost.sessionFor(sessionId, {
+          userId: "local-user",
+          orgId: "local-org",
+          workspace: `/tmp/${sessionId}`,
+          ownerType: "team",
+          ownerTeamId: "team_actor",
+          credentialOwnerMode,
+          repos: [{ ...binding({ fullName: "acme/team-widgets" }), targetDir: "team-widgets" }],
+        });
+        await session.attachment.ensureReady({ timeoutMs: 5_000 });
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    const contentsCalls = fixture.calls.filter((c) => c.path.includes("/contents/"));
+    // Actor mode: the member's token, and the declared docker flag lands.
+    expect(contentsCalls[0]?.authHeader).toBe("Bearer member-tok");
+    expect(recorder.createCalls.find((c) => c.sessionId === "team-actor-prebuild-flags")?.docker).toBe(true);
+    // Owner mode: no App means no token; the read degrades to tokenless.
+    expect(contentsCalls[1]?.authHeader).toBeUndefined();
+  });
+
   it("an org with NO GitHub configured still reads a public repo's flags tokenless (TKAI-401)", async () => {
     fixture = startGithubFixture({
       getContents: (_owner, _repo, path) =>

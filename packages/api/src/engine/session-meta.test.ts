@@ -152,4 +152,18 @@ describe("loadSessionMeta: target_dir persistence (spec decision 15)", () => {
 
     expect(meta.sandboxResourceOverrides).toEqual({ cpu: 2, memory: "4Gi" });
   });
+
+  it("carries credential_owner_mode from the row; an unset column stays absent", async () => {
+    await insertSession(db, "s8");
+    const actor = await loadSessionMeta(db, {
+      ...src("s8"),
+      ownerType: "team",
+      ownerId: "team-1",
+      credentialOwnerMode: "actor",
+    });
+    expect(actor.credentialOwnerMode).toBe("actor");
+
+    const unset = await loadSessionMeta(db, { ...src("s8"), ownerType: "team", ownerId: "team-1" });
+    expect(unset.credentialOwnerMode).toBeUndefined();
+  });
 });

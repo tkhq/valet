@@ -932,6 +932,36 @@ describe("team credential scope (TKAI-205)", () => {
     expect(putMember.status).toBe(404);
   });
 
+  // An org admin manages every team in the org and already writes team
+  // credentials through the admin override; the read gate admits them too,
+  // the same way the team roster does. A plain org member off the team
+  // still sees nothing.
+  it("lets an org admin off the team list its credentials, and 404s a plain org member", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org",
+      name: "Platform",
+      creatorUserId: "local-user",
+    });
+    await api.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {
+      type: "api_key",
+      apiKey: "team-lin",
+    });
+    const adminHeaders = { "Content-Type": "application/json", "x-valet-test-user-id": "test-admin" };
+    const asAdmin = await fetch(`${api.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, {
+      headers: adminHeaders,
+    });
+    expect(asAdmin.status).toBe(200);
+    const { credentials: listed } = (await asAdmin.json()) as ListCredentialsResponse;
+    expect(listed).toEqual([expect.objectContaining({ service: "linear", type: "api_key" })]);
+    expect(JSON.stringify(listed)).not.toContain("team-lin");
+
+    const asMember = await fetch(`${api.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, {
+      headers: MEMBER_HEADERS,
+    });
+    expect(asMember.status).toBe(404);
+  });
+
   // A team credential write changes what the team's mirrored workflows may
   // arm, and no commit lands to make the sync notice. Each write marks the
   // team's workflow sources for a full pass at the unchanged head.
@@ -1105,6 +1135,68 @@ describe("team credential scope (TKAI-205)", () => {
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
   });
 
+  // `metadata.delegatedFrom` is what the team read follows to a member's
+  // personal row. Only the delegate route may write it, because that route
+  // runs as the member whose credential is being shared. A PUT that carries
+  // it would let a team admin point the team at any member's token.
+  describe("reserves the delegation metadata keys", () => {
+    it("refuses a team-scope reference that names a member, and stores nothing", async () => {
+      const team = await teamWithMember();
+      const fake = new FakeOnePasswordService();
+      api!.providers.onePassword = fake;
+      await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
+        type: "api_key",
+        apiKey: "member-lin",
+      });
+      const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+        method: "PUT",
+        headers: HEADERS,
+        body: JSON.stringify({
+          type: "api_key",
+          scope: "team",
+          teamId: team.id,
+          onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+          metadata: { delegatedFrom: "test-member" },
+        }),
+      });
+      expect(put.status).toBe(400);
+      const { error } = (await put.json()) as { error: string };
+      expect(error).toContain("metadata.delegatedFrom");
+      expect(error).toContain("POST /api/credentials/linear/delegate");
+      expect(fake.resolveCalls).toEqual([]);
+      // The team read must not reach the member's row through a forged reference.
+      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+    });
+
+    it("refuses the keys on every scope, with or without a secret", async () => {
+      const team = await teamWithMember();
+      const attempts: { scope?: string; teamId?: string; headers: Record<string, string> }[] = [
+        { headers: HEADERS },
+        { scope: "org", headers: HEADERS },
+        { scope: "team", teamId: team.id, headers: HEADERS },
+      ];
+      for (const attempt of attempts) {
+        for (const metadata of [{ delegatedFrom: "test-member" }, { sourceType: "api_key" }]) {
+          const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+            method: "PUT",
+            headers: attempt.headers,
+            body: JSON.stringify({
+              type: "api_key",
+              apiKey: "some-secret",
+              scope: attempt.scope,
+              teamId: attempt.teamId,
+              metadata,
+            }),
+          });
+          expect(put.status).toBe(400);
+        }
+      }
+      expect(await api!.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear")).toBeNull();
+      expect(await api!.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear")).toBeNull();
+      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+    });
+  });
+
   // The same scope rule holds for a delegated reference: the team read
   // runs on org-scoped tokens, so a personal reference on the source row
   // would never resolve for the team.
@@ -1126,6 +1218,154 @@ describe("team credential scope (TKAI-205)", () => {
         "Store it again with tokenScope org, or store the secret directly, then share it.",
     );
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+  });
+
+  // A delegation is a reference to the member's live row. Re-storing that
+  // row as a personal-scope 1Password reference would leave every team
+  // that rides it with a reference the team read cannot resolve, and
+  // nothing would say so until a run failed.
+  describe("a delegated source row and personal 1Password references", () => {
+    async function delegatedLinear() {
+      const team = await teamWithMember();
+      await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+        method: "PUT",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+      });
+      const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+        method: "POST",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ teamId: team.id }),
+      });
+      expect(share.status).toBe(201);
+      return team;
+    }
+
+    it("refuses to re-store the source as a personal reference while shares exist, naming the fix", async () => {
+      const team = await delegatedLinear();
+      const fake = new FakeOnePasswordService();
+      api!.providers.onePassword = fake;
+      const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+        method: "PUT",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({
+          type: "api_key",
+          onepassword: { reference: "op://vault/item/field", tokenScope: "personal" },
+        }),
+      });
+      expect(put.status).toBe(400);
+      const { error } = (await put.json()) as { error: string };
+      expect(error).toContain("shared with 1 team");
+      expect(error).toContain("Revoke");
+      expect(error).toContain("tokenScope to org");
+      expect(fake.resolveCalls).toEqual([]);
+      // The source row and the delegation are both untouched.
+      expect(
+        await api!.providers.engineCredentials.get({ type: "user", id: "test-member" }, "linear"),
+      ).toMatchObject({ apiKey: "member-lin" });
+      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
+        metadata: { delegatedFrom: "test-member" },
+      });
+
+      // An org-scope reference is one the team read can use, so it is accepted.
+      const orgRef = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+        method: "PUT",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({
+          type: "api_key",
+          onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+        }),
+      });
+      expect(orgRef.status).toBe(200);
+    });
+
+    it("marks the team reference broken when the source row is a personal reference", async () => {
+      const team = await delegatedLinear();
+      // Written through the store, the way a row that predates the PUT
+      // check would sit in the table.
+      await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
+        type: "api_key",
+        metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "personal" } },
+      });
+      const listed = (await (
+        await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+      ).json()) as ListCredentialsResponse;
+      expect(listed.credentials).toEqual([
+        expect.objectContaining({ service: "linear", delegatedFrom: "test-member", referenceBroken: true }),
+      ]);
+
+      await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
+        type: "api_key",
+        metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "org" } },
+      });
+      const healthy = (await (
+        await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+      ).json()) as ListCredentialsResponse;
+      expect(healthy.credentials).toEqual([
+        expect.objectContaining({ service: "linear", delegatedFrom: "test-member", referenceBroken: false }),
+      ]);
+    });
+  });
+
+  // A github row that the user's own runs would refuse (identity-only
+  // sign-in scopes, a failed refresh, an expired token with no refresh
+  // token) is no better for a team. Sharing it would hand the team a
+  // credential every run rejects.
+  // The health rule reads the secret slot the row actually uses: a PAT
+  // stored in `apiKey` and a 1Password reference (resolved by the team
+  // read, so it cannot be checked here) both share.
+  it("delegates a github PAT stored in the apiKey slot and a 1Password-referenced github row", async () => {
+    api = await bootTestApi();
+    const { engineCredentials } = api.providers;
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await engineCredentials.save({ type: "user", id: "local-user" }, "github", { type: "api_key", apiKey: "ghp_pat" });
+    const pat = await fetch(`${api.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(pat.status).toBe(201);
+    await fetch(`${api.baseUrl}/api/credentials/github/delegations/${team.id}`, { method: "DELETE" });
+    await engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2",
+      metadata: { onepassword: { reference: "op://Org/GitHub/token", tokenScope: "org" } },
+    });
+    const ref = await fetch(`${api.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(ref.status).toBe(201);
+  });
+
+  it("refuses to delegate an unhealthy github connection, naming the reconnect", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2",
+      accessToken: "identity-tok",
+      metadata: { login: "octocat", identityOnly: true },
+    });
+    const share = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(400);
+    const { error } = (await share.json()) as { error: string };
+    expect(error).toContain("Connect GitHub in Settings → Connected accounts");
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "github")).toBeNull();
+
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2",
+      accessToken: "repo-tok",
+      metadata: { login: "octocat" },
+    });
+    const healthy = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(healthy.status).toBe(201);
   });
 
   // A team may store its own Slack bot token. It is checked against Slack

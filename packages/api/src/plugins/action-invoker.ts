@@ -49,6 +49,7 @@ import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../
 import { actionInvocations } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
+  isUsableGithubUserRow,
   resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
@@ -820,7 +821,11 @@ function buildGithubCredentialProvider(
       const selection = req.credential ?? "auto";
       if (owner.type === "team" && selection !== "app") {
         const teamRow = await buildCredentialProvider(opts, ctx, owner, "github").get("github");
-        if (teamRow) return teamRow;
+        // A delegated row follows to the member's live github row. When
+        // that row is one the member's own runs would refuse (identity-
+        // only, refresh-failed, expired), the team must not act on it
+        // either: it falls to the App path like a team with no row.
+        if (teamRow && isUsableGithubUserRow(teamRow, (deps.now ?? Date.now)())) return teamRow;
         if (selection === "user") return null;
         const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
         return token === null ? null : { accessToken: token };

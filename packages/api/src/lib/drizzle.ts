@@ -144,6 +144,15 @@ interface SchemaRepair {
     | { kind: "table"; table: string }
     | { kind: "index"; index: string };
   sql: string;
+  /**
+   * A one-shot data statement run in the same transaction, right after
+   * `sql`, only when this repair runs. For a column whose meaning depends on
+   * whether a row predates it: the rows present at repair time get their
+   * value here, once, and a later row that omits the column keeps the
+   * column's documented default reading instead of being rewritten on a
+   * later boot. Must end in `RETURNING` a column so the log can count rows.
+   */
+  backfill?: string;
 }
 
 /**
@@ -1225,6 +1234,16 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "index", index: "apikey_teamId_idx" },
     sql: 'CREATE INDEX IF NOT EXISTS "apikey_teamId_idx" ON "apikey" ("team_id")',
   },
+  {
+    // Whose credentials a team-owned session reads (team credentials
+    // design, deviation 13). Nullable; the backfill below is the one-time stamp.
+    describe: "agent_sessions.credential_owner_mode column",
+    probe: { kind: "column", table: "agent_sessions", column: "credential_owner_mode" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "credential_owner_mode" text',
+    backfill:
+      `UPDATE "agent_sessions" SET "credential_owner_mode" = 'actor' ` +
+      `WHERE "owner_type" = 'team' AND "credential_owner_mode" IS NULL RETURNING "id"`,
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per
@@ -1328,14 +1347,19 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
 async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
   for (let attempt = 1; attempt <= REPAIR_ATTEMPTS; attempt++) {
     try {
-      await db.transaction(async (tx) => {
+      const backfilled = await db.transaction(async (tx) => {
         // SET LOCAL scopes the timeout to this transaction. Without it the
         // ALTER waits forever behind any open transaction on the table —
         // during a rolling update, the previous api pod's.
         await tx.query(`SET LOCAL lock_timeout = '${REPAIR_LOCK_TIMEOUT}'`);
         await tx.query(repair.sql);
+        if (!repair.backfill) return 0;
+        const result = await tx.query(repair.backfill);
+        return result.rows.length;
       });
-      console.log(`schema repair: added ${repair.describe}`);
+      console.log(
+        `schema repair: added ${repair.describe}` + (repair.backfill ? ` (backfilled ${backfilled} row(s))` : ""),
+      );
       return;
     } catch (err) {
       if (!isPgLockTimeout(err)) throw err;

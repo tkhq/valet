@@ -374,6 +374,33 @@ describe("teams service", () => {
     expect(rows[0]!.kinds).toEqual(["workflows"]);
   });
 
+  // An org source may collect skills alongside workflows. Copying its kinds
+  // gave every new team a team-owned mirror of every org skill and its own
+  // poll of the repository. The adopted row exists for the workflows.
+  it("createTeam adopts only the workflows kind of a mixed-kind org source", async () => {
+    const team = await createTeam(db, {
+      orgId,
+      name: "Platform",
+      creatorUserId: "u1",
+      adoptSources: [
+        {
+          repoFullName: "tkhq/automation",
+          ref: "main",
+          subpath: "",
+          kinds: ["skills", "workflows", "templates"],
+        },
+      ],
+    });
+
+    expect(team.adoptedSources).toHaveLength(1);
+    expect(team.adoptedSources[0]!.kinds).toEqual(["workflows"]);
+    const rows = await db
+      .select()
+      .from(contentSources)
+      .where(and(eq(contentSources.ownerType, "team"), eq(contentSources.ownerId, team.id)));
+    expect(rows[0]!.kinds).toEqual(["workflows"]);
+  });
+
   it("createTeam with no adoptSources writes only the team and membership", async () => {
     const team = await createTeam(db, { orgId, name: "Empty", creatorUserId: "u1" });
     expect(team.adoptedSources).toEqual([]);

@@ -29,6 +29,7 @@ import {
   type PluginStore,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { pluginStore } from "../services/plugin-store.js";
 import {
   buildPluginCatalog,
@@ -55,6 +56,7 @@ import {
 } from "../services/github-tokens.js";
 import {
   githubTokenArgsForOwner,
+  isUsableGithubRow,
   primaryRepoBinding,
   resolveSessionGitHubToken,
 } from "../services/session-github-token.js";
@@ -386,6 +388,9 @@ export interface EngineHostOpts {
   prebuildPreflight?: PrebuildPreflightOpts;
 }
 
+/** `agent_sessions.credential_owner_mode`; see {@link SessionMeta.credentialOwnerMode}. */
+export type CredentialOwnerMode = "owner" | "actor";
+
 export interface SessionMeta {
   userId: string;
   orgId: string;
@@ -428,6 +433,34 @@ export interface SessionMeta {
    * `loadSessionMeta` supplies it from the app row.
    */
   ownerTeamId?: string;
+  /**
+   * `agent_sessions.credential_owner_mode`. `actor` marks a team session
+   * from before team-owner credential resolution shipped: its credentials
+   * keep resolving as the prompting member with org fallback, exactly as
+   * they did when the session was created. `owner`, NULL, or absent
+   * resolves as the owning team. Ignored for user- and org-owned sessions.
+   * `loadSessionMeta` supplies it from the app row.
+   */
+  credentialOwnerMode?: CredentialOwnerMode | null;
+}
+
+/**
+ * Whether a session's credential reads run as the acting member, the
+ * contract every session had before team ownership, instead of as the
+ * owner principal. Only a team session stamped `actor` qualifies. The stamp
+ * is written once at boot onto rows that predate the column
+ * (the column repair in `lib/drizzle.ts` stamps them once); every writer since stamps
+ * `owner`.
+ */
+export function resolvesAsActingMember(
+  meta: Pick<SessionMeta, "ownerType" | "credentialOwnerMode">,
+): boolean {
+  return meta.ownerType === "team" && meta.credentialOwnerMode === "actor";
+}
+
+/** The principal a session's GitHub metadata reads (prebuild flags) run as. */
+function credentialReadPrincipal(meta: SessionMeta): Principal {
+  return resolvesAsActingMember(meta) ? { type: "user", id: meta.userId } : sessionPrincipal(meta);
 }
 
 /** The session principal `buildSession` stamps onto `SessionOptions.owner`. */
@@ -982,7 +1015,12 @@ export class EngineHost {
       });
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef, personaCell != null);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
+    const credentialResolver = this.buildCredentialResolver(
+      sessionId,
+      meta.userId,
+      meta.orgId,
+      resolvesAsActingMember(meta),
+    );
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
     // the session doesn't exist yet at this point. `hasPrep` is true only when
@@ -1516,7 +1554,9 @@ export class EngineHost {
    * The engine passes the session principal as `owner` (user, team, or org).
    * The resolver trusts that argument. It does not read a separate ownerType.
    *
-   *  - `github` (when `githubTokenDeps`+`db` are wired) → `resolveSessionGitHubToken`
+   *  - `github` (when `githubTokenDeps`+`db` are wired) → for a team owner,
+   *    the team's own `github` row first (`resolveTeamCredentialRead`,
+   *    health-checked by `isUsableGithubRow`), then `resolveSessionGitHubToken`
    *    (`purpose: "api"`). A user owner keeps `userId` so their PAT or
    *    App-OAuth can win. A team or org owner omits `userId` and always
    *    selects `auth: "app"`: the primary `session_repos` binding names the
@@ -1531,7 +1571,8 @@ export class EngineHost {
    *    installation). `null` when no installation resolves, or when `db`/
    *    `githubTokenDeps` are not wired.
    *  - `openai` → `resolveOpenAiCredential` when `db` is wired (org OpenAI
-   *    LLM-provider key → team row for a team owner, or
+   *    LLM-provider key → team row for a team owner under
+   *    `orgFallbackPolicy(plugins, "openai")`, or
    *    `resolveUserCredentialRead` for a user owner → OPENAI_API_KEY env).
    *    A team or org owner never reads the prompting member's user row.
    *  - `slack` → owner-precedence read (user, team, or org), then
@@ -1555,6 +1596,13 @@ export class EngineHost {
    *    credential for everyone), otherwise `reference-only` (an admin's
    *    1Password pointer is a deliberate act of sharing; a plain org row
    *    stays invisible to member sessions).
+   *
+   *  - `actingMember` (a team session whose row is stamped
+   *    `credential_owner_mode = 'actor'`, see `resolvesAsActingMember`)
+   *    reads every service as `{ type: "user", id: userId }` with the org
+   *    fallback above and the team's 1Password scope, which is the contract
+   *    every session had before team-owner resolution. The principal the
+   *    engine hands over is ignored for the read; it still owns the session.
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -1609,13 +1657,20 @@ export class EngineHost {
     sessionId: string,
     userId: string,
     orgId: string,
+    actingMember: boolean,
   ): ((owner: CredentialOwner, service: string) => Promise<StoredCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
     const onePassword = this.opts.onePassword;
     if ((!tokenDeps || !db) && !onePassword) return undefined;
-    return async (owner, service) => {
+    return async (sessionOwner, service) => {
+      // A legacy team session reads as the member prompting it; every other
+      // session reads as the principal the engine hands over. The scope
+      // follows the OWNER either way: a shared session never reaches the
+      // frozen actor's personal vault.
+      const owner: CredentialOwner = actingMember ? { type: "user", id: userId } : sessionOwner;
+      const scopes = onePasswordScopesFor(actingMember ? "team" : owner.type);
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -1653,13 +1708,38 @@ export class EngineHost {
             orgId,
             owner,
             ...(owner.type === "user" ? { userId: owner.id } : {}),
-            scopes: onePasswordScopesFor(owner.type),
+            scopes,
+            // The team read runs under the same policy a team workflow's
+            // openai node reads with, so both reach the org-scoped item.
+            orgFallback: orgFallbackPolicy(this.opts.plugins, "openai"),
           },
           process.env,
           onePassword,
         );
       }
       if (service === "github" && tokenDeps && db) {
+        if (owner.type === "team") {
+          // The team's own row first, direct or delegated, the way a
+          // workflow tool node reads it (`plugins/action-invoker.ts`); the
+          // App installation is the fallback behind it. `github` declares no
+          // org credential, so the policy stops at the team row and the
+          // org-scoped 1Password lookup. An unhealthy row is skipped, not
+          // surfaced: the App answer below still names the corrective step.
+          let teamRow: StoredCredential | null = null;
+          try {
+            teamRow = await resolveTeamCredentialRead(
+              { credentials, onePassword },
+              { orgId, teamId: owner.id, userId, scopes },
+              "github",
+              orgFallbackPolicy(this.opts.plugins, "github"),
+            );
+          } catch (err) {
+            // A delegation whose member left the team is skipped like an
+            // unhealthy row: the App answer below still names the fix.
+            if (!(err instanceof CredentialReferenceBrokenError)) throw err;
+          }
+          if (isUsableGithubRow(teamRow)) return teamRow;
+        }
         const binding = await primaryRepoBinding(db, sessionId);
         const resolved = await resolveSessionGitHubToken(
           {
@@ -1692,7 +1772,7 @@ export class EngineHost {
       if (owner.type === "team") {
         return resolveTeamCredentialRead(
           { credentials, onePassword },
-          { orgId, teamId: owner.id, userId, scopes: onePasswordScopesFor("team") },
+          { orgId, teamId: owner.id, userId, scopes },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read
           // reach an org-scoped 1Password item by service name while still
@@ -1703,13 +1783,13 @@ export class EngineHost {
       if (owner.type === "org") {
         return resolveOrgCredentialRead(
           { credentials, onePassword },
-          { orgId, userId, scopes: onePasswordScopesFor("org") },
+          { orgId, userId, scopes },
           service,
         );
       }
       const stored = await resolveUserCredentialRead(
         { credentials, onePassword },
-        { orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
+        { orgId, userId: owner.id, scopes },
         service,
         fallback,
       );
@@ -1849,7 +1929,7 @@ export class EngineHost {
           const resolved = await resolveSessionGitHubToken(
             fullDeps,
             githubTokenArgsForOwner(
-              sessionPrincipal(meta),
+              credentialReadPrincipal(meta),
               meta.orgId,
               sessionId,
               { owner, name: repoName },
@@ -2188,6 +2268,23 @@ export class EngineHost {
   }
 
   /**
+   * The app row's `credential_owner_mode`, for builds that do not receive
+   * a `SessionMeta` (assistant sessions). No row, or no db, reads as
+   * `owner`: a session with no row is new, and a new row is stamped
+   * `owner` by every writer.
+   */
+  private async storedCredentialOwnerMode(sessionId: string): Promise<CredentialOwnerMode | null> {
+    const db = this.opts.db;
+    if (!db) return null;
+    const rows = await db
+      .select({ mode: agentSessions.credentialOwnerMode })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    return rows[0]?.mode ?? null;
+  }
+
+  /**
    * Fire-and-forget prune of durable events belonging to submissions that
    * settled before the retention cutoff. Errors are logged, never thrown.
    */
@@ -2358,7 +2455,15 @@ export class EngineHost {
     // to. See `PATCH /api/sessions/:id`.
     const profile = await this.storedProfile(sessionId);
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
+    // Same row read as the profile: a team assistant from before team-owner
+    // resolution keeps reading credentials as the member prompting it.
+    const credentialOwnerMode = await this.storedCredentialOwnerMode(sessionId);
+    const credentialResolver = this.buildCredentialResolver(
+      sessionId,
+      meta.actorUserId,
+      meta.orgId,
+      resolvesAsActingMember({ ownerType: principal.type, credentialOwnerMode }),
+    );
     // Slash-command options: same wiring as the interactive path, so the
     // orchestrator answers /model and /sessions instead of the no-context
     // fallback. The getter closes over `builtSession`, assigned below.
@@ -3216,6 +3321,12 @@ export class EngineHost {
       docker?: boolean;
       /** CPU and memory overrides for this child only. */
       resources?: PrebuildResources;
+      /**
+       * The mode the spawner writes on the child's row. A child of a legacy
+       * team orchestrator inherits `actor` and must resolve that way from
+       * its first build, before its row exists.
+       */
+      credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
     const cached = this.cache.get(childSessionId);
@@ -3246,6 +3357,12 @@ export class EngineHost {
       docker?: boolean;
       /** CPU and memory overrides for this child only. */
       resources?: PrebuildResources;
+      /**
+       * The mode the spawner writes on the child's row. A child of a legacy
+       * team orchestrator inherits `actor` and must resolve that way from
+       * its first build, before its row exists.
+       */
+      credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
     // `opts.owner` is the child's own principal: the `task` tool reads the
@@ -3306,7 +3423,15 @@ export class EngineHost {
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
+    // A first child build has no app row yet, so the mode the spawner is
+    // about to write travels in the options: a legacy team orchestrator's
+    // child keeps acting as the member from its first turn.
+    const credentialResolver = this.buildCredentialResolver(
+      childSessionId,
+      opts.actorUserId,
+      opts.orgId,
+      resolvesAsActingMember({ ownerType: opts.owner.type, credentialOwnerMode: opts.credentialOwnerMode ?? null }),
+    );
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     // A child spawned with a repo binding (the spawner inserts the
@@ -3517,7 +3642,7 @@ export class EngineHost {
     });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
-    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
+    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const sessionOptions = {
