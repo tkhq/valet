@@ -29,6 +29,23 @@ describe("resolveProxyPrincipal", () => {
     expect(r).toBeInstanceOf(Response);
     expect((r as Response).status).toBe(401);
   });
+  it("401s a team key and names the fix — the gateway bills a user, and a team key has none", async () => {
+    const team = {
+      verifyApiKey: vi.fn(async () => ({ valid: true, key: { id: "k7", userId: "admin-1", teamId: "team_1" } })),
+      userOrg: vi.fn(async () => "org1"),
+    };
+    const r = await resolveProxyPrincipal(new Headers({ "x-api-key": "vlt_team" }), "anthropic", team);
+    expect(r).toBeInstanceOf(Response);
+    const res = r as Response;
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toMatch(/team API key/);
+    expect(body.error.message).toMatch(/personal/);
+    // Refused before the org lookup: the creating admin's org must never
+    // become the billing principal by accident.
+    expect(team.userOrg).not.toHaveBeenCalled();
+  });
+
   it("prefers the vlt_ key when Claude Code also sends a real provider key as x-api-key", async () => {
     // Claude Code forwards ANTHROPIC_API_KEY as x-api-key even when the valet
     // key is in ANTHROPIC_AUTH_TOKEN (the bearer). The gateway must pick the

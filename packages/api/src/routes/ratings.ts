@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import { and, desc, eq, lt } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
+import type { RequestPrincipal } from "../lib/request-principal.js";
 import { agentSessions, ratings } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import type {
@@ -44,11 +45,11 @@ function isRatingValue(v: unknown): v is RatingValue {
 async function loadViewableSession(
   db: AppDb,
   sessionId: string,
-  userId: string,
+  caller: RequestPrincipal,
 ) {
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, userId))) return null;
+  if (!row || !(await canViewSession(db, row, caller))) return null;
   return row;
 }
 
@@ -115,7 +116,7 @@ ratingsRouter.post("/:id/rating", async (c) => {
   const { db } = c.var.providers;
   const sessionId = c.req.param("id");
   const userId = c.var.user.id;
-  if ((await loadViewableSession(db, sessionId, userId)) === null) {
+  if ((await loadViewableSession(db, sessionId, c.var.principal)) === null) {
     return c.json({ error: "session not found" }, 404);
   }
   let body: unknown;
@@ -146,7 +147,7 @@ ratingsRouter.post("/:id/messages/:entryId/rating", async (c) => {
   const sessionId = c.req.param("id");
   const entryId = c.req.param("entryId");
   const userId = c.var.user.id;
-  if ((await loadViewableSession(db, sessionId, userId)) === null) {
+  if ((await loadViewableSession(db, sessionId, c.var.principal)) === null) {
     return c.json({ error: "session not found" }, 404);
   }
   let body: unknown;
@@ -181,7 +182,7 @@ ratingsRouter.get("/:id/ratings", async (c) => {
   const { db } = c.var.providers;
   const sessionId = c.req.param("id");
   const userId = c.var.user.id;
-  if ((await loadViewableSession(db, sessionId, userId)) === null) {
+  if ((await loadViewableSession(db, sessionId, c.var.principal)) === null) {
     return c.json({ error: "session not found" }, 404);
   }
   const rows = await db

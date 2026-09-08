@@ -70,7 +70,7 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
 export async function createWorkflowTrigger(
   db: AppDb,
   plugins: ValetPlugin[],
-  user: { id: string; orgId: string },
+  owner: WorkflowOwner,
   input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const target = { kind: "workflow" as const, workflowId: input.workflowId };
@@ -78,7 +78,7 @@ export async function createWorkflowTrigger(
     db,
     plugins,
     { name: input.name, eventKeys: input.eventKeys, filters: input.filters ?? [], target },
-    { creatorUserId: user.id, anyChannel: input.anyChannel === true, matchChanged: true },
+    { creatorUserId: owner.userId, anyChannel: input.anyChannel === true, matchChanged: true },
   );
   if (!write.ok) return { ok: false, error: write.error };
   const filters = write.filters;
@@ -87,8 +87,10 @@ export async function createWorkflowTrigger(
   // member wire event-driven automation onto a workflow they don't own.
   // Unlike the schedule path, run ownership at fire time was already
   // correct here (`events/dispatcher.ts` bills the workflow definition's
-  // own owner) — only this creation-time check needed the fix.
-  const owned = await armableDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId);
+  // own owner) — only this creation-time check needed the fix. The owner
+  // carries the request principal, so a team key reaches its team's
+  // workflows only.
+  const owned = await armableDefinitionRow(db, owner, input.workflowId);
   if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
 
   const now = Date.now();
@@ -96,16 +98,16 @@ export async function createWorkflowTrigger(
     .insert(eventSubscriptions)
     .values({
       id: randomUUID(),
-      orgId: user.orgId,
+      orgId: owner.orgId,
       // Owner follows the workflow, team only — see the insert in `routes/events.ts`.
       ownerType: owned.ownerType === "team" ? "team" : "user",
-      ownerId: owned.ownerType === "team" ? owned.ownerId : user.id,
+      ownerId: owned.ownerType === "team" ? owned.ownerId : owner.userId,
       name: input.name,
       eventKeys: input.eventKeys,
       filters,
       target,
       enabled: true,
-      createdBy: user.id,
+      createdBy: owner.userId,
       createdAt: now,
       updatedAt: now,
     })

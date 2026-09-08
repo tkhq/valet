@@ -806,7 +806,7 @@ export function orderNodes(definition: WorkflowDefinition): WorkflowNode[] {
 
 workflowPreviewRouter.post("/:id/preview", async (c) => {
   const { db, workflowStore, actionPluginByService } = c.var.providers;
-  const owner: WorkflowOwner = { userId: c.var.user.id, orgId: c.var.user.orgId };
+  const owner: WorkflowOwner = { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal };
   const workflowId = c.req.param("id");
 
   let body: PreviewWorkflowRequest;

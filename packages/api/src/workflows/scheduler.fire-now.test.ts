@@ -21,7 +21,6 @@ let db: AppDb;
 let pgdb: PgDb;
 let cleanup: () => Promise<void>;
 
-const USER = { id: "user_1", orgId: "org_1" };
 const OWNER = { userId: "user_1", orgId: "org_1" };
 const FIXED_NOW = Date.UTC(2026, 0, 20, 10, 0, 0); // 2026-01-20T10:00:00Z
 
@@ -71,7 +70,7 @@ describe("WorkflowScheduler.fireNow", () => {
   it("fires an orchestrator schedule and does not advance nextFireAt", async () => {
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "daily digest", name: "orch-sched-a", cron: "0 9 * * *" },
       FIXED_NOW - 1000,
     );
@@ -97,9 +96,9 @@ describe("WorkflowScheduler.fireNow", () => {
   it("fires a workflow schedule through runHost.start with the derived runId", async () => {
     await db.insert(workflowDefinitions).values({
       id: "wf_fire_b",
-      orgId: USER.orgId,
+      orgId: OWNER.orgId,
       ownerType: "user",
-      ownerId: USER.id,
+      ownerId: OWNER.userId,
       name: "test workflow b",
       definition: { version: "dag/v1", nodes: [], edges: [] },
       createdAt: FIXED_NOW,
@@ -108,7 +107,7 @@ describe("WorkflowScheduler.fireNow", () => {
 
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { workflowId: "wf_fire_b", name: "wf-sched-b", cron: "0 9 * * *" },
       FIXED_NOW - 1000,
     );
@@ -128,7 +127,7 @@ describe("WorkflowScheduler.fireNow", () => {
   it("returns not_found for cross-org and unknown ids", async () => {
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "p", name: "cross-org-sched-c", cron: "0 9 * * *" },
       FIXED_NOW - 1000,
     );
@@ -139,14 +138,14 @@ describe("WorkflowScheduler.fireNow", () => {
     const { host } = makeRunHost();
     const scheduler = buildScheduler(host, deliver);
 
-    expect(await scheduler.fireNow({ userId: USER.id, orgId: "org_other" }, scheduleId)).toBe("not_found");
+    expect(await scheduler.fireNow({ userId: OWNER.userId, orgId: "org_other" }, scheduleId)).toBe("not_found");
     expect(await scheduler.fireNow(OWNER, "nope")).toBe("not_found");
   });
 
   it("fires a disabled schedule (manual fire is the test path)", async () => {
     const created = await createWorkflowSchedule(
       db,
-      USER,
+      OWNER,
       { prompt: "p", name: "disabled-sched-d", cron: "0 9 * * *" },
       FIXED_NOW - 1000,
     );

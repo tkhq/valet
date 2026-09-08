@@ -9,6 +9,7 @@
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
  *   DELETE /api/teams/:id/members/:userId   → remove a member
  *   POST   /api/teams/:id/orchestrator      → get-or-create the team's default assistant session
+ *   GET/POST/DELETE /api/teams/:id/api-keys → team `vlt_` keys (TKAI-396; `routes/team-api-keys.ts`)
  *
  * Org-membership-gated: every route requires the team to belong to the
  * caller's org (`c.var.user.orgId`) — cross-org teams 404 rather than 403,
@@ -44,12 +45,13 @@
  * and `config`: the reconciler identifies a declared team by name, so a
  * rename orphans the row and the next boot creates a second team beside it.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
+import { requirePrincipal } from "../middleware/auth.js";
 import {
   agentSessions,
   assistants,
@@ -244,6 +246,16 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
  * any org admin (admins manage the whole org's teams, not just ones they're
  * on) — looser than `canAdministerTeam`, which requires *team*-admin.
  */
+function refuseTeamApiKey(c: Context<AppEnv>) {
+  if (requirePrincipal(c)?.type === "team") {
+    return c.json(
+      { error: "A team API key cannot change team membership. Sign in to the team workspace." },
+      403,
+    );
+  }
+  return undefined;
+}
+
 async function canViewTeam(
   db: AppEnv["Variables"]["providers"]["db"],
   teamId: string,
@@ -297,15 +309,23 @@ teamsRouter.get("/", async (c) => {
  * case this only backfills the `agent_sessions` app row the viewing routes
  * (`GET /api/sessions/:id`, messages, the WS) need, rather than creating a
  * second session.
+ *
+ * A team `vlt_` key reaches this for its own team, with no membership
+ * check on the creating admin: the key survives them leaving (decision 2
+ * of the team-api-keys design). The scope gate already refuses every
+ * other team's id; the principal comparison here is the route's own
+ * guard, so it holds even if that gate changes.
  */
 teamsRouter.post("/:id/orchestrator", async (c) => {
   const { db, engineHost } = c.var.providers;
   const user = c.var.user;
+  const principal = c.var.principal;
   const id = c.req.param("id");
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  const admitted = principal.type === "team" ? principal.id === id : await canViewTeam(db, id, user);
+  if (!admitted) return c.json({ error: "team not found" }, 404);
 
   const { sessionId } = await ensureDefaultAssistantSession(
     { db, engineHost },
@@ -417,6 +437,8 @@ teamsRouter.get("/:id/members", async (c) => {
 // ── Create ────────────────────────────────────────────────────────────────
 
 teamsRouter.post("/", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
   const { db, contentSync } = c.var.providers;
   const user = c.var.user;
 
@@ -478,6 +500,8 @@ const PATCH_TEAM_FIELDS = new Set(["defaultModel", "defaultReasoning"]);
  * set `GET /api/models` shows the picker.
  */
 teamsRouter.patch("/:id", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
   const { db, engineCredentials } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
@@ -558,6 +582,8 @@ teamsRouter.patch("/:id", async (c) => {
 // ── Delete ────────────────────────────────────────────────────────────────
 
 teamsRouter.delete("/:id", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
   const { db, engineHost } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
@@ -612,6 +638,8 @@ teamsRouter.delete("/:id", async (c) => {
 // ── Members: add/update ─────────────────────────────────────────────────
 
 teamsRouter.post("/:id/members", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
   const { db } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
@@ -649,6 +677,8 @@ teamsRouter.post("/:id/members", async (c) => {
 // ── Members: change role ────────────────────────────────────────────────
 
 teamsRouter.patch("/:id/members/:userId", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
   const { db } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
@@ -684,6 +714,8 @@ teamsRouter.patch("/:id/members/:userId", async (c) => {
 // ── Members: remove ──────────────────────────────────────────────────────
 
 teamsRouter.delete("/:id/members/:userId", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
   const { db } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");

@@ -78,7 +78,7 @@ export function registerWsRoutes(
     upgradeWebSocket((c) => {
       const sessionId = c.req.param("id");
       const providers = c.var.providers;
-      const userId = c.var.user.id;
+      const caller = c.var.principal;
       // Resume handshake: `?fromOffset=<offset>` replays durable events after
       // that offset before live delivery. Empty/absent ⇒ live-only.
       const rawFromOffset = c.req.query("fromOffset");
@@ -108,8 +108,8 @@ export function registerWsRoutes(
           // error frame and close the socket gracefully.
           try {
             // Verify view access before subscribing — direct ownership, or
-            // team membership for a team's orchestrator session (see
-            // `services/session-access.ts`).
+            // team membership for a team's orchestrator session, or the
+            // team principal itself (see `services/session-access.ts`).
             const rows = await providers.db
               .select()
               .from(agentSessions)
@@ -121,7 +121,7 @@ export function registerWsRoutes(
               ws.close(4040, "session not found");
               return;
             }
-            const canView = await canViewSession(providers.db, row, userId);
+            const canView = await canViewSession(providers.db, row, caller);
             if (lifecycle.closed) return;
             if (!canView) {
               ws.close(4040, "session not found");

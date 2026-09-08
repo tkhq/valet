@@ -23,11 +23,11 @@ import { saveConfig } from "../config.js";
 import { AuthError, ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
-import type { MeResponse } from "../../wire/types.js";
+import type { GetMeResponse } from "../../wire/types.js";
 
 /** The subset of `InstanceClient` the `login` command needs. */
 export interface LoginClient {
-  me(): Promise<MeResponse>;
+  me(): Promise<GetMeResponse>;
 }
 
 /** Injectable dependencies for `runLogin`. */

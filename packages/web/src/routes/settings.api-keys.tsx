@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
 import { ApiKeysSection } from "~/components/settings/api-keys-section";
+import { WorkspaceClause } from "~/components/workspace-clause";
 
 /**
- * `/settings/api-keys` — You · API keys. Scripts and CI can call the Valet
- * API with a key created here instead of a signed-in session.
+ * `/settings/api-keys` follows the workspace switcher. Personal scope
+ * creates a personal `vlt_` key. Team scope creates a key that
+ * authenticates as that team.
  */
 export const Route = createFileRoute("/settings/api-keys")({
   component: ApiKeysPage,
@@ -12,7 +14,15 @@ export const Route = createFileRoute("/settings/api-keys")({
 
 export function ApiKeysPage() {
   return (
-    <Section title="API keys" description="Create keys to call the Valet API from scripts.">
+    <Section
+      title={
+        <span className="inline-flex flex-wrap items-baseline gap-x-2">
+          API keys
+          <WorkspaceClause />
+        </span>
+      }
+      description="Create keys to call the Valet API from scripts."
+    >
       <ApiKeysSection />
     </Section>
   );

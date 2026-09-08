@@ -1205,6 +1205,19 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "assistants", column: "avatar_url" },
     sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "avatar_url" text',
   },
+  {
+    // Team `vlt_` key pin (TKAI-396). Nullable: a personal key has none.
+    // Pre-1.0 there are no team keys to backfill; the team route writes
+    // the column and `metadata.teamId` in one statement from now on.
+    describe: "apikey.team_id column",
+    probe: { kind: "column", table: "apikey", column: "team_id" },
+    sql: 'ALTER TABLE "apikey" ADD COLUMN IF NOT EXISTS "team_id" text',
+  },
+  {
+    describe: "apikey_teamId_idx index",
+    probe: { kind: "index", index: "apikey_teamId_idx" },
+    sql: 'CREATE INDEX IF NOT EXISTS "apikey_teamId_idx" ON "apikey" ("team_id")',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

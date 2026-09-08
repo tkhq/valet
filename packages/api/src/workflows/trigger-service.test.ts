@@ -65,7 +65,7 @@ describe("createWorkflowTrigger authorization", () => {
   it("rejects wiring a trigger onto a workflow owned by a different user in the SAME org", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
 
-    const result = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "other-org-member", orgId: "org-1" }, {
+    const result = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { userId: "other-org-member", orgId: "org-1" }, {
       workflowId: "wf_1",
       name: "trig",
       eventKeys: ["fixture.thing_happened"],
@@ -79,7 +79,7 @@ describe("createWorkflowTrigger authorization", () => {
   it("allows the actual owner to wire a trigger onto their own workflow", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
 
-    const result = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "owner-user", orgId: "org-1" }, {
+    const result = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { userId: "owner-user", orgId: "org-1" }, {
       workflowId: "wf_1",
       name: "trig",
       eventKeys: ["fixture.thing_happened"],
@@ -94,7 +94,7 @@ describe("createWorkflowTrigger authorization", () => {
 describe("listWorkflowTriggers / deleteWorkflowTrigger owner scoping (TKAI-227)", () => {
   it("another org member cannot list or delete a trigger on a workflow they cannot reach; the owner can do both", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
-    const created = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { id: "owner-user", orgId: "org-1" }, {
+    const created = await createWorkflowTrigger(db, FIXTURE_PLUGINS, { userId: "owner-user", orgId: "org-1" }, {
       workflowId: "wf_1",
       name: "trig",
       eventKeys: ["fixture.thing_happened"],

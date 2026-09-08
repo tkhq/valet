@@ -109,7 +109,8 @@ CREATE TABLE "apikey" (
 	"created_at" timestamp NOT NULL,
 	"updated_at" timestamp NOT NULL,
 	"permissions" text,
-	"metadata" text
+	"metadata" text,
+	"team_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "apikey_configId_idx" ON "apikey" ("config_id");
@@ -117,6 +118,8 @@ CREATE INDEX "apikey_configId_idx" ON "apikey" ("config_id");
 CREATE INDEX "apikey_referenceId_idx" ON "apikey" ("reference_id");
 --> statement-breakpoint
 CREATE INDEX "apikey_key_idx" ON "apikey" ("key");
+--> statement-breakpoint
+CREATE INDEX "apikey_teamId_idx" ON "apikey" ("team_id");
 --> statement-breakpoint
 CREATE TABLE "oauth_application" (
 	"id" text PRIMARY KEY NOT NULL,

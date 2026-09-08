@@ -54,6 +54,42 @@ describe("InstanceClient auth header", () => {
   });
 });
 
+describe("InstanceClient.ensureOrchestrator", () => {
+  it("posts /api/orchestrator for a personal identity", async () => {
+    const calls: string[] = [];
+    handler = (req, res) => {
+      calls.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      if (req.url === "/api/me") {
+        res.end(JSON.stringify({ id: "u1", email: "u@x", name: "U", role: "member", orgId: "org1" }));
+        return;
+      }
+      res.end(JSON.stringify({ sessionId: "assistant:u1" }));
+    };
+    const client = new InstanceClient({ url: baseUrl, apiKey: "vlt_personal" });
+    expect((await client.ensureOrchestrator()).sessionId).toBe("assistant:u1");
+    expect(calls).toContain("POST /api/orchestrator");
+    expect(calls.some((c) => c.startsWith("POST /api/teams/"))).toBe(false);
+  });
+
+  it("posts the team's orchestrator for a team identity", async () => {
+    const calls: string[] = [];
+    handler = (req, res) => {
+      calls.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      if (req.url === "/api/me") {
+        res.end(JSON.stringify({ id: "team_1", name: "Platform", role: "team", orgId: "org1" }));
+        return;
+      }
+      res.end(JSON.stringify({ sessionId: "assistant:team_1" }));
+    };
+    const client = new InstanceClient({ url: baseUrl, apiKey: "vlt_team" });
+    expect((await client.ensureOrchestrator()).sessionId).toBe("assistant:team_1");
+    expect(calls).toContain("POST /api/teams/team_1/orchestrator");
+    expect(calls).not.toContain("POST /api/orchestrator");
+  });
+});
+
 describe("InstanceClient error mapping", () => {
   it("maps 401 to AuthError", async () => {
     handler = (_req, res) => {

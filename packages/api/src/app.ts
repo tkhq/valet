@@ -15,7 +15,9 @@ import type { RunningServer, ServerAdapter } from "./server-adapter.js";
 import { nodeServerAdapter } from "./server-adapter.node.js";
 import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
-import { buildAuthMiddleware } from "./middleware/auth.js";
+import { buildAuthMiddleware, refuseTeamKeyOutsideScope } from "./middleware/auth.js";
+import { filterTeamKeysFromPersonalApiKeyList } from "./lib/personal-api-key-list.js";
+import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
@@ -27,6 +29,7 @@ import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
+import { teamApiKeysRouter } from "./routes/team-api-keys.js";
 import { memoryRouter } from "./routes/memory.js";
 import { securityRouter } from "./routes/security.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
@@ -163,8 +166,15 @@ export function createApp(
     verifyApiKey: auth
       ? async (opts) => {
           const r = await auth.api.verifyApiKey({ body: opts });
-          // Bridge ValetApiKeyRecord (referenceId) → PrincipalDeps (userId).
-          return { valid: r.valid, key: r.key ? { id: r.key.id, userId: r.key.referenceId } : null };
+          // Bridge ValetApiKeyRecord (referenceId, metadata) → PrincipalDeps
+          // (userId, teamId). The team id rides along so the gateway can
+          // refuse a team key instead of billing the creating admin.
+          return {
+            valid: r.valid,
+            key: r.key
+              ? { id: r.key.id, userId: r.key.referenceId, teamId: teamIdFromApiKeyMetadata(r.key.metadata) }
+              : null,
+          };
         }
       : async () => ({ valid: false, key: null }),
   });
@@ -207,7 +217,7 @@ export function createApp(
 
   // PUBLIC artifact read (artifacts design) — `GET /api/artifacts/:token`.
   // The token in the URL is the capability; the handler resolves the
-  // caller itself (`resolveOptionalUser`) because `org`-visibility
+  // caller itself (`resolveOptionalIdentity`) because `org`-visibility
   // artifacts still serve logged-in members. Mounted BEFORE
   // `buildAuthMiddleware` like the webhook mounts above — do not move it
   // below that line. The share/list/manage half of the surface is the
@@ -249,7 +259,10 @@ export function createApp(
   // authMiddleware so it's public even when VALET_LOCAL_AUTH isn't set —
   // otherwise login/signup could never succeed in production.
   if (auth) {
-    app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+    app.on(["POST", "GET"], "/api/auth/*", async (c) => {
+      const res = await auth.handler(c.req.raw);
+      return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);
+    });
     app.get("/.well-known/oauth-authorization-server", (c) => oAuthDiscoveryMetadata(auth)(c.req.raw));
     app.get("/.well-known/oauth-protected-resource", (c) => oAuthProtectedResourceMetadata(auth)(c.req.raw));
 
@@ -284,6 +297,7 @@ export function createApp(
 
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
+  app.use("/api/*", refuseTeamKeyOutsideScope());
 
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
@@ -294,6 +308,7 @@ export function createApp(
   app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
+  app.route("/api/teams", teamApiKeysRouter);
   app.route("/api/memory", memoryRouter);
   // Authed artifact surface (share/list/manage). The public `GET /:token`
   // half is mounted pre-auth above.

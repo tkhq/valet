@@ -765,7 +765,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await createWorkflowTrigger(
         deps.db,
         deps.plugins ?? [],
-        { id: owner.userId, orgId: owner.orgId },
+        owner,
         { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel },
       );
       if (!result.ok) return { success: false, error: result.error };
@@ -828,7 +828,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const result = await createWorkflowSchedule(
         getDeps().db,
-        { id: owner.userId, orgId: owner.orgId },
+        owner,
         { workflowId: workflow_id, prompt, name, cron, timezone, input },
       );
       if (!result.ok) return { success: false, error: result.error };

@@ -72,10 +72,9 @@ export const messagesRouter = new Hono<AppEnv>();
 export async function loadOwnedSession(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const id = c.req.param("id");
-  const userId = c.var.user.id;
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, userId))) return null;
+  if (!row || !(await canViewSession(db, row, c.var.principal))) return null;
   return row;
 }
 
@@ -922,7 +921,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // Explicit resolve authorization, distinct from `loadEngineSession`'s
   // view check: answering a gate acts on the session's behalf. The same
   // named check gates the channel gate-callback path.
-  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.principal))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,
@@ -948,6 +947,16 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // the shared guard (also called by the channel gate-callback path) and is
   // checked against the SESSION's org, the scope the policy write lands in.
   if (body.actionId === GATE_ACTION_ALWAYS_ALLOW) {
+    // A team key carries the minting admin as `c.var.user` for audit only;
+    // an org-wide policy is that admin's decision to make signed in, never
+    // a CI key's. Every other org-admin gate short-circuits the same way
+    // (`_org-admin.ts`).
+    if (c.var.principal.type === "team") {
+      return c.json(
+        { error: "A team API key cannot grant an always-allow policy. Sign in as an organization admin to apply it." },
+        403,
+      );
+    }
     if (!(await canApplyAlwaysAllow(c.var.providers.db, session.orgId, c.var.user.id))) {
       return c.json({ error: "org admin required for always_allow" }, 403);
     }
@@ -977,7 +986,7 @@ messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
 
   // Same explicit resolve authorization as the resolve route above —
   // withdrawing settles the gate too.
-  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.principal))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,

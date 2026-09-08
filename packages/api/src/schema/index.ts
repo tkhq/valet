@@ -215,11 +215,19 @@ export const apikey = pgTable(
     updatedAt: timestamp("updated_at").notNull(),
     permissions: text("permissions"),
     metadata: text("metadata"),
+    /**
+     * Valet-owned pin for a team `vlt_` key (TKAI-396). Set by the team
+     * key route together with `metadata.teamId`; the auth ladder reads the
+     * metadata (it is what `verifyApiKey` returns), the team list filters
+     * on this indexed column. Null on a personal key.
+     */
+    teamId: text("team_id"),
   },
   (t) => [
     index("apikey_configId_idx").on(t.configId),
     index("apikey_referenceId_idx").on(t.referenceId),
     index("apikey_key_idx").on(t.key),
+    index("apikey_teamId_idx").on(t.teamId),
   ],
 );
 

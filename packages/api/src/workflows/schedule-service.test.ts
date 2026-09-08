@@ -100,7 +100,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     const result = await createWorkflowSchedule(
       db,
-      { id: "other-org-member", orgId: "org-1" },
+      { userId: "other-org-member", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
 
@@ -114,7 +114,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     const result = await createWorkflowSchedule(
       db,
-      { id: "owner-user", orgId: "org-1" },
+      { userId: "owner-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
 
@@ -142,7 +142,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     const result = await createWorkflowSchedule(
       db,
-      { id: "member-user", orgId: "org-1" },
+      { userId: "member-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
 
@@ -201,7 +201,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     const result = await createWorkflowSchedule(
       db,
-      { id: "plain-member", orgId: "org-1" },
+      { userId: "plain-member", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
 
@@ -214,7 +214,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     const result = await createWorkflowSchedule(
       db,
-      { id: "org-admin", orgId: "org-1" },
+      { userId: "org-admin", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
 
@@ -247,7 +247,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     const result = await createWorkflowSchedule(
       db,
-      { id: "outsider-user", orgId: "org-1" },
+      { userId: "outsider-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
 
@@ -286,7 +286,7 @@ describe("listWorkflowSchedules / deleteWorkflowSchedule owner scoping (TKAI-227
     });
     const created = await createWorkflowSchedule(
       db,
-      { id: "owner-user", orgId: "org-1" },
+      { userId: "owner-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
     expect(created.ok).toBe(true);
