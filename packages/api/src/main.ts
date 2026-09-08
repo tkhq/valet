@@ -509,16 +509,17 @@ async function runBootChain(): Promise<void> {
       console.error(e instanceof InstanceConfigError ? e.message : `FATAL: instance config reconcile failed: ${e}`);
       process.exit(1);
     }
-    // Teams from before every writer seeded a default assistant get one
-    // now, once, through the same seed (`services/teams.ts`). Named in the
-    // log so an operator can see what changed on this boot.
-    const seededTeams = await seedMissingTeamDefaults(providers.db);
-    if (seededTeams.length > 0) {
-      console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
-    }
     // Config rows are inserted pending and due. Poll once here so they do
     // not wait for `contentSync.start()` later in this chain.
     void providers.contentSync.pollOnce();
+  }
+  // Teams from before every writer seeded a default assistant get one now,
+  // once, through the same seed (`services/teams.ts`). Runs with or without
+  // an instance config, after the reconcile so config-declared teams are
+  // already seeded. Named in the log so an operator sees what changed.
+  const seededTeams = await seedMissingTeamDefaults(providers.db);
+  if (seededTeams.length > 0) {
+    console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
   }
 
   if (closed) return;
