@@ -19,6 +19,17 @@ export function applySandboxResourceOverrides(
   overrides: PrebuildResources | undefined,
 ): ResolvedRepoPrebuildFlags {
   if (!overrides || Object.keys(overrides).length === 0) return flags;
+  // A partial desired resource object is authoritative at the engine layer:
+  // omitted fields are reset to deployment defaults on adoption. When repo
+  // authority is unavailable, keep reconciliation non-authoritative and put
+  // the child override only in initialResources. Fresh child compute uses it;
+  // retries and restarts preserve the CR's recorded effective resources.
+  if (flags.resourcesWithheld) {
+    return {
+      ...flags,
+      initialResources: { ...flags.initialResources, ...overrides },
+    };
+  }
   return {
     ...flags,
     initialResources: { ...flags.initialResources, ...overrides },

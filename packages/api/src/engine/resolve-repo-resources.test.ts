@@ -30,7 +30,7 @@ describe("applySandboxResourceOverrides", () => {
     expect(applySandboxResourceOverrides(resolved, overrides)).toBe(resolved);
   });
 
-  it("makes only supplied fields authoritative when repository resources are withheld", () => {
+  it("applies fresh overrides but preserves live resources when repository resources are withheld", () => {
     const withheld = {
       docker: false,
       outcome: "error" as const,
@@ -41,7 +41,6 @@ describe("applySandboxResourceOverrides", () => {
     expect(applySandboxResourceOverrides(withheld, { cpu: 2 })).toEqual({
       ...withheld,
       initialResources: { cpu: 2, memory: "8Gi" },
-      resources: { cpu: 2 },
     });
   });
 });
