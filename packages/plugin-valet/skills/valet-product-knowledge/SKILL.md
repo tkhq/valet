@@ -1,23 +1,23 @@
 ---
 name: valet-product-knowledge
-description: Answer questions about Valet product capabilities. Use for "can Valet do X", "does Valet support", "how do I build a workflow in Valet", "how do I use Valet", or "what features does Valet have". Do not use for Valet development or a specific integration.
+description: Answer questions about Valet product capabilities. Use for "can Valet do X", "does Valet support", "does Valet support workflows", "how do I use Valet", or "what features does Valet have". Do not use for Valet development or a specific integration.
 ---
 
 # Using Valet
 
 Use this skill to answer questions about Valet product capabilities. Do not use it to develop Valet. For development, read `CLAUDE.md`. Do not use it for a specific integration. Use that integration's skill instead.
 
-State a limitation before you answer. If you cannot read the repository at the required ref, say so. Do not imply that you read documentation that you cannot access.
+If a limitation affects the answer, state it before the answer. If you cannot read the repository at the required ref, say so. Do not imply that you read documentation that you cannot access.
 
 ## Research rules
 
 1. Pin every product research claim to `tkhq/valet@dev-v2`.
 2. Do not use `main` for product answers. It is the frozen legacy stack: Cloudflare Worker, Modal sandboxes, and D1.
 3. Read `CLAUDE.md`, then `docs/architecture.md`, then relevant dated `docs/specs/YYYY-MM-DD-<topic>-design.md` files.
-4. Treat dated specs as v2 guidance, not shipped status. A spec can be Draft or Proposed.
+4. Read each dated spec's scope and status. Check the packages it references. Treat a spec as current only when it describes v2 packages. A current spec can be Draft or Proposed. Do not treat it as shipped status.
 5. Treat undated specs as legacy. Treat `docs/plans/` as proposals.
 6. Confirm every capability in code before you say that it exists.
-7. Check `packages/plugin-*/plugin.yaml`. A plugin with `enabled: false` is parked and unavailable.
+7. Check `packages/plugin-*/plugin.yaml`. `enabled: false` excludes a plugin from the generated bundled registry. It does not guarantee that the plugin is unavailable at runtime.
 8. Check `packages/workflow/` for the DAG interpreter.
 9. Check `packages/api/src/routes/` for the API surface.
 10. Check `packages/web/` for the UI surface.

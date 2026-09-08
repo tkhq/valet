@@ -6,7 +6,7 @@
 
 ## Context
 
-A skill is a markdown playbook that tells the agent how to use one integration or how to do one task. Valet ships twelve of them inside plugin packages.
+A skill is a markdown playbook that tells the agent how to use one integration or how to do one task. Valet ships skills inside plugin packages.
 
 Valet targets the Agent Skills specification, <https://agentskills.io/specification>. The reason is interoperability: a skill written for another agent must work here, and a skill written here must work elsewhere. A format of our own would block repository sync before it starts.
 
