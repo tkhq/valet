@@ -92,13 +92,17 @@ five-second host timeout.
 
 Precedence is per field:
 
-1. A repository YAML value wins when it is present.
-2. A saved repository default applies when YAML omits that field.
-3. A deployment value applies when both repository sources omit that field.
-4. The provider omits the field when no source defines it.
+1. A child `task.resources` value wins when it is supplied.
+2. A repository YAML value wins when it is present.
+3. A saved repository default applies when YAML omits that field.
+4. A deployment value applies when all higher sources omit that field.
+5. The provider omits the field when no source defines it.
 
 Only the primary repository binding supplies runtime values. Child sessions use
-the same resolution path as REST-created sessions.
+the same resolution path as REST-created sessions. A child may override CPU,
+memory, or both through `task.resources`; omitted fields inherit normally. The
+override is stored on `agent_sessions` and reapplied on rebuild, reconcile, and
+watcher rearm. It affects only that child and never edits repository defaults.
 If token resolution fails, a tokenless missing-file answer remains a read error.
 The API removes its resource opinion before initial creation or reconciliation.
 
@@ -153,6 +157,11 @@ This rule prevents a timeout, rate limit, malformed file, or temporary GitHub
 failure from replacing a sandbox with deployment defaults. If the first read for
 a new sandbox fails, no recorded overrides exist, so initial provisioning uses
 available saved repository defaults before deployment defaults.
+
+When a child override exists during an authority read failure, it is merged into
+fresh-create resources. Reconciliation remains non-authoritative so an omitted
+CPU or memory field preserves the live CR value instead of resetting to a
+deployment default. The CR's recorded resources carry that shape across retries.
 
 Provider creation can adopt existing compute after an API restart. The engine
 sets the internal `preserveResourcesOnAdopt` option when the desired spec has no

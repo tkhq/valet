@@ -5,11 +5,45 @@ import type { PrebuildResources } from "../prebuilds/recipe.js";
 import { imageSources } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 
+type ResourceField = keyof Pick<PrebuildResources, "cpu" | "memory">;
+const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory"];
+
 export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   /** Fresh compute can use these values even when existing compute must be preserved. */
   initialResources?: PrebuildResources;
-  /** Settings exist, but one authority read failed, so reconciliation must preserve live resources. */
+  /** Available repository settings were withheld after an authority read failed. */
   resourcesWithheld?: boolean;
+  /** Live fields to preserve because repository authority was unavailable. */
+  preserveResourceFields?: readonly ResourceField[];
+}
+
+/** Apply one child's resource request after repository and saved defaults.
+ * When authority reads fail, only supplied fields become authoritative. */
+export function applySandboxResourceOverrides(
+  flags: ResolvedRepoPrebuildFlags,
+  overrides: PrebuildResources | undefined,
+): ResolvedRepoPrebuildFlags {
+  if (!overrides || Object.keys(overrides).length === 0) return flags;
+  // A partial desired resource object resets omitted fields on adoption unless
+  // the engine carries a preservation mask. When repository authority is
+  // unavailable, task-supplied fields stay authoritative and omitted fields
+  // preserve the CR's live values. Fresh compute uses every available default.
+  const unavailableFields = flags.preserveResourceFields ??
+    (flags.resourcesWithheld ? RESOURCE_FIELDS : undefined);
+  if (unavailableFields) {
+    const preserveResourceFields = unavailableFields.filter((field) => overrides[field] === undefined);
+    return {
+      ...flags,
+      initialResources: { ...flags.initialResources, ...overrides },
+      resources: { ...overrides },
+      preserveResourceFields,
+    };
+  }
+  return {
+    ...flags,
+    initialResources: { ...flags.initialResources, ...overrides },
+    resources: { ...flags.resources, ...overrides },
+  };
 }
 
 /** Read saved defaults outside the GitHub cache. Only two successful reads
@@ -47,10 +81,17 @@ export async function resolveRepoResources(
   const [saved, yaml] = await Promise.all([readSaved(), readYaml()]);
   const { resources: yamlResources, ...flags } = yaml;
   const combined = { ...saved.resources, ...(yaml.outcome === "error" ? {} : yamlResources) };
+  const hasAvailableResources = Object.keys(combined).length > 0;
+  const authorityFailed = !saved.ok || yaml.outcome === "error";
   return {
     ...flags,
     ...(saved.ok && yaml.outcome !== "error" ? { resources: combined } : {}),
-    ...(Object.keys(combined).length > 0 ? { initialResources: combined } : {}),
-    ...(Object.keys(combined).length > 0 && (!saved.ok || yaml.outcome === "error") ? { resourcesWithheld: true } : {}),
+    ...(hasAvailableResources ? { initialResources: combined } : {}),
+    ...(authorityFailed
+      ? {
+          ...(hasAvailableResources ? { resourcesWithheld: true } : {}),
+          preserveResourceFields: RESOURCE_FIELDS,
+        }
+      : {}),
   };
 }

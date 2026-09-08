@@ -1255,6 +1255,8 @@ export interface SandboxResources {
   ephemeralStorageLimit?: string;
 }
 
+export type SandboxResourceField = "cpu" | "memory";
+
 export interface SandboxCreateOpts {
   image?: string;
   workspace?: string;
@@ -1280,6 +1282,9 @@ export interface SandboxCreateOpts {
    * this when the desired spec has no authoritative repository resource opinion.
    */
   preserveResourcesOnAdopt?: boolean;
+  /** CPU or memory fields that an adopting provider must copy from live
+   * compute. Fields outside this list remain authoritative in resources. */
+  preserveResourceFieldsOnAdopt?: readonly SandboxResourceField[];
   /** Internal migration reader for adopted compute without durable override
    * metadata. The provider calls this on the old handle before replacement and
    * persists a returned object, including `{}`, before it deletes compute.
@@ -1993,6 +1998,9 @@ export interface DesiredSandboxSpec {
   /** Repository resource overrides. Undefined gives no authoritative opinion;
    * an empty object authoritatively declares no repository overrides. */
   resources?: Pick<SandboxResources, "cpu" | "memory">;
+  /** Resource fields whose authority was unavailable. Adoption keeps their
+   * live values while applying the other fields from resources. */
+  preserveResourceFields?: readonly SandboxResourceField[];
   /** Stable content hash across all steps; used by the diff engine in Task 4+. */
   specHash: string;
   steps: PrepStep[];
@@ -2459,6 +2467,8 @@ export interface SpawnChildRequest {
   repo?: string;
   branch?: string;
   model?: string;
+  /** CPU and memory overrides for the child's sandbox. Omitted fields use host defaults. */
+  resources?: Pick<SandboxResources, "cpu" | "memory">;
   /** Interactive-service profile for the child's sandbox (default "headless"). */
   profile?: "headless" | "full";
   /** Request a rootless docker daemon inside the child's sandbox

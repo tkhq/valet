@@ -4,6 +4,7 @@
  * lifecycle wired through KubernetesSandboxProvider.
  */
 import { describe, expect, it, vi } from "vitest";
+import { SandboxAttachment, SandboxStartupError } from "@valet/engine";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
@@ -20,10 +21,12 @@ import type {
   ReplaceSandboxParams,
   SandboxCustomObjectsApi,
   SandboxPodsApi,
+  SandboxPodDeleteApi,
+  SandboxPodStatusApi,
   SandboxCpuMemoryResources,
   PodStatusInfo,
 } from "../src/lifecycle.js";
-import { imageFingerprint, sandboxCpuMemoryResources } from "../src/lifecycle.js";
+import { imageFingerprint, resourceFingerprint, sandboxCpuMemoryResources } from "../src/lifecycle.js";
 import type { PodLivenessApi } from "../src/provider.js";
 import type { PodExecApi } from "../src/exec.js";
 
@@ -648,6 +651,24 @@ describe("create() resource adoption and pod rollout", () => {
     expect(objectsApi.calls.slice(0, 3)).toEqual(["create", "get", "replace"]);
   });
 
+  it("partial authority applies CPU and preserves live memory on adoption", async () => {
+    const { provider, objectsApi, deletedPods } = setup(prior, { cpu: 1, memory: "2Gi" });
+
+    await provider.create({
+      workspace: "/ws/resources",
+      resources: { cpu: 2, memory: "2Gi" },
+      preserveResourceFieldsOnAdopt: ["memory"],
+    });
+
+    expect(objectsApi.cr.spec.podTemplate).toMatchObject({
+      spec: { containers: [{ resources: {
+        requests: { cpu: "2", memory: "4Gi" },
+        limits: { cpu: "2", memory: "8Gi" },
+      } }] },
+    });
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
   it.each([
     { cpu: 2, memory: "8Gi" },
     { cpu: 4, memory: "4Gi" },
@@ -1017,6 +1038,443 @@ class ErrorStatefulObjectsApi implements SandboxCustomObjectsApi {
     return {};
   }
 }
+
+/** This stateful capacity fake stores one CR and one stable backing pod. */
+class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
+  cr: SandboxCRRead | null;
+  podPresent = true;
+  createCalls = 0;
+  replaceCalls = 0;
+  deleteCalls = 0;
+  ready = false;
+
+  constructor(createdAt?: string) {
+    this.cr = createdAt === undefined ? null : this.initialCr("ws-capacity", createdAt);
+  }
+
+  private initialCr(name: string, createdAt: string): SandboxCRRead {
+    return {
+      apiVersion: SANDBOX_CR_API_VERSION,
+      kind: "Sandbox",
+      metadata: {
+        name,
+        uid: "cr-capacity-1",
+        resourceVersion: "1",
+        creationTimestamp: createdAt,
+        annotations: { "agents.x-k8s.io/pod-name": "pod-capacity-1" },
+      },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+      status: { conditions: [{ type: "Ready", status: "False", reason: "PodPending" }] },
+    };
+  }
+
+  setReady(ready: boolean, createdAt?: string): void {
+    this.ready = ready;
+    if (this.cr === null) return;
+    if (createdAt !== undefined) this.cr.metadata.creationTimestamp = createdAt;
+    this.cr.status = {
+      conditions: [{
+        type: "Ready",
+        status: ready ? "True" : "False",
+        reason: ready ? "DependenciesReady" : "PodPending",
+      }],
+    };
+  }
+
+  async createNamespacedCustomObject(params: CreateSandboxParams): Promise<unknown> {
+    this.createCalls++;
+    if (this.cr !== null) throw new FakeApiError(409, "already exists");
+    this.cr = {
+      ...params.body,
+      metadata: {
+        ...params.body.metadata,
+        uid: "cr-capacity-1",
+        resourceVersion: "1",
+        creationTimestamp: new Date(Date.now()).toISOString(),
+        annotations: {
+          ...params.body.metadata.annotations,
+          "agents.x-k8s.io/pod-name": "pod-capacity-1",
+        },
+      },
+      status: { conditions: [{
+        type: "Ready",
+        status: this.ready ? "True" : "False",
+        reason: this.ready ? "DependenciesReady" : "PodPending",
+      }] },
+    };
+    return this.cr;
+  }
+
+  async getNamespacedCustomObject(): Promise<unknown> {
+    if (this.cr === null) throw new FakeApiError(404, "not found");
+    return this.cr;
+  }
+
+  async replaceNamespacedCustomObject(params: ReplaceSandboxParams): Promise<unknown> {
+    if (this.cr === null) throw new FakeApiError(404, "not found");
+    this.replaceCalls++;
+    this.cr = {
+      ...params.body,
+      metadata: {
+        ...this.cr.metadata,
+        ...params.body.metadata,
+        annotations: { ...this.cr.metadata.annotations, ...params.body.metadata.annotations },
+        resourceVersion: String(this.replaceCalls + 1),
+      },
+      status: this.cr.status,
+    };
+    return this.cr;
+  }
+
+  async deleteNamespacedCustomObject(): Promise<unknown> {
+    this.deleteCalls++;
+    this.cr = null;
+    this.podPresent = false;
+    return {};
+  }
+
+  async listNamespacedCustomObject(): Promise<unknown> {
+    return { items: [] };
+  }
+
+  async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
+    if (this.cr !== null && "metadata" in params.body) {
+      this.cr.metadata.annotations = Object.fromEntries(Object.entries({
+        ...this.cr.metadata.annotations,
+        ...params.body.metadata.annotations,
+      }).filter(([, value]) => value !== null)) as Record<string, string>;
+    }
+    return {};
+  }
+}
+
+function makeCapacityPendingProvider(opts: {
+  createdAt?: string;
+  schedulerMessage?: string | null;
+  requests?: { cpu?: string | number; memory?: string | number };
+}) {
+  const objectsApi = new CapacityPendingObjectsApi(opts.createdAt);
+  let schedulerMessage = opts.schedulerMessage;
+  const podIdentity = { name: "pod-capacity-1", uid: "pod-capacity-uid-1" };
+  const podReads: { name: string; uid: string }[] = [];
+  const podStatusApi: SandboxPodStatusApi = {
+    async getPodStatus(_namespace, podName) {
+      if (!objectsApi.podPresent) return null;
+      podReads.push({ name: podName, uid: podIdentity.uid });
+      if (objectsApi.ready) {
+        return {
+          phase: "Running",
+          sandboxImage: providerCfg.defaultImage,
+          sandboxResources: {},
+          resourceFingerprint: resourceFingerprint({}),
+          conditions: [{ type: "Ready", status: "True" }],
+        };
+      }
+      return {
+        phase: "Pending",
+        sandboxImage: providerCfg.defaultImage,
+        sandboxResources: opts.requests === undefined ? {} : { requests: opts.requests },
+        resourceFingerprint: resourceFingerprint({}),
+        conditions: schedulerMessage === null ? [] : [{
+          type: "PodScheduled",
+          status: "False",
+          reason: "Unschedulable",
+          message: schedulerMessage ?? "0/3 nodes are available: 3 Insufficient cpu.",
+        }],
+      };
+    },
+  };
+  const podDeleteApi: SandboxPodDeleteApi = {
+    deletePod: vi.fn(async () => {
+      podIdentity.uid = "pod-capacity-uid-2";
+    }),
+  };
+  const provider = new KubernetesSandboxProvider(
+    {
+      objectsApi,
+      podsApi: new FakePodsApi(),
+      podStatusApi,
+      podDeleteApi,
+      execApi: fakePodExecApi,
+      livenessApi: new FakeLivenessApi(),
+    },
+    providerCfg,
+  );
+  const restart = () => new KubernetesSandboxProvider(
+    {
+      objectsApi,
+      podsApi: new FakePodsApi(),
+      podStatusApi,
+      podDeleteApi,
+      execApi: fakePodExecApi,
+      livenessApi: new FakeLivenessApi(),
+    },
+    providerCfg,
+  );
+  const setSchedulerMessage = (message: string | null): void => {
+    schedulerMessage = message;
+  };
+  return { provider, restart, objectsApi, podDeleteApi, podReads, setSchedulerMessage };
+}
+
+async function captureAfter(promise: Promise<unknown>, elapsedMs: number): Promise<unknown> {
+  const result = promise.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  await vi.advanceTimersByTimeAsync(elapsedMs);
+  return result;
+}
+
+function expectError(value: unknown): Error {
+  expect(value).toBeInstanceOf(Error);
+  if (!(value instanceof Error)) throw new Error("Expected create() to reject with an Error.");
+  return value;
+}
+
+describe("create() capacity retention and diagnosis", () => {
+  it("keeps a fresh capacity-blocked CR and pod through retries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, objectsApi, podDeleteApi, podReads } = makeCapacityPendingProvider({});
+
+      const firstError = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(firstError).not.toBeInstanceOf(SandboxStartupError);
+      expect(firstError.message).toContain("did not become ready within 60000ms");
+      expect(objectsApi.cr?.metadata.uid).toBe("cr-capacity-1");
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(podDeleteApi.deletePod).not.toHaveBeenCalled();
+
+      const readsAfterFirstCreate = podReads.length;
+      const secondError = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(secondError).not.toBeInstanceOf(SandboxStartupError);
+      expect(objectsApi.createCalls).toBe(2);
+      expect(objectsApi.replaceCalls).toBe(1);
+      expect(objectsApi.cr?.metadata.uid).toBe("cr-capacity-1");
+      expect(podReads.length).toBeGreaterThan(readsAfterFirstCreate);
+      expect(new Set(podReads.map(({ name, uid }) => `${name}:${uid}`)))
+        .toEqual(new Set(["pod-capacity-1:pod-capacity-uid-1"]));
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(podDeleteApi.deletePod).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports requested CPU and memory after the ten-minute grace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const schedulerReason = "0/3 nodes are available: 3 Insufficient cpu, 3 Insufficient memory";
+      const { provider, objectsApi } = makeCapacityPendingProvider({
+        schedulerMessage: `${schedulerReason}.`,
+        requests: { cpu: "4", memory: "8Gi" },
+      });
+
+      const firstError = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(firstError).not.toBeInstanceOf(SandboxStartupError);
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("over 10 minutes");
+      expect(error.message).toContain(schedulerReason);
+      expect(error.message).toContain("cpu=4");
+      expect(error.message).toContain("memory=8Gi");
+      expect(error.message).toContain("task.resources");
+      expect(error.message).toContain(".valet/prebuild.yaml");
+      expect(error.message).toMatch(/largest node/i);
+      expect(error.message).not.toContain(".).");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+      expect(objectsApi.podPresent).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans an owned never-ready CR after a provider restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, restart, objectsApi } = makeCapacityPendingProvider({});
+
+      await captureAfter(provider.create({ workspace: "/ws/capacity", sessionId: "session-a" }), 60_000);
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans an owned post-grace Pending CR without a recognized shortage", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, restart, objectsApi } = makeCapacityPendingProvider({ schedulerMessage: null });
+
+      await captureAfter(provider.create({ workspace: "/ws/capacity", sessionId: "session-a" }), 60_000);
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("not yet judged by the scheduler");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans an owned retained CR after a later structural scheduling failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, restart, objectsApi, setSchedulerMessage } = makeCapacityPendingProvider({
+        schedulerMessage: null,
+      });
+
+      const firstError = expectError(await captureAfter(
+        provider.create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+      expect(firstError).not.toBeInstanceOf(SandboxStartupError);
+      setSchedulerMessage("0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector.");
+
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("unschedulable");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a pre-existing adopted workspace after capacity grace expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider, objectsApi } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        requests: { cpu: "4", memory: "8Gi" },
+      });
+
+      const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(objectsApi.cr).not.toBeNull();
+      expect(objectsApi.podPresent).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a once-ready CR if it becomes capacity-blocked later", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider, restart, objectsApi } = makeCapacityPendingProvider({});
+      objectsApi.setReady(true);
+      await provider.create({ workspace: "/ws/capacity", sessionId: "session-a" });
+
+      expect(objectsApi.cr?.metadata.annotations?.["valet.dev/never-ready-owner"]).toBeUndefined();
+      objectsApi.setReady(false, "2026-09-07T12:00:00.000Z");
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(objectsApi.cr).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("beats the engine readiness timeout for an adopted CR past the grace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider, objectsApi } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        requests: { cpu: "4", memory: "8Gi" },
+      });
+      const attachment = new SandboxAttachment(provider, { workspace: "/ws/capacity" });
+      const startedAt = Date.now();
+      let failedAt: number | undefined;
+      const waiting = attachment.ensureReady({ timeoutMs: 60_000 }).then(
+        () => null,
+        (error: unknown) => {
+          failedAt = Date.now();
+          return error;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const error = expectError(await waiting);
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(failedAt).toBe(startedAt);
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(objectsApi.cr).not.toBeNull();
+      expect(objectsApi.podPresent).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives ephemeral-storage guidance without CPU or memory advice", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        schedulerMessage: "0/3 nodes are available: 3 Insufficient ephemeral-storage.",
+      });
+
+      const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toMatch(/node.*ephemeral-storage capacity/i);
+      expect(error.message).toMatch(/deployment.*ephemeral-storage request/i);
+      expect(error.message).not.toMatch(/lower (CPU|memory)/i);
+      expect(error.message).not.toContain("task.resources");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("includes ephemeral-storage guidance for mixed shortages", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        schedulerMessage: "0/3 nodes are available: 3 Insufficient cpu, 3 Insufficient ephemeral-storage.",
+      });
+
+      const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(error.message).toMatch(/node.*ephemeral-storage capacity/i);
+      expect(error.message).toMatch(/deployment.*ephemeral-storage request/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("create() cleanup after terminal startup failure", () => {
   function makeFailingProvider(preExisting: boolean) {

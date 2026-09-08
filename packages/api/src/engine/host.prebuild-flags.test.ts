@@ -162,7 +162,7 @@ describe("childSessionFor repo prebuild flags", () => {
     clearRepoPrebuildFlagsCache();
   });
 
-  it("a child bound to a repo gets the repo's runtime flags and resources", async () => {
+  it("a child resource override wins for initial creation and desired reconciliation", async () => {
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
@@ -225,6 +225,7 @@ describe("childSessionFor repo prebuild flags", () => {
       orgId: "local-org",
       owner: { type: "user", id: "local-user" },
       workspace: `/tmp/${childId}`,
+      resources: { cpu: 2 },
     });
     await child.attachment.ensureReady({ timeoutMs: 5_000 });
 
@@ -232,7 +233,8 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(call).toBeDefined();
     expect(call?.workspaceStorage).toBe("8Gi");
     expect(call?.docker).toBe(true);
-    expect(call?.resources).toEqual({ cpu: 4, memory: "8Gi" });
+    expect(call?.resources).toEqual({ cpu: 2, memory: "8Gi" });
+    expect((await child.options.specProvider?.())?.resources).toEqual({ cpu: 2, memory: "8Gi" });
 
     // The contents read must be AUTHENTICATED with the minted installation
     // token — a change that swallows token errors and proceeds tokenless

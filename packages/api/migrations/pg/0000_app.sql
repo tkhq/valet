@@ -230,6 +230,7 @@ CREATE TABLE "agent_sessions" (
 	"owner_id" text DEFAULT '' NOT NULL,
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
+	"sandbox_resource_overrides" jsonb,
 	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
 	"hibernated_sandbox_id" text,

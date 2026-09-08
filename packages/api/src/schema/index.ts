@@ -367,6 +367,9 @@ export const agentSessions = pgTable(
     // Request a rootless docker daemon inside this session's sandbox
     // (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md.
     docker: boolean("docker").notNull().default(false),
+    // Per-child CPU and memory overrides from the task tool. Null means the
+    // session uses repository or deployment defaults.
+    sandboxResourceOverrides: jsonb("sandbox_resource_overrides").$type<PrebuildResources>(),
     // Which authoring surface the session drives ('code' default,
     // 'security' = engagement runner). Distinct from the engine's
     // lifecycle `purpose`. Shared shape with the Valet Design PR (#396),

@@ -62,7 +62,11 @@ import { repoCredentialCommands, repoPrebuildFlags, type RepoPrebuildFlags } fro
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
-import { resolveRepoResources, type ResolvedRepoPrebuildFlags } from "./resolve-repo-resources.js";
+import {
+  applySandboxResourceOverrides,
+  resolveRepoResources,
+  type ResolvedRepoPrebuildFlags,
+} from "./resolve-repo-resources.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
@@ -75,6 +79,7 @@ import {
   onePasswordScopesFor,
 } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
+import type { PrebuildResources } from "../prebuilds/recipe.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
@@ -394,6 +399,8 @@ export interface SessionMeta {
   /** Request a rootless docker daemon inside this session's sandbox
    * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
   docker?: boolean;
+  /** Per-child CPU and memory overrides persisted on the app session row. */
+  sandboxResourceOverrides?: PrebuildResources;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -1469,9 +1476,12 @@ export class EngineHost {
 
       return {
         image: spec.image !== stockImage ? spec.image : undefined,
-        specHash: specHash(spec, resources),
+        specHash: specHash(spec, resources, repoFlags.preserveResourceFields),
         steps,
         ...(resources !== undefined ? { resources } : {}),
+        ...(repoFlags.preserveResourceFields !== undefined
+          ? { preserveResourceFields: repoFlags.preserveResourceFields }
+          : {}),
       };
     };
   }
@@ -1769,7 +1779,8 @@ export class EngineHost {
    */
   private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<ResolvedRepoPrebuildFlags> {
     const primary = meta.repos?.[0];
-    const result = await resolveRepoResources(this.opts.db, meta.orgId, primary, () => this.resolveRepoYamlFlags(sessionId, meta));
+    const resolved = await resolveRepoResources(this.opts.db, meta.orgId, primary, () => this.resolveRepoYamlFlags(sessionId, meta));
+    const result = applySandboxResourceOverrides(resolved, meta.sandboxResourceOverrides);
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
       if (result.resourcesWithheld) {
@@ -3203,6 +3214,8 @@ export class EngineHost {
       profile?: "headless" | "full";
       /** Rootless docker daemon in the child's sandbox (docker-in-sandbox). */
       docker?: boolean;
+      /** CPU and memory overrides for this child only. */
+      resources?: PrebuildResources;
     },
   ): Promise<Session> {
     const cached = this.cache.get(childSessionId);
@@ -3231,6 +3244,8 @@ export class EngineHost {
       profile?: "headless" | "full";
       /** Rootless docker daemon in the child's sandbox (docker-in-sandbox). */
       docker?: boolean;
+      /** CPU and memory overrides for this child only. */
+      resources?: PrebuildResources;
     },
   ): Promise<Session> {
     // `opts.owner` is the child's own principal: the `task` tool reads the
@@ -3320,6 +3335,7 @@ export class EngineHost {
           ownerId: opts.owner.id,
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
+          ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
         })
       : {
           userId: opts.actorUserId,
@@ -3327,6 +3343,7 @@ export class EngineHost {
           workspace: opts.workspace,
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
+          ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
         };
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`
     // (TKAI-385): the same read `buildSession` does, so a child bound to a

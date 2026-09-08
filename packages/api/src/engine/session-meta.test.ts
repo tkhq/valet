@@ -141,4 +141,15 @@ describe("loadSessionMeta: target_dir persistence (spec decision 15)", () => {
     const userMeta = await loadSessionMeta(db, { ...src("s7"), ownerType: "user", ownerId: USER });
     expect(userMeta.ownerTeamId).toBeUndefined();
   });
+
+  it("copies persisted sandbox resource overrides into session meta", async () => {
+    await insertSession(db, "s8");
+
+    const meta = await loadSessionMeta(db, {
+      ...src("s8"),
+      sandboxResourceOverrides: { cpu: 2, memory: "4Gi" },
+    });
+
+    expect(meta.sandboxResourceOverrides).toEqual({ cpu: 2, memory: "4Gi" });
+  });
 });

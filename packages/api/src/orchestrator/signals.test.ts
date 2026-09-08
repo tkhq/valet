@@ -296,6 +296,9 @@ describe("admitSignal edge ACL", () => {
       workspace: "/workspace",
       ownerType: "team",
       ownerId: "team-1",
+      profile: "full",
+      docker: true,
+      sandboxResourceOverrides: { cpu: 2, memory: "4Gi" },
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -315,6 +318,11 @@ describe("admitSignal edge ACL", () => {
       userId: "user-a",
       orgId: "local-org",
       workspace: "/tmp",
+    });
+    expect(rebuilt.options.sandbox).toMatchObject({
+      profile: "full",
+      docker: true,
+      resources: { cpu: 2, memory: "4Gi" },
     });
     await rebuilt.credentialProvider().get("linear");
     expect(scopesTried).toEqual(["org"]);

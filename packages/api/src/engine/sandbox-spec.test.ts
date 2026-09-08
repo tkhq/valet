@@ -176,6 +176,11 @@ describe("resource opinion hashing", () => {
     expect(specHash(spec, { cpu: 2, memory: "8Gi" })).not.toBe(base);
     expect(specHash(spec, { cpu: 4, memory: "4Gi" })).not.toBe(base);
   });
+
+  it("changes when resource field authority changes", () => {
+    const base = specHash(spec, { cpu: 2 });
+    expect(specHash(spec, { cpu: 2 }, ["memory"])).not.toBe(base);
+  });
 });
 
 // ── Hash sensitivity matrix ────────────────────────────────────────────────

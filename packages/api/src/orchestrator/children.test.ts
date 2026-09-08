@@ -5,7 +5,7 @@
  * submission via the engine store directly, and the parent thread is paused
  * so the admitted `child.settled` signal stays observable in the queue.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -281,6 +281,41 @@ describe("buildChildSpawner", () => {
     expect(plainRows[0]?.docker).toBe(false);
   });
 
+  it("passes task resources to the first child build and persists only explicit overrides", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const childSessionFor = vi.spyOn(api.providers.engineHost, "childSessionFor");
+    const parent = await api.providers.engineHost.sessionFor("parent-resources", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const ctx = {
+      parentSessionId: "parent-resources",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+
+    const overridden = await spawner({ prompt: "small task", resources: { cpu: 2 } }, ctx);
+    expect(childSessionFor).toHaveBeenCalledWith(overridden.childSessionId, expect.objectContaining({
+      resources: { cpu: 2 },
+    }));
+    const [overriddenRow] = await api.providers.db
+      .select({ resources: agentSessions.sandboxResourceOverrides })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, overridden.childSessionId));
+    expect(overriddenRow?.resources).toEqual({ cpu: 2 });
+
+    const inherited = await spawner({ prompt: "normal task" }, ctx);
+    const [inheritedRow] = await api.providers.db
+      .select({ resources: agentSessions.sandboxResourceOverrides })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, inherited.childSessionId));
+    expect(inheritedRow?.resources).toBeNull();
+  });
+
   it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {
     // Isolated + customImage provider so buildSpecProvider wires image
     // resolution (resolveBaseImage consults the org's per-profile base bakes).
@@ -317,7 +352,7 @@ describe("buildChildSpawner", () => {
     expect(spec?.image).toBe("reg/cb-f/base:1");
   });
 
-  it("child_send after a cache eviction (api restart) rebuilds the child with its persisted profile/docker", async () => {
+  it("child_send after a cache eviction rebuilds the child with its persisted sandbox shape", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -335,7 +370,12 @@ describe("buildChildSpawner", () => {
       actorUserId: "local-user",
       owner: { type: "user" as const, id: "local-user" },
     };
-    const spawned = await spawner({ prompt: "dind work", profile: "full", docker: true }, ctx);
+    const spawned = await spawner({
+      prompt: "dind work",
+      profile: "full",
+      docker: true,
+      resources: { cpu: 2 },
+    }, ctx);
 
     // Simulate an api restart: the cached session dies; the row survives.
     api.providers.engineHost.evictAll();
@@ -347,6 +387,7 @@ describe("buildChildSpawner", () => {
     expect(rebuilt).not.toBeNull();
     expect(asCreateOpts(rebuilt?.options.sandbox)?.profile).toBe("full");
     expect(asCreateOpts(rebuilt?.options.sandbox)?.docker).toBe(true);
+    expect(asCreateOpts(rebuilt?.options.sandbox)?.resources).toEqual({ cpu: 2 });
   });
 
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
@@ -795,6 +836,20 @@ describe("ChildWatcher", () => {
     await engineStore.admitSubmission("child-w", childThread.id, queuedItem(itemId, childThread.id, "work"));
     await engineStore.settleUnclaimed("child-w", childThread.id, itemId, { outcome: "completed" });
 
+    await db.insert(agentSessions).values({
+      id: "child-w",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      sandboxResourceOverrides: { cpu: 2 },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
     const watch = {
       childSessionId: "child-w",
       queueItemId: itemId,
@@ -806,6 +861,8 @@ describe("ChildWatcher", () => {
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     // Double-fire: direct arm AND a rearm() pass over the unsettled row.
+    engineHost.evictCache("child-w");
+    const sessionFor = vi.spyOn(engineHost, "sessionFor");
     watcher.arm(watch);
     await watcher.rearm();
 
@@ -830,6 +887,9 @@ describe("ChildWatcher", () => {
     // sender session id — this is what makes double-fires idempotent.
     expect(settledSignals[0]?.dispatchId).toBe(`child-w:settled:child-w:${itemId}`);
     expect(settledSignals[0]?.threadId).toBe(parentThread.id);
+    expect(sessionFor).toHaveBeenCalledWith("child-w", expect.objectContaining({
+      sandboxResourceOverrides: { cpu: 2 },
+    }));
     const content = settledSignals[0]?.content as SignalContent;
     expect(content.attributes?.child_session_id).toBe("child-w");
     expect(content.attributes?.outcome).toBe("completed");

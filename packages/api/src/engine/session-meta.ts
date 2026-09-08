@@ -24,6 +24,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { sessionRepos, users } from "../schema/index.js";
 import { computeTargetDirs } from "./workspace-prep.js";
 import type { RepoBinding } from "../wire/types.js";
+import type { PrebuildResources } from "../prebuilds/recipe.js";
 
 /**
  * Minimal identity a session meta is assembled around. The app session row
@@ -43,6 +44,8 @@ export interface SessionMetaSource {
   /** Request a rootless docker daemon inside the sandbox (docker-in-sandbox).
    * Omitted by orchestrator/child callers. */
   docker?: boolean;
+  /** Per-child CPU and memory overrides persisted on the app session row. */
+  sandboxResourceOverrides?: PrebuildResources | null;
   /**
    * Principal ownership, from the app row's `owner_type`/`owner_id` or from
    * an engine `SessionData.owner`. When `ownerType` is `"team"`, the loader
@@ -109,6 +112,9 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     workspace: src.workspace,
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
     ...(src.docker !== undefined ? { docker: src.docker } : {}),
+    ...(src.sandboxResourceOverrides !== undefined && src.sandboxResourceOverrides !== null
+      ? { sandboxResourceOverrides: src.sandboxResourceOverrides }
+      : {}),
     ...(src.ownerType !== undefined ? { ownerType: src.ownerType } : {}),
     ...(src.ownerType === "team" && src.ownerId ? { ownerTeamId: src.ownerId } : {}),
     repos: reposWithDirs,

@@ -95,7 +95,9 @@ import {
 import { cancelJobInPod, execJobInPod, pollJobInPod } from "./jobs.js";
 import {
   applySandbox,
+  classifyPodCapacityShortages,
   classifyPodPending,
+  clearNeverReadyOwner,
   deleteSandbox,
   getSandbox,
   imageFingerprint,
@@ -120,6 +122,7 @@ import {
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
+  NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
 import {
@@ -166,7 +169,18 @@ function reportAdoptedWorkspacePvcError(args: {
  * served. Past this age, unscheduled means capacity is genuinely absent —
  * fail with the cause instead of re-queueing forever (the 2026-08-22
  * incident's sessions waited 47h behind retryable timeouts). */
-const PENDING_TERMINAL_GRACE_MS = 5 * 60_000;
+const PENDING_TERMINAL_GRACE_MS = 10 * 60_000;
+
+interface PendingPodDiagnosis {
+  detail: string;
+  requests: {
+    cpu?: string | number;
+    memory?: string | number;
+  };
+}
+
+/** This error marks all post-grace Pending failures eligible for owned cleanup. */
+class PendingTerminalStartupError extends SandboxStartupError {}
 
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
@@ -706,7 +720,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   readonly backend = "kubernetes";
   private readonly deps: KubernetesSandboxProviderDeps;
   private readonly cfg: K8sProviderConfig;
-
   constructor(deps: KubernetesSandboxProviderDeps, cfg: K8sProviderConfig) {
     this.deps = deps;
     this.cfg = cfg;
@@ -778,6 +791,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       );
     }
     const name = sandboxCrName(opts.workspace);
+    const neverReadyOwner = opts.sessionId ?? `cr:${name}`;
     const manifest = buildSandboxManifest(this.cfg, name, opts);
 
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
@@ -791,17 +805,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
     }
 
-    // `adopted` decides cleanup on startup failure below: a CR this call
-    // CREATED (and its empty PVC) is ours to delete; an adopted CR may
-    // hold a prior workspace and must stand (decision 5's
-    // workspace-survival intent). The flag comes from applySandbox's own
-    // create/409 branch, so it cannot race the way an existence pre-GET
-    // would.
+    // `adopted` decides cleanup for ordinary startup failures below. A CR
+    // that this call created is safe to delete because its pod never ran.
+    // An adopted CR can hold prior work and stays for those failures.
+    // Post-grace capacity failures are different: the provider retained the
+    // CR across earlier attempts, and no attempt returned a sandbox handle.
     const { cpu, memory } = opts.resources ?? {};
     const { cr: applied, adopted, previousSession, resourceOverrides } = await applySandbox(
       this.deps.objectsApi, this.cfg, manifest,
       {
         preserveResourcesOnAdopt: opts.preserveResourcesOnAdopt,
+        preserveResourceFieldsOnAdopt: opts.preserveResourceFieldsOnAdopt,
         resourceOverrides: { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) },
         readResourceOverrides: opts.readResourceOverrides
           ? async () => {
@@ -810,6 +824,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
             return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker)));
           }
           : undefined,
+        neverReadyOwner,
       },
     );
 
@@ -983,13 +998,18 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         resourceFingerprint: podTemplateResourceFingerprint(applied.spec.podTemplate),
       });
     } catch (err) {
-      if (!adopted && err instanceof SandboxStartupError) {
+      const ownsPendingCreate = applied.metadata.annotations?.[NEVER_READY_OWNER_ANNOTATION_KEY] === neverReadyOwner;
+      if (err instanceof SandboxStartupError &&
+        (!adopted || ownsPendingCreate)) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
         // pod terminally failed to start. Left standing it queues phantom
         // demand against the scheduler (the 2026-08-22 incident held 433
         // Pending pods for 47h), and its PVC holds nothing — the pod never
-        // ran. Adopted CRs are never cleaned up here.
+        // ran. Durable ownership also authorizes cleanup when a retained pod
+        // later reaches any other terminal startup state.
+        // Earlier attempts never returned a sandbox handle, so no owner can
+        // clean it up after the engine settles the failed provision.
         // No destroyed-counter record here: the created counter only fires
         // on a READY provision, so counting this cleanup would add a
         // destroy with no matching create and drive the created−destroyed
@@ -1000,6 +1020,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
       throw err;
     }
+    await clearNeverReadyOwner(this.deps.objectsApi, this.cfg, name);
     const sandbox = this.makeSandbox(name, Boolean(opts.docker));
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
@@ -1173,9 +1194,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * provider must not return until the CR has actually reconciled.
    *
    * `state: "error"` is a FAST FAIL: `sandboxStatus` (when `podStatusApi` is
-   * wired) classifies terminal pod failures — `ImagePullBackOff`,
-   * `CrashLoopBackOff`, `PodFailed`, `Unschedulable` — as `error` within a
-   * few poll intervals of the failure actually occurring, well under
+   * wired) classifies terminal pod failures as `error`. These failures include
+   * `ImagePullBackOff`, `CrashLoopBackOff`, `PodFailed`, and non-capacity
+   * `Unschedulable` conditions. Classification takes a few poll intervals, well under
    * `READY_TIMEOUT_MS`. That's thrown as `SandboxStartupError` (a definite,
    * non-retryable startup failure carrying the specific cause), NOT the
    * generic timeout error below — `SandboxAttachment.doProvision` branches
@@ -1192,6 +1213,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
     for (;;) {
+      const pendingError = await this.pendingTerminalError(name);
+      if (pendingError !== null) throw pendingError;
       try {
         const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
         lastState = status.state;
@@ -1239,14 +1262,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         lastReadError = err instanceof Error ? err.message : String(err);
       }
       if (Date.now() >= deadline) {
-        const pending = await this.podPendingReason(name);
-        if (pending !== null) {
-          throw new SandboxStartupError(
-            name,
-            `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes (${pending}). ` +
-              "The cluster has no schedulable capacity for this sandbox. Free or add node capacity, then retry.",
-          );
-        }
         const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
         throw new Error(
           `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${readDetail} ` +
@@ -1257,12 +1272,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
   }
 
-  /** The backing pod's Pending diagnosis at readiness timeout, or null
-   * when the pod is absent, past Pending, unresolvable, or the CR is
-   * younger than `PENDING_TERMINAL_GRACE_MS` — transient API errors and
-   * autoscaler-scale-up windows keep the generic retryable timeout (which
-   * retains the CR), never a terminal verdict. */
-  private async podPendingReason(name: string): Promise<string | null> {
+  /** Return the backing pod's post-grace Pending diagnosis. Return null if
+   * the pod is absent, past Pending, unresolvable, or inside the grace period.
+   * Transient API errors and autoscaler scale-up windows stay retryable. */
+  private async podPendingDiagnosis(name: string): Promise<PendingPodDiagnosis | null> {
     if (!this.deps.podStatusApi) return null;
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, name).catch(() => null);
     const bornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
@@ -1270,6 +1283,39 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name).catch(() => null);
     if (!podName) return null;
     const pod = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName).catch(() => null);
-    return classifyPodPending(pod);
+    const detail = classifyPodPending(pod);
+    if (detail === null) return null;
+    return { detail, requests: pod?.sandboxResources?.requests ?? {} };
+  }
+
+  /** Return a terminal error when an unscheduled pod is past the grace period. */
+  private async pendingTerminalError(name: string): Promise<SandboxStartupError | null> {
+    const pending = await this.podPendingDiagnosis(name);
+    if (pending === null) return null;
+    const requests = [
+      ...(pending.requests.cpu === undefined ? [] : [`cpu=${pending.requests.cpu}`]),
+      ...(pending.requests.memory === undefined ? [] : [`memory=${pending.requests.memory}`]),
+    ];
+    const requestDetail = requests.length === 0 ? "" : ` Pod requests: ${requests.join(", ")}.`;
+    const shortages = classifyPodCapacityShortages(pending.detail);
+    const actions: string[] = [];
+    if (shortages.includes("cpu") || shortages.includes("memory")) {
+      actions.push(
+        "For the CPU or memory shortage, retry the child with a lower task.resources value. " +
+        "Reduce the value in .valet/prebuild.yaml to set a durable default. " +
+        "If a lower value fails, check the largest node's available CPU and memory.",
+      );
+    }
+    if (shortages.includes("ephemeral-storage")) {
+      actions.push(
+        "Check node ephemeral-storage capacity. Check the deployment ephemeral-storage request. " +
+        "If you correct the capacity mismatch, retry.",
+      );
+    }
+    const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
+    const schedulerDetail = pending.detail.replace(/[.!?]+$/, "");
+    const message = `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
+      `(${schedulerDetail}).${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
+    return new PendingTerminalStartupError(name, message);
   }
 }

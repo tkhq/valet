@@ -8,7 +8,7 @@
  * detect spec changes with a single string comparison.
  */
 import { createHash } from "node:crypto";
-import type { SandboxResources } from "@valet/engine";
+import type { SandboxResourceField, SandboxResources } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
@@ -127,12 +127,14 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
  *
  * Canonical JSON: image first, then steps in array order with each step's
  * keys in fixed order (id, hash, critical). When an authoritative resource
- * opinion exists, resources follow with cpu before memory. An absent opinion
- * keeps the legacy JSON and hash unchanged.
+ * opinion exists, resources follow with cpu before memory. A field-preservation
+ * mask follows in fixed CPU and memory order. An absent opinion and mask keep
+ * the legacy JSON and hash unchanged.
  */
 export function specHash(
   spec: SandboxSpec,
   resources?: Pick<SandboxResources, "cpu" | "memory">,
+  preserveResourceFields?: readonly SandboxResourceField[],
 ): string {
   const canonicalSpec = {
     image: spec.image,
@@ -144,6 +146,9 @@ export function specHash(
             ...(resources.memory !== undefined ? { memory: resources.memory } : {}),
           },
         }
+      : {}),
+    ...(preserveResourceFields !== undefined
+      ? { preserveResourceFields: (["cpu", "memory"] as const).filter((field) => preserveResourceFields.includes(field)) }
       : {}),
   };
   return sha256(JSON.stringify(canonicalSpec));

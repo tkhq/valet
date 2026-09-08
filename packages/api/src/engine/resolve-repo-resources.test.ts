@@ -2,7 +2,65 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { imageSources } from "../schema/index.js";
-import { resolveRepoResources } from "./resolve-repo-resources.js";
+import { applySandboxResourceOverrides, resolveRepoResources } from "./resolve-repo-resources.js";
+
+describe("applySandboxResourceOverrides", () => {
+  const resolved = {
+    docker: false,
+    outcome: "declared" as const,
+    initialResources: { cpu: 4, memory: "8Gi" },
+    resources: { cpu: 4, memory: "8Gi" },
+  };
+
+  it("overrides repository CPU and inherits repository memory", () => {
+    expect(applySandboxResourceOverrides(resolved, { cpu: 2 })).toMatchObject({
+      initialResources: { cpu: 2, memory: "8Gi" },
+      resources: { cpu: 2, memory: "8Gi" },
+    });
+  });
+
+  it("overrides repository memory and inherits repository CPU", () => {
+    expect(applySandboxResourceOverrides(resolved, { memory: "4Gi" })).toMatchObject({
+      initialResources: { cpu: 4, memory: "4Gi" },
+      resources: { cpu: 4, memory: "4Gi" },
+    });
+  });
+
+  it.each([undefined, {}])("leaves resolved resources unchanged for %j", (overrides) => {
+    expect(applySandboxResourceOverrides(resolved, overrides)).toBe(resolved);
+  });
+
+  it("applies supplied overrides and preserves only omitted live fields when repository resources are withheld", () => {
+    const withheld = {
+      docker: false,
+      outcome: "error" as const,
+      initialResources: { memory: "8Gi" },
+      resourcesWithheld: true,
+    };
+
+    expect(applySandboxResourceOverrides(withheld, { cpu: 2 })).toEqual({
+      ...withheld,
+      initialResources: { cpu: 2, memory: "8Gi" },
+      resources: { cpu: 2 },
+      preserveResourceFields: ["memory"],
+    });
+  });
+
+  it("applies a partial override without resetting omitted fields when both authority reads fail", () => {
+    const unavailable = {
+      docker: false,
+      outcome: "error" as const,
+      preserveResourceFields: ["cpu", "memory"] as const,
+    };
+
+    expect(applySandboxResourceOverrides(unavailable, { memory: "4Gi" })).toEqual({
+      ...unavailable,
+      initialResources: { memory: "4Gi" },
+      resources: { memory: "4Gi" },
+      preserveResourceFields: ["cpu"],
+    });
+  });
+});
 
 describe("resolveRepoResources", () => {
   let harness: TestPgDb;
@@ -86,5 +144,23 @@ describe("resolveRepoResources", () => {
     expect(failed.resources).toBeUndefined();
     expect(failed.initialResources).toEqual({ cpu: 8 });
     expect(failed.resourcesWithheld).toBe(true);
+  });
+
+  it("preserves both live fields when both authority reads fail without defaults", async () => {
+    vi.spyOn(harness.appDb, "select").mockImplementation(() => { throw new Error("database unavailable"); });
+    const failed = await resolveRepoResources(harness.appDb, "org-a", primary, async () => ({
+      docker: false,
+      outcome: "error",
+    }));
+
+    expect(failed.resources).toBeUndefined();
+    expect(failed.initialResources).toBeUndefined();
+    expect(failed.resourcesWithheld).toBeUndefined();
+    expect(failed.preserveResourceFields).toEqual(["cpu", "memory"]);
+    expect(applySandboxResourceOverrides(failed, { memory: "4Gi" })).toMatchObject({
+      initialResources: { memory: "4Gi" },
+      resources: { memory: "4Gi" },
+      preserveResourceFields: ["cpu"],
+    });
   });
 });

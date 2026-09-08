@@ -59,6 +59,8 @@ export const SANDBOX_POD_LABEL_KEY = "valet.dev/sandbox";
  * through `SandboxProvider.list` to map a CR to its session; absent on CRs
  * created before session stamping existed. */
 export const SESSION_ANNOTATION_KEY = "valet.dev/session";
+/** Fresh-create ownership for a CR that has never reached Ready. */
+export const NEVER_READY_OWNER_ANNOTATION_KEY = "valet.dev/never-ready-owner";
 export const SANDBOX_CONTAINER_NAME = "sandbox";
 
 /** Mount path for the per-sandbox credential files (see `SandboxCreateOpts.credsFiles`). */

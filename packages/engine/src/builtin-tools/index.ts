@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
+import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired } from "../decision-gate.js";
 import type {
@@ -720,13 +721,26 @@ export const taskTool = defineTool({
     "Assess difficulty and select s/m/l for drafting, or l/xl for separate review. " +
     "XL children review only. Include the scope, selected tier and reason, " +
     "and acceptance checks in the brief. Tiers resolve through org config; " +
-    "do not name specific models.",
+    "do not name specific models. To retry capacity-blocked children, set " +
+    "task.resources to lower CPU or memory values. Omitted fields inherit defaults.",
   parameters: Type.Object({
     prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
     title: Type.Optional(Type.String()),
     repo: Type.Optional(Type.String({ description: "Clone URL or org/repo; interpretation is host policy." })),
     branch: Type.Optional(Type.String()),
     model: Type.Optional(Type.String({ description: "Choose explicitly by task difficulty: s for mechanical drafting, m for bounded implementation, l for difficult drafting or review, xl for review only. Default: s. Explain the assignment in the brief." })),
+    resources: Type.Optional(
+      Type.Object({
+        cpu: Type.Optional(
+          Type.Number({ description: "CPU cores for the child's sandbox. Omit to use the host default." }),
+        ),
+        memory: Type.Optional(
+          Type.String({
+            description: 'Memory for the child\'s sandbox as a Kubernetes quantity, such as "4Gi". Omit to use the host default.',
+          }),
+        ),
+      }),
+    ),
     profile: Type.Optional(
       Type.Union([Type.Literal("headless"), Type.Literal("full")], {
         description:
@@ -750,12 +764,44 @@ export const taskTool = defineTool({
     }
     const spawner = rawSpawner as ChildSpawner; // narrowed by typeof check above
 
+    let resources: SpawnChildRequest["resources"];
+    if (args.resources !== undefined) {
+      if (args.resources.cpu !== undefined && !isValidSandboxCpu(args.resources.cpu)) {
+        return {
+          text: `[task_resources] Set task.resources.cpu to a number ${sandboxCpuRange()}.`,
+        };
+      }
+
+      const memory = args.resources.memory;
+      let normalizedMemory: string | undefined;
+      if (memory !== undefined) {
+        if (typeof memory !== "string") {
+          return {
+            text: '[task_resources] Set task.resources.memory to a positive Kubernetes quantity such as "4Gi".',
+          };
+        }
+        normalizedMemory = memory.trim();
+        const memoryBytes = parseResourceQuantity(normalizedMemory);
+        if (memoryBytes === null || memoryBytes <= 0) {
+          return {
+            text: '[task_resources] Set task.resources.memory to a positive Kubernetes quantity such as "4Gi".',
+          };
+        }
+      }
+
+      resources = {
+        ...(args.resources.cpu !== undefined ? { cpu: args.resources.cpu } : {}),
+        ...(normalizedMemory !== undefined ? { memory: normalizedMemory } : {}),
+      };
+    }
+
     const req: SpawnChildRequest = {
       prompt: args.prompt,
       title: args.title,
       repo: args.repo,
       branch: args.branch,
       model: args.model,
+      resources,
       profile: args.profile,
       docker: args.docker,
     };

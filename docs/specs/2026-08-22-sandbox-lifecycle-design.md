@@ -93,26 +93,28 @@ hour.
    no owner sweep; it now surfaces through the over-age report rather than
    being silently killed.
 
-7. **Pending timeout fails terminally, and a failed fresh create cleans up
-   its CR.** `waitReady` previously threw a retryable timeout for a pod
+7. **Pending capacity waits for autoscaling, then fails actionably.**
+   `waitReady` previously threw a retryable timeout for a pod
    stuck `Pending` without an `Unschedulable` verdict, so callers re-queued
    forever (the incident's assistants waited 47h). At readiness timeout it
-   now diagnoses the pod (`classifyPodPending`): unscheduled → terminal
-   `SandboxStartupError` naming the capacity cause; scheduled-but-pulling →
-   still the retryable timeout (large images legitimately exceed the
+   now distinguishes capacity shortages (`Insufficient cpu`, `memory`, or
+   `ephemeral-storage`) from structural unschedulability. Structural failures
+   remain terminal immediately. Capacity shortages remain Pending so the
+   cluster autoscaler can observe the same pod; scheduled-but-pulling keeps
+   the retryable timeout (large images legitimately exceed the
    window). Guard from review: the terminal verdict only applies once the
-   CR is older than a 5-minute pending grace (`PENDING_TERMINAL_GRACE_MS`)
-   — a cluster autoscaler provisions a node in 2–5 minutes, and the
+   CR is older than a 10-minute pending grace (`PENDING_TERMINAL_GRACE_MS`)
+   — a cold node launch, join, and image pull can exceed five minutes, and the
    retryable timeout retains the CR whose Pending pod IS the scale-up
    signal, so failing terminally inside that window would delete the
-   signal and hard-fail sessions a later retry would have served. On a
-   terminal startup failure, `create()` deletes the CR it created **fresh
-   in that call** — leaving it queues phantom scheduler demand and its PVC
-   holds nothing. Fresh-vs-adopted comes from `applySandbox` itself
-   (`{ cr, adopted }`, derived from its create/409 branch), never from a
-   racy existence pre-GET. An adopted CR is never deleted (decision 5's
-   workspace-survival intent); this is the one documented exception to
-   "only the session-deletion path deletes a CR".
+   signal and hard-fail sessions a later retry would have served. A
+   post-grace `SandboxStartupError` includes the scheduler reason, requested
+   CPU/memory, and the corrective choices: lower `task.resources`, lower the
+   durable `.valet/prebuild.yaml` request, or compare against the largest node.
+   Ephemeral-storage gets its own node/deployment guidance. Cleanup ownership
+   is tied to the never-ready CR UID and spawning session across retries. That
+   owned CR is deleted after grace to stop phantom scheduler demand; a genuinely
+   pre-existing adopted CR is preserved because its PVC may contain prior work.
 
 ## Metrics
 
