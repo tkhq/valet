@@ -237,6 +237,48 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
   });
 
+  // A team orchestrator from before owner-mode resolution keeps resolving
+  // as the acting member (credential_owner_mode "actor"); the tasks it
+  // delegates must resolve the same way, or the parent and its children
+  // would act with different credentials mid-conversation.
+  it("copies an actor-mode parent's credential owner mode onto the child row", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const spawner = buildChildSpawner(deps, watcher);
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({
+      id: "parent-actor",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "team",
+      ownerId: "team-x",
+      credentialOwnerMode: "actor",
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+    });
+    const parent = await api.providers.engineHost.sessionFor("parent-actor", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+
+    const result = await spawner(
+      { prompt: "do the thing" },
+      { parentSessionId: "parent-actor", parentThreadId: parentThread.id, actorUserId: "local-user", owner: { type: "team", id: "team-x" } },
+    );
+    const rows = await api.providers.db
+      .select({ mode: agentSessions.credentialOwnerMode })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, result.childSessionId))
+      .limit(1);
+    expect(rows[0]?.mode).toBe("actor");
+  });
+
   it("threads profile/docker to the child's sandbox options and persists them on the row (defaults: headless, no docker)", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

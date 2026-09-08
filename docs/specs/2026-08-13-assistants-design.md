@@ -176,6 +176,18 @@ adds no new authorization surface.
 Creating and archiving an assistant follows the same rule as administering
 one: your own for a user assistant, team admin for a team's.
 
+## Credentials of existing team assistants
+
+A team assistant's session resolves credentials as the team, per decision 6
+of `2026-08-24-team-credentials-and-workflow-bootstrap-design.md`. Team
+assistants whose session row predates that decision are the exception: they
+were created when every session read credentials as the member prompting
+it, and their `agent_sessions.credential_owner_mode` is stamped `actor` once
+at boot so they keep doing so. A team assistant materialized since is
+stamped `owner`. Deviation 9 of that design records the rule; `EngineHost`
+reads the mode from the row when it builds the assistant session, the same
+read that supplies the profile.
+
 ## Profile pictures
 
 Amended 2026-09-05: `POST /api/assistants/:id/avatar` accepts a multipart

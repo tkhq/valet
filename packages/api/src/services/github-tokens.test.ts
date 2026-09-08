@@ -15,7 +15,12 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, githubInstallations } from "../schema/index.js";
 import { saveAppConfig, type GithubAppConfig } from "./github-app.js";
-import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "./github-tokens.js";
+import {
+  GitHubAuthError,
+  installationResolvesFor,
+  resolveGitHubToken,
+  type GitHubTokenDeps,
+} from "./github-tokens.js";
 
 const orgId = "org1";
 const userId = "user1";
@@ -580,6 +585,65 @@ describe("resolveGitHubToken", () => {
       await expect(
         resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "acme", name: "repo" }, auth: "app" }),
       ).rejects.toBeInstanceOf(GitHubAuthError);
+    });
+  });
+
+  // The readiness predicate's view of the team `auto` path: whether an
+  // installation would answer, without minting a token. Mirrors
+  // `resolveInstallationApiToken`: the owner's installation first, then the
+  // org's sole non-suspended one.
+  describe("installationResolvesFor", () => {
+    it("is no_app when the org has no App configured", async () => {
+      await seedInstallation();
+      expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: false, gap: "no_app" });
+    });
+
+    it("is ok for the sole installation when no owner is named", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: true });
+    });
+
+    it("is no_installations when the App has none", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: false, gap: "no_installations" });
+    });
+
+    it("is ambiguous with two installations and no owner", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other" });
+      expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: false, gap: "ambiguous", count: 2 });
+    });
+
+    it("is ok for the named owner's installation among several, case-insensitively", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other" });
+      expect(await installationResolvesFor(deps(), orgId, "ACME")).toEqual({ ok: true });
+    });
+
+    it("falls back to the sole installation when the named owner has none", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      expect(await installationResolvesFor(deps(), orgId, "nobody")).toEqual({ ok: true });
+    });
+
+    it("names the owner when it has no installation and the org has several", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other" });
+      expect(await installationResolvesFor(deps(), orgId, "nobody")).toEqual({
+        ok: false,
+        gap: "no_installation_for_owner",
+        owner: "nobody",
+      });
+    });
+
+    it("ignores a suspended installation", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation({ suspended: true });
+      expect(await installationResolvesFor(deps(), orgId, "acme")).toEqual({ ok: false, gap: "no_installations" });
     });
   });
 });

@@ -105,4 +105,65 @@ describe("resolveOpenAiCredential", () => {
     expect(got).toBeNull();
     expect(tried).toEqual(["org"]);
   });
+
+  // A team session must find the same org-scope OpenAI item a team workflow
+  // finds: the generic team read runs under the service's fallback policy.
+  describe("team owner", () => {
+    const teamOwner: CredentialOwner = { type: "team", id: "team_1" };
+
+    function vaultWith(items: Record<string, string>, tried: string[]): OnePasswordService {
+      return {
+        tokenConnected: async () => true,
+        listVaults: async () => [],
+        resolveReference: async () => "",
+        resolveCredential: async (row: StoredCredential) => row,
+        findCandidates: async () => [],
+        findCredentialForService: async (scope: string, _ctx, service: string) => {
+          tried.push(scope);
+          return items[`${scope}:${service}`] ?? null;
+        },
+      } satisfies OnePasswordService;
+    }
+
+    it("reaches an org-scoped vault item under reference-only, the policy a team workflow reads with", async () => {
+      const tried: string[] = [];
+      const onePassword = vaultWith({ "org:openai": "sk-org-vault" }, tried);
+      const cred = await resolveOpenAiCredential(
+        db,
+        credentials,
+        { orgId, owner: teamOwner, scopes: ["org"], orgFallback: "reference-only" },
+        {},
+        onePassword,
+      );
+      expect(cred).toEqual({ type: "api_key", apiKey: "sk-org-vault" });
+      expect(tried).toEqual(["org"]);
+    });
+
+    it("stops at the team row when the policy is none", async () => {
+      const tried: string[] = [];
+      const onePassword = vaultWith({ "org:openai": "sk-org-vault" }, tried);
+      const cred = await resolveOpenAiCredential(
+        db,
+        credentials,
+        { orgId, owner: teamOwner, scopes: ["org"], orgFallback: "none" },
+        {},
+        onePassword,
+      );
+      expect(cred).toBeNull();
+      expect(tried).toEqual([]);
+    });
+
+    it("the team's own row still wins over the vault", async () => {
+      await credentials.save(teamOwner, "openai", { type: "api_key", apiKey: "sk-team" });
+      const onePassword = vaultWith({ "org:openai": "sk-org-vault" }, []);
+      const cred = await resolveOpenAiCredential(
+        db,
+        credentials,
+        { orgId, owner: teamOwner, scopes: ["org"], orgFallback: "reference-only" },
+        {},
+        onePassword,
+      );
+      expect(cred?.apiKey).toBe("sk-team");
+    });
+  });
 });

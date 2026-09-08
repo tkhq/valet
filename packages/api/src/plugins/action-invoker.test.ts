@@ -1206,6 +1206,59 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toEqual({ ok: true, result: { token: "team-tok" } });
   });
 
+  // A delegated row follows to the member's live github row. When that row
+  // is one the member's own runs would refuse (identity-only scopes here),
+  // the team run must not act on it either: it falls to the App path the
+  // same way a team with no row does.
+  it("team-owned: an unhealthy delegated github row falls through to the installation token", async () => {
+    const { TeamCredentialStore } = await import("./team-credential-store.js");
+    const { appDb, credentials: inner } = await harness();
+    const credentials = new TeamCredentialStore(inner, { isMember: async () => true });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_team_2",
+      orgId,
+      installationId: 4343,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "identity-tok",
+      metadata: { login: "octocat", identityOnly: true },
+    });
+    await credentials.save({ type: "team", id: "gh-team" }, "github", {
+      type: "oauth2",
+      metadata: { delegatedFrom: userId, sourceType: "oauth2" },
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const whoami = countingGithubWhoami();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: declaredGithubActionPluginByService([whoami.action]),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:team-gh-unhealthy" },
+      teamOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-4343" } });
+    expect(whoami.calls()).toBe(1);
+  });
+
   it("user-connected: resolves the user's healthy github credential", async () => {
     const { appDb, credentials } = await harness();
     await credentials.save({ type: "user", id: userId }, "github", {

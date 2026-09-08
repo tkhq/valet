@@ -671,6 +671,9 @@ sessionsRouter.post("/", async (c) => {
         status: "active",
         ownerType: owner.type,
         ownerId: owner.id,
+        // A new team session resolves credentials as the team (team
+        // credentials design, deviation 13).
+        credentialOwnerMode: "owner",
         profile,
         docker,
         kind,
@@ -1379,10 +1382,14 @@ sessionsRouter.post("/:id/pause", async (c) => {
 /** POST /:id/sandbox/replace — tear down the session's sandbox and
  * re-provision a fresh one. Threads and history are untouched; prep steps
  * re-apply on the new sandbox. Same busy rule as pause: ANY unsettled
- * submission blocks, so a queued turn is never orphaned mid-replace. */
+ * submission blocks, so a queued turn is never orphaned mid-replace.
+ * Direct-owner-gated like `sandbox-jwt`, and a team key is refused the
+ * same way: it owns its team's rows, but rebuilding a live sandbox is a
+ * person's act on the session, not a key's. */
 sessionsRouter.post("/:id/sandbox/replace", async (c) => {
   const { db, engineHost, engineStore } = c.var.providers;
   const id = c.req.param("id");
+  const caller = c.var.principal;
 
   const rows = await db
     .select()
@@ -1390,7 +1397,13 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !(await isSessionDirectOwner(db, row, c.var.principal))) return c.json({ error: "session not found" }, 404);
+  if (!row || !(await isSessionDirectOwner(db, row, caller))) return c.json({ error: "session not found" }, 404);
+  if (caller.type === "team") {
+    return c.json(
+      { error: "A team API key cannot replace a sandbox. Use a personal API key or the web app." },
+      403,
+    );
+  }
 
   const unsettled = await engineStore.listUnsettledSubmissions(id);
   if (unsettled.length > 0) {

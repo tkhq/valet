@@ -357,6 +357,13 @@ export const agentSessions = pgTable(
     // both explicitly (owner_id = user_id for today's user-owned sessions).
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
+    // Whose credentials a TEAM-owned session reads (team credentials
+    // design, deviation 13). `owner` = the team principal. `actor` = the
+    // prompting member with org fallback, the contract every session had
+    // before team-owner resolution shipped; a boot pass stamps it onto
+    // team rows that predate the column, and no writer sets it since.
+    // NULL reads as `owner`. Ignored for user- and org-owned rows.
+    credentialOwnerMode: text("credential_owner_mode", { enum: ["owner", "actor"] }),
     // Interactive-service profile (sandbox auth gateway plan, Task 5).
     // "headless" (default) is agent-only; "full" additionally runs
     // ttyd + code-server + the auth gateway inside the sandbox.

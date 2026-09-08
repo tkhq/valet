@@ -314,6 +314,9 @@ export async function ensureAssistantSession(
         status: "active",
         ownerType: principal.type,
         ownerId: principal.id,
+        // A new team assistant resolves credentials as the team (team
+        // credentials design, deviation 13).
+        credentialOwnerMode: "owner",
         createdAt: now,
         updatedAt: now,
         lastActivityAt: now,

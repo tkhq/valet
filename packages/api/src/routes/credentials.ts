@@ -45,7 +45,7 @@
 import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
-import type { CredentialOwner, StoredCredential } from "@valet/engine";
+import { credentialSecret, type CredentialOwner, type StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
@@ -59,8 +59,9 @@ import {
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
-import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
-import { deleteDelegationsFrom } from "../services/credential-delegations.js";
+import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { deleteDelegationsFrom, listDelegationsFrom } from "../services/credential-delegations.js";
+import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
 import type {
   CredentialSummary,
@@ -93,9 +94,24 @@ function delegatedFromMeta(metadata: unknown): string | undefined {
   return typeof raw === "string" && raw.length > 0 ? raw : undefined;
 }
 
+/** The metadata keys only `POST /:service/delegate` may write. */
+const DELEGATION_METADATA_KEYS = ["delegatedFrom", "sourceType"] as const;
+
+function reservedDelegationKey(metadata: unknown): string | undefined {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  return DELEGATION_METADATA_KEYS.find((key) => key in metadata);
+}
+
 function rowHasSecret(stored: StoredCredential): boolean {
   const value = stored.accessToken ?? stored.apiKey;
   return typeof value === "string" && value.length > 0;
+}
+
+/** A secretless source row a team read can still turn into a secret: a
+ * 1Password reference on the org token (`resolveTeamCredentialRead` runs
+ * with org scopes only). */
+function usableByTeamRead(stored: StoredCredential): boolean {
+  return onePasswordMeta(stored)?.tokenScope === "org";
 }
 
 /** The service key as a sentence subject (`slack` → `Slack`). */
@@ -126,10 +142,13 @@ async function resolveCredentialOwner(
     const { db } = c.var.providers;
     const team = await getTeamInOrg(db, user.orgId, teamId);
     if (!team) return c.json({ error: "Team not found." }, 404);
+    // Reads admit an org admin off the team, the same gate the team roster
+    // uses: an admin who can already store the team's credentials must be
+    // able to see them.
     const allowed =
       access === "write"
         ? await canAdministerTeam(db, teamId, user.id)
-        : await isTeamMember(db, teamId, user.id);
+        : await canViewTeam(db, teamId, user.id);
     if (!allowed) return c.json({ error: "Team not found." }, 404);
     return { type: "team", id: teamId };
   }
@@ -282,8 +301,11 @@ credentialsRouter.get("/", async (c) => {
       if (from) {
         const stillMember = await isTeamMember(db, owner.id, from);
         const source = stillMember ? await engineCredentials.get({ type: "user", id: from }, row.service) : null;
+        // A source row with neither a secret nor a reference has nothing
+        // to resolve. A personal-scope reference has one the team read
+        // cannot use: it runs on org-scoped tokens only.
         referenceBroken =
-          !stillMember || source === null || (!rowHasSecret(source) && !onePasswordMeta(source));
+          !stillMember || source === null || (!rowHasSecret(source) && !usableByTeamRead(source));
       }
       // The same summary a user row gets, so health fields and the
       // 1Password reference are not lost. Secret columns are left out;
@@ -396,6 +418,23 @@ credentialsRouter.put("/:service", async (c) => {
   if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "onepassword" in body.metadata) {
     return c.json({ error: "metadata.onepassword is reserved; use the onepassword request field" }, 400);
   }
+  // The delegation keys are reserved the same way, on every scope. The
+  // team read (`plugins/team-credential-store.ts`) follows
+  // `metadata.delegatedFrom` on a secretless team row to that member's
+  // personal row, so a PUT carrying it would let a team admin point the
+  // team at any member's token without that member's consent. Only the
+  // delegate route writes these keys, and it runs as the member sharing.
+  const smuggled = reservedDelegationKey(body.metadata);
+  if (smuggled) {
+    return c.json(
+      {
+        error:
+          `metadata.${smuggled} is reserved. To share a personal credential with a team, ` +
+          `POST /api/credentials/${service}/delegate as the member who holds it.`,
+      },
+      400,
+    );
+  }
 
   if (body.onepassword) {
     // Structural validation (reserved service name) takes precedence over
@@ -472,6 +511,23 @@ credentialsRouter.put("/:service", async (c) => {
       const allowed = await getAllowPersonalOnePassword(db, user.orgId);
       if (!allowed) {
         return c.json(PERSONAL_DISABLED, 403);
+      }
+      // Every team that rides this row reads it with org-scoped tokens
+      // only, so a personal reference would leave each of them with a
+      // reference that never resolves. Refuse while shares exist: the
+      // caller revokes them on purpose, or stores a reference a team can
+      // read.
+      const shared = await listDelegationsFrom(db, { userId: user.id, service });
+      if (shared.length > 0) {
+        const teams = shared.length === 1 ? "1 team" : `${shared.length} teams`;
+        return c.json(
+          {
+            error:
+              `${service} is shared with ${teams}, and a team cannot read a personal 1Password reference. ` +
+              "Revoke those shares in Integrations first, or set tokenScope to org.",
+          },
+          400,
+        );
       }
     }
 
@@ -616,6 +672,29 @@ credentialsRouter.post("/:service/delegate", async (c) => {
       { error: `${service} cannot be shared with a team. Ask a team admin to connect ${service} for the team instead.` },
       400,
     );
+  }
+  // A github row the member's own runs would refuse (identity-only sign-in
+  // scopes, a failed refresh, an expired token with no refresh token) is
+  // held to the same rule here: the team read follows the reference to
+  // this row, so sharing it would hand the team a credential every run
+  // rejects. Same predicate the invoker's team branch applies.
+  // A 1Password reference cannot be checked without resolving it; the team
+  // read resolves it under the org token, so it is admitted as is.
+  if (service === GITHUB_CREDENTIAL_SERVICE && onePasswordMeta(source) === null) {
+    const health = checkGithubUserRow(
+      { accessToken: credentialSecret(source), refreshToken: source.refreshToken, expiresAt: source.expiresAt, metadata: source.metadata },
+      Date.now(),
+    );
+    if (!health.ok) {
+      return c.json(
+        {
+          error:
+            `Your GitHub connection cannot be shared: ${health.reason}. ` +
+            "Connect GitHub in Settings → Connected accounts, then share it with the team.",
+        },
+        400,
+      );
+    }
   }
   // Insert-only. `engineCredentials.save` upserts on the owner+service key,
   // so a list-then-save would let a concurrent delegation, or an admin's

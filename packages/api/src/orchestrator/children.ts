@@ -292,7 +292,20 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       });
     }
 
+    // A child resolves credentials the way its parent does. A team
+    // orchestrator from before owner-mode resolution keeps acting as the
+    // member (team credentials design, deviation 13); its delegated tasks
+    // must not switch identity mid-conversation. A parent with no row, or
+    // one in owner mode, spawns an owner-mode child.
+    const parentRows = await deps.db
+      .select({ credentialOwnerMode: agentSessions.credentialOwnerMode })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, ctx.parentSessionId))
+      .limit(1);
+    const credentialOwnerMode = parentRows[0]?.credentialOwnerMode === "actor" ? "actor" : "owner";
+
     const childSession = await deps.engineHost.childSessionFor(childSessionId, {
+      credentialOwnerMode,
       parentSessionId: ctx.parentSessionId,
       parentThreadId: ctx.parentThreadId,
       actorUserId: ctx.actorUserId,
@@ -304,6 +317,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       docker: req.docker,
       resources: req.resources,
     });
+
 
     const now = Date.now();
     await deps.db
@@ -322,6 +336,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         status: "active",
         ownerType: ctx.owner.type,
         ownerId: ctx.owner.id,
+        credentialOwnerMode,
         createdAt: now,
         updatedAt: now,
         lastActivityAt: now,
@@ -528,6 +543,7 @@ export class ChildWatcher {
         profile: agentSessions.profile,
         docker: agentSessions.docker,
         sandboxResourceOverrides: agentSessions.sandboxResourceOverrides,
+        credentialOwnerMode: agentSessions.credentialOwnerMode,
       })
       .from(agentSessions)
       .where(eq(agentSessions.id, watch.childSessionId))
@@ -549,6 +565,7 @@ export class ChildWatcher {
               profile: shapeRow.profile,
               docker: shapeRow.docker,
               sandboxResourceOverrides: shapeRow.sandboxResourceOverrides,
+              credentialOwnerMode: shapeRow.credentialOwnerMode,
             }
           : {}),
       }),
@@ -1063,6 +1080,9 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         // team-owned child keeps the team tier of the model cascade.
         ownerType: agentSessions.ownerType,
         ownerId: agentSessions.ownerId,
+        // A child stamped `actor` keeps acting-member credential reads
+        // across a rebuild.
+        credentialOwnerMode: agentSessions.credentialOwnerMode,
       })
       .from(agentSessions)
       .where(eq(agentSessions.id, req.childSessionId))

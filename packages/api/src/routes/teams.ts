@@ -50,14 +50,12 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import type { AuthUser } from "../middleware/auth.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import {
   agentSessions,
   assistants,
   childWatches,
   contentSources,
-  teamMembers,
   teams,
   type ContentSourceRow,
   type TeamRow,
@@ -76,6 +74,7 @@ import {
 import {
   addMember,
   canAdministerTeam,
+  canViewTeam,
   ConfigManagedTeamError,
   createTeam,
   deleteTeam,
@@ -241,11 +240,6 @@ async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId:
   return getTeamInOrg(db, orgId, teamId);
 }
 
-/**
- * Gates read access to a team's member roster: any member of the team, or
- * any org admin (admins manage the whole org's teams, not just ones they're
- * on) — looser than `canAdministerTeam`, which requires *team*-admin.
- */
 function refuseTeamApiKey(c: Context<AppEnv>) {
   if (requirePrincipal(c)?.type === "team") {
     return c.json(
@@ -254,20 +248,6 @@ function refuseTeamApiKey(c: Context<AppEnv>) {
     );
   }
   return undefined;
-}
-
-async function canViewTeam(
-  db: AppEnv["Variables"]["providers"]["db"],
-  teamId: string,
-  user: AuthUser,
-): Promise<boolean> {
-  if (await isOrgAdmin(db, user.orgId, user.id)) return true;
-  const members = await db
-    .select()
-    .from(teamMembers)
-    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, user.id)))
-    .limit(1);
-  return members.length > 0;
 }
 
 // ── List ──────────────────────────────────────────────────────────────────
@@ -324,7 +304,7 @@ teamsRouter.post("/:id/orchestrator", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  const admitted = principal.type === "team" ? principal.id === id : await canViewTeam(db, id, user);
+  const admitted = principal.type === "team" ? principal.id === id : await canViewTeam(db, id, user.id);
   if (!admitted) return c.json({ error: "team not found" }, 404);
 
   const { sessionId } = await ensureDefaultAssistantSession(
@@ -354,7 +334,7 @@ teamsRouter.get("/:id/children", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canViewTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
   const assistants = await listAssistantsForOwners(db, user.orgId, [{ type: "team", id }]);
   const bySessionId = new Map(assistants.map((a) => [a.sessionId, a]));
@@ -427,7 +407,7 @@ teamsRouter.get("/:id/members", async (c) => {
 
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canViewTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
   const members = await listTeamMembers(db, id);
   const body: ListTeamMembersResponse = { members };
@@ -746,7 +726,7 @@ teamsRouter.get("/:id/onepassword-refs", async (c) => {
   const id = c.req.param("id");
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+  if (!(await canViewTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
   const refs = [...((await loadTeamOnePasswordRefs(engineCredentials, id)) ?? [])];
   return c.json({ refs } satisfies TeamOnePasswordRefsResponse);
 });

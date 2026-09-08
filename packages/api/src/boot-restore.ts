@@ -37,6 +37,11 @@ export interface RestoreSessionMeta {
    * team tier of the model cascade (flows structurally from
    * `loadSessionMeta`; declared so the type matches). */
   ownerTeamId?: string;
+  /** Credential owner mode from the app row. A team session stamped
+   * `actor` must keep resolving as the acting member after a restart
+   * (flows structurally from `loadSessionMeta`; declared so the type
+   * matches). */
+  credentialOwnerMode?: "owner" | "actor" | null;
 }
 
 /**

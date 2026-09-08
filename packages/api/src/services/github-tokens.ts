@@ -66,7 +66,7 @@ import { githubInstallations } from "../schema/index.js";
 import { resolveGithubUrl } from "./github-env.js";
 import { discoverInstallations, loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
 
-const GITHUB_CREDENTIAL_SERVICE = "github";
+export const GITHUB_CREDENTIAL_SERVICE = "github";
 /**
  * Virtual credential service a plugin action requests when it needs the
  * org's GitHub App INSTALLATION token specifically, regardless of which
@@ -284,6 +284,62 @@ async function performRefresh(
 
 // ── User-credential health ─────────────────────────────────────────────
 
+/** The fields the health rules read. `StoredCredential` and the engine's
+ * `Credential` both satisfy it, so a row read through any store shape can
+ * be checked. */
+export interface GithubUserRowLike {
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  metadata?: unknown;
+}
+
+export type GithubUserRowHealth =
+  | { ok: true; token: string; state: "pat" | "fresh" | "stale-refreshable" }
+  | { ok: false; reason: string };
+
+/**
+ * The ONE definition of a usable user `github` row, with no I/O: it must
+ * hold a token, must not be identity-only (sign-in scopes cannot reach
+ * repositories), must not be marked by a failed refresh, and must be fresh
+ * or refreshable. `resolveUserCredential` applies it before it refreshes;
+ * the delegate route and the workflow invoker's team branch apply it so a
+ * row a user's own runs would refuse is never shared with, or acted on by,
+ * a team. `reason` names the gap for a caller that reports it.
+ */
+export function checkGithubUserRow(cred: GithubUserRowLike, now: number): GithubUserRowHealth {
+  if (!cred.accessToken) {
+    return { ok: false, reason: "no GitHub account is connected for this user" };
+  }
+  const metadata = cred.metadata;
+  if (isRecord(metadata) && metadata.identityOnly === true) {
+    return {
+      ok: false,
+      reason: "the connected GitHub account is identity-only (sign-in scopes) and cannot access repositories; reconnect GitHub with repo access",
+    };
+  }
+  if (isRecord(metadata) && metadata.refreshFailedAt !== undefined && metadata.refreshFailedAt !== null) {
+    return { ok: false, reason: "the connected GitHub credential needs to be reconnected (a previous token refresh failed)" };
+  }
+  // PAT: no expiry and no refresh token → always fresh.
+  if (cred.expiresAt === undefined && cred.refreshToken === undefined) {
+    return { ok: true, token: cred.accessToken, state: "pat" };
+  }
+  const stale = cred.expiresAt !== undefined && cred.expiresAt - STALE_MARGIN_MS <= now;
+  if (!stale) {
+    return { ok: true, token: cred.accessToken, state: "fresh" };
+  }
+  if (!cred.refreshToken) {
+    return { ok: false, reason: "the connected GitHub credential has expired and cannot be refreshed; reconnect GitHub" };
+  }
+  return { ok: true, token: cred.accessToken, state: "stale-refreshable" };
+}
+
+/** `checkGithubUserRow` as a boolean, for callers that only branch on it. */
+export function isUsableGithubUserRow(cred: GithubUserRowLike, now: number): boolean {
+  return checkGithubUserRow(cred, now).ok;
+}
+
 type UserCredResult =
   | { ok: true; token: string; source: "user" | "pat"; login?: string }
   | { ok: false; reason: string };
@@ -302,37 +358,20 @@ async function resolveUserCredential(
     return { ok: false, reason: "no user is associated with this request to resolve a user GitHub credential" };
   }
   const cred = await deps.credentials.get(userOwner(userId), GITHUB_CREDENTIAL_SERVICE);
-  if (!cred || !cred.accessToken) {
+  if (!cred) {
     return { ok: false, reason: "no GitHub account is connected for this user" };
   }
-
-  const metadata = cred.metadata;
-  const login = loginOf(metadata);
-
-  if (isRecord(metadata) && metadata.identityOnly === true) {
-    return {
-      ok: false,
-      reason: "the connected GitHub account is identity-only (sign-in scopes) and cannot access repositories; reconnect GitHub with repo access",
-    };
+  const health = checkGithubUserRow(cred, nowOf(deps));
+  if (!health.ok) return health;
+  const login = loginOf(cred.metadata);
+  if (health.state === "pat") {
+    return { ok: true, token: health.token, source: "pat", login };
   }
-  if (isRecord(metadata) && metadata.refreshFailedAt !== undefined && metadata.refreshFailedAt !== null) {
-    return { ok: false, reason: "the connected GitHub credential needs to be reconnected (a previous token refresh failed)" };
+  if (health.state === "fresh") {
+    return { ok: true, token: health.token, source: "user", login };
   }
 
-  // PAT: no expiry and no refresh token → always fresh.
-  if (cred.expiresAt === undefined && cred.refreshToken === undefined) {
-    return { ok: true, token: cred.accessToken, source: "pat", login };
-  }
-
-  const stale = cred.expiresAt !== undefined && cred.expiresAt - STALE_MARGIN_MS <= nowOf(deps);
-  if (!stale) {
-    return { ok: true, token: cred.accessToken, source: "user", login };
-  }
-
-  // Stale App-OAuth credential.
-  if (!cred.refreshToken) {
-    return { ok: false, reason: "the connected GitHub credential has expired and cannot be refreshed; reconnect GitHub" };
-  }
+  // Stale App-OAuth credential with a refresh token.
   const rotated = await refreshSingleFlight(deps, orgId, userId, cred);
   if (!rotated || !rotated.accessToken) {
     return { ok: false, reason: "the connected GitHub credential could not be refreshed; reconnect GitHub" };
@@ -451,6 +490,47 @@ export async function resolveInstallationApiToken(
     if (token !== null) return token;
   }
   return resolveSoleInstallationToken(deps, orgId);
+}
+
+/** Why an App installation would not answer a team `auto` read. */
+export type InstallationResolution =
+  | { ok: true }
+  | { ok: false; gap: "no_app" }
+  | { ok: false; gap: "no_installations" }
+  | { ok: false; gap: "no_installation_for_owner"; owner: string }
+  | { ok: false; gap: "ambiguous"; count: number };
+
+/**
+ * Whether `resolveInstallationApiToken` would find an installation, without
+ * minting a token: the App is configured, and either `repoOwner` has a
+ * non-suspended installation or the org has exactly one. This is the
+ * readiness predicate's view of a team-owned `auto` github node
+ * (`workflows/team-service-readiness.ts`), so the two stay one rule.
+ *
+ * Reads the installations table as it stands. The lazy sync that
+ * `resolveInstallationApiToken` runs on an empty table needs the App's
+ * signing key, which a readiness caller does not hold; an App installed in
+ * manual webhook mode and never refreshed reads as `no_installations` until
+ * a run or "Refresh installations" fills the table.
+ */
+export async function installationResolvesFor(
+  deps: Pick<GithubAppDeps, "db" | "credentials" | "env">,
+  orgId: string,
+  repoOwner: string | undefined,
+): Promise<InstallationResolution> {
+  if (!(await loadAppConfig(deps, orgId))) return { ok: false, gap: "no_app" };
+  const rows = await deps.db
+    .select({ accountLogin: githubInstallations.accountLogin })
+    .from(githubInstallations)
+    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
+  if (rows.length === 0) return { ok: false, gap: "no_installations" };
+  // Same case-insensitive match as `mintInstallationToken`.
+  if (repoOwner && rows.some((row) => row.accountLogin.toLowerCase() === repoOwner.toLowerCase())) {
+    return { ok: true };
+  }
+  if (rows.length === 1) return { ok: true };
+  if (repoOwner) return { ok: false, gap: "no_installation_for_owner", owner: repoOwner };
+  return { ok: false, gap: "ambiguous", count: rows.length };
 }
 
 // ── Lazy installation sync ──────────────────────────────────────────────

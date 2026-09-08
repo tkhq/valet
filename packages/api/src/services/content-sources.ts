@@ -138,8 +138,20 @@ export interface AdoptedSourceSpec {
   repoFullName: string;
   ref: string;
   subpath: string;
+  /** The org source's kinds. Only `workflows` is adopted; see
+   * `ADOPTED_KINDS`. */
   kinds: ContentKind[];
 }
+
+/**
+ * What an adopted row collects, whatever the org source collects. A team
+ * adopts the org's template repository for its workflows (team-credentials
+ * design, decision 13). An org source that also collects skills or
+ * templates already publishes those org-wide; copying its kinds gave every
+ * new team a team-owned mirror of every org skill, a second copy of every
+ * org template in its gallery, and its own poll of the repository for each.
+ */
+const ADOPTED_KINDS: readonly ContentKind[] = ["workflows"];
 
 /** Builds a pending team-owned source that copies an org workflow source.
  * The caller inserts it inside its own transaction — `createTeam` does. */
@@ -156,7 +168,7 @@ export function adoptedTeamSourceRow(
     repoFullName: spec.repoFullName,
     ref: spec.ref,
     subpath: spec.subpath,
-    kinds: spec.kinds,
+    kinds: ADOPTED_KINDS.filter((kind) => spec.kinds.includes(kind)),
     enabled: true,
     status: "pending",
     attempts: 0,

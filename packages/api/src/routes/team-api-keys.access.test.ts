@@ -262,4 +262,24 @@ describe("team API key reach", () => {
     expect(team.status).toBe(403);
     expect(((await team.json()) as { error: string }).error).toContain("personal");
   });
+
+  // A key owns its team's sessions, so the direct-owner gate on
+  // sandbox/replace admits it. Rebuilding a sandbox is a person's act on a
+  // live session, the same way minting a sandbox credential is.
+  it("cannot replace its team's sandbox: that rebuilds a live session, which a key does not do", async () => {
+    const f = await bootFixture();
+    const headers = { "x-api-key": f.teamKey };
+
+    const personal = await fetch(`${f.baseUrl}/api/sessions/${f.personalSessionId}/sandbox/replace`, {
+      method: "POST",
+      headers,
+    });
+    expect(personal.status).toBe(404);
+    const team = await fetch(`${f.baseUrl}/api/sessions/${f.teamSessionId}/sandbox/replace`, {
+      method: "POST",
+      headers,
+    });
+    expect(team.status).toBe(403);
+    expect(((await team.json()) as { error: string }).error).toContain("personal");
+  });
 });
