@@ -5,10 +5,10 @@
  * plugin-slack.
  *
  * The bot token is org-shared by design (`PUT /api/credentials/slack?scope=org`
- * stores it under `{ type: "org", id: orgId }`). The engine's session always
- * calls the resolver with a user owner, so a plain exact-owner read would
- * return null in production. These tests prove the org-scoped fallback and the
- * enrichment path both work correctly.
+ * stores it under `{ type: "org", id: orgId }`). A user-owned session reaches
+ * that row through `requires.orgCredential`. A team-owned session does the
+ * same and skips identity enrichment. These tests prove the org-scoped
+ * fallback and the user-session enrichment path both work correctly.
  *
  * Modelled on host.github-credential.test.ts — same harness, same fixture
  * bootstrapping pattern, exercising the real `Session.credentialProvider()` seam.

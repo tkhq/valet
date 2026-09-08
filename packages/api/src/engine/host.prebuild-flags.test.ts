@@ -432,6 +432,89 @@ describe("childSessionFor repo prebuild flags", () => {
     infoSpy.mockRestore();
   });
 
+  it("a child of a team-owned session carries the team id and gets the repo's docker flag", async () => {
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/prebuild.yaml"
+          ? contentsBody("docker: true\n", "blob1")
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const { engineHost, db, engineCredentials } = api.providers;
+    await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+    const now = Date.now();
+    await db.insert(githubInstallations).values({
+      id: "ghi_team_flags",
+      orgId: "local-org",
+      installationId: 222,
+      accountLogin: "tkhq",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const childId = "child-team-prebuild-flags";
+    await db.insert(sessionRepos).values({
+      sessionId: childId,
+      host: "github",
+      fullName: "tkhq/mono",
+      cloneUrl: "https://github.com/tkhq/mono.git",
+      ref: null,
+      auth: "auto",
+      position: 0,
+      targetDir: "mono",
+    });
+
+    const parent = await engineHost.sessionFor("parent-team-prebuild-flags", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/parent-team-prebuild-flags",
+      ownerType: "team",
+      ownerTeamId: "team_flags",
+    });
+    const parentThread = parent.thread("web:default");
+    const errorSpy = vi.spyOn(console, "error");
+    try {
+      const child = await engineHost.childSessionFor(childId, {
+        parentSessionId: "parent-team-prebuild-flags",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "team", id: "team_flags" },
+        workspace: `/tmp/${childId}`,
+      });
+      await child.attachment.ensureReady({ timeoutMs: 5_000 });
+
+      const call = recorder.createCalls.find((c) => c.sessionId === childId);
+      expect(call).toBeDefined();
+      expect(call?.docker).toBe(true);
+      const flagErrors = errorSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("resolveRepoPrebuildFlags"),
+      );
+      expect(flagErrors).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+    // A team child reads through the App installation, never a member token.
+    const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
+    expect(contentsCall?.authHeader).toBe("Bearer inst-222");
+  });
+
   it("an org with NO GitHub configured still reads a public repo's flags tokenless (TKAI-401)", async () => {
     fixture = startGithubFixture({
       getContents: (_owner, _repo, path) =>

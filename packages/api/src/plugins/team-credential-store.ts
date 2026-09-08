@@ -61,7 +61,13 @@ export class TeamCredentialStore implements CredentialStore {
     if (!row) return null;
     if (rowSecret(row)) return row;
     const from = delegatedFrom(row);
-    if (!from) return row;
+    if (!from) {
+      // Empty stub (no secret, no delegation). A 1Password reference still
+      // needs to reach `resolveRow`. Anything else is a miss so org fallback
+      // can run instead of treating the stub as a real team credential.
+      if (onePasswordMeta(row)) return row;
+      return null;
+    }
 
     if (!(await this.deps.isMember(owner.id, from))) {
       throw new CredentialReferenceBrokenError(service);
