@@ -1000,13 +1000,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     } catch (err) {
       const ownsPendingCreate = applied.metadata.annotations?.[NEVER_READY_OWNER_ANNOTATION_KEY] === neverReadyOwner;
       if (err instanceof SandboxStartupError &&
-        (!adopted || (err instanceof PendingTerminalStartupError && ownsPendingCreate))) {
+        (!adopted || ownsPendingCreate)) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
         // pod terminally failed to start. Left standing it queues phantom
         // demand against the scheduler (the 2026-08-22 incident held 433
         // Pending pods for 47h), and its PVC holds nothing — the pod never
-        // ran. A post-grace capacity error also cleans up the retained CR.
+        // ran. Durable ownership also authorizes cleanup when a retained pod
+        // later reaches any other terminal startup state.
         // Earlier attempts never returned a sandbox handle, so no owner can
         // clean it up after the engine settles the failed provision.
         // No destroyed-counter record here: the created counter only fires

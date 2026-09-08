@@ -1154,6 +1154,7 @@ function makeCapacityPendingProvider(opts: {
   requests?: { cpu?: string | number; memory?: string | number };
 }) {
   const objectsApi = new CapacityPendingObjectsApi(opts.createdAt);
+  let schedulerMessage = opts.schedulerMessage;
   const podIdentity = { name: "pod-capacity-1", uid: "pod-capacity-uid-1" };
   const podReads: { name: string; uid: string }[] = [];
   const podStatusApi: SandboxPodStatusApi = {
@@ -1174,11 +1175,11 @@ function makeCapacityPendingProvider(opts: {
         sandboxImage: providerCfg.defaultImage,
         sandboxResources: opts.requests === undefined ? {} : { requests: opts.requests },
         resourceFingerprint: resourceFingerprint({}),
-        conditions: opts.schedulerMessage === null ? [] : [{
+        conditions: schedulerMessage === null ? [] : [{
           type: "PodScheduled",
           status: "False",
           reason: "Unschedulable",
-          message: opts.schedulerMessage ?? "0/3 nodes are available: 3 Insufficient cpu.",
+          message: schedulerMessage ?? "0/3 nodes are available: 3 Insufficient cpu.",
         }],
       };
     },
@@ -1210,7 +1211,10 @@ function makeCapacityPendingProvider(opts: {
     },
     providerCfg,
   );
-  return { provider, restart, objectsApi, podDeleteApi, podReads };
+  const setSchedulerMessage = (message: string | null): void => {
+    schedulerMessage = message;
+  };
+  return { provider, restart, objectsApi, podDeleteApi, podReads, setSchedulerMessage };
 }
 
 async function captureAfter(promise: Promise<unknown>, elapsedMs: number): Promise<unknown> {
@@ -1325,6 +1329,35 @@ describe("create() capacity retention and diagnosis", () => {
 
       expect(error).toBeInstanceOf(SandboxStartupError);
       expect(error.message).toContain("not yet judged by the scheduler");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans an owned retained CR after a later structural scheduling failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, restart, objectsApi, setSchedulerMessage } = makeCapacityPendingProvider({
+        schedulerMessage: null,
+      });
+
+      const firstError = expectError(await captureAfter(
+        provider.create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+      expect(firstError).not.toBeInstanceOf(SandboxStartupError);
+      setSchedulerMessage("0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector.");
+
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("unschedulable");
       expect(objectsApi.deleteCalls).toBe(1);
       expect(objectsApi.cr).toBeNull();
     } finally {

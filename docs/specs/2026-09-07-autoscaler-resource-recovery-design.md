@@ -83,8 +83,10 @@ CR and pending pod.
 The provider writes never-ready ownership to a CR annotation only when it creates
 the CR. Retry adoption preserves that annotation, including across an API
 restart. The provider removes the annotation after the pod reaches Ready. A
-post-grace retry deletes an adopted CR only when the durable owner matches the
-current session. A pre-existing adopted CR never gains cleanup ownership.
+retry that reaches any terminal startup error deletes an adopted CR only when
+the durable owner matches the current session. This covers both a post-grace
+Pending diagnosis and a retained pod that later becomes structurally
+unschedulable. A pre-existing adopted CR never gains cleanup ownership.
 
 ### 3. Return an actionable terminal message
 
@@ -180,6 +182,7 @@ becomes terminal only after the grace period.
 - Provider tests prove never-ready cleanup survives an API restart.
 - Provider tests prove a once-ready CR cannot gain post-grace cleanup ownership.
 - Provider tests prove all owned post-grace Pending diagnoses clean up the CR.
+- Provider tests prove later structural failures clean up an owned retained CR.
 - Provider tests check the ten-minute terminal message and resource details.
 - Task-tool tests validate and forward the nested resource object.
 - Child-spawner tests prove resource parameters reach child creation and storage.

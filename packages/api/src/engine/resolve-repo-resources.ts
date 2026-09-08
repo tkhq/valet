@@ -11,7 +11,7 @@ const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory"];
 export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   /** Fresh compute can use these values even when existing compute must be preserved. */
   initialResources?: PrebuildResources;
-  /** A repository authority read failed, so reconciliation must preserve live resources. */
+  /** Available repository settings were withheld after an authority read failed. */
   resourcesWithheld?: boolean;
   /** Live fields to preserve because repository authority was unavailable. */
   preserveResourceFields?: readonly ResourceField[];
@@ -81,12 +81,17 @@ export async function resolveRepoResources(
   const [saved, yaml] = await Promise.all([readSaved(), readYaml()]);
   const { resources: yamlResources, ...flags } = yaml;
   const combined = { ...saved.resources, ...(yaml.outcome === "error" ? {} : yamlResources) };
+  const hasAvailableResources = Object.keys(combined).length > 0;
+  const authorityFailed = !saved.ok || yaml.outcome === "error";
   return {
     ...flags,
     ...(saved.ok && yaml.outcome !== "error" ? { resources: combined } : {}),
-    ...(Object.keys(combined).length > 0 ? { initialResources: combined } : {}),
-    ...(!saved.ok || yaml.outcome === "error"
-      ? { resourcesWithheld: true, preserveResourceFields: RESOURCE_FIELDS }
+    ...(hasAvailableResources ? { initialResources: combined } : {}),
+    ...(authorityFailed
+      ? {
+          ...(hasAvailableResources ? { resourcesWithheld: true } : {}),
+          preserveResourceFields: RESOURCE_FIELDS,
+        }
       : {}),
   };
 }

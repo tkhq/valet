@@ -1732,7 +1732,7 @@ export class EngineHost {
     const result = applySandboxResourceOverrides(resolved, meta.sandboxResourceOverrides);
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
-      if (result.preserveResourceFields && result.preserveResourceFields.length > 0) {
+      if (result.resourcesWithheld) {
         if (!this.resourceWithholdingWarnings.has(warningKey)) {
           console.warn(
             `EngineHost: sandbox resource settings for ${primary.fullName} are withheld from existing compute because YAML authority is unavailable. ` +

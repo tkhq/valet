@@ -155,6 +155,7 @@ describe("resolveRepoResources", () => {
 
     expect(failed.resources).toBeUndefined();
     expect(failed.initialResources).toBeUndefined();
+    expect(failed.resourcesWithheld).toBeUndefined();
     expect(failed.preserveResourceFields).toEqual(["cpu", "memory"]);
     expect(applySandboxResourceOverrides(failed, { memory: "4Gi" })).toMatchObject({
       initialResources: { memory: "4Gi" },
