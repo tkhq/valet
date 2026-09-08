@@ -11,7 +11,7 @@
 - [x] Check all bindings before session writes. Return an error with a corrective action for confirmed 404 responses.
 - [x] Check org access before automatic source writes. Skip unverified repositories and preserve the existing bake gates.
 - [x] Update decision 13 in the sandbox reconciliation spec.
-- [ ] Run targeted tests, type checks, and `make e2e`. Review the diff, commit, and open a PR against `dev-v2`.
+- [x] Run targeted tests, type checks, and `make e2e`. Review the diff, commit, and open a PR against `dev-v2`.
 
 Acceptance criteria:
 
@@ -19,3 +19,9 @@ Acceptance criteria:
 - Successful checks persist `full_name` and `clone_url`. Each check uses the binding's auth mode and requesting user.
 - A multi-repo request with a missing repository writes no session or bindings.
 - Automatic source creation uses org credentials. Missing credentials and failed checks create no source rows.
+
+Validation results:
+
+- Repository, reader, route, and source tests: 180 passed. Child-spawner tests: 67 passed.
+- Full e2e run: 28 passed, three failed, four opt-in checks skipped.
+- After corrections, all three failed stages passed on rerun: typecheck, root unit tests, and plugin tests.
