@@ -20,6 +20,7 @@ import type {
   SignalContent,
 } from "@valet/engine";
 import { VirtualSandbox } from "@valet/engine";
+import { startGithubFixture } from "../test-helpers/github-fixture.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   buildChildReader,
@@ -41,10 +42,13 @@ import { PendingCapError, ValidationError as EngineValidationError } from "@vale
 import { SignalEdgeDeniedError } from "./signals.js";
 
 let api: TestApi | undefined;
+let githubFixture: ReturnType<typeof startGithubFixture> | undefined;
 
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  await githubFixture?.close();
+  githubFixture = undefined;
 });
 
 function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): ChildrenDeps {
@@ -433,7 +437,11 @@ describe("buildChildSpawner", () => {
   });
 
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
-    api = await bootTestApi();
+    githubFixture = startGithubFixture();
+    api = await bootTestApi({ githubApiUrl: githubFixture.url });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github", {
+      type: "api_key", accessToken: "org-test-token",
+    });
     const deps = childrenDeps(api);
     const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
 
@@ -472,8 +480,7 @@ describe("buildChildSpawner", () => {
     const child = api.providers.engineHost.liveSession(result.childSessionId);
     expect(child?.options.specProvider).toBeDefined();
 
-    // Zero-config generation (spec decision 13) fires for children too —
-    // the image source row appears even though no builder is wired here.
+    // A verified repository gets an automatic source without a builder.
     await waitFor(async () => {
       const sources = await api!.providers.db
         .select()

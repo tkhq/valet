@@ -42,6 +42,7 @@ import {
   type BakeRow,
 } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
+import { checkRepoExistence } from "../services/repo-existence.js";
 import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { DEFAULT_FULL_BASE_IMAGE, resolveDefaultImage } from "../providers/sandbox-backend.js";
 import {
@@ -1559,14 +1560,22 @@ export class SourceService {
    * exists and fires the first bake; on conflict, touches `last_bound_at`,
    * re-enables a decayed source, and fires a bake when the source has no
    * pushed bake yet. NEVER throws. The bake is gated on an org-scoped GitHub
-   * credential AND a wired builder; when either is missing the source is
-   * still upserted and the bake is skipped with one log line.
+   * credential AND a wired builder. The source requires a successful org
+   * repository check. Missing credentials and failed checks skip the upsert.
    */
   async ensureRepoSource(
     orgId: string,
     repo: { host: string; fullName: string; cloneUrl: string },
   ): Promise<void> {
     try {
+      const result = await checkRepoExistence(this.githubTokenDeps, {
+        orgId, host: repo.host, fullName: repo.fullName,
+      });
+      if (result.kind !== "found") {
+        if (result.kind === "not-found") console.warn(`ensureRepoSource: ${result.error}`);
+        return;
+      }
+      repo = { ...repo, fullName: result.fullName, cloneUrl: result.cloneUrl };
       const existing = await this.db
         .select()
         .from(imageSources)

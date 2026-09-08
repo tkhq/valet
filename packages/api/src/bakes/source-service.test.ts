@@ -280,7 +280,6 @@ describe("SourceService", () => {
     lockfilePresent = false;
     prebuildYaml = null;
     fixture = startGithubFixture({
-      getRepo: () => ({ body: { default_branch: "main" } }),
       getCommit: () => ({ body: { sha: currentSha } }),
       getContents: (_owner, _repo, path) => contentsFor(path),
     });
@@ -836,6 +835,15 @@ describe("SourceService", () => {
   describe("ensureRepoSource", () => {
     const repo = { host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" };
 
+    it.each([404, 403, 429, 503] as const)("does not insert a source after HTTP %s", async (status) => {
+      await fixture.close();
+      fixture = startGithubFixture({ getRepo: () => ({ status, body: { message: "Not Found" } }) });
+      service = makeService();
+      await service.ensureRepoSource(orgId, repo);
+      expect(await db.select().from(imageSources)).toHaveLength(0);
+      expect(builder.specs).toHaveLength(0);
+    });
+
     it("happy path: upserts the source and queues the first bake", async () => {
       await service.ensureRepoSource(orgId, repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
@@ -884,12 +892,12 @@ describe("SourceService", () => {
       expect(repoSpecs[0].baseImage).toBe(baseBake?.imageRef);
     });
 
-    it("no org GitHub credential → source still upserted, no bake fired", async () => {
+    it("no org GitHub credential → no source or bake", async () => {
       // A different org with no credential seeded.
       await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW });
       await service.ensureRepoSource("org-nocred", repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, "org-nocred"));
-      expect(sources).toHaveLength(1);
+      expect(sources).toHaveLength(0);
       expect(builder.specs).toHaveLength(0);
     });
 
@@ -1472,8 +1480,7 @@ describe("SourceService", () => {
     ): Promise<void> {
       await fixture.close();
       fixture = startGithubFixture({
-        getRepo: () => ({ body: { default_branch: "main" } }),
-        getContents,
+          getContents,
       });
     }
 

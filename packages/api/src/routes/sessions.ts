@@ -26,6 +26,7 @@ import {
 import { seedSecurityReview, seededConfigContext } from "../services/security-seed.js";
 import { planCellInputToCell, PlanCellInputError } from "./security.js";
 import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
+import { checkRepoExistence } from "../services/repo-existence.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
@@ -536,6 +537,23 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "A security review needs a repository. Pick one when you start the review." }, 400);
   }
 
+  const verifiedRepos: RepoBinding[] = [];
+  const checkedRepos: RepoBinding[] = [];
+  const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+  for (const repo of repos) {
+    const result = await checkRepoExistence(tokenDeps, {
+      orgId: user.orgId, userId: user.id, host: repo.host ?? "github",
+      fullName: repo.fullName, auth: repo.auth,
+    });
+    if (result.kind === "not-found") return c.json({ error: result.error }, 400);
+    const binding = result.kind === "found"
+      ? { ...repo, fullName: result.fullName, cloneUrl: result.cloneUrl }
+      : repo;
+    checkedRepos.push(binding);
+    if (result.kind === "found") verifiedRepos.push(binding);
+  }
+  repos = checkedRepos;
+
   // Auto-create the workspace dir if it doesn't exist; reject if the path
   // exists but is a file (Docker bind-mount needs a directory).
   try {
@@ -736,10 +754,10 @@ sessionsRouter.post("/", async (c) => {
   });
 
   // Zero-config generation (spec decision 13): after the bindings land,
-  // upsert each repo's image source + touch its `last_bound_at` and kick a
+  // upsert each verified repo's image source + touch its `last_bound_at` and kick a
   // first bake in the background. Fire-and-forget — session create never
   // waits on a bake, and `ensureRepoSource` never throws.
-  for (const repo of repos) {
+  for (const repo of verifiedRepos) {
     void prebuildService.ensureRepoSource(user.orgId, {
       host: repo.host ?? "github",
       fullName: repo.fullName,
