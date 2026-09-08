@@ -52,6 +52,8 @@ import { skillRepoReaderFactory } from "../services/content-source-credential.js
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { TeamCredentialStore } from "../plugins/team-credential-store.js";
+import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
@@ -397,10 +399,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // credential store so any `engineCredentials.get()` call transparently
   // refreshes near-expiry oauth2 tokens using the plugins' oauth
   // declarations. Constructed after plugin assembly since it needs `plugins`.
-  const engineCredentials = new OAuthRefreshingCredentialStore(baseCredentials, {
+  const refreshingCredentials = new OAuthRefreshingCredentialStore(baseCredentials, {
     db,
     plugins,
     env: process.env,
+  });
+  // Team references wrap outside refresh: a followed user row refreshes
+  // under that user, a direct team row refreshes under the team.
+  const engineCredentials = new TeamCredentialStore(refreshingCredentials, {
+    isMember: (teamId, userId) => isTeamMember(db, teamId, userId),
   });
 
   // 1Password reference-credential service (1Password credential provider

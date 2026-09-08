@@ -45,14 +45,20 @@ import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { qualifiedActionId } from "./action-id.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
-import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
+import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { actionInvocations } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
-import { orgFallbackPolicy, resolveOrgCredentialRead, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
+import {
+  orgFallbackPolicy,
+  resolveOrgCredentialRead,
+  resolveTeamCredentialRead,
+  resolveUserCredentialRead,
+  onePasswordScopesFor,
+} from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
@@ -233,7 +239,7 @@ async function computeResult(
   if (!owner) {
     return {
       ok: false,
-      error: `credential resolution is not supported for owner type "${ctx.owner.type}" (workflow action invocation only supports user/org owners)`,
+      error: `credential resolution is not supported for owner type "${ctx.owner.type}" (workflow action invocation only supports user/team/org owners)`,
     };
   }
   const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
@@ -246,8 +252,12 @@ async function computeResult(
   // different plugin than the action's owner.
   const registry = registryOf(opts);
   const declared = findCredentialDeclaration(registry, credentialService);
+  // Kept past the gate: the team refusal below reads it to tell an
+  // org-provided service (the org row IS the credential) from one a team
+  // must hold itself.
+  let mode: ConnectMode | null = null;
   if (declared) {
-    const mode = await connectModeFor({
+    mode = await connectModeFor({
       plugins: registry,
       decl: declared,
       service: credentialService,
@@ -300,12 +310,42 @@ async function computeResult(
   // exists once the action is resolved. Discovery may touch credentials (an
   // MCP-proxy plugin lists its tools over an authenticated upstream), but no
   // action is EXECUTED here; enforcement below still gates the actual call.
+  // Team refusal (team credentials design, decision 3): a team run with no
+  // resolvable credential refuses here, before any action code runs. A
+  // personal run keeps executing on a null credential because the action's
+  // own guards answer for one person; a team run must fail the same way
+  // for every member, so the refusal is made once, up front, and names the
+  // corrective action. Only a declared service is gated (an undeclared one
+  // never needed a credential), and only when the org does not provide it
+  // (`mode === "org"` means the org row resolved above and the team read
+  // escalates to it). `github` is gated like any other service: its team
+  // branch returns `null` when neither a team row nor an App installation
+  // answers, and the refusal names the github-specific fix.
+  //
+  // Ordering against the unknown-action check: a node that names an action
+  // which does not exist must hear that, not a credential hint that sends
+  // the author to the wrong settings page, so a statically listed plugin is
+  // checked after the action is found. A dynamic plugin cannot list its
+  // actions without the credential (an MCP proxy discovers its tools over
+  // the authenticated upstream), so for one of those the refusal runs
+  // before discovery: discovery would only echo the plugin's own generic
+  // "no credential connected" message, which names no fix.
+  const teamGated = ctx.owner.type === "team" && declared !== null && mode !== "org";
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
+    if (teamGated) {
+      const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+      if (refusal) return refusal;
+    }
     const resolved = await entry.actionPlugin.resolveActions({ credentials });
     action = findAction(resolved, req.service, req.action);
   }
   if (!action) return unknownAction(req);
+
+  if (teamGated) {
+    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+    if (refusal) return refusal;
+  }
 
   // Policy enforcement (action-policies plan, Task 3): `deny` fails the
   // node. `require_approval` does NOT — it returns `requiresApproval`, and
@@ -389,6 +429,43 @@ async function computeResult(
 
 function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionResult {
   return { ok: false, error: `unknown action: ${req.service}.${req.action}` };
+}
+
+/**
+ * Resolves the team run's credential once, ahead of execute. A null
+ * resolution is the refusal decision 3 asks for. A throw (a broken
+ * delegated reference, a scope refusal) is mapped the way `execute`'s own
+ * try/catch maps it, so the typed message reaches the run unchanged.
+ */
+async function refuseTeamRunWithoutCredential(
+  credentials: CredentialProvider,
+  service: string,
+): Promise<WorkflowInvokeActionResult | null> {
+  try {
+    if ((await credentials.get()) !== null) return null;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  return { ok: false, error: teamRefusalMessage(service) };
+}
+
+/**
+ * The corrective action a team refusal names. GitHub has two fixes a
+ * generic "share one from Integrations" does not cover: the App
+ * installation is per repository owner, and a personal GitHub connection
+ * is never borrowed by a team run.
+ */
+function teamRefusalMessage(service: string): string {
+  if (service === "github") {
+    return (
+      "This team has no github credential. Install the GitHub App on the repository's owner in " +
+      "Settings → Organization → GitHub, or store a github credential for the team in Settings → Organization → Teams."
+    );
+  }
+  return (
+    `This team has no ${service} credential. Share one from Integrations, ` +
+    `or store one for the team in Settings → Organization → Teams.`
+  );
 }
 
 /**
@@ -552,9 +629,10 @@ export function findAction(actions: PluginAction[], service: string, actionId: s
   });
 }
 
-/** Decision 15: a workflow run's owner `Principal` maps onto `CredentialOwner` for user/org owners only — team-owned runs have no credential scope today. */
+/** A workflow run's owner `Principal` maps onto `CredentialOwner` of the same type. */
 function credentialOwnerFor(owner: Principal): CredentialOwner | null {
   if (owner.type === "user") return { type: "user", id: owner.id };
+  if (owner.type === "team") return { type: "team", id: owner.id };
   if (owner.type === "org") return { type: "org", id: owner.id };
   return null;
 }
@@ -564,12 +642,14 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
  * owner-precedence contract (`services/credential-resolution.ts`)
  * instead of a raw `CredentialStore.get`. A user-owned run resolves via
  * `resolveUserCredentialRead` (user row shadows org row, `owner.id` as the
- * acting user); an org-owned run resolves via `resolveOrgCredentialRead`
- * (org row only), with `ctx.userId` — the run's actor bookkeeping field —
- * threaded through for a personal-tokenScope 1Password reference to resolve
- * against. Either path fills a `metadata.onepassword` row's secret when
- * `opts.onePassword` is wired; absent onePassword or a non-reference row
- * passes through raw.
+ * acting user); a team-owned run resolves via `resolveTeamCredentialRead`
+ * (team row, then org only when the service is org-provided, then the
+ * org-scoped vault item); an org-owned
+ * run resolves via `resolveOrgCredentialRead` (org row only), with
+ * `ctx.userId` — the run's actor bookkeeping field — threaded through for a
+ * personal-tokenScope 1Password reference to resolve against. Either path
+ * fills a `metadata.onepassword` row's secret when `opts.onePassword` is
+ * wired; absent onePassword or a non-reference row passes through raw.
  */
 function buildCredentialProvider(
   opts: ActionInvokerOpts,
@@ -600,7 +680,14 @@ function buildCredentialProvider(
               svc,
               fallback,
             )
-          : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
+          : owner.type === "team"
+            ? await resolveTeamCredentialRead(
+                deps,
+                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team") },
+                svc,
+                fallback,
+              )
+            : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
       if (!stored) return null;
       const accessToken = credentialSecret(stored) ?? "";
       if (accessToken === "") return null;
@@ -667,6 +754,16 @@ function withOwnerSlackIdentity(provider: CredentialProvider, db: AppDb, userId:
  *   - `"user"` → `auth: "user"`, equally strict in the other direction.
  *   - `"auto"` or absent → the pre-existing precedence, binding included.
  *     Every definition written before this field existed lands here.
+ *
+ * ── Team owners (team credentials design, decisions 3 and 6) ────────────
+ * A team run acts as the team, never as a person. `"auto"` reads the
+ * team's own github row first (direct or delegated), then mints the App
+ * installation token for the action's repository owner, or the org's sole
+ * installation. `"user"` reads the team row alone. Neither consults a user
+ * credential (`ctx.userId` is the synthetic `team:{id}` and must not be
+ * resolved as a person) nor the org PAT, and a miss returns `null` rather
+ * than throwing, so `computeResult`'s team refusal names the fix. `"app"`
+ * keeps the strict installation path above.
  */
 function buildGithubCredentialProvider(
   opts: ActionInvokerOpts,
@@ -711,6 +808,13 @@ function buildGithubCredentialProvider(
         return token === null ? null : { accessToken: token };
       }
       const selection = req.credential ?? "auto";
+      if (owner.type === "team" && selection !== "app") {
+        const teamRow = await buildCredentialProvider(opts, ctx, owner, "github").get("github");
+        if (teamRow) return teamRow;
+        if (selection === "user") return null;
+        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
+        return token === null ? null : { accessToken: token };
+      }
       // `params` are template-rendered, so a webhook payload can choose this
       // repo. That is safe only because `mintInstallationToken` looks an
       // installation up by `(orgId, accountLogin)` — the reachable set is
@@ -725,7 +829,9 @@ function buildGithubCredentialProvider(
       }
       const resolved = await resolveSessionGitHubToken(deps, {
         orgId: ctx.orgId,
-        userId: ctx.userId,
+        // A team run reaches here only with the "app" selection, which
+        // reads no user; the synthetic `team:{id}` actor is never a person.
+        userId: owner.type === "team" ? undefined : ctx.userId,
         sessionId: ctx.sessionId,
         purpose: "api",
         // `auto` means "keep the default precedence", so it must NOT

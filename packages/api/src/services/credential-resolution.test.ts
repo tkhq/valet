@@ -9,7 +9,12 @@ import { describe, expect, it } from "vitest";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordService } from "./onepassword.js";
-import { resolveOrgCredentialRead, resolveUserCredentialRead, onePasswordScopesFor } from "./credential-resolution.js";
+import {
+  resolveOrgCredentialRead,
+  resolveTeamCredentialRead,
+  resolveUserCredentialRead,
+  onePasswordScopesFor,
+} from "./credential-resolution.js";
 
 const orgId = "cr-org";
 const userId = "cr-user";
@@ -462,5 +467,122 @@ describe("vault lookup when no row exists", () => {
       "reference-only",
     );
     expect(got?.apiKey).toBe("ACTOR-PRIVATE");
+  });
+});
+
+describe("resolveTeamCredentialRead", () => {
+  const teamId = "cr-team";
+
+  it("returns a direct team row and does not read the org row", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "linear", {
+      type: "api_key",
+      apiKey: "team-secret",
+    });
+    await credentials.save({ type: "org", id: orgId }, "linear", {
+      type: "api_key",
+      apiKey: "org-secret",
+    });
+    const got = await resolveTeamCredentialRead(
+      { credentials },
+      { orgId, teamId },
+      "linear",
+      "reference-only",
+    );
+    expect(got?.apiKey).toBe("team-secret");
+  });
+
+  it("does not fall back to a plain org row when the team has no credential", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "linear", {
+      type: "api_key",
+      apiKey: "org-secret",
+    });
+    const got = await resolveTeamCredentialRead(
+      { credentials },
+      { orgId, teamId },
+      "linear",
+      "reference-only",
+    );
+    expect(got).toBeNull();
+  });
+
+  it("reads the org row when the service is org-provided", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "slack", {
+      type: "bot_token",
+      accessToken: "org-bot",
+    });
+    const got = await resolveTeamCredentialRead(
+      { credentials },
+      { orgId, teamId },
+      "slack",
+      "org-provided",
+    );
+    expect(got?.accessToken).toBe("org-bot");
+  });
+
+  function vaultWithLookup(secret: string | null, onLookup: (scope: string) => void): OnePasswordService {
+    const unused = (): never => {
+      throw new Error("not exercised by this suite");
+    };
+    return {
+      tokenConnected: unused,
+      listVaults: unused,
+      resolveReference: unused,
+      findCandidates: async () => [],
+      findCredentialForService: async (scope) => {
+        onLookup(scope);
+        return secret;
+      },
+      resolveCredential: async (row: StoredCredential) => row,
+    };
+  }
+
+  it("team-row miss reaches the org-scoped 1Password item, on the caller's scopes alone", async () => {
+    const scopesTried: string[] = [];
+    const credentials = fakeCredentialStore();
+    const onePassword = vaultWithLookup("vault-secret", (scope) => scopesTried.push(scope));
+    const got = await resolveTeamCredentialRead(
+      { credentials, onePassword },
+      { orgId, teamId, scopes: onePasswordScopesFor("team") },
+      "linear",
+      "reference-only",
+    );
+    expect(scopesTried).toEqual(["org"]);
+    expect(got?.apiKey).toBe("vault-secret");
+  });
+
+  it("a team row wins without consulting the vault", async () => {
+    const scopesTried: string[] = [];
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "linear", {
+      type: "api_key",
+      apiKey: "team-secret",
+    });
+    const onePassword = vaultWithLookup("vault-secret", (scope) => scopesTried.push(scope));
+    const got = await resolveTeamCredentialRead(
+      { credentials, onePassword },
+      { orgId, teamId, scopes: onePasswordScopesFor("team") },
+      "linear",
+      "reference-only",
+    );
+    expect(scopesTried).toEqual([]);
+    expect(got?.apiKey).toBe("team-secret");
+  });
+
+  it("returns null for denied services", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "team", id: teamId }, "onepassword", {
+      type: "service_account",
+      apiKey: "must-not-leak",
+    });
+    const got = await resolveTeamCredentialRead(
+      { credentials },
+      { orgId, teamId },
+      "onepassword",
+      "org-provided",
+    );
+    expect(got).toBeNull();
   });
 });

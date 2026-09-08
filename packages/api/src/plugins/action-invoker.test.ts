@@ -281,17 +281,198 @@ describe("buildActionInvoker", () => {
     expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org"] });
   });
 
-  it("team-owned run: unsupported owner type returns a deterministic {ok:false} and never invokes execute", async () => {
+  it("team-owned run: resolves a direct team credential", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "team", id: "t1" }, "demo", { type: "api_key", apiKey: "team-tok" });
+    const fixture = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-direct" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+  });
+
+  it("team-owned slack run: uses the org bot token and stays bare", async () => {
+    let seenOwnerId: unknown = "sentinel";
+    const action: PluginAction = {
+      id: "slack.whoami",
+      name: "whoami",
+      description: "reports the owner id it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        seenOwnerId = cred?.metadata?.["owner_slack_user_id"];
+        return { success: true, data: { token: cred?.accessToken ?? null } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "slack", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const db = await makeDb();
+    await linkIdentity(db, { provider: "slack", externalId: "U123LINKED", userId: "u1" });
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "slack", action: "whoami", params: {}, invocationId: "workflow:r1:team-slack" },
+      { userId: "u1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-bot" } });
+    expect(seenOwnerId).toBeUndefined();
+  });
+
+  it("team-owned run: a declared service with no team credential refuses before execute", async () => {
+    const fixture = countingAction();
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "demo",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    };
+    const store = new FakeCredentialStore();
+    // An org row for the same service must stay invisible to the team run
+    // (decision 5) — the refusal fires even though the org has a token.
+    store.seed({ type: "org", id: "org1" }, "demo", { type: "api_key", apiKey: "org-tok" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["demo", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-missing" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "This team has no demo credential. Share one from Integrations, or store one for the team in Settings → Organization → Teams.",
+    });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("team-owned run: a dynamic plugin with no team credential refuses before discovery", async () => {
+    // An MCP-backed plugin lists its actions over the credential, so
+    // discovery itself throws the plugin's generic message when the team
+    // holds nothing. The team refusal must win: its copy names the fix.
+    const fixture = countingAction();
+    const actionPlugin: ActionPlugin = {
+      service: "demo",
+      actions: [],
+      async resolveActions({ credentials }) {
+        if ((await credentials.get()) === null) throw new Error("demo: no credential connected");
+        return [fixture.action];
+      },
+    };
+    const plugin: ValetPlugin = {
+      name: "demo",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "u1" }, "demo", { type: "api_key", apiKey: "personal-tok" });
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: store,
+      actionPluginByService: new Map([["demo", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-dynamic" },
+      { userId: "u1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "This team has no demo credential. Share one from Integrations, or store one for the team in Settings → Organization → Teams.",
+    });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("team-owned run: a service with no credential declaration still executes", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
     const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
-      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-undeclared" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: false } });
+    expect(fixture.calls()).toBe(1);
+  });
+
+  it("team-owned run: a broken delegated reference returns the typed error", async () => {
+    const { TeamCredentialStore, CredentialReferenceBrokenError } = await import(
+      "./team-credential-store.js"
+    );
+    const inner = new FakeCredentialStore();
+    inner.seed({ type: "team", id: "t1" }, "demo", {
+      type: "oauth2",
+      metadata: { delegatedFrom: "u1" },
+    });
+    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+    const fixture = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-broken" },
       { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
     );
 
     expect(result.ok).toBe(false);
+    expect(result.ok === false && "error" in result ? result.error : "").toMatch(
+      /Reconnect demo|share it with the team again/,
+    );
+    expect(result.ok === false && "error" in result ? result.error : "").toBe(
+      new CredentialReferenceBrokenError("demo").message,
+    );
+  });
+
+  it("team-owned run: an unknown action reports the typo, not a missing credential", async () => {
+    const fixture = countingAction();
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [fixture.action] };
+    const plugin: ValetPlugin = {
+      name: "demo",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "api_key", configKeys: ["apiKey"] }],
+    };
+    // No team row: the credential refusal would fire if it ran first. The
+    // action name is what is wrong here, so that is what the error names.
+    const invoke = buildActionInvoker({
+      db: await makeDb(),
+      credentials: new FakeCredentialStore(),
+      actionPluginByService: new Map([["demo", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "demo", action: "pnig", params: { msg: "hi" }, invocationId: "workflow:r1:team-typo" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: false, error: "unknown action: demo.pnig" });
     expect(fixture.calls()).toBe(0);
   });
 
@@ -808,6 +989,126 @@ describe("buildActionInvoker: github service resolution", () => {
       actions: [githubWhoamiAction(), githubRepoAction()],
     });
   }
+
+  /** The github plugin with its credential declared, so the team refusal
+   * gate sees `github` as a service a team must hold a credential for. */
+  function declaredGithubActionPluginByService(
+    actions: PluginAction[],
+  ): Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }> {
+    const actionPlugin: ActionPlugin = { service: "github", actions };
+    const plugin: ValetPlugin = {
+      name: "github",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "oauth2", configKeys: ["accessToken"] }],
+    };
+    return new Map([["github", { plugin, actionPlugin }]]);
+  }
+
+  /** `githubWhoamiAction` plus a call counter, so a refusal can be told
+   * apart from the action's own missing-token throw. */
+  function countingGithubWhoami(): { action: PluginAction; calls: () => number } {
+    let count = 0;
+    const base = githubWhoamiAction();
+    const action: PluginAction = {
+      ...base,
+      execute: async (args, ctx) => {
+        count += 1;
+        return base.execute(args, ctx);
+      },
+    };
+    return { action, calls: () => count };
+  }
+
+  const teamOwner: ActionInvocationContext = {
+    userId: "team:gh-team",
+    orgId,
+    owner: { type: "team", id: "gh-team" },
+  };
+  const TEAM_GITHUB_REFUSAL =
+    "This team has no github credential. Install the GitHub App on the repository's owner in " +
+    "Settings → Organization → GitHub, or store a github credential for the team in Settings → Organization → Teams.";
+
+  it("team-owned: no installation and no team row refuses before execute and names the fix", async () => {
+    const { appDb, credentials } = await harness();
+    fixture = startGithubFixture();
+    const whoami = countingGithubWhoami();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: declaredGithubActionPluginByService([whoami.action]),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:team-gh-none" },
+      teamOwner,
+    );
+
+    expect(result).toEqual({ ok: false, error: TEAM_GITHUB_REFUSAL });
+    expect(whoami.calls()).toBe(0);
+  });
+
+  it("team-owned: an App installation resolves the installation token", async () => {
+    const { appDb, credentials } = await harness();
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_team_1",
+      orgId,
+      installationId: 4242,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const whoami = countingGithubWhoami();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: declaredGithubActionPluginByService([whoami.action]),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:team-gh-inst" },
+      teamOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-4242" } });
+    expect(whoami.calls()).toBe(1);
+  });
+
+  it("team-owned: a stored team github credential is the identity the run acts as", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "team", id: "gh-team" }, "github", {
+      type: "oauth2",
+      accessToken: "team-tok",
+    });
+    fixture = startGithubFixture();
+    const whoami = countingGithubWhoami();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: declaredGithubActionPluginByService([whoami.action]),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:team-gh-row" },
+      teamOwner,
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "team-tok" } });
+  });
 
   it("user-connected: resolves the user's healthy github credential", async () => {
     const { appDb, credentials } = await harness();
