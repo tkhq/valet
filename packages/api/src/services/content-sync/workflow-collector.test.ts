@@ -37,7 +37,7 @@ import { ContentSyncService } from "./service.js";
 import { SkillCollector } from "./skill-collector.js";
 import { WorkflowCollector } from "./workflow-collector.js";
 import githubPlugin from "@valet/plugin-github/plugin";
-import type { ValetPlugin } from "@valet/engine";
+import { InMemoryCredentialStore, type CredentialStore, type ValetPlugin } from "@valet/engine";
 
 const ORG = "org1";
 const TEAM = "team_1";
@@ -132,10 +132,14 @@ function serve(repo: FakeRepo): GithubFixture {
 
 describe("workflow collector", () => {
   let db: AppDb;
+  /** The team's credential rows, which decide whether a team file's
+   * triggers arm (`teamServiceReadiness`). Empty unless a case adds one. */
+  let credentials: InMemoryCredentialStore;
 
   beforeEach(async () => {
     const { appDb } = await freshTestPgDb();
     db = appDb;
+    credentials = new InMemoryCredentialStore();
     await db.insert(orgs).values({ id: ORG, name: "Org", createdAt: Date.now() });
     await db.insert(users).values({ id: "u1", email: "u1@x.test", name: "u1", role: "member" });
     await db.insert(orgMembers).values({ orgId: ORG, userId: "u1", role: "member" });
@@ -152,11 +156,15 @@ describe("workflow collector", () => {
    * defaults to none, which fails closed: with no catalog every event key is
    * unknown, and a file declaring events reports that instead of arming a
    * subscription nothing can deliver. */
-  function serviceFor(f: GithubFixture, plugins: ValetPlugin[] = []): ContentSyncService {
+  function serviceFor(
+    f: GithubFixture,
+    plugins: ValetPlugin[] = [],
+    store: CredentialStore = credentials,
+  ): ContentSyncService {
     return new ContentSyncService({
       db,
       reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
-      collectors: [new SkillCollector(), new WorkflowCollector({ plugins })],
+      collectors: [new SkillCollector(), new WorkflowCollector({ plugins, credentials: store })],
     });
   }
 
@@ -821,8 +829,27 @@ describe("workflow collector", () => {
       expect(after.nextFireAt).toBe(before.nextFireAt);
     });
 
-    it("arms nothing for a team file with tool nodes, and says why", async () => {
-      const file = [
+    /** A scheduled team file with one tool node on `service`. `body` wraps
+     * the node in a foreach when set. */
+    function nightlyReport(body: "top-level" | "foreach" = "top-level", service = "github"): string {
+      const tool = [
+        "      type: tool",
+        `      service: ${service}`,
+        "      action: list_issues",
+        "      params: {}",
+      ];
+      const node =
+        body === "top-level"
+          ? ["    - id: fetch", ...tool]
+          : [
+              "    - id: fetch",
+              "      type: foreach",
+              '      items: "{{ trigger.data.repos }}"',
+              "      body:",
+              "        id: one",
+              ...tool.map((line) => `  ${line}`),
+            ];
+      return [
         "valet: workflow/v1",
         "name: Nightly report",
         "schedule:",
@@ -833,11 +860,7 @@ describe("workflow collector", () => {
         "  nodes:",
         "    - id: trigger",
         "      type: trigger",
-        "    - id: fetch",
-        "      type: tool",
-        "      service: github",
-        "      action: list_issues",
-        "      params: {}",
+        ...node,
         "    - id: stop",
         "      type: stop",
         "  edges:",
@@ -847,14 +870,117 @@ describe("workflow collector", () => {
         "      to: stop",
         "",
       ].join("\n");
-      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": file } });
+    }
+
+    it("arms a team file with tool nodes when the team can act as each service", async () => {
+      await credentials.save({ type: "team", id: TEAM }, "github", {
+        type: "oauth2",
+        accessToken: "ghu_team",
+      });
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
       const id = await teamSource();
       const outcome = await serviceFor(f).syncOnce(id);
 
-      // Mirrored, and unarmed: decision 9.
+      expect(await mirrored()).toHaveLength(1);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      expect(outcome?.warnings).toEqual([]);
+    });
+
+    it("arms nothing for a team file whose service the team cannot act as, and names it", async () => {
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
+      const id = await teamSource();
+      const outcome = await serviceFor(f).syncOnce(id);
+
+      // Mirrored, and unarmed: decision 15's readiness predicate said no.
       expect(await mirrored()).toHaveLength(1);
       expect(await db.select().from(workflowSchedules)).toHaveLength(0);
-      expect(outcome?.warnings.join(" ")).toContain("left the trigger off");
+      const warning = outcome?.warnings.join(" ") ?? "";
+      expect(warning).toContain("report.yaml");
+      // The sync has no template to install: the readiness reason is
+      // caller-neutral and the collector names its own next step.
+      expect(warning).toContain("Connect github for this team. Valet arms it after you connect the service.");
+      expect(warning).not.toContain("install this template");
+      expect(warning).not.toContain("move the repository");
+    });
+
+    // Connecting the service is the fix the warning names, and no commit
+    // lands when a team does it. Without a resync the next poll stops at
+    // the recorded head and the file stays unarmed until an unrelated push.
+    it("arms a mirrored team file once the team connects the service, at the same commit", async () => {
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
+      const id = await teamSource();
+      const service = serviceFor(f);
+
+      const first = await service.syncOnce(id);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      expect(first?.warnings.join(" ")).toContain("Valet arms it after you connect the service.");
+
+      await credentials.save({ type: "team", id: TEAM }, "github", {
+        type: "oauth2",
+        accessToken: "ghu_team",
+      });
+      // The repository did not move, so a plain poll learns nothing.
+      expect((await service.syncOnce(id))?.changed).toBe(false);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+
+      // The method nudges the sweep; this test drives the pass itself.
+      await service.stop();
+      expect(await service.resyncTeamWorkflowSources(TEAM)).toBe(1);
+      const armed = await service.syncOnce(id);
+
+      expect(armed?.warnings).toEqual([]);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      expect(await mirrored()).toHaveLength(1);
+    });
+
+    // A transient fault in the credential store is one file's problem. The
+    // pass keeps going, the file is left as it was, and the sync stays
+    // incomplete so the next poll checks it again without a commit.
+    it("warns and defers one file when its readiness check fails, and mirrors the rest", async () => {
+      await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", accessToken: "ghu" });
+      await credentials.save({ type: "team", id: TEAM }, "slack", { type: "bot_token", accessToken: "xoxb" });
+      const failing: CredentialStore = {
+        get: (owner, service) => {
+          if (owner.type === "team" && service === "github") {
+            throw new Error("credential store unavailable");
+          }
+          return credentials.get(owner, service);
+        },
+        save: (owner, service, credential) => credentials.save(owner, service, credential),
+        delete: (owner, service) => credentials.delete(owner, service),
+        list: (owner) => credentials.list(owner),
+      };
+      const f = serve({
+        sha: "c1",
+        files: {
+          ".valet/workflows/report.yaml": nightlyReport(),
+          ".valet/workflows/digest.yaml": nightlyReport("top-level", "slack"),
+        },
+      });
+      const id = await teamSource();
+      const outcome = await serviceFor(f, [], failing).syncOnce(id);
+
+      const rows = await mirrored();
+      expect(rows.map((row) => row.upstreamPath)).toEqual([".valet/workflows/digest.yaml"]);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      expect(outcome?.status).toBe("warning");
+      const warning = outcome?.warnings.join(" ") ?? "";
+      expect(warning).toContain("report.yaml");
+      expect(warning).toContain("credential store unavailable");
+      expect(warning).not.toContain("digest.yaml");
+      // Incomplete, so the next poll re-reads at the same commit.
+      const [source] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+      expect(source.lastSha).toBeNull();
+    });
+
+    it("treats a tool node inside a foreach body like a top-level one", async () => {
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport("foreach") } });
+      const id = await teamSource();
+      const outcome = await serviceFor(f).syncOnce(id);
+
+      expect(await mirrored()).toHaveLength(1);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      expect(outcome?.warnings.join(" ")).toContain("Connect github for this team");
     });
   });
 

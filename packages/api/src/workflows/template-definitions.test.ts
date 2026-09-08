@@ -44,7 +44,8 @@ import type { ActionPlugin, ValetPlugin, WorkflowTemplate } from "@valet/engine"
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { nextFireAt } from "./schedule-service.js";
 import { buildValidateEnvironment } from "./validation-env.js";
-import { templateRequirements, toolNodesOf } from "./templates.js";
+import { templateRequirements } from "./templates.js";
+import { toolNodesOf } from "./tool-nodes.js";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 

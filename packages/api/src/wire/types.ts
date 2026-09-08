@@ -1736,6 +1736,9 @@ export interface CreateTeamResponse {
    * into the assistants cache so `/chat` opens it instead of treating the
    * team as empty and creating a second row. */
   defaultAssistant: AssistantSummary;
+  /** Org workflow sources copied onto the new team. Empty when the org
+   * publishes none. Each row is pending until its first sync finishes. */
+  adoptedSources?: SkillSourceSummary[];
 }
 
 /** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the

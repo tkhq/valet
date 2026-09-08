@@ -34,6 +34,7 @@ function templateDeps(providers: Providers): TemplateServiceDeps {
     plugins: providers.plugins,
     actionPluginByService: providers.actionPluginByService,
     credentials: providers.engineCredentials,
+    onePassword: providers.onePassword,
   };
 }
 

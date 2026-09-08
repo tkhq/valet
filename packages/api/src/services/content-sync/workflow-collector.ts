@@ -35,7 +35,7 @@ import {
   type ValidateEnvironment,
   type WorkflowFile,
 } from "@valet/workflow";
-import type { ValetPlugin } from "@valet/engine";
+import type { CredentialStore, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../../lib/drizzle.js";
 import { canonicalJson } from "../../lib/canonical-json.js";
 import {
@@ -52,6 +52,9 @@ import {
   purgeWorkflowRows,
 } from "../../workflows/service.js";
 import { nextFireAt } from "../../workflows/schedule-service.js";
+import { teamServiceReadiness, type TeamServiceReadinessDeps } from "../../workflows/team-service-readiness.js";
+import type { OnePasswordService } from "../onepassword.js";
+import { toolNodesOf } from "../../workflows/tool-nodes.js";
 import { validateSubscriptionWrite } from "../../events/subscription-write.js";
 import type { SubscriptionFilter } from "../../events/match.js";
 import type { SkillTreeEntry } from "../skill-repo-reader.js";
@@ -82,19 +85,32 @@ export interface WorkflowCollectorDeps {
    */
   env?: ValidateEnvironment;
   /**
-   * The event catalog `validateSubscription` reads to check an `events`
-   * block's keys and filter fields. Optional and defaulting to none, which
-   * fails closed: with no catalog every event key is unknown, so a file
-   * declaring events reports that instead of arming a subscription nothing
-   * can deliver.
+   * The plugin registry. `validateSubscription` reads its event catalog to
+   * check an `events` block's keys and filter fields, and
+   * `teamServiceReadiness` reads its credential declarations and the org's
+   * provided services. Required: an empty registry disarms every team
+   * file's triggers, because no service is free and none is org-provided.
+   * A test that wants that fail-closed answer passes `[]`.
    */
-  plugins?: ValetPlugin[];
+  plugins: ValetPlugin[];
+  /**
+   * The credential rows `teamServiceReadiness` reads, so a team file that
+   * declares a trigger over tool nodes arms only when the team can act as
+   * every service those nodes name (decision 15).
+   */
+  credentials: CredentialStore;
+  /**
+   * The 1Password client a team run resolves through, so an org-vault item
+   * titled with the service arms the file the way it funds the run. Absent
+   * on a deployment without one.
+   */
+  onePassword?: OnePasswordService;
 }
 
 export class WorkflowCollector implements ContentCollector {
   readonly kind = "workflows" as const;
 
-  constructor(private readonly deps: WorkflowCollectorDeps = {}) {}
+  constructor(private readonly deps: WorkflowCollectorDeps) {}
 
   discover({ entries, source }: CollectorDiscoverContext): CollectorPass {
     const candidates: WorkflowCandidate[] = [];
@@ -114,7 +130,14 @@ export class WorkflowCollector implements ContentCollector {
     // Path order, so the manifest hash follows the commit and not the order
     // GitHub listed the tree in.
     candidates.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    return new WorkflowPass(candidates, source, this.deps.env, this.deps.plugins ?? []);
+    return new WorkflowPass(
+      candidates,
+      source,
+      this.deps.env,
+      this.deps.plugins,
+      this.deps.credentials,
+      this.deps.onePassword,
+    );
   }
 }
 
@@ -167,6 +190,8 @@ class WorkflowPass implements CollectorPass {
     source: ContentSourceRow,
     private readonly env: ValidateEnvironment | undefined,
     private readonly plugins: ValetPlugin[],
+    private readonly credentials: CredentialStore,
+    private readonly onePassword: OnePasswordService | undefined,
   ) {
     this.discovered = candidates.length;
     // A user source collects no workflows: personal workflow sync is out of
@@ -225,6 +250,9 @@ class WorkflowPass implements CollectorPass {
      * `skill-collector.ts` seeds from `readEntries` for the same reason.
      */
     const upstream = new Set(this.readEntries.map((entry) => entry.path));
+    /** Files whose readiness check failed. Left as they were, and reported
+     * deferred so the next poll checks them again at this commit. */
+    const unchecked: string[] = [];
 
     for (const candidate of this.candidates) {
       const raw = text.get(candidate.path);
@@ -237,10 +265,31 @@ class WorkflowPass implements CollectorPass {
         continue;
       }
 
-      // Decision 9: a team cannot run tool nodes on a trigger, so a
-      // team-owned file that declares one is mirrored with its triggers
-      // unarmed, and the warning is what tells the team why.
-      const gated = teamTriggerGate(source, parsed.file);
+      // Decision 15: a triggered team run bills the team, so a team file
+      // that declares a trigger over tool nodes arms only when the team can
+      // act as every service those nodes name. Otherwise the file is
+      // mirrored with its triggers unarmed, and the warning names each
+      // blocked service and its fix.
+      //
+      // A fault in the check is this file's fault alone. A transient
+      // credential-store error must not fail every file in the source, and
+      // it must not disarm a trigger that was armed: the file is left as it
+      // was and deferred, so the next poll checks it again.
+      let gated: string | null;
+      try {
+        gated = await teamTriggerGate(
+          { db, credentials: this.credentials, plugins: this.plugins, onePassword: this.onePassword },
+          source,
+          parsed.file,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push(
+          `${candidate.path}: the team's credential check failed (${message}), so Valet left this workflow as it was and armed nothing new. It checks again on the next sync.`,
+        );
+        unchecked.push(candidate.path);
+        continue;
+      }
       if (gated !== null) warnings.push(`${candidate.path}: ${gated}`);
 
       // Decision 8's validation order: the cron and every filter are checked
@@ -328,7 +377,14 @@ class WorkflowPass implements CollectorPass {
     );
     // A narrower scan's absences prove nothing, so a cut tree deletes nothing.
     if (discovery === "directory-walk") {
-      return { imported, updated, deleted: 0, keptStale: stale.map((row) => row.name), warnings };
+      return {
+        imported,
+        updated,
+        deleted: 0,
+        keptStale: stale.map((row) => row.name),
+        warnings,
+        deferred: unchecked,
+      };
     }
 
     let deleted = 0;
@@ -373,8 +429,16 @@ class WorkflowPass implements CollectorPass {
 
     // A disarmed workflow waits on a run, and no commit will land to move the
     // manifest when it settles. Reporting it deferred keeps the sync
-    // incomplete, so the next poll re-reads and retries the delete.
-    return { imported, updated, deleted, keptStale: [], warnings, deferred: disarmed };
+    // incomplete, so the next poll re-reads and retries the delete. An
+    // unchecked file is deferred for the same reason.
+    return {
+      imported,
+      updated,
+      deleted,
+      keptStale: [],
+      warnings,
+      deferred: [...disarmed, ...unchecked],
+    };
   }
 
   /** One candidate's body to a workflow file, or to what to say about it. */
@@ -712,22 +776,35 @@ async function armTriggers(
 }
 
 /**
- * Decision 9. A team-owned workflow with tool nodes cannot resolve a team
- * credential outside a session someone started, so the install path refuses
- * one. The sync mirrors the definition and leaves its triggers unarmed, and
- * this is the message that says why. Org sources are unaffected: org
- * credential escalation already works.
+ * Decision 15. A team-owned file that declares a trigger over tool nodes
+ * arms only when `teamServiceReadiness` reports every service ready: a
+ * triggered run bills the team, and a tool node whose service the team
+ * cannot act as fails on every fire. The sync still mirrors the
+ * definition, and the message names each blocked service with its fix.
+ * Org sources are unaffected: org credential escalation already works.
  *
- * Returns null when there is nothing to say.
+ * Returns null when the triggers may arm.
  */
-function teamTriggerGate(source: ContentSourceRow, file: WorkflowFile): string | null {
+async function teamTriggerGate(
+  deps: TeamServiceReadinessDeps,
+  source: ContentSourceRow,
+  file: WorkflowFile,
+): Promise<string | null> {
   if (source.ownerType !== "team") return null;
   if (file.schedule === undefined && (file.events === undefined || file.events.length === 0)) {
     return null;
   }
-  const nodes = file.definition.nodes;
-  if (!nodes.some((node) => node.type === "tool")) return null;
-  return `this workflow uses tool actions and declares a trigger. A team cannot run tool actions on a trigger yet, so Valet mirrored the workflow and left the trigger off. Run it by hand, or move the repository to an org source.`;
+  if (toolNodesOf(file.definition).length === 0) return null;
+  const readiness = await teamServiceReadiness(deps, {
+    orgId: source.orgId,
+    teamId: source.ownerId,
+    definition: file.definition,
+  });
+  if (readiness.blocked.length === 0) return null;
+  // The readiness reasons are caller-neutral; the step that follows the fix
+  // in THIS flow is the resync, and it is named once after them.
+  const reasons = readiness.blocked.map((b) => b.reason).join(" ");
+  return `this workflow declares a trigger over tool actions the team cannot act as yet, so Valet mirrored the workflow and left the trigger off. ${reasons} Valet arms it after you connect the service.`;
 }
 
 /** Which of `ids` hold a run that has not settled. One query, and none at all

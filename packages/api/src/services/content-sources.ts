@@ -113,6 +113,64 @@ export function newContentSourceId(): string {
   return `skillsrc_${randomUUID()}`;
 }
 
+/** Enabled sources that collect workflows for one owner. `createTeam`
+ * adopts the org's rows; the team create route lists them first. */
+export async function listWorkflowSources(
+  db: AppDb,
+  filter: { orgId: string; ownerType: "user" | "team" | "org"; ownerId: string },
+): Promise<ContentSourceRow[]> {
+  const rows = await db
+    .select()
+    .from(contentSources)
+    .where(
+      and(
+        eq(contentSources.orgId, filter.orgId),
+        eq(contentSources.ownerType, filter.ownerType),
+        eq(contentSources.ownerId, filter.ownerId),
+        eq(contentSources.enabled, true),
+      ),
+    );
+  return rows.filter((row) => row.kinds.includes("workflows"));
+}
+
+export interface AdoptedSourceSpec {
+  orgId: string;
+  repoFullName: string;
+  ref: string;
+  subpath: string;
+  kinds: ContentKind[];
+}
+
+/** Builds a pending team-owned source that copies an org workflow source.
+ * The caller inserts it inside its own transaction — `createTeam` does. */
+export function adoptedTeamSourceRow(
+  spec: AdoptedSourceSpec,
+  opts: { teamId: string; createdBy: string; now: number },
+): ContentSourceRow {
+  return {
+    id: newContentSourceId(),
+    orgId: spec.orgId,
+    ownerType: "team",
+    ownerId: opts.teamId,
+    createdBy: opts.createdBy,
+    repoFullName: spec.repoFullName,
+    ref: spec.ref,
+    subpath: spec.subpath,
+    kinds: spec.kinds,
+    enabled: true,
+    status: "pending",
+    attempts: 0,
+    nextAttemptAt: opts.now,
+    lastSha: null,
+    lastManifestHash: null,
+    discoveryScan: null,
+    lastSyncedAt: null,
+    lastError: null,
+    createdAt: opts.now,
+    updatedAt: opts.now,
+  };
+}
+
 export interface ParsedRepoInput {
   repoFullName: string;
   /** Empty means the default branch. */
@@ -489,6 +547,11 @@ export async function deleteContentSource(
 ): Promise<boolean> {
   const row = await ownedContentSourceRow(db, owner, id, opts);
   if (!row) return false;
+  // List and read stay member-level. Delete of a team-owned row is an
+  // admin act: it removes every workflow the source mirrors.
+  if (row.ownerType === "team" && !(await canAdministerTeam(db, row.ownerId, owner.userId))) {
+    return false;
+  }
   await db.transaction(async (tx) => {
     await deleteMirroredContent(tx, row.orgId, id);
     await tx.delete(contentSources).where(eq(contentSources.id, id));

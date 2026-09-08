@@ -53,7 +53,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { buildActionInvoker, type ActionInvocationContext } from "../plugins/action-invoker.js";
-import { toolNodesOf } from "./templates.js";
+import { toolNodesOf } from "./tool-nodes.js";
 
 // ─── Shipped templates ───────────────────────────────────────────────────────
 

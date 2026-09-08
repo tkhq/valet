@@ -10,12 +10,14 @@ import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { credentials } from "../schema/index.js";
 
-/** Deletes every team reference that points at `userId`'s `service` row. */
+/** Deletes every team reference that points at `userId`'s `service` row.
+ * Returns the ids of the teams that lost a reference, so a caller can
+ * resync the workflows those teams own. */
 export async function deleteDelegationsFrom(
   db: AppDb,
   source: { userId: string; service: string },
-): Promise<void> {
-  await db
+): Promise<string[]> {
+  const revoked = await db
     .delete(credentials)
     .where(
       and(
@@ -23,5 +25,7 @@ export async function deleteDelegationsFrom(
         eq(credentials.service, source.service),
         sql`${credentials.metadata}->>'delegatedFrom' = ${source.userId}`,
       ),
-    );
+    )
+    .returning({ teamId: credentials.ownerId });
+  return revoked.map((row) => row.teamId);
 }

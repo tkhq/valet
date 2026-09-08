@@ -201,8 +201,11 @@ export async function resolveUserCredentialRead(
  * vault decides what an integration authenticates as. That is why the vaults
  * a service account may read are the security boundary here, and why the
  * token should be scoped to vaults chosen for this.
+ *
+ * Exported for `workflows/team-service-readiness.ts`, which has to give the
+ * same answer a team run gets when it reaches this lookup.
  */
-async function lookupInOnePassword(
+export async function lookupInOnePassword(
   deps: CredentialReadDeps,
   ctx: UserReadCtx,
   service: string,

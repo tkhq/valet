@@ -24,7 +24,7 @@ import {
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError } from "@valet/shared";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   actionInvocations,
   contentSources,
@@ -36,7 +36,12 @@ import {
   workflowWebhooks,
 } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
-import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
+import {
+  isTeamMember,
+  listTeamsForUser,
+  lockTeamForOwnership,
+  TeamHasActiveRunsError,
+} from "../services/teams.js";
 import { isOrgAdmin, isOrgMember } from "../services/org.js";
 import {
   writeExecutionGrant,
@@ -1008,7 +1013,7 @@ export async function deleteWorkflowDefinition(
  * finishes.
  */
 export async function disarmWorkflowTriggers(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   workflowId: string,
 ): Promise<void> {
@@ -1030,13 +1035,60 @@ export async function disarmWorkflowTriggers(
 /** The definition, its version history, and everything that could start it.
  * Settled runs are kept: they are history, reachable by their run id. */
 export async function purgeWorkflowRows(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   workflowId: string,
 ): Promise<void> {
   await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
   await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, workflowId));
   await disarmWorkflowTriggers(db, orgId, workflowId);
+}
+
+const UNSETTLED_RUN_STATUSES = ["pending", "running", "parked", "terminalizing"] as const;
+
+/** Throws `TeamHasActiveRunsError` when any team-owned workflow has a run
+ * that has not settled.
+ *
+ * Reads `workflow_runs` through the handle it is given, never through
+ * `WorkflowStore`. `reapTeamWorkflows` calls this from inside `deleteTeam`'s
+ * transaction, and the process-wide store holds its own handle over the
+ * same connection source: on PGlite a read through it waits on the open
+ * transaction forever, and on Postgres it reads outside the ownership
+ * lock. */
+export async function assertNoTeamOwnedActiveRuns(db: AppQueryable, teamId: string): Promise<void> {
+  const defs = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, teamId)));
+  if (defs.length === 0) return;
+  const active = await db
+    .select({ id: workflowRuns.id })
+    .from(workflowRuns)
+    .where(
+      and(
+        inArray(
+          workflowRuns.workflowId,
+          defs.map((d) => d.id),
+        ),
+        inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
+      ),
+    )
+    .limit(1);
+  if (active.length > 0) throw new TeamHasActiveRunsError(teamId);
+}
+
+/** Deletes every team-owned workflow and its triggers. Refuses while any
+ * of those workflows has an unsettled run. Settled runs stay as history. */
+export async function reapTeamWorkflows(tx: AppQueryable, teamId: string): Promise<void> {
+  const defs = await tx
+    .select({ id: workflowDefinitions.id, orgId: workflowDefinitions.orgId })
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, teamId)));
+  if (defs.length === 0) return;
+  await assertNoTeamOwnedActiveRuns(tx, teamId);
+  for (const def of defs) {
+    await purgeWorkflowRows(tx, def.orgId, def.id);
+  }
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an

@@ -764,6 +764,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // its file at sync instead of arming a subscription nothing can
         // deliver.
         plugins,
+        // A team file's triggers arm only when the team can act as every
+        // service its tool nodes name (`teamServiceReadiness`), including
+        // through an org-vault item the run would resolve.
+        credentials: engineCredentials,
+        onePassword,
       }),
       // Memories collect for every owner type, including a personal source:
       // a mirrored memory runs nothing and resolves no credential, so

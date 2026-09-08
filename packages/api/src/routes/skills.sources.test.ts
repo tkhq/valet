@@ -351,6 +351,38 @@ describe("org-scoped skill sources", () => {
     expect(body.source.ownerType).toBe("team");
   });
 
+  it("a team member lists a team source and cannot delete it", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org",
+      name: "Platform",
+      creatorUserId: "local-user",
+    });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    const created = (await (
+      await post(api.baseUrl, { repo: "tkhq/skills", teamId: team.id })
+    ).json()) as SkillSourceSyncResponse;
+
+    const list = (await (
+      await fetch(`${api.baseUrl}/api/skills/sources?ownerType=team&ownerId=${team.id}`, {
+        headers: { "x-valet-test-user-id": "test-member" },
+      })
+    ).json()) as ListSkillSourcesResponse;
+    expect(list.sources.map((s) => s.id)).toEqual([created.source.id]);
+
+    const del = await fetch(`${api.baseUrl}/api/skills/sources/${created.source.id}`, {
+      method: "DELETE",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(del.status).toBe(404);
+
+    const still = (await (
+      await fetch(`${api.baseUrl}/api/skills/sources?ownerType=team&ownerId=${team.id}`)
+    ).json()) as ListSkillSourcesResponse;
+    expect(still.sources).toHaveLength(1);
+  });
+
   it("excludeOrg drops org rows from the unfiltered list", async () => {
     const f = serve({ sha: "commit-1", names: ["deploy"] });
     api = await bootTestApi({ githubApiUrl: f.url });

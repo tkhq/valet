@@ -399,6 +399,32 @@ const chatTemplate: WorkflowTemplate = {
   ),
 };
 
+/** An App-pinned GitHub step: the run acts as the org's GitHub App, and
+ * no team or personal connection can stand in for it. */
+const githubAppTemplate: WorkflowTemplate = {
+  id: "github-app-issues",
+  name: "App issues",
+  description: "Lists issues as the App.",
+  category: "Chat",
+  apps: ["github"],
+  steps: ["List"],
+  definition: definition(
+    [
+      { id: "start", type: "trigger" },
+      { id: "issues", type: "tool", service: "github", action: "list_issues", params: {}, credential: "app" },
+    ],
+    [{ from: "start", to: "issues" }],
+  ),
+};
+
+const githubPlugin: ValetPlugin = {
+  name: "github",
+  version: "0.0.1",
+  actions: [{ service: "github", actions: [action("github.list_issues", "low")] }],
+  credentials: [{ type: "oauth2", service: "github", configKeys: [] }],
+  templates: [githubAppTemplate],
+};
+
 const chatPlugin: ValetPlugin = {
   name: "chat",
   version: "0.0.1",
@@ -1002,20 +1028,72 @@ describe("installWorkflowTemplate ownership", () => {
     expect(result.code).toBe("team_not_found");
   });
 
-  it("refuses a scheduled tool template for a team, naming the reason", async () => {
-    // A scheduled run acts as the workflow's OWNER (`scheduler.ts#fire`),
-    // and a team principal has no credential scope in the action invoker
-    // (`plugins/action-invoker.ts#credentialOwnerFor`) — every gmail step
-    // would fail on every run.
+  it("refuses a scheduled team template when the team has no credential, naming the service", async () => {
+    // The caller's personal Gmail does not fund a team run. Readiness looks
+    // at the team row, org-provided services, and App pins — not Integrations.
     await connect("gmail");
     await seedTeam("team-3", [OWNER.userId]);
     const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep", { teamId: "team-3" });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected a refusal");
-    expect(result.code).toBe("unsupported_owner");
-    expect(result.error).toContain("gmail");
-    expect(result.error).toContain("Install this template into your own workspace.");
+    expect(result.code).toBe("not_connected");
+    // The readiness reason is caller-neutral; the install path adds the
+    // step that follows the fix here and nowhere else.
+    expect(result.error).toBe("Connect gmail for this team, then install this template.");
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("reports a team the caller does not belong to before it reads that team's credentials", async () => {
+    // The refusal a non-member sees must not change with the team's
+    // connections, or it would tell them which services the team holds.
+    await seedTeam("team-3c", ["someone-else"]);
+    const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep", { teamId: "team-3c" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("team_not_found");
+  });
+
+  it("sends a team install of an App-pinned template to the admin when no App is configured", async () => {
+    // "Connect github for this team" names a control a member does not
+    // have: no team connection satisfies an App pin. The readiness reason
+    // already says who acts, and the team refusal must carry it.
+    await seedTeam("team-3d", [OWNER.userId]);
+    const result = await installWorkflowTemplate(deps([githubPlugin]), OWNER, "github-app-issues", {
+      teamId: "team-3d",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("not_connected");
+    expect(result.error).toContain("no App configured");
+    expect(result.error).toContain("Settings → Organization");
+    expect(result.error).not.toContain("for this team");
+  });
+
+  it("sends a team install of an unconfigured service to the admin, as the personal path does", async () => {
+    await seedTeam("team-3e", [OWNER.userId]);
+    const result = await installWorkflowTemplate(deps([chatPlugin]), OWNER, "chat-note", { teamId: "team-3e" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("not_connected");
+    expect(result.error).toContain("not configured for this organization");
+    expect(result.error).toContain("Settings → Organization");
+    expect(result.error).not.toContain("for this team");
+  });
+
+  it("installs a scheduled team template when the team credential is ready", async () => {
+    await credentials.save({ type: "team", id: "team-3b" }, "gmail", {
+      type: "oauth2",
+      accessToken: "team-gmail",
+    });
+    await seedTeam("team-3b", [OWNER.userId]);
+    const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep", { teamId: "team-3b" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    const defs = await db.select().from(workflowDefinitions);
+    expect(defs[0]!.ownerType).toBe("team");
+    expect(defs[0]!.ownerId).toBe("team-3b");
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
   });
 
   it("files a team install's event subscription with the team", async () => {
