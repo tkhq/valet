@@ -88,6 +88,7 @@
     "@valet/plugin-telegram": "workspace:*",
     "@valet/plugin-typefully": "workspace:*",
     "@valet/plugin-workflows": "workspace:*",
+    "@valet/plugin-valet": "workspace:*",
     "@valet/sandbox-docker": "workspace:*",
     "@valet/sandbox-gateway": "workspace:*",
     "@valet/sandbox-kubernetes": "workspace:*",

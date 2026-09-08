@@ -43,6 +43,7 @@
     { "path": "./packages/plugin-telegram" },
     { "path": "./packages/plugin-browser" },
     { "path": "./packages/plugin-workflows" },
+    { "path": "./packages/plugin-valet" },
     { "path": "./packages/plugin-sandbox-tunnels" },
     { "path": "./packages/plugin-assistants" },
     { "path": "./packages/plugin-memory" },
