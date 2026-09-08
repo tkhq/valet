@@ -348,6 +348,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "default_model" text',
   },
   {
+    describe: "orgs.allow_anonymous_image_bakes column",
+    probe: { kind: "column", table: "orgs", column: "allow_anonymous_image_bakes" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_anonymous_image_bakes" boolean NOT NULL DEFAULT false',
+  },
+  {
     // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills
     // every pre-existing org row to `false` — anonymous sharing stays off
     // until an admin opts in, the same answer a fresh database gets.

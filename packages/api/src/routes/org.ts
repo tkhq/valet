@@ -116,6 +116,7 @@ async function loadOrgResponse(
     features,
     ssoTeamGroups,
     allowPublicArtifacts: row.allowPublicArtifacts,
+    allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     plugins,
     callerRole,
   };

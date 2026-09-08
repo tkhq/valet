@@ -19,7 +19,7 @@
  *   - ZERO-CONFIG (`ensureRepoSource`, spec decision 13): binding a repo to a
  *     session upserts its repo source, touches `last_bound_at`, re-enables a
  *     decayed source, and fires the first bake in the background — gated on an
- *     org-scoped GitHub credential AND a wired builder, never throwing.
+ *     verified repository and a wired builder, subject to the org bake policy.
  *
  * The `ImageBuilder` port is unchanged; base bakes ride the same builder via
  * `PrebuildSpec.kind: "base"` (a data flag the builders branch their
@@ -35,6 +35,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
+  orgs,
   bakes,
   agentSessions,
   sessionRepos,
@@ -43,7 +44,7 @@ import {
 } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { checkRepoExistence } from "../services/repo-existence.js";
-import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
+import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps, type ResolvedGitHubToken } from "../services/github-tokens.js";
 import { DEFAULT_FULL_BASE_IMAGE, resolveDefaultImage } from "../providers/sandbox-backend.js";
 import {
   resolveRecipe,
@@ -78,6 +79,13 @@ export class PrebuildUnavailableError extends Error {
  * `baseSetup` — see `ensureRepoBaseLayer`). */
 export function repoBaseSourceName(repoFullName: string): string {
   return `repo-base:${repoFullName}`;
+}
+
+export class AnonymousImageBakesDisabledError extends Error {
+  constructor() {
+    super("Anonymous image bakes are disabled. Connect an org GitHub credential or enable anonymous image bakes in Settings > Organization > Sandbox images.");
+    this.name = "AnonymousImageBakesDisabledError";
+  }
 }
 
 /** A repo bake that could not start because its base layer has no consistent
@@ -1080,12 +1088,35 @@ export class SourceService {
     return parentBase.status === "defer";
   }
 
+  private async anonymousImageBakesAllowed(orgId: string): Promise<boolean> {
+    const [org] = await this.db.select({ allowed: orgs.allowAnonymousImageBakes })
+      .from(orgs).where(eq(orgs.id, orgId)).limit(1);
+    return org?.allowed ?? false;
+  }
+
+  private async assertRepoBakeAllowed(orgId: string, token: string | null): Promise<void> {
+    if (!token && !(await this.anonymousImageBakesAllowed(orgId))) {
+      throw new AnonymousImageBakesDisabledError();
+    }
+  }
+
+  private async repoBakeToken(source: ImageSourceRow): Promise<ResolvedGitHubToken> {
+    const token = await resolveGitHubToken(this.githubTokenDeps, {
+      orgId: source.orgId, purpose: "git",
+      repo: { owner: ownerOf(source.repoFullName ?? ""), name: repoOf(source.repoFullName ?? "") },
+    });
+    await this.assertRepoBakeAllowed(source.orgId, token.token);
+    return token;
+  }
+
   private async startRepoBake(source: ImageSourceRow): Promise<BakeRow> {
     const builder = this.builder;
     if (!builder) throw new PrebuildUnavailableError();
     const repoFullName = source.repoFullName ?? "";
     const owner = ownerOf(repoFullName);
     const repo = repoOf(repoFullName);
+
+    const gitToken = await this.repoBakeToken(source);
 
     const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
     const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
@@ -1110,12 +1141,6 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
-    const gitToken = await resolveGitHubToken(this.githubTokenDeps, {
-      orgId: source.orgId,
-      purpose: "git",
-      repo: { owner, name: repo },
-    });
-
     const imageRef = imageRefFor(builder.backend, source.id, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
     const now = this.now();
     const row: BakeRow = {
@@ -1134,6 +1159,7 @@ export class SourceService {
       sizeBytes: null,
       createdAt: now,
     };
+    await this.assertRepoBakeAllowed(source.orgId, gitToken.token);
     await this.db.insert(bakes).values(row);
 
     const spec: PrebuildSpec = {
@@ -1399,6 +1425,7 @@ export class SourceService {
         // base already has a newer pending rebake).
         if (await this.repoBakeDefers(child)) continue;
 
+        await this.repoBakeToken(child);
         const owner = ownerOf(child.repoFullName ?? "");
         const repo = repoOf(child.repoFullName ?? "");
         const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, child.orgId, owner, repo);
@@ -1517,6 +1544,7 @@ export class SourceService {
       }
     }
 
+    await this.repoBakeToken(source);
     const owner = ownerOf(repoFullName);
     const repo = repoOf(repoFullName);
     const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
@@ -1570,6 +1598,7 @@ export class SourceService {
     try {
       const result = await checkRepoExistence(this.githubTokenDeps, {
         orgId, host: repo.host, fullName: repo.fullName,
+        allowAnonymous: await this.anonymousImageBakesAllowed(orgId),
       });
       if (result.kind !== "found") {
         if (result.kind === "not-found") console.warn(`ensureRepoSource: ${result.error}`);

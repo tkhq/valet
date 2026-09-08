@@ -6,7 +6,7 @@ export type RepoExistence =
   | { kind: "not-found"; error: string }
   | { kind: "unverified" };
 
-type RepoCheckRequest = { orgId: string; userId?: string; host: string; fullName: string; auth?: GitHubAuthMode };
+type RepoCheckRequest = { orgId: string; userId?: string; host: string; fullName: string; auth?: GitHubAuthMode; allowAnonymous?: boolean };
 
 /** Bound the whole check, including credential discovery and token refresh. */
 export async function checkRepoExistence(deps: GitHubTokenDeps, request: RepoCheckRequest): Promise<RepoExistence> {
@@ -47,6 +47,7 @@ async function verifyRepoExistence(
       repo: { owner: parts[0], name: parts[1] },
     };
     credential = await resolveGitHubToken(deps, { ...tokenRequest, purpose: "git" });
+    if (!credential.token && request.allowAnonymous === false) return unverified("anonymous image bakes are disabled");
     // A sole installation can check an org typo even when cloning would be anonymous.
     if (!credential.token && !signal.aborted) {
       credential = await resolveGitHubToken(deps, { ...tokenRequest, purpose: "api" });
@@ -57,6 +58,7 @@ async function verifyRepoExistence(
   }
   // Token refresh can be shared with other callers. Let it finish after our deadline.
   if (signal.aborted) return { kind: "unverified" };
+  if (!credential.token && request.allowAnonymous === false) return unverified("anonymous image bakes are disabled");
 
   const reader = new GitHubSkillRepoReader({
     apiUrl: deps.apiUrl, fetchImpl: deps.fetchImpl, timeoutMs: 5_000,

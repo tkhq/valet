@@ -26,7 +26,7 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
-import { GitHubApiError, PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../bakes/source-service.js";
+import { AnonymousImageBakesDisabledError, GitHubApiError, PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../bakes/source-service.js";
 import type { ApiError } from "../wire/types.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -339,6 +339,7 @@ sourcesRouter.post("/:id/bake", async (c) => {
     const row = await prebuildService.startBuild(id);
     return c.json({ bake: row }, 202);
   } catch (err) {
+    if (err instanceof AnonymousImageBakesDisabledError) return c.json({ error: err.message }, 403);
     if (err instanceof PrebuildUnavailableError) return c.json({ error: err.message }, 409);
     if (err instanceof PrebuildConfigNotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof GitHubAuthError) return c.json({ error: err.message }, 502);

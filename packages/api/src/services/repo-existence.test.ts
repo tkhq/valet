@@ -52,6 +52,11 @@ describe("checkRepoExistence", () => {
       kind: "not-found",
     });
     await deps.credentials.delete({ type: "org", id: "org" }, "github");
+    fetchImpl.mockClear();
+    expect(await checkRepoExistence({ ...deps, fetchImpl }, {
+      ...request, userId: undefined, fullName: "wrong-org/widgets", allowAnonymous: false,
+    })).toEqual({ kind: "unverified" });
+    expect(fetchImpl).not.toHaveBeenCalled();
     fetchImpl.mockResolvedValue(new Response(null, { status: 404 }));
     expect(await checkRepoExistence({ ...deps, fetchImpl }, {
       ...request, userId: undefined, fullName: "wrong-org/widgets",

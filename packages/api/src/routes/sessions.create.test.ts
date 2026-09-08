@@ -16,7 +16,7 @@ import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { SessionDetail, SessionSummary } from "../wire/types.js";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
-import { agentSessions, sessionRepos, imageSources, bakes, teams, teamMembers } from "../schema/index.js";
+import { orgs, agentSessions, sessionRepos, imageSources, bakes, teams, teamMembers } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import type {
@@ -600,6 +600,7 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-bake-"));
     const { db, engineCredentials } = api.providers;
 
+    await db.update(orgs).set({ allowAnonymousImageBakes: true }).where(eq(orgs.id, "local-org"));
     if (hasCredential) {
       await engineCredentials.save({ type: "org", id: "local-org" }, "github", {
         type: "api_key", accessToken: "test-pat", metadata: { login: "test-bot" },

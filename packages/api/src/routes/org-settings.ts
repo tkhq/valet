@@ -3,7 +3,7 @@
  * (slash-commands plan, Task 3) and the public-artifact opt-in
  * (artifacts design). Org-admin gated via `requireOrgAdmin`.
  *
- * Accepts `{ bareSkillCommands?, allowPublicArtifacts? }` booleans.
+ * Accepts boolean settings, including `allowAnonymousImageBakes`.
  * Unknown fields 400. Responds with the updated org settings row.
  */
 import { Hono } from "hono";
@@ -15,7 +15,7 @@ import type { OrgSettingsResponse } from "../wire/types.js";
 
 export const orgSettingsRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts"]);
+const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes"]);
 
 orgSettingsRouter.patch("/", async (c) => {
   const gate = await requireOrgAdmin(c);
@@ -36,7 +36,7 @@ orgSettingsRouter.patch("/", async (c) => {
     return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
   }
 
-  const update: { bareSkillCommands?: boolean; allowPublicArtifacts?: boolean } = {};
+  const update: { bareSkillCommands?: boolean; allowPublicArtifacts?: boolean; allowAnonymousImageBakes?: boolean } = {};
 
   if ("bareSkillCommands" in raw) {
     if (typeof raw.bareSkillCommands !== "boolean") {
@@ -52,6 +52,13 @@ orgSettingsRouter.patch("/", async (c) => {
     update.allowPublicArtifacts = raw.allowPublicArtifacts;
   }
 
+  if ("allowAnonymousImageBakes" in raw) {
+    if (typeof raw.allowAnonymousImageBakes !== "boolean") {
+      return c.json({ error: "allowAnonymousImageBakes must be a boolean. Send true or false." }, 400);
+    }
+    update.allowAnonymousImageBakes = raw.allowAnonymousImageBakes;
+  }
+
   if (Object.keys(update).length === 0) {
     return c.json({ error: "no recognized fields" }, 400);
   }
@@ -65,6 +72,7 @@ orgSettingsRouter.patch("/", async (c) => {
   const resp: OrgSettingsResponse = {
     bareSkillCommands: row.bareSkillCommands,
     allowPublicArtifacts: row.allowPublicArtifacts,
+    allowAnonymousImageBakes: row.allowAnonymousImageBakes,
   };
   return c.json(resp);
 });

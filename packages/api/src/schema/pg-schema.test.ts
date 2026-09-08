@@ -909,6 +909,7 @@ describe("pg app schema + migrations", () => {
       { table: "memory_files", column: "upstream_path" },
       { table: "memory_files", column: "content_sha" },
       { table: "orgs", column: "sso_team_groups" },
+      { table: "orgs", column: "allow_anonymous_image_bakes" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
       { table: "agent_sessions", column: "sandbox_resource_overrides" },

@@ -6,6 +6,7 @@ CREATE TABLE "orgs" (
 	"created_at" bigint NOT NULL,
 	"bare_skill_commands" boolean NOT NULL DEFAULT false,
 	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
+	"allow_anonymous_image_bakes" boolean NOT NULL DEFAULT false,
 	"model_tiers" jsonb,
 	"approved_models" jsonb,
 	"reasoning_settings" jsonb

@@ -895,9 +895,44 @@ describe("SourceService", () => {
       expect(repoSpecs[0].baseImage).toBe(baseBake?.imageRef);
     });
 
+    it("blocks anonymous source creation and existing-source bakes by default", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      await service.ensureRepoSource(orgId, repo);
+      expect(await db.select().from(imageSources)).toHaveLength(0);
+      const id = await seedRepoSource(db);
+      await expect(service.startBake(id)).rejects.toThrow("enable anonymous image bakes");
+      await service.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+      expect(await db.select().from(bakes)).toHaveLength(0);
+    });
+
+    it("turning the policy off preserves a pushed bake and blocks the next bake", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      await db.update(orgs).set({ allowAnonymousImageBakes: true }).where(eq(orgs.id, orgId));
+      await service.ensureRepoSource(orgId, repo);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+      const [source] = await db.select().from(imageSources);
+      await db.update(orgs).set({ allowAnonymousImageBakes: false }).where(eq(orgs.id, orgId));
+      await expect(service.startBake(source.id)).rejects.toThrow("enable anonymous image bakes");
+      await service.runSchedulerPass();
+      expect(builder.specs).toHaveLength(1);
+      expect(await service.currentBake(source.id)).toMatchObject({ status: "pushed" });
+    });
+
+    it("blocks anonymous repo children when a base bake pushes", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      const baseId = await seedBaseSource(db, []);
+      await seedRepoSource(db, { parentId: baseId });
+      await service.startBake(baseId);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+      expect(builder.specs.map((spec) => spec.kind)).toEqual(["base"]);
+    });
+
     it("bakes a public repository without an org GitHub credential", async () => {
       // A different org with no credential seeded.
-      await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW });
+      await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW, allowAnonymousImageBakes: true });
       await service.ensureRepoSource("org-nocred", repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, "org-nocred"));
       expect(sources).toHaveLength(1);
