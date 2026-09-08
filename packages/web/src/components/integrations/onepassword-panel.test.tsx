@@ -44,6 +44,7 @@ vi.mock("~/api/integrations", () => ({
     mutate: disconnectMutate,
     isPending: false,
     error: disconnectError,
+    reset: vi.fn(),
   }),
 }));
 

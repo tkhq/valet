@@ -1085,7 +1085,7 @@ describe("team credential scope (TKAI-205)", () => {
       body: JSON.stringify({ teamId: team.id }),
     });
     expect(unconnected.status).toBe(400);
-    expect(((await unconnected.json()) as { error: string }).error).toContain("Connect linear in Integrations first");
+    expect(((await unconnected.json()) as { error: string }).error).toContain("Connect Linear in Integrations first");
 
     await fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT",
@@ -1109,6 +1109,56 @@ describe("team credential scope (TKAI-205)", () => {
       await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
     ).json()) as ListCredentialsResponse;
     expect(after.credentials).toEqual([]);
+  });
+
+  // The refusals name the service the way the product does, not the way
+  // the route param spells it: the caller reads "Linear"/"GitHub", the
+  // same spelling the connect UI and this file's own GitHub copy use.
+  // Both halves are asserted together, because a label that swallowed the
+  // corrective sentence would be the worse regression.
+  it("names the service by its product name in the occupied-slot refusal, and keeps the corrective action", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
+      type: "api_key",
+      apiKey: "member-lin",
+    });
+    const shared = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(shared.status).toBe(201);
+    const occupied = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(occupied.status).toBe(409);
+    expect(((await occupied.json()) as { error: string }).error).toBe(
+      "This team already has a Linear credential. Ask a team admin to disconnect it first.",
+    );
+
+    // `github` is the case a first-letter capitalization gets wrong, and
+    // the one this file already spells "GitHub" by hand two refusals up.
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "api_key",
+      apiKey: "ghp_pat",
+    });
+    const sharedGithub = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(sharedGithub.status).toBe(201);
+    const occupiedGithub = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(occupiedGithub.status).toBe(409);
+    expect(((await occupiedGithub.json()) as { error: string }).error).toBe(
+      "This team already has a GitHub credential. Ask a team admin to disconnect it first.",
+    );
   });
 
   // A team row is read with org-scoped 1Password tokens only, so a
@@ -1214,7 +1264,7 @@ describe("team credential scope (TKAI-205)", () => {
     expect(share.status).toBe(400);
     const { error } = (await share.json()) as { error: string };
     expect(error).toBe(
-      "linear is stored as a personal 1Password reference, which a team cannot read. " +
+      "Linear is stored as a personal 1Password reference, which a team cannot read. " +
         "Store it again with tokenScope org, or store the secret directly, then share it.",
     );
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
@@ -1514,7 +1564,7 @@ describe("team credential scope (TKAI-205)", () => {
       body: JSON.stringify({ teamId: team.id }),
     });
     expect(unshareable.status).toBe(400);
-    expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect github for the team instead.");
+    expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect GitHub for the team instead.");
   });
 
   it("refuses to overwrite a direct team credential, even when a pre-read saw the slot empty", async () => {

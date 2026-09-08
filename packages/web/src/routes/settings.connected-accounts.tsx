@@ -310,7 +310,13 @@ function GithubRow() {
         />
         <ConfirmDialog
           open={confirmDisconnect}
-          onOpenChange={setConfirmDisconnect}
+          onOpenChange={(open) => {
+            setConfirmDisconnect(open);
+            // React Query holds `error` until the next mutate, so a dialog
+          // reopened after a refusal would present the OLD failure as this
+          // attempt's. Clear it as the dialog opens.
+            if (open) disconnectGithub.reset();
+          }}
           title="Disconnect GitHub?"
           description="Valet deletes your stored GitHub token, so the assistant can no longer clone or push to your repos. Teams you shared it with lose access too. Connect GitHub again to restore it."
           confirmLabel="Disconnect"
@@ -385,7 +391,11 @@ function CredentialsListSection() {
               variant="ghost"
               size="sm"
               disabled={disconnect.isPending}
-              onClick={() => setConfirmRevoke(cred)}
+              onClick={() => {
+                // Clear the previous row's refusal as this dialog opens.
+                disconnect.reset();
+                setConfirmRevoke(cred);
+              }}
             >
               {disconnect.isPending ? "Revoking…" : `Revoke ${cred.service}`}
             </Button>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail a PR that reintroduces the browser's `confirm()` into the web app.
+"""Fail a PR that reintroduces a native browser dialog into the web app.
 Walks packages/web/src and reports every occurrence; there is no PR body to
 read and no diff to compute.
 
@@ -34,7 +34,18 @@ TEST_SUFFIXES = (".test.ts", ".test.tsx", ".test.js", ".test.jsx")
 # `confirm(`, or the same call through a global object. The lookbehind keeps
 # an identifier that merely ends in the word out of the match: `setConfirm(`
 # differs in case, and `dialog.confirm(` is a method on something else.
-CALL = re.compile(r"(?<![\w$.])(?:(?:window|globalThis|self)\s*\.\s*)?confirm\s*\(")
+# `alert` and `prompt` are in the same class and carry the same three faults,
+# so the guard names all three rather than waiting for the next one to land.
+# Prose is skipped before the match runs. This product's own vocabulary is
+# full of the word "prompt", and a doc comment reading "the refute-reason
+# prompt (r)" satisfies `prompt\s*\(` exactly. A guard that cries wolf on
+# a comment gets switched off, so comment-only lines never reach CALL.
+CALL = re.compile(r"(?<![\w$.])(?:(?:window|globalThis|self)\s*\.\s*)?(?:confirm|alert|prompt)\s*\(")
+
+# A line whose first non-space character opens or continues a comment. A
+# trailing comment after code is deliberately NOT skipped: erring toward a
+# report is safe there, erring toward silence is not.
+COMMENT_LINE = re.compile(r"\s*(?://|/\*|\*)")
 
 FIX = (
     "Confirm the action with the ConfirmDialog primitive from "
@@ -60,6 +71,8 @@ def scan(root: Path) -> list[str]:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for number, line in enumerate(text.splitlines(), start=1):
+            if COMMENT_LINE.match(line):
+                continue
             if CALL.search(line):
                 rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
                 found.append(f"{rel}:{number}: {line.strip()}")
@@ -73,7 +86,7 @@ def main() -> int:
         return 1
     found = scan(WEB)
     if found:
-        sys.stderr.write(f"Bare confirm() in the web app ({len(found)}):\n")
+        sys.stderr.write(f"Native browser dialog in the web app ({len(found)}):\n")
         for report in found:
             sys.stderr.write(f"  {report}\n")
         sys.stderr.write("\n" + FIX)

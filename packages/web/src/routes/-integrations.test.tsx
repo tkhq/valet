@@ -211,6 +211,7 @@ vi.mock("~/api/integrations", () => ({
     mutateAsync: disconnectMutateAsync,
     isPending: false,
     error: null,
+    reset: vi.fn(),
   }),
   useDelegateCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
@@ -252,7 +253,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
       isError: false,
       error: null,
     }),
-    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false }),
+    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false , reset: vi.fn() }),
   };
 });
 

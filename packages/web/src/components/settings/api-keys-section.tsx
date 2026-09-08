@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { OrgDirectoryUserWire } from "@valet/api/wire";
 import { Button, Input, Spinner } from "~/components/primitives";
 import {
   useApiKeys,
@@ -9,7 +10,7 @@ import {
   useTeamApiKeys,
   type CreatedApiKey,
 } from "~/api/api-keys";
-import { useOrg, useTeams } from "~/api/settings";
+import { useOrg, useOrgDirectory, useTeams } from "~/api/settings";
 import { formatDateOr } from "~/lib/format-when";
 import { useCopyToClipboard } from "~/lib/use-copy";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
@@ -62,11 +63,34 @@ function PersonalApiKeysSection() {
   );
 }
 
+/**
+ * Who minted a team key, as a line for the row. Every member of the team
+ * sees the key, so the row has to answer it; a personal key has one
+ * possible creator and passes no label at all.
+ *
+ * `createdBy` on the wire is a user id. The org directory turns it into a
+ * name, the same read the teams page uses for its roster
+ * (`useOrgDirectory()`, member-visible). While that directory is still in
+ * flight the row says nothing: a creator named wrong for one frame is
+ * worse than a creator named one frame late.
+ */
+function creatorLabel(
+  createdBy: string | null,
+  directory: OrgDirectoryUserWire[] | undefined,
+): string | null {
+  if (!createdBy) return "Creator not recorded";
+  if (!directory) return null;
+  const identity = directory.find((u) => u.userId === createdBy);
+  if (!identity) return "Created by a member who left the organization";
+  return `Created by ${identity.name || identity.email}`;
+}
+
 function TeamApiKeysSection({ teamId }: { teamId: string }) {
   const keysQ = useTeamApiKeys(teamId);
   const createKey = useCreateTeamApiKey(teamId);
   const teamsQ = useTeams();
   const orgQ = useOrg();
+  const directoryQ = useOrgDirectory();
   const ws = useActiveWorkspace();
   const [created, setCreated] = useState<{ name: string | null; key: string } | null>(null);
 
@@ -126,6 +150,7 @@ function TeamApiKeysSection({ teamId }: { teamId: string }) {
               start={key.start}
               createdAt={key.createdAt}
               lastRequest={key.lastRequest}
+              createdByLabel={creatorLabel(key.createdBy, directoryQ.data?.users)}
               revokeDisabled={!canMutate}
             />
           ))}
@@ -278,6 +303,7 @@ function TeamApiKeyRow({
   start,
   createdAt,
   lastRequest,
+  createdByLabel,
   revokeDisabled,
 }: {
   teamId: string;
@@ -286,6 +312,7 @@ function TeamApiKeyRow({
   start: string | null;
   createdAt: Date | number;
   lastRequest: Date | number | null;
+  createdByLabel: string | null;
   revokeDisabled?: boolean;
 }) {
   const revokeKey = useRevokeTeamApiKey(teamId);
@@ -295,6 +322,7 @@ function TeamApiKeyRow({
       start={start}
       createdAt={createdAt}
       lastRequest={lastRequest}
+      createdByLabel={createdByLabel}
       revokeDisabled={revokeDisabled}
       pending={revokeKey.isPending}
       onRevoke={(done) => revokeKey.mutate(apiKeyId, { onSuccess: done })}
@@ -307,6 +335,7 @@ function ApiKeyRow({
   start,
   createdAt,
   lastRequest,
+  createdByLabel,
   onRevoke,
   pending,
   revokeDisabled,
@@ -315,6 +344,8 @@ function ApiKeyRow({
   start: string | null;
   createdAt: Date | number;
   lastRequest: Date | number | null;
+  /** Team rows only. A personal key has one possible creator. */
+  createdByLabel?: string | null;
   onRevoke: (done: () => void) => void;
   pending: boolean;
   revokeDisabled?: boolean;
@@ -327,6 +358,9 @@ function ApiKeyRow({
         <div className="truncate text-sm font-medium text-ink">{name ?? "Unnamed key"}</div>
         <div className="truncate font-mono text-xs text-muted">{start ?? "…"}</div>
       </div>
+      {createdByLabel && (
+        <div className="hidden shrink-0 text-xs text-muted sm:block">{createdByLabel}</div>
+      )}
       <div className="hidden shrink-0 text-xs text-muted sm:block">
         Created {formatDateOr(createdAt, "—")}
       </div>

@@ -120,12 +120,23 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
           </button>
         </div>
       </div>
-      {/* The dialog is where a failed revoke is reported: it stays open on
-          failure, so the caller reads the server's message beside the
-          button that produced it. */}
+      {/* A failed revoke reports in BOTH places on purpose. The dialog
+          stays open so the caller reads the reason beside the button that
+          produced it; the row keeps the message after the dialog is
+          dismissed, because a link the caller believes is revoked and is
+          not is a disclosure they must still be able to see. `errorText`
+          supplies the corrective half for a bare network failure. */}
+      {revoke.error != null && !confirmRevoke && (
+        <p className="mt-1 text-xs text-danger-500">{errorText(revoke.error)}</p>
+      )}
       <ConfirmDialog
         open={confirmRevoke}
-        onOpenChange={setConfirmRevoke}
+        onOpenChange={(open) => {
+          setConfirmRevoke(open);
+          // Reopening must not present the last attempt's refusal as this
+          // one's: React Query holds `error` until the next mutate.
+          if (open) revoke.reset();
+        }}
         title={`Revoke the link to ${artifact.title}?`}
         description="Anyone who opens the link gets a 404, and the page leaves this gallery. Publish it again to get a new link."
         confirmLabel="Revoke"

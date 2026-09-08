@@ -238,7 +238,13 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
         </Button>
         <ConfirmDialog
           open={confirmUnlink}
-          onOpenChange={setConfirmUnlink}
+          onOpenChange={(open) => {
+            setConfirmUnlink(open);
+            // React Query holds `error` until the next mutate, so a dialog
+          // reopened after a refusal would present the OLD failure as this
+          // attempt's. Clear it as the dialog opens.
+            if (open) unlink.reset();
+          }}
           title={`Unlink ${title}?`}
           description={unlinkDescription}
           confirmLabel="Unlink"

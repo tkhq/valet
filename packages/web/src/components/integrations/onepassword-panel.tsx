@@ -150,7 +150,13 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
 
       <ConfirmDialog
         open={confirmRemove}
-        onOpenChange={setConfirmRemove}
+        onOpenChange={(open) => {
+          setConfirmRemove(open);
+          // React Query holds `error` until the next mutate, so a dialog
+          // reopened after a refusal would present the OLD failure as this
+          // attempt's. Clear it as the dialog opens.
+          if (open) disconnect.reset();
+        }}
         title="Remove the organization 1Password token?"
         description={REMOVE_ORG_TOKEN_NOTE}
         confirmLabel="Remove token"
@@ -215,7 +221,13 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
 
       <ConfirmDialog
         open={confirmRemove}
-        onOpenChange={setConfirmRemove}
+        onOpenChange={(open) => {
+          setConfirmRemove(open);
+          // React Query holds `error` until the next mutate, so a dialog
+          // reopened after a refusal would present the OLD failure as this
+          // attempt's. Clear it as the dialog opens.
+          if (open) disconnect.reset();
+        }}
         title="Remove your personal 1Password token?"
         description={REMOVE_PERSONAL_TOKEN_NOTE}
         confirmLabel="Remove token"

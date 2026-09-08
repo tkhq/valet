@@ -180,6 +180,10 @@ let teamCredentials: Array<{
 const disconnectMutate = vi.fn();
 let disconnectPending = false;
 let disconnectError: Error | null = null;
+/** The arguments the last disconnect ran with. React Query sets this when
+ * `mutate` is called, so an `error` never exists without it. The panel keys a
+ * failure to the row it was fired for, and that guard reads this. */
+let disconnectVariables: { service: string } | undefined;
 
 vi.mock("~/api/integrations", () => ({
   useCredentials: () => ({
@@ -191,6 +195,8 @@ vi.mock("~/api/integrations", () => ({
     mutate: disconnectMutate,
     isPending: disconnectPending,
     error: disconnectError,
+    variables: disconnectVariables,
+    reset: vi.fn(),
   }),
 }));
 
@@ -574,6 +580,7 @@ describe("TeamsPanel — team credentials", () => {
     teamCredentials = [];
     disconnectPending = false;
     disconnectError = null;
+    disconnectVariables = undefined;
   });
 
   it("names the empty place when the team has no credentials", () => {
@@ -595,10 +602,10 @@ describe("TeamsPanel — team credentials", () => {
     expect(screen.getByText("linear")).toBeTruthy();
     expect(screen.getByText("Shared by Two · broken")).toBeTruthy();
     expect(screen.getByText("Broken")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Disconnect linear from Platform" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop sharing linear with Platform" })).toBeTruthy();
   });
 
-  it("hides Disconnect from a plain member", () => {
+  it("hides the removal control from a plain member", () => {
     callerRole = "member";
     teamCredentials = [
       { service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z" },
@@ -606,16 +613,28 @@ describe("TeamsPanel — team credentials", () => {
     openTeam();
     expect(screen.getByText("Stored on the team")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Disconnect linear from Platform" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Stop sharing/ })).toBeNull();
   });
 });
 
 /**
- * Disconnecting a team credential asks in the page, not through
+ * Removing a team credential asks in the page, not through
  * `window.confirm`. The native call was no confirmation at all for a
  * scripted client — browser automation accepts it — so the first assertion
  * here is that the click alone writes nothing.
+ *
+ * One route serves both rows (`DELETE /api/credentials/:service?scope=team`)
+ * but it costs two different things, so the list names two actions. A
+ * delegated row is a secretless reference to a member who keeps their own
+ * connection: dropping it is "Stop sharing", the same words the Integrations
+ * share menu uses for the same effect. A direct row holds the team's own
+ * secret and dropping it deletes that secret: "Disconnect".
  */
-describe("TeamsPanel — disconnecting a team credential", () => {
+describe("TeamsPanel — removing a team credential", () => {
+  /** linear is stored on the team. slack is shared by Two. */
+  const DIRECT = "Disconnect linear from Platform";
+  const SHARED = "Stop sharing slack with Platform";
+
   beforeEach(() => {
     callerRole = "admin";
     orgRole = "member";
@@ -637,14 +656,16 @@ describe("TeamsPanel — disconnecting a team credential", () => {
     disconnectError = null;
   });
 
-  async function clickDisconnect(service: string) {
-    openTeam();
-    fireEvent.click(screen.getByRole("button", { name: `Disconnect ${service} from Platform` }));
+  /** The panel must already be open: a second `openTeam()` would mount a
+   * second copy and make every row query ambiguous. */
+  async function clickRemove(control: string) {
+    fireEvent.click(screen.getByRole("button", { name: control }));
     return screen.findByRole("dialog");
   }
 
-  it("opens the dialog and disconnects nothing on the click alone", async () => {
-    const dialog = await clickDisconnect("linear");
+  it("opens the dialog and removes nothing on the click alone", async () => {
+    openTeam();
+    const dialog = await clickRemove(DIRECT);
     expect(disconnectMutate).not.toHaveBeenCalled();
     expect(within(dialog).getByText("Disconnect linear from Platform?")).toBeTruthy();
   });
@@ -652,25 +673,54 @@ describe("TeamsPanel — disconnecting a team credential", () => {
   it("names the row that was clicked, not the first row", async () => {
     // One dialog serves the whole list, so it must read the row held in
     // state. A single boolean would name whichever row rendered first.
-    const dialog = await clickDisconnect("slack");
-    expect(within(dialog).getByText("Disconnect slack from Platform?")).toBeTruthy();
+    openTeam();
+    const dialog = await clickRemove(SHARED);
+    expect(within(dialog).getByText("Stop sharing slack with Platform?")).toBeTruthy();
     expect(within(dialog).queryByText("Disconnect linear from Platform?")).toBeNull();
   });
 
+  it("calls a delegated row Stop sharing, the label the share menu uses", async () => {
+    // "Disconnect slack" beside a row shared by Two read as though it would
+    // drop Two's own slack connection. It never did: the team row carries no
+    // secret. The Integrations share menu calls this same action "Stop
+    // sharing" (`integrations/share-with-team.test.tsx`), so this does too.
+    openTeam();
+    expect(screen.getByRole("button", { name: SHARED }).textContent).toBe("Stop sharing");
+    expect(screen.queryByRole("button", { name: "Disconnect slack from Platform" })).toBeNull();
+
+    const dialog = await clickRemove(SHARED);
+    expect(within(dialog).getByRole("button", { name: "Stop sharing" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Disconnect" })).toBeNull();
+  });
+
+  it("keeps Disconnect for the credential the team stores itself", async () => {
+    // This row is the team's own secret, and the route deletes it. Only
+    // here is "Disconnect" the truthful word.
+    openTeam();
+    expect(screen.getByRole("button", { name: DIRECT }).textContent).toBe("Disconnect");
+
+    const dialog = await clickRemove(DIRECT);
+    expect(within(dialog).getByRole("button", { name: "Disconnect" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Stop sharing" })).toBeNull();
+  });
+
   it("says the team credential is deleted, and how to get access back", async () => {
-    const dialog = await clickDisconnect("linear");
+    openTeam();
+    const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByText(/deletes the credential stored on the team/)).toBeTruthy();
     expect(within(dialog).getByText(/Connect linear again from Integrations/)).toBeTruthy();
   });
 
   it("says a delegated row only cuts the link, and names the delegator", async () => {
-    const dialog = await clickDisconnect("slack");
+    openTeam();
+    const dialog = await clickRemove(SHARED);
     expect(within(dialog).getByText(/removes the team's link only/)).toBeTruthy();
     expect(within(dialog).getByText(/Two keeps their own slack connection/)).toBeTruthy();
   });
 
-  it("confirming disconnects with the team scope and id", async () => {
-    const dialog = await clickDisconnect("linear");
+  it("confirming removes with the team scope and id", async () => {
+    openTeam();
+    const dialog = await clickRemove(DIRECT);
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
 
     expect(disconnectMutate).toHaveBeenCalledTimes(1);
@@ -681,8 +731,21 @@ describe("TeamsPanel — disconnecting a team credential", () => {
     });
   });
 
+  it("sends a delegated row to the same route, under the other label", async () => {
+    openTeam();
+    const dialog = await clickRemove(SHARED);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stop sharing" }));
+
+    expect(disconnectMutate.mock.calls[0]?.[0]).toEqual({
+      service: "slack",
+      scope: "team",
+      teamId: "team_1",
+    });
+  });
+
   it("closes on success", async () => {
-    const dialog = await clickDisconnect("linear");
+    openTeam();
+    const dialog = await clickRemove(DIRECT);
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
 
     const options = disconnectMutate.mock.calls[0]?.[1] as { onSuccess: () => void };
@@ -690,8 +753,9 @@ describe("TeamsPanel — disconnecting a team credential", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("cancelling disconnects nothing and closes the dialog", async () => {
-    const dialog = await clickDisconnect("linear");
+  it("cancelling removes nothing and closes the dialog", async () => {
+    openTeam();
+    const dialog = await clickRemove(DIRECT);
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
     expect(disconnectMutate).not.toHaveBeenCalled();
@@ -700,16 +764,30 @@ describe("TeamsPanel — disconnecting a team credential", () => {
 
   it("shows the server error in the dialog instead of swallowing it", async () => {
     disconnectError = new Error("Team not found.");
-    const dialog = await clickDisconnect("linear");
+    disconnectVariables = { service: "linear" };
+    openTeam();
+    const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByText(/Team not found\./)).toBeTruthy();
   });
 
-  it("says it is working while the disconnect is in flight", async () => {
-    // The row button disables itself while a disconnect runs, so the dialog
+  it("keeps one row's failure off the next row's dialog", async () => {
+    // One mutation serves every row. Without the per-row guard, opening the
+    // Slack row after a failed Linear removal shows Linear's refusal before
+    // anything has been clicked in it.
+    disconnectError = new Error("Team not found.");
+    disconnectVariables = { service: "linear" };
+    openTeam();
+
+    const other = await clickRemove(SHARED);
+    expect(within(other).queryByText(/Team not found\./)).toBeNull();
+  });
+
+  it("says it is working while a direct disconnect is in flight", async () => {
+    // The row button disables itself while a removal runs, so the dialog
     // has to open first and the pending state arrive on the next render.
     const view = render(<TeamsPanel orgMembers={orgMembers} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
-    fireEvent.click(screen.getByRole("button", { name: "Disconnect linear from Platform" }));
+    fireEvent.click(screen.getByRole("button", { name: DIRECT }));
     await screen.findByRole("dialog");
 
     disconnectPending = true;
@@ -717,6 +795,20 @@ describe("TeamsPanel — disconnecting a team credential", () => {
 
     expect(
       within(screen.getByRole("dialog")).getByRole("button", { name: "Disconnecting…" }),
+    ).toBeTruthy();
+  });
+
+  it("says it is working while a share removal is in flight", async () => {
+    const view = render(<TeamsPanel orgMembers={orgMembers} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+    fireEvent.click(screen.getByRole("button", { name: SHARED }));
+    await screen.findByRole("dialog");
+
+    disconnectPending = true;
+    view.rerender(<TeamsPanel orgMembers={orgMembers} />);
+
+    expect(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Stopping…" }),
     ).toBeTruthy();
   });
 });

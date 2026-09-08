@@ -651,7 +651,13 @@ function ConfiguredCard({
           as soon as the credential is gone. */}
       <ConfirmDialog
         open={confirmRemove}
-        onOpenChange={setConfirmRemove}
+        onOpenChange={(open) => {
+          setConfirmRemove(open);
+          // React Query holds `error` until the next mutate, so a dialog
+          // reopened after a refusal would present the OLD failure as this
+          // attempt's. Clear it as the dialog opens.
+          if (open) deleteApp.reset();
+        }}
         title="Remove the GitHub App?"
         description="Sessions using it for repo access lose that access. The App stays on GitHub, so you can connect it again with its App ID and private key."
         confirmLabel="Remove App"

@@ -41,7 +41,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
       error: saveCredentialError,
     }),
     useRefreshGithubApp: () => ({ mutate: refreshMutate, isPending: false }),
-    useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false, error: deleteAppError }),
+    useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false, error: deleteAppError , reset: vi.fn() }),
   };
 });
 

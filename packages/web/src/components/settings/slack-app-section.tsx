@@ -360,7 +360,13 @@ function ConnectedCard({ data }: { data: GetSlackAppResponse }) {
 
       <ConfirmDialog
         open={confirmDisconnect}
-        onOpenChange={setConfirmDisconnect}
+        onOpenChange={(open) => {
+          setConfirmDisconnect(open);
+          // React Query holds `error` until the next mutate, so a dialog
+          // reopened after a refusal would present the OLD failure as this
+          // attempt's. Clear it as the dialog opens.
+          if (open) deleteApp.reset();
+        }}
         title="Disconnect Slack?"
         description="This deletes the organization's stored Slack credential. The agent stops answering in this workspace until you save the credential again on this page."
         confirmLabel="Disconnect"

@@ -28,9 +28,17 @@
  * would only stop somebody installing a template to look at it and edit it.
  * That is the normal way to meet a template, so nothing is demanded here.
  *
+ * The workflow belongs to the workspace the nav switcher names, so the
+ * install carries that team id. Without it every install landed on the
+ * installer instead: the team's list stayed empty, the workflow outlived
+ * the team, and the server's team-readiness check never ran, because that
+ * check only applies to a team install.
+ *
  * A failed install keeps the dialog open with the server's message. The
  * install is one transaction server-side, so a failure leaves nothing
- * behind, and retrying after a correction is safe.
+ * behind, and retrying after a correction is safe. A team install refused
+ * for a credential the team does not have arrives on that same path, and
+ * the server's message names the service to connect.
  */
 import { useId, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -40,6 +48,7 @@ import { ServiceIcon } from "~/components/service-icon";
 import { displayName } from "~/components/integrations/display-name";
 import { apiErrorMessage } from "~/api/policies";
 import { useInstallTemplate } from "~/api/templates";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { describeCadence } from "./cadence";
 import {
   isInstallable,
@@ -115,6 +124,10 @@ export function InstallTemplateDialog({
     initialValues(template.inputs),
   );
   const [error, setError] = useState<string | null>(null);
+  // The active workspace owns the installed workflow, exactly as it owns a
+  // workflow created new or imported. An Owner select here would ask again
+  // what the nav's workspace switcher has already answered.
+  const scope = useWorkspaceScope();
   // `null`, not `undefined`: the wire always carries the field and uses
   // null for "arms no schedule" (`WorkflowTemplateSummary`).
   const scheduled = template.schedule !== null;
@@ -131,7 +144,12 @@ export function InstallTemplateDialog({
     try {
       const installed = await install.mutateAsync({
         templateId: template.id,
-        body: template.inputs.length > 0 ? { inputs: values } : {},
+        // Two independent fields. A template that asks nothing still has an
+        // owner, so the team id cannot ride along inside the inputs branch.
+        body: {
+          ...(template.inputs.length > 0 ? { inputs: values } : {}),
+          ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }),
+        },
       });
       onOpenChange(false);
       void navigate({

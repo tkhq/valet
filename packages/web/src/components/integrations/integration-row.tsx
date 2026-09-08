@@ -401,7 +401,13 @@ function ServiceBlock({
           rode on it (DELETE /api/credentials/:service). */}
       <ConfirmDialog
         open={disconnecting}
-        onOpenChange={setDisconnecting}
+        onOpenChange={(open) => {
+          setDisconnecting(open);
+          // React Query holds `error` until the next mutate, so a dialog
+          // reopened after a refusal would present the OLD failure as this
+          // attempt's. Clear it as the dialog opens.
+          if (open) disconnect.reset();
+        }}
         title={`Disconnect ${title}?`}
         description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
         confirmLabel="Disconnect"

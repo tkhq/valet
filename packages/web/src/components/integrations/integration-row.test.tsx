@@ -19,6 +19,7 @@ vi.mock("~/api/integrations", () => ({
     mutate: disconnectMutate,
     isPending: disconnectPending,
     error: disconnectError,
+    reset: vi.fn(),
   }),
   useConnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
@@ -41,7 +42,7 @@ vi.mock("~/api/queries", () => ({
   useIdentityLinks: () => ({ data: undefined, isLoading: false }),
   useStartIdentityLink: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useDeliverIdentityLink: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
-  useUnlinkIdentity: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useUnlinkIdentity: () => ({ mutate: vi.fn(), isPending: false, error: null , reset: vi.fn() }),
   useLinkMembers: () => ({ data: undefined, isLoading: false }),
 }));
 

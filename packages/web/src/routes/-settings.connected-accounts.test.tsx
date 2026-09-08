@@ -62,13 +62,13 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, ...startLinkState }),
     // provider argument accepted but ignored — mocks return fixed stubs
     useSetLinkNotify: (_provider: string) => ({ mutate: setNotifyMutate }),
-    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkMutate, isPending: false }),
+    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkMutate, isPending: false , reset: vi.fn() }),
   };
 });
 
 vi.mock("~/api/repos", () => ({
   useConnectGithub: () => ({ mutateAsync: connectGithubMutateAsync, isPending: false }),
-  useDisconnectGithub: () => ({ mutate: disconnectGithubMutate, ...disconnectGithubState }),
+  useDisconnectGithub: () => ({ mutate: disconnectGithubMutate, ...disconnectGithubState , reset: vi.fn() }),
 }));
 
 vi.mock("~/api/integrations", () => ({
@@ -80,6 +80,7 @@ vi.mock("~/api/integrations", () => ({
   useDisconnectCredential: () => ({
     mutate: disconnectCredentialMutate,
     ...disconnectCredentialState,
+    reset: vi.fn(),
   }),
 }));
 

@@ -86,7 +86,7 @@ vi.mock("~/api/artifacts", () => ({
     useArtifactsMock(...args);
     return { data: artifactsData, isLoading: false, error: null };
   },
-  useRevokeArtifact: () => ({ mutate: revokeMutate, isPending: revokePending, error: revokeError }),
+  useRevokeArtifact: () => ({ mutate: revokeMutate, isPending: revokePending, error: revokeError , reset: vi.fn() }),
 }));
 
 import { ArtifactsPage } from "./artifacts.index";

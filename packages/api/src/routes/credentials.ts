@@ -114,9 +114,35 @@ function usableByTeamRead(stored: StoredCredential): boolean {
   return onePasswordMeta(stored)?.tokenScope === "org";
 }
 
-/** The service key as a sentence subject (`slack` → `Slack`). */
+/**
+ * Product names for the service keys these refusals name. The connect UI
+ * derives the same labels from the same ids
+ * (`packages/web/src/components/integrations/display-name.ts`), and the
+ * refusals below spell "GitHub" and "1Password" by hand, so a derived
+ * label has to agree with both rather than title-case the id blindly.
+ */
+const SERVICE_DISPLAY_NAMES: Record<string, string> = {
+  github: "GitHub",
+  gmail: "Gmail",
+  "google-calendar": "Google Calendar",
+  google_calendar: "Google Calendar",
+  "google-workspace": "Google Workspace",
+  google_workspace: "Google Workspace",
+  deepwiki: "DeepWiki",
+  onepassword: "1Password",
+};
+
+/** The service key as a sentence subject (`slack` → `Slack`, `github` →
+ * `GitHub`). An unlisted key falls back the way the connect UI does, so a
+ * dropped-in service still reads like a name and not an identifier. */
 function displayName(service: string): string {
-  return service.charAt(0).toUpperCase() + service.slice(1);
+  const known = SERVICE_DISPLAY_NAMES[service];
+  if (known) return known;
+  return service
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word, i) => (i === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word))
+    .join(" ");
 }
 
 /**
@@ -602,6 +628,10 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   const { engineCredentials, db, plugins } = c.var.providers;
   const user = c.var.user;
   const service = c.req.param("service");
+  // Every refusal below names the service the way the product does. The
+  // route param is an id (`github`), not a name, and reads as neither
+  // when it is dropped into a sentence.
+  const label = displayName(service);
   if (service === ONEPASSWORD_SERVICE) {
     return c.json(
       {
@@ -632,7 +662,6 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   // not change the answer.
   const declared = findCredentialDeclaration(plugins, service);
   if (declared?.requires?.orgCredential) {
-    const label = displayName(service);
     return c.json(
       {
         error:
@@ -649,7 +678,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   const source = await engineCredentials.get({ type: "user", id: user.id }, service);
   if (!source || (!rowHasSecret(source) && !onePasswordMeta(source))) {
     return c.json(
-      { error: `Connect ${service} in Integrations first, then share it with the team.` },
+      { error: `Connect ${label} in Integrations first, then share it with the team.` },
       400,
     );
   }
@@ -661,7 +690,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     return c.json(
       {
         error:
-          `${service} is stored as a personal 1Password reference, which a team cannot read. ` +
+          `${label} is stored as a personal 1Password reference, which a team cannot read. ` +
           "Store it again with tokenScope org, or store the secret directly, then share it.",
       },
       400,
@@ -669,7 +698,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   }
   if (!isCredentialKind(source.type)) {
     return c.json(
-      { error: `${service} cannot be shared with a team. Ask a team admin to connect ${service} for the team instead.` },
+      { error: `${label} cannot be shared with a team. Ask a team admin to connect ${label} for the team instead.` },
       400,
     );
   }
@@ -717,7 +746,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     .returning({ service: credentials.service });
   if (inserted.length === 0) {
     return c.json(
-      { error: `This team already has a ${service} credential. Ask a team admin to disconnect it first.` },
+      { error: `This team already has a ${label} credential. Ask a team admin to disconnect it first.` },
       409,
     );
   }

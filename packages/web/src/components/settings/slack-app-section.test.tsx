@@ -39,6 +39,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
       mutate: deleteAppMutate,
       isPending: false,
       error: deleteAppError,
+      reset: vi.fn(),
     }),
   };
 });

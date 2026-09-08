@@ -24,6 +24,7 @@ vi.mock("~/api/queries", () => ({
     mutate: unlinkMutate,
     isPending: unlinkPending,
     error: unlinkError,
+    reset: vi.fn(),
   }),
 }));
 

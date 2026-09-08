@@ -260,7 +260,7 @@ vi.mock("~/api/integrations", async (importOriginal) => {
   return {
     ...actual,
     useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
-    useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+    useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null , reset: vi.fn() }),
   };
 });
 
