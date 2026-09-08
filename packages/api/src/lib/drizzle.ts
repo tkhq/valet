@@ -561,6 +561,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_reclaimed_at" bigint',
   },
   {
+    // Per-child CPU and memory overrides. Null means the session continues to
+    // use repository or deployment defaults.
+    describe: "agent_sessions.sandbox_resource_overrides column",
+    probe: { kind: "column", table: "agent_sessions", column: "sandbox_resource_overrides" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "sandbox_resource_overrides" jsonb',
+  },
+  {
     // Settled-run sandbox reclaim bookkeeping (workflows/sandbox-reclaim.ts).
     // Null on every run settled before the column existed — exactly the rows
     // the reclaim sweep must pick up.

@@ -129,6 +129,32 @@ describe("pg app schema + migrations", () => {
     expect(row.is_nullable).toBe("NO");
   });
 
+  it("defines agent_sessions.sandbox_resource_overrides as nullable JSONB", async () => {
+    const result = await db.query(
+      "SELECT data_type, is_nullable FROM information_schema.columns WHERE table_name = 'agent_sessions' AND column_name = 'sandbox_resource_overrides'",
+    );
+    expect(result.rows).toEqual([{ data_type: "jsonb", is_nullable: "YES" }]);
+  });
+
+  it("round-trips agent session sandbox resource overrides through Drizzle", async () => {
+    const now = Date.now();
+    await drizzleDb.insert(agentSessions).values({
+      id: "session-resource-overrides",
+      userId: "user-resource-overrides",
+      orgId: "org-resource-overrides",
+      workspace: "/tmp/session-resource-overrides",
+      sandboxResourceOverrides: { cpu: 2, memory: "4Gi" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const rows = await drizzleDb
+      .select({ sandboxResourceOverrides: agentSessions.sandboxResourceOverrides })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, "session-resource-overrides"));
+    expect(rows).toEqual([{ sandboxResourceOverrides: { cpu: 2, memory: "4Gi" } }]);
+  });
+
   it("enforces append-only revisions on security_files (engagement, path, revision) unique", async () => {
     const now = Date.now();
     await db.query(
@@ -885,6 +911,7 @@ describe("pg app schema + migrations", () => {
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
+      { table: "agent_sessions", column: "sandbox_resource_overrides" },
       { table: "mcp_oauth_clients", column: "registered_scopes" },
       { table: "mcp_oauth_clients", column: "scopes_supported" },
       { table: "security_engagements", column: "base_ref" },
