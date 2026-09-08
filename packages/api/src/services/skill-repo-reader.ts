@@ -1,6 +1,7 @@
 /**
- * Reads a GitHub repository for skill sync. Four operations:
+ * Reads GitHub repository metadata and skill files. Five operations:
  *
+ *   0. `repository`    — `GET /repos/{owner}/{repo}`
  *   1. `head`          — `GET /repos/{owner}/{repo}/commits/{ref}`
  *   2. `listTree`      — `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1`
  *   3. `listDirectory` — `GET /repos/{owner}/{repo}/contents/{path}`
@@ -400,6 +401,18 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
       this.headers.authorization = `Bearer ${credential.token}`;
     }
     this.credential = describeCredential(credential);
+  }
+
+  /** Read the canonical repository identity through the existing REST transport. */
+  async repository(repoFullName: string): Promise<{ fullName: string; cloneUrl: string }> {
+    const url = `${this.apiUrl}/repos/${encodePath(repoFullName)}`;
+    const data = await this.getJson(url, repoFullName, repoFullName);
+    if (!isRecord(data) || typeof data.full_name !== "string" ||
+        !/^[^/]+\/[^/]+$/.test(data.full_name) ||
+        typeof data.clone_url !== "string" || !data.clone_url.startsWith("https://")) {
+      throw new SkillRepoReadError(repoFullName, 200, "The repository response has no valid identity. Retry the request.");
+    }
+    return { fullName: data.full_name, cloneUrl: data.clone_url };
   }
 
   async head(repoFullName: string, ref: string): Promise<SkillRepoHead> {

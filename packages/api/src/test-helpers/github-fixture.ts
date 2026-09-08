@@ -139,7 +139,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
     },
   }),
   updateHookConfig: () => ({ body: { content_type: "json", insecure_ssl: "0", secret: "********" } }),
-  getRepo: () => ({ body: { default_branch: "main" } }),
+  getRepo: (owner, repo) => ({ body: { default_branch: "main", full_name: `${owner}/${repo}`, clone_url: `https://github.com/${owner}/${repo}.git` } }),
   getCommit: () => ({ body: commitBody("fixture-head-sha") }),
   getTree: () => ({ body: { sha: "fixture-tree-sha", tree: [], truncated: false } }),
   getContents: () => ({ status: 404, body: { message: "Not Found" } }),

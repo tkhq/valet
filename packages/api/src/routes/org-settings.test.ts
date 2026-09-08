@@ -99,3 +99,30 @@ describe("PATCH /api/org/settings", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("anonymous image bake policy", () => {
+  it("defaults off and lets only an org admin change it", async () => {
+    api = await bootTestApi();
+    const read = await fetch(`${api.baseUrl}/api/org`);
+    expect(await read.json()).toMatchObject({ allowAnonymousImageBakes: false });
+    for (const enabled of [true, false]) {
+      const response = await fetch(`${api.baseUrl}/api/org/settings`, {
+        method: "PATCH", headers: ADMIN_HEADERS,
+        body: JSON.stringify({ allowAnonymousImageBakes: enabled }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ allowAnonymousImageBakes: enabled });
+    }
+    const denied = await fetch(`${api.baseUrl}/api/org/settings`, {
+      method: "PATCH", headers: MEMBER_HEADERS,
+      body: JSON.stringify({ allowAnonymousImageBakes: true }),
+    });
+    expect(denied.status).toBe(403);
+    const invalid = await fetch(`${api.baseUrl}/api/org/settings`, {
+      method: "PATCH", headers: ADMIN_HEADERS,
+      body: JSON.stringify({ allowAnonymousImageBakes: "yes" }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.text()).toContain("Send true or false");
+  });
+});

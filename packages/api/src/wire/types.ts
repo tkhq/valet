@@ -3192,12 +3192,15 @@ export type PatchMeResponse = MeResponse;
 export interface OrgSettingsResponse {
   bareSkillCommands: boolean;
   allowPublicArtifacts: boolean;
+  /** Absent on older APIs. Defaults to false. */
+  allowAnonymousImageBakes?: boolean;
 }
 
 /** Org-level settings request for `PATCH /api/org/settings`. */
 export interface PatchOrgSettingsRequest {
   bareSkillCommands?: boolean;
   allowPublicArtifacts?: boolean;
+  allowAnonymousImageBakes?: boolean;
 }
 
 // ─── Artifacts (2026-08-22 artifacts design; 2026-09-02 artifact-pages) ──
@@ -3612,6 +3615,8 @@ export interface OrgResponse {
    * readable by every member (the share UI needs it to know whether to
    * offer the `public` option), writable only via `PATCH /api/org/settings`. */
   allowPublicArtifacts: boolean;
+  /** Absent on older APIs. Defaults to false. */
+  allowAnonymousImageBakes?: boolean;
   /**
    * The gateable plugins on this deployment, with this org's entitlement and
    * this caller's effective access (plugin-entitlements design). A plugin's

@@ -617,6 +617,16 @@ describe("POST /api/org/sources/:id/bake", () => {
     expect(res.status).toBe(404);
   });
 
+  it("403s a manual anonymous bake when the org policy is off", async () => {
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
+    const source = await seedRepoSource(api);
+    const response = await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bake`, {
+      method: "POST", headers: HEADERS,
+    });
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("enable anonymous image bakes");
+  });
+
   it("409s when no builder is wired (PrebuildUnavailableError)", async () => {
     api = await bootTestApi();
     const source = await seedRepoSource(api);

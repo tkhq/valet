@@ -280,7 +280,6 @@ describe("SourceService", () => {
     lockfilePresent = false;
     prebuildYaml = null;
     fixture = startGithubFixture({
-      getRepo: () => ({ body: { default_branch: "main" } }),
       getCommit: () => ({ body: { sha: currentSha } }),
       getContents: (_owner, _repo, path) => contentsFor(path),
     });
@@ -836,6 +835,18 @@ describe("SourceService", () => {
   describe("ensureRepoSource", () => {
     const repo = { host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" };
 
+    it.each(([404, 403, 429, 503] as const).flatMap((status) => [
+      { status, authenticated: true }, { status, authenticated: false },
+    ]))("does not insert after HTTP $status, authenticated=$authenticated", async ({ status, authenticated }) => {
+      if (!authenticated) await credentials.delete({ type: "org", id: orgId }, "github");
+      await fixture.close();
+      fixture = startGithubFixture({ getRepo: () => ({ status, body: { message: "Not Found" } }) });
+      service = makeService();
+      await service.ensureRepoSource(orgId, repo);
+      expect(await db.select().from(imageSources)).toHaveLength(0);
+      expect(builder.specs).toHaveLength(0);
+    });
+
     it("happy path: upserts the source and queues the first bake", async () => {
       await service.ensureRepoSource(orgId, repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, orgId));
@@ -884,13 +895,51 @@ describe("SourceService", () => {
       expect(repoSpecs[0].baseImage).toBe(baseBake?.imageRef);
     });
 
-    it("no org GitHub credential → source still upserted, no bake fired", async () => {
+    it("blocks anonymous source creation and existing-source bakes by default", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      await service.ensureRepoSource(orgId, repo);
+      expect(await db.select().from(imageSources)).toHaveLength(0);
+      const id = await seedRepoSource(db);
+      await expect(service.startBake(id)).rejects.toThrow("enable anonymous image bakes");
+      await service.runSchedulerPass();
+      expect(builder.specs).toHaveLength(0);
+      expect(await db.select().from(bakes)).toHaveLength(0);
+    });
+
+    it("turning the policy off preserves a pushed bake and blocks the next bake", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      await db.update(orgs).set({ allowAnonymousImageBakes: true }).where(eq(orgs.id, orgId));
+      await service.ensureRepoSource(orgId, repo);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+      const [source] = await db.select().from(imageSources);
+      await db.update(orgs).set({ allowAnonymousImageBakes: false }).where(eq(orgs.id, orgId));
+      await expect(service.startBake(source.id)).rejects.toThrow("enable anonymous image bakes");
+      await service.runSchedulerPass();
+      expect(builder.specs).toHaveLength(1);
+      expect(await service.currentBake(source.id)).toMatchObject({ status: "pushed" });
+    });
+
+    it("blocks anonymous repo children when a base bake pushes", async () => {
+      await credentials.delete({ type: "org", id: orgId }, "github");
+      const baseId = await seedBaseSource(db, []);
+      await seedRepoSource(db, { parentId: baseId });
+      await service.startBake(baseId);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+      expect(builder.specs.map((spec) => spec.kind)).toEqual(["base"]);
+    });
+
+    it("bakes a public repository without an org GitHub credential", async () => {
       // A different org with no credential seeded.
-      await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW });
+      await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW, allowAnonymousImageBakes: true });
       await service.ensureRepoSource("org-nocred", repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, "org-nocred"));
       expect(sources).toHaveLength(1);
-      expect(builder.specs).toHaveLength(0);
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0].gitToken).toBeUndefined();
+      expect(builder.specs[0].commitSha).toBeTruthy();
+      expect(fixture.calls.every((call) => !call.authHeader)).toBe(true);
     });
 
     it("no builder → source still upserted, no bake fired", async () => {
@@ -1472,8 +1521,7 @@ describe("SourceService", () => {
     ): Promise<void> {
       await fixture.close();
       fixture = startGithubFixture({
-        getRepo: () => ({ body: { default_branch: "main" } }),
-        getContents,
+          getContents,
       });
     }
 

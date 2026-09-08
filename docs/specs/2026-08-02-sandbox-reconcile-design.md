@@ -72,7 +72,7 @@ One sentence: **a sandbox is a cache materialization of a pure spec over a durab
 
 12. **Org base source.** At most one `base` source per org; org-admin edits its setup command list in settings. Identity = parent identity + commands hash — the nightly job therefore skips unless the commands or the stock image changed. Unbound sessions (orchestrators, ad-hoc chat) resolve to the base source's current bake; this is the durable home for "the sandbox never has python3/jq/cc."
 
-13. **Zero-config repo sources, with decay.** Binding a repo to a session auto-creates its `repo` source (enabled, nightly, parent = org base source if one exists, else stock) and kicks the first bake in the background — gated on: an org-scoped GitHub credential resolvable (installation/PAT; user-only cannot build, existing invariant) AND an `ImageBuilder` configured. Session create never waits on a bake. The nightly job skips (auto-disables) a source only when NO live session has its repo bound AND no new bind happened in 30 days — binding is an event, use is ongoing, and a repo an orchestrator bound months ago but still works in daily must keep baking. The next bind re-enables. A repo touched once does not cost a BuildKit job every night forever.
+13. **Zero-config repo sources, with decay.** Before REST session creation, Valet checks each GitHub repository with the binding's auth mode and the requesting user's credential context. The check uses the existing credential resolver and prefers the clone credential. If cloning has no credential, the check tries API credential resolution. Explicit auth choices still apply. The full check has a five-second deadline, including credential lookup. An authenticated repository metadata 404 rejects the entire request before Valet writes a session or binding. The error tells the user to check the organization name or connect a GitHub account with access in Settings. A successful check supplies the canonical `full_name` and `clone_url`. Without credentials, Valet checks public access anonymously. Anonymous success permits a source and bake without a token only when the org enables anonymous image bakes. An anonymous 404 cannot distinguish private repositories from missing repositories. If an anonymous check fails, Valet logs the result and permits the binding. Other check failures also permit the binding. This fallback does not request automatic source creation. `ensureRepoSource` also checks repository access with org credentials or anonymously before it inserts or updates a source. A 404 or any other failed check skips that write. A verified repository gets an enabled nightly source, parented to the org base source when available. The first bake runs in the background when an `ImageBuilder` is available. Private repository bakes use org credentials; public repository bakes can use no token. Session creation never waits on a bake. The nightly job disables a source only if no live session binds it and no new binding occurred in 30 days. A later verified binding enables the source again.
 
 14. **The nightly job walks sources parent-first in one pass.** A base bake and its dependent repo rebakes land the same night, not across two.
 
@@ -123,7 +123,7 @@ On the local k8s deploy: edit a shim script, deploy — next prompt on a running
 - **Engine unit:** reconcile diff matrix (image / subset-of-steps / empty-applied / corrupt-applied); mid-run acquisitions never converge anything; single-flight under concurrent run starts across threads; busy signals (runs + jobs) block the window; backoff memo; critical vs non-critical step failure; epoch semantics preserved; observation throttle honored.
 - **Conformance:** replace-preserves-workspace and `updateCreds` visibility added to the provider suites (docker bind-mount instant; cluster-gated PVC survival + Secret propagation ≤ ~90 s).
 - **Integration:** newer bake → lazy replacement on next prompt; wake-when-stale skips resume; api-restart amnesia (observed image + steps restored from applied.json — `restore()` reports no image; backoff memo cleared → exactly one retry); shim reads file-first/env-fallback.
-- **Generation:** source chain resolution, identity hashing, parent-first ordering, bake-or-skip matrix, zero-config gating (no creds → no source; no builder → no source), 30-day decay + re-enable, retention ported.
+- **Generation:** source chain resolution, identity hashing, parent-first ordering, bake-or-skip matrix, zero-config gating (unverified repo → no source; no builder → verified source without a bake), 30-day decay + re-enable, retention ported.
 
 ## Out of scope (named, deliberate)
 
@@ -181,3 +181,16 @@ including after a crash that removed the old pod. Fresh pods still run full prep
 **Retention runs on failed pushes too, and the chart caps the cache budget** (added 2026-08-19). Retention and the org cache ceiling ran only on the `pushed` transition. A registry disk at ENOSPC fails every push, so retention never ran again and a full registry could not drain itself — this deadlocked agents-dev (10Gi volume, every bake failing). Two changes: (a) `syncActiveBuilds` now runs `applyRetention` + `enforceCacheCeiling` on the `failed` transition as well; (b) the chart sets `VALET_PREBUILD_CACHE_BUDGET_GB` from `registry.cacheBudgetGb` (default 6) — the api default (20 GB) exceeded the bundled registry volume (10Gi), so the eviction ceiling could never fire before the disk filled. The budget is per org. `values.yaml` documents how to grow a live cluster's registry volume around the StatefulSet volumeClaimTemplate immutability.
 
 **Deferred items still open.** Cascade + scheduler double-dispatch guard landed (I3). The `packages/web` package is not yet in the root `tsc --build` graph (CI follow-up tracked separately). The manual-rebuild path uses the stock ref as FROM when no base bake exists — documented escape hatch, not a spec violation.
+
+## Anonymous image bake policy
+
+`orgs.allow_anonymous_image_bakes` defaults to false, including on deployed databases after schema repair.
+Only an org admin can change `allowAnonymousImageBakes` through `PATCH /api/org/settings`.
+Settings > Organization > Sandbox images shows the toggle. Members cannot change it.
+
+When disabled, Valet creates no anonymous repository source and dispatches no repository bake without an org Git credential.
+This rule applies to first bakes, manual rebuilds, nightly jobs, and parent-push cascades.
+The service checks the current setting before recipe work and again before it records a new bake.
+Org-authenticated bakes still work. Session binding checks can still read public metadata anonymously.
+Disabling the setting preserves existing sources, images, and session bindings. It does not cancel running builds.
+Enabling the setting permits new anonymous bakes. A new binding can create a missing source.
