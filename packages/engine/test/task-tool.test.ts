@@ -20,6 +20,7 @@ import type {
   SpawnChildRequest,
   SpawnChildResult,
   ToolContext,
+  ToolResult,
 } from "../src/types.js";
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
@@ -51,10 +52,34 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   };
 }
 
+/** Exercise execute's runtime boundary with both schema-valid and malformed input. */
+function executeTask(args: unknown, ctx: ToolContext): Promise<ToolResult> {
+  return Reflect.apply(taskTool.execute, undefined, [args, ctx]);
+}
+
 describe("task tool: params schema", () => {
   it("rejects an empty prompt", () => {
     const result = taskTool.parameters.properties.prompt.minLength;
     expect(result).toBe(1);
+  });
+
+  it("exposes optional nested CPU and memory resource fields", () => {
+    expect(taskTool.parameters).toMatchObject({
+      properties: {
+        resources: {
+          properties: {
+            cpu: { type: "number" },
+            memory: { type: "string" },
+          },
+        },
+      },
+    });
+  });
+
+  it("describes resource overrides as a capacity-retry option", () => {
+    expect(taskTool.description).toContain("retry capacity-blocked children");
+    expect(taskTool.description).toContain("lower CPU or memory");
+    expect(taskTool.description).toContain("Omitted fields inherit defaults");
   });
 });
 
@@ -116,6 +141,56 @@ describe("task tool: spawner present", () => {
     );
     expect(result.text).toContain("child.settled");
   });
+
+  it("forwards valid child sandbox resource overrides", async () => {
+    let seenReq: SpawnChildRequest | undefined;
+    const spawner = vi.fn(async (req: SpawnChildRequest) => {
+      seenReq = req;
+      return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
+    });
+    const ctx = makeCtx({ config: { childSpawner: spawner } });
+
+    await executeTask(
+      { prompt: "build the widget", resources: { cpu: 2, memory: " 4Gi " } },
+      ctx,
+    );
+
+    expect(seenReq?.resources).toEqual({ cpu: 2, memory: "4Gi" });
+  });
+
+  it.each([0, 65])("rejects invalid CPU %s without calling the spawner", async (cpu) => {
+    const spawner = vi.fn(async () => {
+      return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
+    });
+    const ctx = makeCtx({ config: { childSpawner: spawner } });
+
+    const result = await executeTask({ prompt: "build the widget", resources: { cpu } }, ctx);
+
+    expect(result.text).toBe(
+      "[task_resources] Set task.resources.cpu to a number greater than 0 and at most 64.",
+    );
+    expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it.each(["0", "-1Gi", "8GB", 4096])(
+    "rejects invalid memory %j without calling the spawner",
+    async (memory) => {
+      const spawner = vi.fn(async () => {
+        return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
+      });
+      const ctx = makeCtx({ config: { childSpawner: spawner } });
+
+      const result = await executeTask(
+        { prompt: "build the widget", resources: { memory } },
+        ctx,
+      );
+
+      expect(result.text).toBe(
+        '[task_resources] Set task.resources.memory to a positive Kubernetes quantity such as "4Gi".',
+      );
+      expect(spawner).not.toHaveBeenCalled();
+    },
+  );
 
   it("propagates spawner rejection (e.g. child cap) as a thrown error", async () => {
     const spawner = vi.fn(async () => {

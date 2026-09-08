@@ -2459,6 +2459,8 @@ export interface SpawnChildRequest {
   repo?: string;
   branch?: string;
   model?: string;
+  /** CPU and memory overrides for the child's sandbox. Omitted fields use host defaults. */
+  resources?: Pick<SandboxResources, "cpu" | "memory">;
   /** Interactive-service profile for the child's sandbox (default "headless"). */
   profile?: "headless" | "full";
   /** Request a rootless docker daemon inside the child's sandbox
