@@ -219,15 +219,23 @@ export function AutomationWizard({
   // A manual target choice wins: once the reader picks a target, a later
   // workspace switch must not overwrite it. The default target seeds from the
   // active workspace, so it must follow a workspace change until then (see
-  // CLAUDE.md "Mount-time state from props").
+  // CLAUDE.md "Mount-time state from props"). One exception: a picked team
+  // target whose team is no longer the active workspace is stale. The Then
+  // step would show no team radio while the create still posts that team, so
+  // the target drops back to the workspace seed and follows it again.
   const userTouched = useRef(false);
   function chooseTarget(next: TargetChoice) {
     userTouched.current = true;
     setTarget(next);
   }
   useEffect(() => {
-    if (userTouched.current) return;
-    setTarget(initialTarget(scopedTeamId));
+    setTarget((held) => {
+      const stale =
+        held.kind === "orchestrator" && held.orchestrator === "team" && held.teamId !== scopedTeamId;
+      if (userTouched.current && !stale) return held;
+      userTouched.current = false;
+      return initialTarget(scopedTeamId);
+    });
   }, [scopedTeamId]);
 
   const workflows = workflowsQ.data?.workflows ?? [];
@@ -298,6 +306,16 @@ export function AutomationWizard({
     return t.kind === "orchestrator" ? t : { kind: "orchestrator", orchestrator: "user" };
   }
 
+  // A mention rule cannot target a team until the membership gate ships
+  // (docs/specs/2026-09-04-team-slack-mention-subscriptions-design.md,
+  // decision 7). The workspace seed and the Then step can still hold a team
+  // target, so the reply step, its review line and the create all read this
+  // narrowed value: the team falls back to the caller's own assistant.
+  function mentionTargetFrom(t: TargetChoice): OrchestratorChoice {
+    const chosen = orchestratorTargetFrom(t);
+    return chosen.orchestrator === "team" ? { kind: "orchestrator", orchestrator: "user" } : chosen;
+  }
+
   function submit(allowCollision = false) {
     if (!canCreate) return;
     setError(null);
@@ -345,7 +363,7 @@ export function AutomationWizard({
           name: name.trim(),
           eventKeys: [SLACK_APP_MENTION],
           filters: channelFilters,
-          target: { ...orchestratorTargetFrom(target), follow },
+          target: { ...mentionTargetFrom(target), follow },
           ...(anyChannel ? { anyChannel: true } : {}),
           ...(allowCollision ? { allowCollision: true } : {}),
         },
@@ -451,7 +469,7 @@ export function AutomationWizard({
               onChannelsChange={setReplyChannels}
               anyChannel={anyChannel}
               onAnyChannelChange={setAnyChannel}
-              target={orchestratorTargetFrom(target)}
+              target={mentionTargetFrom(target)}
               onTargetChange={chooseTarget}
               scopedTeam={scopedTeam}
               follow={follow}
@@ -510,7 +528,7 @@ export function AutomationWizard({
                 anyChannel,
                 cron,
                 timezone,
-                target,
+                target: outcome === "reply" ? mentionTargetFrom(target) : target,
                 follow,
                 workflows,
                 teams,
@@ -583,7 +601,7 @@ const OUTCOMES: { value: Outcome; title: string; hint: string }[] = [
   {
     value: "reply",
     title: "Reply to Slack mentions",
-    hint: "An assistant answers when someone @-mentions the app in Slack.",
+    hint: "An assistant answers when you @-mention the app in Slack.",
   },
   {
     value: "workflow",
@@ -636,6 +654,10 @@ function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Ou
  * toggle. No raw event key is shown — the event is always
  * `slack.app_mention`. The server also scopes the rule to the creator's
  * linked Slack user, so the step says so and warns when no link exists.
+ *
+ * The team's assistant is listed but disabled: a team-owned mention rule
+ * still fires only for its creator, so offering it would promise a team-wide
+ * rule the gate does not deliver yet (spec 2026-09-04, decision 7).
  */
 function ReplyStep({
   channels,
@@ -663,11 +685,12 @@ function ReplyStep({
   const linksQ = useIdentityLinks();
   const slackLink = linksQ.data?.links.find((l) => l.provider === "slack");
   const slackUnlinked = slackLink !== undefined && !slackLink.linked;
+  const reach = target.orchestrator === "org" ? "the org assistant" : "your assistant";
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted">
         This rule fires only when <span className="text-ink">you</span> @-mention the app.
-        Mentions by other people do not reach your assistant.
+        Mentions by other people do not reach {reach}.
       </p>
       {slackUnlinked && (
         <p className="text-xs text-danger-500">
@@ -722,31 +745,16 @@ function ReplyStep({
             />
           )}
           {scopedTeam && (
-            <label className="flex items-center gap-2 text-sm text-ink">
-              <input
-                type="radio"
-                name="automation-reply-target"
-                checked={target.orchestrator === "team"}
-                onChange={() =>
-                  onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })
-                }
-              />
-              {scopedTeam.name}&apos;s assistant
-            </label>
-          )}
-          {scopedTeam && target.orchestrator === "team" && (
-            <AssistantSelect
-              owner={{ type: "team", id: scopedTeam.id }}
-              value={target.assistantId}
-              onChange={(assistantId) =>
-                onTargetChange({
-                  kind: "orchestrator",
-                  orchestrator: "team",
-                  teamId: scopedTeam.id,
-                  assistantId,
-                })
-              }
-            />
+            <div>
+              <label className="flex items-center gap-2 text-sm text-muted">
+                <input type="radio" name="automation-reply-target" disabled />
+                {scopedTeam.name}&apos;s assistant
+              </label>
+              <p className="ml-6 text-xs text-muted">
+                Team-wide mentions are not available yet. This rule would only answer your own
+                mentions.
+              </p>
+            </div>
           )}
           <label className="flex items-center gap-2 text-sm text-ink">
             <input

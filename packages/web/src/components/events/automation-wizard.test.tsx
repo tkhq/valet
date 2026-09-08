@@ -137,17 +137,23 @@ describe("AutomationWizard", () => {
   }
 
   it("reply outcome posts slack.app_mention with the picked channel and follow ON", () => {
-    // A team workspace, so the team-assistant option appears.
+    // A team workspace. The team target is listed but not offered until the
+    // membership gate ships (spec 2026-09-04), so the rule posts the
+    // caller's own assistant.
     scopeTeamId = "t_platform";
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
     // Step 1 — What: reply is the default. Next.
     clickNext();
 
-    // Step 2 — Reply: channels are required now, so add one, then pick the
-    // team's assistant and leave follow ON (default).
+    // Step 2 — Reply: channels are required now, so add one, and leave
+    // follow ON (default). The team radio is disabled; a click cannot pick it.
+    expect(screen.getByText(/do not reach your assistant/)).toBeTruthy();
     addReplyChannel("C123");
-    fireEvent.click(screen.getByLabelText(/Platform's assistant/));
+    const teamRadio = screen.getByLabelText(/Platform's assistant/) as HTMLInputElement;
+    expect(teamRadio.disabled).toBe(true);
+    fireEvent.click(teamRadio);
+    expect((screen.getByLabelText(/^Your assistant/) as HTMLInputElement).checked).toBe(true);
     // Follow is a checkbox, default checked.
     const follow = screen.getByRole("checkbox", { name: /Keep following the thread/ });
     expect((follow as HTMLInputElement).checked).toBe(true);
@@ -164,12 +170,36 @@ describe("AutomationWizard", () => {
     expect(body.eventKeys).toEqual(["slack.app_mention"]);
     expect(body.filters).toEqual([{ field: "channel", op: "eq", value: "C123", label: "C123" }]);
     expect(body.anyChannel).toBeUndefined();
-    expect(body.target).toEqual({
-      kind: "orchestrator",
-      orchestrator: "team",
-      teamId: "t_platform",
-      follow: true,
-    });
+    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: true });
+  });
+
+  it("reply step shows the team target disabled with the interim copy", () => {
+    scopeTeamId = "t_platform";
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    expect(screen.getByText(/when you @-mention the app in Slack/)).toBeTruthy();
+    clickNext();
+    expect(screen.getByText(/This rule fires only when/)).toBeTruthy();
+    expect(screen.getByText(/do not reach your assistant/)).toBeTruthy();
+    expect((screen.getByLabelText(/Platform's assistant/) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText(/Team-wide mentions are not available yet/)).toBeTruthy();
+    // The review line follows the same narrowing: the caller's assistant, not the team's.
+    addReplyChannel("C123");
+    clickNext();
+    expect(screen.getByText(/notify your assistant/)).toBeTruthy();
+  });
+
+  it("reply step keeps the org assistant reachable in a team workspace", () => {
+    scopeTeamId = "t_platform";
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    clickNext();
+    addReplyChannel("C123");
+    fireEvent.click(screen.getByLabelText(/The org assistant/));
+    expect(screen.getByText(/do not reach the org assistant/)).toBeTruthy();
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Org replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "org", follow: true });
   });
 
   it("reply outcome posts several channels as one in filter", () => {
@@ -218,6 +248,34 @@ describe("AutomationWizard", () => {
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("drops a picked team target when the workspace switches back to personal", () => {
+    scopeTeamId = "t_platform";
+    const view = render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Send a notification/);
+    clickNext(); // What
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext(); // Match
+
+    // The reader moves off the seeded team target and then picks it by hand
+    // (a pick, not the seed, is what a workspace switch must not keep), then
+    // leaves the team workspace.
+    fireEvent.click(screen.getByLabelText(/Notify your assistant/));
+    fireEvent.click(screen.getByLabelText(/Notify Platform's assistant/));
+    scopeTeamId = undefined;
+    view.rerender(<AutomationWizard open onOpenChange={() => {}} />);
+
+    // The team option is gone, and the held target followed the workspace.
+    expect(screen.queryByLabelText(/Notify Platform's assistant/)).toBeNull();
+    expect((screen.getByLabelText(/Notify your assistant/) as HTMLInputElement).checked).toBe(true);
+    clickNext(); // Then
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "PR ping" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false });
   });
 
   it("workflow outcome posts a subscription with a workflow target", () => {

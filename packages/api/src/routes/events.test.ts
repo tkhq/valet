@@ -1550,6 +1550,28 @@ describe("mention scoping (slack.app_mention)", () => {
     target: { kind: "orchestrator" },
   };
 
+  it("a team-owned mention subscription still injects the creator user filter", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.ownerType).toBe("team");
+    expect(body.ownerId).toBe("team_1");
+    expect(body.filters).toEqual([
+      { field: "channel", op: "eq", value: "C123", label: "#eng" },
+      { field: "user", op: "eq", value: "U_LOCAL" },
+    ]);
+    const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, body.id));
+    expect(rows[0].filters).toEqual(body.filters);
+  });
+
   it("injects the creator's linked Slack user filter on create", async () => {
     const a = await bootSlack();
     await linkSlack(a, "local-user", "U_LOCAL");
