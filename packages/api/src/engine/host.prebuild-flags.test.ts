@@ -517,6 +517,84 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(contentsCall?.authHeader).toBe("Bearer inst-222");
   });
 
+  it("a CHILD of a team session stamped actor reads the repo's flags with the acting member's token", async () => {
+    // The parent's stamp has to reach the child's FIRST build. The child's
+    // tool-time resolver already honours it; the repo prebuild-flag read runs
+    // off `SessionMeta`, so a meta that drops the mode resolves the read as
+    // the team and — with no App installed — degrades to a tokenless read that
+    // 404s on a private repo. The child then provisions without the repo's
+    // declared docker, while its parent, same repo, got it.
+    fixture = startGithubFixture({
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/prebuild.yaml"
+          ? contentsBody("docker: true\n", "blob-child-actor")
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const { engineHost, db, engineCredentials } = api.providers;
+    // No App at all: only the acting member's own token can back the read.
+    await engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2",
+      accessToken: "member-tok",
+      metadata: { login: "octocat" },
+    });
+
+    const childId = "child-team-actor-prebuild-flags";
+    await db.insert(sessionRepos).values({
+      sessionId: childId,
+      host: "github",
+      fullName: "acme/private-widgets",
+      cloneUrl: "https://github.com/acme/private-widgets.git",
+      ref: null,
+      auth: "auto",
+      position: 0,
+      targetDir: "private-widgets",
+    });
+
+    const parent = await engineHost.sessionFor("parent-team-actor-prebuild-flags", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/parent-team-actor-prebuild-flags",
+      ownerType: "team",
+      ownerTeamId: "team_actor_child",
+      credentialOwnerMode: "actor",
+    });
+    const parentThread = parent.thread("web:default");
+    clearRepoPrebuildFlagsCache();
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const child = await engineHost.childSessionFor(childId, {
+        parentSessionId: "parent-team-actor-prebuild-flags",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "team", id: "team_actor_child" },
+        workspace: `/tmp/${childId}`,
+        credentialOwnerMode: "actor",
+      });
+      await child.attachment.ensureReady({ timeoutMs: 5_000 });
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    // The child's repo read runs as the acting member, exactly like its parent.
+    // With no App installed, an owner-mode read carries no Authorization header
+    // at all and would 404 on a private repo.
+    const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
+    expect(contentsCall?.authHeader).toBe("Bearer member-tok");
+    // The declared flag still reaches the child's sandbox.
+    expect(recorder.createCalls.find((c) => c.sessionId === childId)?.docker).toBe(true);
+  });
+
   it("a team session stamped actor reads the repo's flags with the acting member's token; owner mode does not", async () => {
     fixture = startGithubFixture({
       getContents: (_owner, _repo, path) =>

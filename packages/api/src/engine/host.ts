@@ -3450,6 +3450,13 @@ export class EngineHost {
     // `ownerTeamId` only from the pair, and `sessionPrincipal` rejects a
     // team meta without it, so a team child with a repo binding silently
     // resolved default prebuild flags.
+    // `credentialOwnerMode` MUST reach the meta for the same reason: the
+    // tool-time resolver above takes it from `opts`, but the repo
+    // prebuild-flag read below runs off this meta through
+    // `credentialReadPrincipal`. Dropped, a child of a legacy `actor` team
+    // parent reads as the TEAM, finds no App, degrades to a tokenless read
+    // and 404s on a private repo — so it provisions without the docker flag
+    // and workspace claim its parent honoured, on the same repo.
     const meta = this.opts.db
       ? await loadSessionMeta(this.opts.db, {
           id: childSessionId,
@@ -3461,6 +3468,9 @@ export class EngineHost {
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
           ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
+          ...(opts.credentialOwnerMode !== undefined
+            ? { credentialOwnerMode: opts.credentialOwnerMode }
+            : {}),
         })
       : {
           userId: opts.actorUserId,
@@ -3469,6 +3479,9 @@ export class EngineHost {
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
           ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
+          ...(opts.credentialOwnerMode !== undefined
+            ? { credentialOwnerMode: opts.credentialOwnerMode }
+            : {}),
         };
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`
     // (TKAI-385): the same read `buildSession` does, so a child bound to a
