@@ -548,12 +548,13 @@ describe("POST /api/sessions: repository existence", () => {
     expect(log).toHaveBeenCalled();
   });
 
-  it("allows a binding without a credential and does not query GitHub or fire a source", async () => {
+  it("allows an anonymous 404 without firing a source", async () => {
     const { response, ensure, db } = await create(404, false);
     expect(response.status).toBe(201);
     expect(await db.select().from(sessionRepos)).toMatchObject([repo]);
     expect(ensure).not.toHaveBeenCalled();
-    expect(fixture?.calls.filter((call) => call.path.startsWith("/repos/"))).toHaveLength(0);
+    expect(fixture?.calls.filter((call) => call.path.startsWith("/repos/"))).toHaveLength(1);
+    expect(fixture?.calls[0].authHeader).toBeUndefined();
   });
 });
 
@@ -572,7 +573,9 @@ describe("POST /api/sessions: zero-config repo sources", () => {
   });
 
   it("session create returns 201 immediately — ensureRepoSource is fire-and-forget", async () => {
-    api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
+    fixture = startGithubFixture({ getRepo: () => ({ status: 404, body: {} }) });
+    vi.stubEnv("GITHUB_API_URL", fixture.url);
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder(), githubApiUrl: fixture.url });
     const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-fast-"));
 
     const t0 = Date.now();
@@ -587,7 +590,7 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     expect(elapsed).toBeLessThan(1_500);
   });
 
-  it("with builder + org GitHub credential: upserts enabled repo source and queues a first bake", async () => {
+  it.each([true, false])("with builder and org credential=%s: queues a first bake", async (hasCredential) => {
     const builder = new FakeImageBuilder();
     // Wire a GitHub fixture so resolveHeadSha (inside startRepoBake) succeeds
     // without hitting the real GitHub API.
@@ -597,12 +600,11 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-bake-"));
     const { db, engineCredentials } = api.providers;
 
-    // Seed an org-scoped GitHub credential so ensureRepoSource can fire the bake.
-    await engineCredentials.save({ type: "org", id: "local-org" }, "github", {
-      type: "api_key",
-      accessToken: "test-pat",
-      metadata: { login: "test-bot" },
-    });
+    if (hasCredential) {
+      await engineCredentials.save({ type: "org", id: "local-org" }, "github", {
+        type: "api_key", accessToken: "test-pat", metadata: { login: "test-bot" },
+      });
+    }
 
     const res = await fetch(`${api.baseUrl}/api/sessions`, {
       method: "POST",
@@ -649,10 +651,16 @@ describe("POST /api/sessions: zero-config repo sources", () => {
       .from(bakes)
       .where(eq(bakes.sourceId, sourceId));
     expect(bakeRows.every((b) => b.status === "queued" || b.status === "building")).toBe(true);
+    if (!hasCredential) {
+      expect(builder.specs[0].gitToken).toBeUndefined();
+      expect(fixture.calls.every((call) => !call.authHeader)).toBe(true);
+    }
   });
 
-  it("without org GitHub credential: binding succeeds without a source or bake", async () => {
-    api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
+  it("anonymous 404: binding succeeds without a source or bake", async () => {
+    fixture = startGithubFixture({ getRepo: () => ({ status: 404, body: {} }) });
+    vi.stubEnv("GITHUB_API_URL", fixture.url);
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder(), githubApiUrl: fixture.url });
     const ensure = vi.spyOn(api.providers.prebuildService, "ensureRepoSource");
     const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-nocred-"));
     const res = await fetch(`${api.baseUrl}/api/sessions`, {

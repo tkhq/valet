@@ -76,6 +76,17 @@ describe("checkRepoExistence", () => {
     expect(new Headers(fetchImpl.mock.calls[0][1]?.headers).get("authorization")).toBe("Bearer org-token");
   });
 
+  it.each([200, 404, 503])("checks public access without credentials: %s", async (status) => {
+    await deps.credentials.delete({ type: "org", id: "org" }, "github");
+    await deps.credentials.delete({ type: "user", id: "user" }, "github");
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(metadata, { status }));
+    expect(await checkRepoExistence({ ...deps, fetchImpl }, request)).toEqual(status === 200
+      ? { kind: "found", fullName: metadata.full_name, cloneUrl: metadata.clone_url }
+      : { kind: "unverified" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(new Headers(fetchImpl.mock.calls[0][1]?.headers).has("authorization")).toBe(false);
+  });
+
   it("allows a missing explicit app credential without switching to a user credential", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     expect(await checkRepoExistence({ ...deps, fetchImpl }, { ...request, auth: "app" })).toEqual({ kind: "unverified" });
@@ -84,9 +95,9 @@ describe("checkRepoExistence", () => {
 
   it("treats a credential lookup failure as unverified", async () => {
     vi.spyOn(deps.credentials, "get").mockRejectedValue(new Error("credential read failed"));
-    const fetchImpl = vi.fn<typeof fetch>();
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 404 }));
     expect(await checkRepoExistence({ ...deps, fetchImpl }, request)).toEqual({ kind: "unverified" });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it.each(["TimeoutError", "AbortError", "TypeError"])("allows a request failure: %s", async (name) => {

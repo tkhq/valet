@@ -835,7 +835,10 @@ describe("SourceService", () => {
   describe("ensureRepoSource", () => {
     const repo = { host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" };
 
-    it.each([404, 403, 429, 503] as const)("does not insert a source after HTTP %s", async (status) => {
+    it.each(([404, 403, 429, 503] as const).flatMap((status) => [
+      { status, authenticated: true }, { status, authenticated: false },
+    ]))("does not insert after HTTP $status, authenticated=$authenticated", async ({ status, authenticated }) => {
+      if (!authenticated) await credentials.delete({ type: "org", id: orgId }, "github");
       await fixture.close();
       fixture = startGithubFixture({ getRepo: () => ({ status, body: { message: "Not Found" } }) });
       service = makeService();
@@ -892,13 +895,16 @@ describe("SourceService", () => {
       expect(repoSpecs[0].baseImage).toBe(baseBake?.imageRef);
     });
 
-    it("no org GitHub credential → no source or bake", async () => {
+    it("bakes a public repository without an org GitHub credential", async () => {
       // A different org with no credential seeded.
       await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW });
       await service.ensureRepoSource("org-nocred", repo);
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, "org-nocred"));
-      expect(sources).toHaveLength(0);
-      expect(builder.specs).toHaveLength(0);
+      expect(sources).toHaveLength(1);
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0].gitToken).toBeUndefined();
+      expect(builder.specs[0].commitSha).toBeTruthy();
+      expect(fixture.calls.every((call) => !call.authHeader)).toBe(true);
     });
 
     it("no builder → source still upserted, no bake fired", async () => {

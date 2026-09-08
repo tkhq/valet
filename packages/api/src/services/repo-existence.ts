@@ -52,22 +52,24 @@ async function verifyRepoExistence(
       credential = await resolveGitHubToken(deps, { ...tokenRequest, purpose: "api" });
     }
   } catch {
-    return unverified("credential unavailable");
+    if (request.auth && request.auth !== "auto") return unverified("credential unavailable");
+    credential = { token: null, source: "none" };
   }
   // Token refresh can be shared with other callers. Let it finish after our deadline.
   if (signal.aborted) return { kind: "unverified" };
-  if (!credential.token) return unverified("no credential");
 
   const reader = new GitHubSkillRepoReader({
     apiUrl: deps.apiUrl, fetchImpl: deps.fetchImpl, timeoutMs: 5_000,
-    credential: credential.source === "installation"
-      ? { kind: "installation", token: credential.token }
-      : { kind: "user", token: credential.token, ownerScope: "user" },
+    credential: !credential.token ? { kind: "none" }
+      : credential.source === "installation"
+        ? { kind: "installation", token: credential.token }
+        : { kind: "user", token: credential.token, ownerScope: "user" },
   });
   try {
     return { kind: "found", ...await reader.repository(request.fullName) };
   } catch (error) {
     if (error instanceof SkillRepoNotFoundError) {
+      if (!credential.token) return unverified("repository is not public or was not found");
       return {
         kind: "not-found",
         error: `Repository "${request.fullName}" was not found. Check the organization name or connect a GitHub account with access in Settings.`,

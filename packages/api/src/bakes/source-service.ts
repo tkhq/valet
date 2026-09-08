@@ -1559,9 +1559,9 @@ export class SourceService {
    * `repo` in `orgId`: on insert, parents it to the org's base source if one
    * exists and fires the first bake; on conflict, touches `last_bound_at`,
    * re-enables a decayed source, and fires a bake when the source has no
-   * pushed bake yet. NEVER throws. The bake is gated on an org-scoped GitHub
-   * credential AND a wired builder. The source requires a successful org
-   * repository check. Missing credentials and failed checks skip the upsert.
+   * pushed bake yet. NEVER throws. The bake requires a wired builder.
+   * The source requires a successful org-credential or anonymous repository
+   * check. Failed checks skip the upsert.
    */
   async ensureRepoSource(
     orgId: string,
@@ -1617,7 +1617,7 @@ export class SourceService {
         // base and skips when a bake is already in flight.
         const current = await this.currentBake(source.id);
         if (!current || adoptedParentId !== source.parentId) {
-          await this.maybeFireFirstBake(source.id, orgId, repo);
+          await this.maybeFireFirstBake(source.id, repo);
         }
         return;
       }
@@ -1647,43 +1647,21 @@ export class SourceService {
         createdAt: now,
         updatedAt: now,
       });
-      await this.maybeFireFirstBake(id, orgId, repo);
+      await this.maybeFireFirstBake(id, repo);
     } catch (err) {
       console.error(`ensureRepoSource(${orgId}, ${repo.fullName}) failed:`, err);
     }
   }
 
-  /** Best-effort first bake for a zero-config source. Gated on a wired
-   * builder AND an org-scoped GitHub credential (installation/PAT — a
-   * user-only credential cannot build, existing invariant). Skips silently
-   * with one log line otherwise. Never throws. */
+  /** Starts the first bake after ensureRepoSource verifies repository access.
+   * Private repositories use org credentials. Public repositories can clone
+   * without a token. A user credential never enters an org bake. Never throws. */
   private async maybeFireFirstBake(
     sourceId: string,
-    orgId: string,
     repo: { fullName: string },
   ): Promise<void> {
     if (!this.builder) {
       console.log(`ensureRepoSource: no image builder — skipping first bake of ${repo.fullName}`);
-      return;
-    }
-    const owner = ownerOf(repo.fullName);
-    const name = repoOf(repo.fullName);
-    let hasOrgCredential = false;
-    try {
-      // `userId` omitted → `auto` cannot resolve a user-only credential, so a
-      // non-null token here is org-scoped (installation/PAT). Guard on
-      // `source` too so a future change never lets a user credential build.
-      const result = await resolveGitHubToken(this.githubTokenDeps, {
-        orgId,
-        purpose: "git",
-        repo: { owner, name },
-      });
-      hasOrgCredential = result.token !== null && result.source !== "user";
-    } catch {
-      hasOrgCredential = false;
-    }
-    if (!hasOrgCredential) {
-      console.log(`ensureRepoSource: no org GitHub credential — skipping first bake of ${repo.fullName}`);
       return;
     }
     // Defer when the parent base has no consistent pushed bake yet — the base
