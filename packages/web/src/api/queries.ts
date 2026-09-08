@@ -8,6 +8,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -109,6 +110,27 @@ export function useSessions(
     isLive: sessionsAreLive,
     ...opts,
   });
+}
+
+/**
+ * Re-reads a session whose row the caller has just created.
+ *
+ * `invalidateQueries` alone does not do it. A read that started before the
+ * row existed may still be in flight, and a query with no data yet keeps
+ * its running attempt when asked to refetch (query-core only cancels a
+ * refetch over existing data), so that attempt's 404 lands after the
+ * invalidation and stays. Cancelling first discards the stale attempt; the
+ * invalidation then starts a fresh one. `qk.session(id)` prefixes every read
+ * under the session — `qk.threads(id)`, messages and decisions included —
+ * so one call covers them all.
+ *
+ * Resolves once the active reads have answered again, so a caller that
+ * awaits it mounts on fresh data rather than on the error the reads held.
+ */
+export async function refetchSessionReads(qc: QueryClient, sessionId: string): Promise<void> {
+  const queryKey = qk.session(sessionId);
+  await qc.cancelQueries({ queryKey });
+  await qc.invalidateQueries({ queryKey });
 }
 
 export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {

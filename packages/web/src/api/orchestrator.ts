@@ -15,7 +15,7 @@ import type {
   GetOrchestratorInfoResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
-import { qk } from "./queries";
+import { qk, refetchSessionReads } from "./queries";
 
 export const qkOrchestrator = {
   info: () => ["orchestrator", "info"] as const,
@@ -95,12 +95,11 @@ export function useEnsureOrchestrator() {
     onSuccess: ({ sessionId }) => {
       qc.invalidateQueries({ queryKey: qkOrchestrator.info() });
       // `GET /info` reports a session id without creating the session, so on
-      // a first-ever load the chat page mounts on that id and its read 404s
-      // while this call is still in flight — the whole screen shows "Failed
-      // to load session", on the one visit where a person has nothing else
-      // to look at. Invalidating makes the read retry once the row exists,
-      // rather than leaving a dead end that a manual reload fixes.
-      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      // a first-ever load the rail's thread tree reads that id and 404s
+      // while this call is still in flight. Re-reading once the row exists
+      // turns that into the conversation rather than a dead end that only a
+      // manual reload fixes.
+      void refetchSessionReads(qc, sessionId);
     },
   });
 }
