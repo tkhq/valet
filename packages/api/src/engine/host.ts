@@ -3457,32 +3457,28 @@ export class EngineHost {
     // parent reads as the TEAM, finds no App, degrades to a tokenless read
     // and 404s on a private repo — so it provisions without the docker flag
     // and workspace claim its parent honoured, on the same repo.
+    // Built once and spread into both branches. Repeating the optional
+    // fields per branch is how the two incidents above happened: a field
+    // added to one path and forgotten on the other typechecks cleanly.
+    const carried = {
+      userId: opts.actorUserId,
+      orgId: opts.orgId,
+      workspace: opts.workspace,
+      profile,
+      ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
+      ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
+      ...(opts.credentialOwnerMode !== undefined
+        ? { credentialOwnerMode: opts.credentialOwnerMode }
+        : {}),
+    };
     const meta = this.opts.db
       ? await loadSessionMeta(this.opts.db, {
           id: childSessionId,
-          userId: opts.actorUserId,
-          orgId: opts.orgId,
-          workspace: opts.workspace,
           ownerType: opts.owner.type,
           ownerId: opts.owner.id,
-          profile,
-          ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
-          ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
-          ...(opts.credentialOwnerMode !== undefined
-            ? { credentialOwnerMode: opts.credentialOwnerMode }
-            : {}),
+          ...carried,
         })
-      : {
-          userId: opts.actorUserId,
-          orgId: opts.orgId,
-          workspace: opts.workspace,
-          profile,
-          ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
-          ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
-          ...(opts.credentialOwnerMode !== undefined
-            ? { credentialOwnerMode: opts.credentialOwnerMode }
-            : {}),
-        };
+      : carried;
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`
     // (TKAI-385): the same read `buildSession` does, so a child bound to a
     // repo gets `workspaceStorage`, `docker`, and CPU/memory exactly like a
