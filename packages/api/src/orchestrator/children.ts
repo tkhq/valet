@@ -302,6 +302,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       modelId: req.model,
       profile: req.profile,
       docker: req.docker,
+      resources: req.resources,
     });
 
     const now = Date.now();
@@ -317,6 +318,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         // `sessionFor` (which reads the row) keeps the same sandbox shape.
         profile: req.profile ?? "headless",
         docker: req.docker === true,
+        sandboxResourceOverrides: req.resources ?? null,
         status: "active",
         ownerType: ctx.owner.type,
         ownerId: ctx.owner.id,
@@ -518,12 +520,15 @@ export class ChildWatcher {
     if (!childData) throw new Error(`child session not found: ${watch.childSessionId}`);
 
     // Centralized meta assembly (repo bindings + git identity). The app row
-    // supplies the persisted profile/docker: if this watcher wins the
-    // post-restart first-touch race for a full/docker child, the rebuild
-    // must keep the child's sandbox shape (services + docker caps) — a
-    // partial meta here would cache a headless, docker-less session.
+    // supplies the persisted profile, Docker flag, and resource overrides.
+    // If this watcher wins the post-restart first-touch race, the rebuild
+    // must keep the child's full sandbox shape.
     const shapeRows = await this.deps.db
-      .select({ profile: agentSessions.profile, docker: agentSessions.docker })
+      .select({
+        profile: agentSessions.profile,
+        docker: agentSessions.docker,
+        sandboxResourceOverrides: agentSessions.sandboxResourceOverrides,
+      })
       .from(agentSessions)
       .where(eq(agentSessions.id, watch.childSessionId))
       .limit(1);
@@ -539,7 +544,13 @@ export class ChildWatcher {
         // team-owned child that rebuilds here keeps the team model tier.
         ownerType: childData.owner.type,
         ownerId: childData.owner.id,
-        ...(shapeRow ? { profile: shapeRow.profile, docker: shapeRow.docker } : {}),
+        ...(shapeRow
+          ? {
+              profile: shapeRow.profile,
+              docker: shapeRow.docker,
+              sandboxResourceOverrides: shapeRow.sandboxResourceOverrides,
+            }
+          : {}),
       }),
     );
     // The spawner always prompts the child's default thread — see
@@ -1046,6 +1057,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         workspace: agentSessions.workspace,
         profile: agentSessions.profile,
         docker: agentSessions.docker,
+        sandboxResourceOverrides: agentSessions.sandboxResourceOverrides,
         status: agentSessions.status,
         // Owner columns feed SessionMeta.ownerTeamId so a rebuild of a
         // team-owned child keeps the team tier of the model cascade.
@@ -1069,8 +1081,8 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     if (!childData) return null;
 
     // Pass the app row as the meta source: it carries the persisted
-    // profile/docker, so a post-restart rebuild keeps the child's sandbox
-    // shape (services + docker caps) instead of silently going headless.
+    // profile, Docker flag, and resource overrides, so a post-restart
+    // rebuild keeps the child's sandbox shape.
     const childSession = await deps.engineHost.sessionFor(
       req.childSessionId,
       await loadSessionMeta(deps.db, child),

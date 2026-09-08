@@ -12,6 +12,20 @@ export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   resourcesWithheld?: boolean;
 }
 
+/** Apply one child's resource request after repository and saved defaults.
+ * When authority reads fail, only supplied fields become authoritative. */
+export function applySandboxResourceOverrides(
+  flags: ResolvedRepoPrebuildFlags,
+  overrides: PrebuildResources | undefined,
+): ResolvedRepoPrebuildFlags {
+  if (!overrides || Object.keys(overrides).length === 0) return flags;
+  return {
+    ...flags,
+    initialResources: { ...flags.initialResources, ...overrides },
+    resources: { ...flags.resources, ...overrides },
+  };
+}
+
 /** Read saved defaults outside the GitHub cache. Only two successful reads
  * authorize a resource change on existing compute. */
 export async function resolveRepoResources(

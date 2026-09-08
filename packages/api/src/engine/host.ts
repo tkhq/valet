@@ -58,7 +58,11 @@ import { repoCredentialCommands, repoPrebuildFlags, type RepoPrebuildFlags } fro
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
-import { resolveRepoResources, type ResolvedRepoPrebuildFlags } from "./resolve-repo-resources.js";
+import {
+  applySandboxResourceOverrides,
+  resolveRepoResources,
+  type ResolvedRepoPrebuildFlags,
+} from "./resolve-repo-resources.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
@@ -1721,7 +1725,8 @@ export class EngineHost {
    */
   private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<ResolvedRepoPrebuildFlags> {
     const primary = meta.repos?.[0];
-    const result = await resolveRepoResources(this.opts.db, meta.orgId, primary, () => this.resolveRepoYamlFlags(sessionId, meta));
+    const resolved = await resolveRepoResources(this.opts.db, meta.orgId, primary, () => this.resolveRepoYamlFlags(sessionId, meta));
+    const result = applySandboxResourceOverrides(resolved, meta.sandboxResourceOverrides);
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
       if (result.resourcesWithheld) {
@@ -3154,6 +3159,8 @@ export class EngineHost {
       profile?: "headless" | "full";
       /** Rootless docker daemon in the child's sandbox (docker-in-sandbox). */
       docker?: boolean;
+      /** CPU and memory overrides for this child only. */
+      resources?: PrebuildResources;
     },
   ): Promise<Session> {
     const cached = this.cache.get(childSessionId);
@@ -3182,6 +3189,8 @@ export class EngineHost {
       profile?: "headless" | "full";
       /** Rootless docker daemon in the child's sandbox (docker-in-sandbox). */
       docker?: boolean;
+      /** CPU and memory overrides for this child only. */
+      resources?: PrebuildResources;
     },
   ): Promise<Session> {
     // `opts.owner` is the child's own principal: the `task` tool reads the
@@ -3266,6 +3275,7 @@ export class EngineHost {
           ownerType: opts.owner.type,
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
+          ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
         })
       : {
           userId: opts.actorUserId,
@@ -3273,6 +3283,7 @@ export class EngineHost {
           workspace: opts.workspace,
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
+          ...(opts.resources !== undefined ? { sandboxResourceOverrides: opts.resources } : {}),
         };
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`
     // (TKAI-385): the same read `buildSession` does, so a child bound to a
