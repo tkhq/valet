@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs } from "../schema/index.js";
+import { deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
+import { orgs, githubInstallations } from "../schema/index.js";
 import type { GitHubTokenDeps } from "./github-tokens.js";
 import { checkRepoExistence } from "./repo-existence.js";
 
@@ -21,7 +21,7 @@ describe("checkRepoExistence", () => {
     deps = { db: appDb, credentials, key, apiUrl: "https://fixture.invalid" };
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
   it("honors user auth and sends one metadata request with a deadline", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(metadata));
@@ -33,6 +33,41 @@ describe("checkRepoExistence", () => {
     expect(url).toBe("https://fixture.invalid/repos/acme/widgets");
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer user-token");
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("checks the clone credential when a personal token cannot read the repository", async () => {
+    await deps.db.insert(githubInstallations).values({
+      id: "installation", orgId: "org", installationId: 123, accountLogin: "acme",
+      accountType: "Organization", repositorySelection: "all", suspended: false,
+      cachedToken: encryptSecret("app-token", deps.key), cachedTokenExpiresAt: Date.now() + 3_600_000,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (_url, init) =>
+      new Headers(init?.headers).get("authorization") === "Bearer app-token"
+        ? Response.json(metadata) : new Response(null, { status: 404 }));
+    expect(await checkRepoExistence({ ...deps, fetchImpl }, request)).toEqual({
+      kind: "found", fullName: metadata.full_name, cloneUrl: metadata.clone_url,
+    });
+    expect(await checkRepoExistence({ ...deps, fetchImpl }, { ...request, auth: "user" })).toMatchObject({
+      kind: "not-found",
+    });
+    await deps.credentials.delete({ type: "org", id: "org" }, "github");
+    fetchImpl.mockResolvedValue(new Response(null, { status: 404 }));
+    expect(await checkRepoExistence({ ...deps, fetchImpl }, {
+      ...request, userId: undefined, fullName: "wrong-org/widgets",
+    })).toMatchObject({ kind: "not-found" });
+    expect(new Headers(fetchImpl.mock.lastCall?.[1]?.headers).get("authorization")).toBe("Bearer app-token");
+  });
+
+  it("allows a credential lookup that does not settle within five seconds", async () => {
+    vi.spyOn(deps.credentials, "get").mockImplementation(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    const result = Promise.race([
+      checkRepoExistence(deps, request),
+      new Promise<string>((resolve) => setTimeout(() => resolve("still blocked"), 6_000)),
+    ]);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await result).toEqual({ kind: "unverified" });
   });
 
   it("uses only org credentials when no requesting user is supplied", async () => {

@@ -6,10 +6,31 @@ export type RepoExistence =
   | { kind: "not-found"; error: string }
   | { kind: "unverified" };
 
+type RepoCheckRequest = { orgId: string; userId?: string; host: string; fullName: string; auth?: GitHubAuthMode };
+
+/** Bound the whole check, including credential discovery and token refresh. */
+export async function checkRepoExistence(deps: GitHubTokenDeps, request: RepoCheckRequest): Promise<RepoExistence> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  const deadline = new Promise<RepoExistence>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      console.warn(`Repository check skipped for ${request.fullName}: check timed out`);
+      resolve({ kind: "unverified" });
+    }, 5_000);
+  });
+  try {
+    return await Promise.race([verifyRepoExistence(deps, request, controller.signal), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Only a repository metadata 404 proves that this credential cannot read the repository. */
-export async function checkRepoExistence(
+async function verifyRepoExistence(
   deps: GitHubTokenDeps,
-  request: { orgId: string; userId?: string; host: string; fullName: string; auth?: GitHubAuthMode },
+  request: RepoCheckRequest,
+  signal: AbortSignal,
 ): Promise<RepoExistence> {
   const unverified = (reason: string): RepoExistence => {
     console.warn(`Repository check skipped for ${request.fullName}: ${reason}`);
@@ -21,13 +42,20 @@ export async function checkRepoExistence(
 
   let credential: ResolvedGitHubToken;
   try {
-    credential = await resolveGitHubToken(deps, {
+    const tokenRequest = {
       orgId: request.orgId, userId: request.userId, auth: request.auth,
-      purpose: "api", repo: { owner: parts[0], name: parts[1] },
-    });
+      repo: { owner: parts[0], name: parts[1] },
+    };
+    credential = await resolveGitHubToken(deps, { ...tokenRequest, purpose: "git" });
+    // A sole installation can check an org typo even when cloning would be anonymous.
+    if (!credential.token && !signal.aborted) {
+      credential = await resolveGitHubToken(deps, { ...tokenRequest, purpose: "api" });
+    }
   } catch {
     return unverified("credential unavailable");
   }
+  // Token refresh can be shared with other callers. Let it finish after our deadline.
+  if (signal.aborted) return { kind: "unverified" };
   if (!credential.token) return unverified("no credential");
 
   const reader = new GitHubSkillRepoReader({
