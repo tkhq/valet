@@ -6,7 +6,7 @@
 
 ## Context
 
-A skill is a markdown playbook that tells the agent how to use one integration or how to do one task. Valet ships eleven of them inside plugin packages.
+A skill is a markdown playbook that tells the agent how to use one integration or how to do one task. Valet ships skills inside plugin packages.
 
 Valet targets the Agent Skills specification, <https://agentskills.io/specification>. The reason is interoperability: a skill written for another agent must work here, and a skill written here must work elsewhere. A format of our own would block repository sync before it starts.
 
@@ -30,6 +30,8 @@ skills: [loadSkillFromMarkdown(skillMd, "plugin", "github")];
 ```
 
 There is no directory scanner. Each plugin names the file it loads, so a new skill needs an explicit line in the plugin manifest.
+
+`packages/plugin-valet/skills/using-valet/SKILL.md` ships product research rules. `mergedSkillSources` (`packages/api/src/plugins/assemble.ts:139-149`) gives a bundled skill precedence over a stored or synced skill with the same name. For `using-valet`, this precedence is deliberate: the core bundled skill is canonical.
 
 ## Frontmatter
 
