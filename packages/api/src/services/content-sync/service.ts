@@ -331,6 +331,50 @@ export class ContentSyncService {
     return due.length;
   }
 
+  /**
+   * Marks every enabled workflow source the team owns for a full pass, then
+   * nudges the sweep. Returns how many rows it marked.
+   *
+   * A team credential write changes which mirrored team files may arm
+   * (`teamServiceReadiness`, team-credentials design decision 15), and
+   * nothing in the repository moves to make the sync notice: compare 1
+   * stops at the recorded head, and compare 2 at the recorded manifest.
+   * Clearing `discovery_scan` and `last_manifest_hash` takes the source past
+   * both, so the next pass reconciles at the unchanged commit and the
+   * trigger gate reads the credential as it now stands. Both columns already
+   * mean "re-read": a NULL scan mark is what an upgrade leaves, and a NULL
+   * manifest hash is what an incomplete sync leaves.
+   *
+   * A source in `error` is left on its backoff, as `onPush` leaves it; an
+   * errored source skips both compares on its retry anyway.
+   */
+  async resyncTeamWorkflowSources(teamId: string): Promise<number> {
+    const rows = await this.deps.db
+      .select()
+      .from(contentSources)
+      .where(
+        and(
+          eq(contentSources.ownerType, "team"),
+          eq(contentSources.ownerId, teamId),
+          eq(contentSources.enabled, true),
+        ),
+      );
+    const due = rows.filter((row) => row.status !== "error" && row.kinds.includes("workflows"));
+    if (due.length === 0) return 0;
+    const now = this.now();
+    await this.deps.db
+      .update(contentSources)
+      .set({ nextAttemptAt: now, discoveryScan: null, lastManifestHash: null, updatedAt: now })
+      .where(
+        inArray(
+          contentSources.id,
+          due.map((row) => row.id),
+        ),
+      );
+    void this.pollOnce();
+    return due.length;
+  }
+
   async syncOnce(sourceId: string): Promise<ContentSyncOutcome | null> {
     const { db } = this.deps;
     const [source] = await db

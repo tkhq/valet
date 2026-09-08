@@ -53,8 +53,11 @@ import {
 import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { teamServiceReadiness } from "./team-service-readiness.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
+import { toolNodesOf } from "./tool-nodes.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
 // template-declared subscription and a hand-made one are held to one rule.
 // `trigger-service.ts` set the precedent for importing it from a service.
@@ -88,6 +91,9 @@ export interface TemplateServiceDeps {
   plugins: ValetPlugin[];
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   credentials: CredentialStore;
+  /** The 1Password client a team run resolves through, so a team install
+   * is gated on the same vault lookup. Absent on a deployment without one. */
+  onePassword?: OnePasswordService;
 }
 
 /** A template plus what contributed it, so every message can name the place
@@ -263,17 +269,6 @@ export async function findTemplateForOwner(
 }
 
 // ─── Definition introspection ────────────────────────────────────────────
-
-/** Tool nodes anywhere in the definition, including the one a foreach body
- * may hold. A foreach body is a single node, never a list (`nodes.ts`). */
-export function toolNodesOf(definition: WorkflowDefinition): ToolNode[] {
-  const out: ToolNode[] = [];
-  for (const node of definition.nodes) {
-    if (node.type === "tool") out.push(node);
-    else if (node.type === "foreach" && node.body.type === "tool") out.push(node.body);
-  }
-  return out;
-}
 
 function foreachNodesOf(definition: WorkflowDefinition): ForeachNode[] {
   const out: ForeachNode[] = [];
@@ -623,8 +618,7 @@ export type InstallTemplateFailure =
   | { code: "team_not_found"; error: string }
   | { code: "broken_template"; error: string; errors: string[] }
   | { code: "not_connected"; error: string }
-  | { code: "invalid_input"; error: string; errors: string[] }
-  | { code: "unsupported_owner"; error: string };
+  | { code: "invalid_input"; error: string; errors: string[] };
 
 export type InstallTemplateResult =
   | { ok: true; workflowId: string; workflowName: string; scheduleId?: string; subscriptionIds?: string[] }
@@ -785,6 +779,17 @@ function resolveInstallValues(
 }
 
 /**
+ * A readiness reason with the install step that follows its fix. Every
+ * reason ends with a period (`team-service-readiness.ts`), so the period
+ * becomes the join.
+ */
+function withInstallStep(reason: string): string {
+  return reason.endsWith(".")
+    ? `${reason.slice(0, -1)}, then install this template.`
+    : `${reason} Then install this template.`;
+}
+
+/**
  * Installs one template as a workflow owned by the caller, or by a team
  * the caller belongs to.
  *
@@ -834,54 +839,70 @@ export async function installWorkflowTemplate(
     };
   }
 
-  // Two different reasons a requirement is unmet, and they take different
-  // corrective actions. A service the CALLER has not connected is fixed on
-  // the Integrations page. A service the ORGANIZATION has not configured is
-  // not on that page at all (integration-availability design hides it), so
-  // sending the reader there is sending them to a screen with no button on
-  // it — only an admin can act, in Settings → Organization.
-  const unmet = summarized.value.summary.requires.filter((r) => !r.connected);
-  const unconfigured = unmet.filter((r) => r.unconfigured === true).map((r) => r.service);
-  const unconnected = unmet.filter((r) => r.unconfigured !== true).map((r) => r.service);
-  if (unconfigured.length > 0) {
-    return {
-      ok: false,
-      code: "not_connected",
-      error:
-        `${unconfigured.join(" and ")} is not configured for this organization, so this template cannot run yet. ` +
-        `An admin sets it up in Settings → Organization.`,
-    };
-  }
-  if (unconnected.length > 0) {
-    return {
-      ok: false,
-      code: "not_connected",
-      // A workflow tool node reads the credential of the run's owner and
-      // has no fallback, so an install without these would fail on its
-      // first run. "Integrations" is the page that holds the connect
-      // control (`web/src/routes/integrations.tsx`, and the nav entry of
-      // the same name) — naming any other page sends the reader to a
-      // screen with no button on it.
-      error: `Connect ${unconnected.join(" and ")} in Integrations, then install this template.`,
-    };
-  }
-
   const schedule = owned.template.schedule;
   const teamId = typeof input.teamId === "string" ? input.teamId : undefined;
-  const toolServices = [...new Set(toolNodesOf(summarized.value.definition).map((n) => n.service))];
-  if (teamId !== undefined && schedule !== undefined && toolServices.length > 0) {
-    // A scheduled run bills the WORKFLOW's owner (`scheduler.ts#fire`), and
-    // a team principal has no credential scope in the workflow action
-    // invoker (`plugins/action-invoker.ts#credentialOwnerFor`) — so every
-    // one of these steps would fail on every nightly run. Refuse now
-    // rather than arm a schedule that can only fail.
-    return {
-      ok: false,
-      code: "unsupported_owner",
-      error:
-        `A team workflow cannot run ${toolServices.join(" or ")} steps on a schedule, because a scheduled team run has no ` +
-        `connected account to act as. Install this template into your own workspace.`,
-    };
+  if (teamId !== undefined) {
+    // Membership first. The readiness answer below names the services the
+    // team holds, and a non-member must see the same refusal whatever the
+    // team has connected. The transaction checks again under the lock.
+    if (!(await isTeamMember(deps.db, teamId, owner.userId))) {
+      return { ok: false, code: "team_not_found", error: `Team not found: ${teamId}. Choose a team you belong to.` };
+    }
+    // A team install bills the team, not the caller. The per-user
+    // Integrations list is the wrong gate: the caller's Gmail does not
+    // fund a team run, and an org Slack bot they never connected does.
+    // `teamServiceReadiness` is the one predicate (decision 15).
+    const readiness = await teamServiceReadiness(
+      { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
+      { orgId: owner.orgId, teamId, definition: summarized.value.definition },
+    );
+    if (readiness.blocked.length > 0) {
+      // Each reason names who acts: a member connects a team credential, an
+      // admin configures the App. A service the ORGANIZATION has not
+      // configured is the personal path's case, and takes its message: the
+      // Integrations page hides such a service, so only an admin can act.
+      // The readiness reason is caller-neutral (the repository sync reads
+      // the same predicate), so the step that follows the fix in THIS flow
+      // is added here.
+      const reasons = readiness.blocked.map((b) =>
+        unavailable.has(b.service)
+          ? `${b.service} is not configured for this organization, so this template cannot run yet. An admin sets it up in Settings → Organization.`
+          : withInstallStep(b.reason),
+      );
+      return { ok: false, code: "not_connected", error: reasons.join(" ") };
+    }
+  } else {
+    // Two different reasons a requirement is unmet, and they take different
+    // corrective actions. A service the CALLER has not connected is fixed on
+    // the Integrations page. A service the ORGANIZATION has not configured is
+    // not on that page at all (integration-availability design hides it), so
+    // sending the reader there is sending them to a screen with no button on
+    // it — only an admin can act, in Settings → Organization.
+    const unmet = summarized.value.summary.requires.filter((r) => !r.connected);
+    const unconfigured = unmet.filter((r) => r.unconfigured === true).map((r) => r.service);
+    const unconnected = unmet.filter((r) => r.unconfigured !== true).map((r) => r.service);
+    if (unconfigured.length > 0) {
+      return {
+        ok: false,
+        code: "not_connected",
+        error:
+          `${unconfigured.join(" and ")} is not configured for this organization, so this template cannot run yet. ` +
+          `An admin sets it up in Settings → Organization.`,
+      };
+    }
+    if (unconnected.length > 0) {
+      return {
+        ok: false,
+        code: "not_connected",
+        // A workflow tool node reads the credential of the run's owner and
+        // has no fallback, so an install without these would fail on its
+        // first run. "Integrations" is the page that holds the connect
+        // control (`web/src/routes/integrations.tsx`, and the nav entry of
+        // the same name) — naming any other page sends the reader to a
+        // screen with no button on it.
+        error: `Connect ${unconnected.join(" and ")} in Integrations, then install this template.`,
+      };
+    }
   }
 
   const schema = triggerDataSchema(summarized.value.definition);

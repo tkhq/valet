@@ -8,7 +8,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { orgMembers, users } from "../schema/index.js";
+import { contentSources, orgMembers, users } from "../schema/index.js";
+import { createContentSource } from "../services/content-sources.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { startSlackFixture, type SlackFixture } from "../test-helpers/slack-fixture.js";
@@ -906,6 +907,100 @@ describe("team credential scope (TKAI-205)", () => {
       body: JSON.stringify({ type: "api_key", apiKey: "nope", scope: "team", teamId: team.id }),
     });
     expect(putMember.status).toBe(404);
+  });
+
+  // A team credential write changes what the team's mirrored workflows may
+  // arm, and no commit lands to make the sync notice. Each write marks the
+  // team's workflow sources for a full pass at the unchanged head.
+  describe("resyncs the team's workflow sources", () => {
+    const later = Date.now() + 3_600_000;
+    const primed = { nextAttemptAt: later, lastSha: "c1", discoveryScan: "1:c1", lastManifestHash: "m1" };
+
+    async function workflowSource(teamId: string): Promise<string> {
+      const source = await createContentSource(
+        api!.providers.db,
+        { userId: "local-user", orgId: "local-org" },
+        { repo: "tkhq/automation", teamId, kinds: ["workflows"] },
+      );
+      await prime(source.id);
+      return source.id;
+    }
+
+    async function prime(sourceId: string): Promise<void> {
+      await api!.providers.db.update(contentSources).set(primed).where(eq(contentSources.id, sourceId));
+    }
+
+    async function marked(sourceId: string): Promise<boolean> {
+      const [row] = await api!.providers.db
+        .select()
+        .from(contentSources)
+        .where(eq(contentSources.id, sourceId));
+      return row.nextAttemptAt <= Date.now() && row.discoveryScan === null && row.lastManifestHash === null;
+    }
+
+    it("on a team PUT and a team DELETE", async () => {
+      const team = await teamWithMember();
+      // The mark nudges the sweep; this test reads the row itself.
+      await api!.providers.contentSync.stop();
+      const sourceId = await workflowSource(team.id);
+
+      const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+        method: "PUT",
+        headers: HEADERS,
+        body: JSON.stringify({ type: "api_key", apiKey: "team-lin", scope: "team", teamId: team.id }),
+      });
+      expect(put.status).toBe(200);
+      expect(await marked(sourceId)).toBe(true);
+
+      await prime(sourceId);
+      const del = await fetch(`${api!.baseUrl}/api/credentials/linear?scope=team&teamId=${team.id}`, {
+        method: "DELETE",
+        headers: HEADERS,
+      });
+      expect(del.status).toBe(200);
+      expect(await marked(sourceId)).toBe(true);
+    });
+
+    it("on a delegation, its revocation, and the source credential's deletion", async () => {
+      const team = await teamWithMember();
+      await api!.providers.contentSync.stop();
+      const sourceId = await workflowSource(team.id);
+      await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+        method: "PUT",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+      });
+      await prime(sourceId);
+
+      const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+        method: "POST",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ teamId: team.id }),
+      });
+      expect(share.status).toBe(201);
+      expect(await marked(sourceId)).toBe(true);
+
+      await prime(sourceId);
+      const revoke = await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`, {
+        method: "DELETE",
+        headers: MEMBER_HEADERS,
+      });
+      expect(revoke.status).toBe(200);
+      expect(await marked(sourceId)).toBe(true);
+
+      await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+        method: "POST",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ teamId: team.id }),
+      });
+      await prime(sourceId);
+      const gone = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+        method: "DELETE",
+        headers: MEMBER_HEADERS,
+      });
+      expect(gone.status).toBe(200);
+      expect(await marked(sourceId)).toBe(true);
+    });
   });
 
   it("delegates and revokes a personal credential, and 409s an occupied slot", async () => {

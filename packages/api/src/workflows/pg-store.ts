@@ -263,11 +263,26 @@ function rowToSignal(row: WorkflowSignalRow): RunSignal {
   };
 }
 
+export interface PgWorkflowStoreOptions {
+  /**
+   * Serialize a team-owned `createRun` against `deleteTeam` on the team's
+   * ownership lock and refuse when the definition is gone. On by default;
+   * the store conformance suite, which creates runs for definitions it never
+   * writes, is the one caller that turns it off.
+   */
+  guardTeamOwnedRuns?: boolean;
+}
+
 export class PgWorkflowStore implements WorkflowStore {
+  private readonly guardTeamOwnedRuns: boolean;
+
   constructor(
     private readonly db: PgDb,
     private readonly clock: () => number = () => Date.now(),
-  ) {}
+    options: PgWorkflowStoreOptions = {},
+  ) {
+    this.guardTeamOwnedRuns = options.guardTeamOwnedRuns ?? true;
+  }
 
   private async getRunRow(q: PgQueryable, runId: string): Promise<WorkflowRunRow | undefined> {
     const result = await q.query('SELECT * FROM workflow_runs WHERE id = $1', [runId]);
@@ -296,7 +311,30 @@ export class PgWorkflowStore implements WorkflowStore {
     owner?: WorkflowRunOwnerInput,
   ): Promise<WorkflowRun> {
     const now = this.clock();
-    if (owner) {
+    if (owner?.ownerType === "team" && this.guardTeamOwnedRuns) {
+      // A team-owned run serializes against `deleteTeam` on the team's
+      // ownership lock (`services/teams.ts#lockTeamForOwnership`): the reap
+      // checks for unsettled runs under that lock, so a starter that read the
+      // definition before the delete waits here, then finds the definition
+      // gone and refuses. Without this a scheduler tick, an event delivery,
+      // or a webhook could insert a run for a team that no longer exists.
+      await this.db.transaction(async (tx) => {
+        await tx.query("select pg_advisory_xact_lock(hashtext($1))", [owner.ownerId]);
+        const def = await tx.query("SELECT 1 FROM workflow_definitions WHERE id = $1", [params.workflowId]);
+        if (def.rows.length === 0) {
+          throw new Error(
+            `workflow ${params.workflowId} was deleted before the run could start; nothing was started.`,
+          );
+        }
+        await tx.query(
+          `INSERT INTO workflow_runs
+             (id, workflow_id, definition_version_id, definition, params, status, waiting_on, wake_requested, attempt, owner_type, owner_id, actor_user_id, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,'pending','[]',false,0,$6,$7,$8,$9,$10)
+           ON CONFLICT (id) DO NOTHING`,
+          [runId, params.workflowId, definitionVersionId, JSON.stringify(definition), JSON.stringify(params), owner.ownerType, owner.ownerId, owner.actorUserId ?? null, now, now],
+        );
+      });
+    } else if (owner) {
       await this.db.query(
         `INSERT INTO workflow_runs
            (id, workflow_id, definition_version_id, definition, params, status, waiting_on, wake_requested, attempt, owner_type, owner_id, actor_user_id, created_at, updated_at)

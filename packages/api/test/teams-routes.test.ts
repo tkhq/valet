@@ -15,6 +15,7 @@ import {
   teamMembers,
   teams,
   workflowDefinitions,
+  workflowRuns,
 } from "../src/schema/index.js";
 import { setOrgFeatures } from "../src/services/org.js";
 import type { CreateTeamResponse, ListTeamMembersResponse, ListTeamsResponse } from "../src/wire/types.js";
@@ -193,10 +194,70 @@ describe("teams routes", () => {
     expect(teamOwned.every((r) => r.archivedAt !== null)).toBe(true);
   });
 
-  // The workflow refusal must land BEFORE the assistant teardown: a refused
-  // delete that had already destroyed the assistants' engine sessions would
-  // erase their history on a request that reports 409 and changes nothing.
-  it("refuses a workflow-owning team before touching its assistants", async () => {
+  // The engine teardown runs AFTER the delete commits. A destroy before the
+  // commit would tear down a conversation on a request that can still
+  // refuse and change nothing.
+  it("destroys the assistant's engine session only after the team rows are gone", async () => {
+    api = await bootTestApi();
+    const { baseUrl, providers } = api;
+    const { db, engineHost } = providers;
+
+    const createRes = await createTeam(baseUrl, "Platform");
+    const { team } = (await createRes.json()) as CreateTeamResponse;
+
+    await db.insert(assistants).values({
+      id: "asst_team_order",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: team.id,
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "assistant:asst_team_order",
+      // Non-default, so the case also holds once a team is seeded with a
+      // default assistant at creation (TKAI-337).
+      isDefault: false,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+    await db.insert(agentSessions).values({
+      id: "assistant:asst_team_order",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/team-order",
+      status: "active",
+      ownerType: "team",
+      ownerId: team.id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const teamRowsAtDestroy: number[] = [];
+    const destroy = vi.spyOn(engineHost, "destroy").mockImplementation(async () => {
+      const rows = await db.select().from(teams).where(eq(teams.id, team.id));
+      teamRowsAtDestroy.push(rows.length);
+    });
+
+    const delRes = await fetch(`${baseUrl}/api/teams/${team.id}`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(200);
+
+    expect(destroy).toHaveBeenCalledWith("assistant:asst_team_order");
+    // Every assistant the team owned (the seeded default included) is torn
+    // down, and each teardown ran after the team row was gone.
+    expect(teamRowsAtDestroy).toHaveLength(destroy.mock.calls.length);
+    expect(teamRowsAtDestroy.every((n) => n === 0)).toBe(true);
+    destroy.mockRestore();
+  });
+
+  // The run refusal lands inside the delete transaction, BEFORE the
+  // assistant teardown: a refused delete that had already destroyed the
+  // assistants' engine sessions would erase their history on a request
+  // that reports 409 and changes nothing. An idle team workflow is reaped
+  // with the team; only an unsettled run refuses.
+  it("refuses a team with an unsettled run before touching its assistants", async () => {
     api = await bootTestApi();
     const { baseUrl, providers } = api;
     const { db } = providers;
@@ -211,6 +272,18 @@ describe("teams routes", () => {
       ownerId: team.id,
       name: "Nightly",
       definition: { nodes: [], edges: [] },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.insert(workflowRuns).values({
+      id: "run_team_del",
+      workflowId: "wf_team_del",
+      definitionVersionId: "v1",
+      definition: { nodes: [], edges: [] },
+      params: {},
+      status: "running",
+      ownerType: "team",
+      ownerId: team.id,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });

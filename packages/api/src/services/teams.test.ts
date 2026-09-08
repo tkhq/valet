@@ -4,13 +4,16 @@ import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import {
   assistants,
+  contentSources,
   orgMembers,
   orgs,
   teamMembers,
   teams,
   users,
   workflowDefinitions,
+  workflowRuns,
 } from "../schema/index.js";
+import { reapTeamWorkflows } from "../workflows/service.js";
 import {
   addMember,
   ConfigManagedTeamError,
@@ -27,6 +30,7 @@ import {
   removeMember,
   seedMissingTeamDefaults,
   setRole,
+  TeamHasActiveRunsError,
   TeamNameConflictError,
   TeamOwnsWorkflowsError,
 } from "./teams.js";
@@ -284,6 +288,200 @@ describe("teams service", () => {
 
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(1);
+  });
+
+  it("createTeam adopts one source per org workflow source", async () => {
+    await db.insert(contentSources).values({
+      id: "skillsrc_org_wf",
+      orgId,
+      ownerType: "org",
+      ownerId: orgId,
+      createdBy: "u1",
+      repoFullName: "tkhq/automation",
+      ref: "main",
+      subpath: "workflows",
+      kinds: ["workflows"],
+      enabled: true,
+      status: "ok",
+      attempts: 0,
+      nextAttemptAt: 1_000,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+    await db.insert(contentSources).values({
+      id: "skillsrc_org_skills",
+      orgId,
+      ownerType: "org",
+      ownerId: orgId,
+      createdBy: "u1",
+      repoFullName: "tkhq/skills",
+      ref: "",
+      subpath: "",
+      kinds: ["skills"],
+      enabled: true,
+      status: "ok",
+      attempts: 0,
+      nextAttemptAt: 1_000,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    const team = await createTeam(db, {
+      orgId,
+      name: "Platform",
+      creatorUserId: "u1",
+      adoptSources: [
+        {
+          repoFullName: "tkhq/automation",
+          ref: "main",
+          subpath: "workflows",
+          kinds: ["workflows"],
+        },
+      ],
+    });
+
+    expect(team.adoptedSources).toHaveLength(1);
+    expect(team.adoptedSources[0]!.repoFullName).toBe("tkhq/automation");
+    expect(team.adoptedSources[0]!.ownerType).toBe("team");
+    expect(team.adoptedSources[0]!.ownerId).toBe(team.id);
+    expect(team.adoptedSources[0]!.createdBy).toBe("u1");
+
+    const rows = await db
+      .select()
+      .from(contentSources)
+      .where(and(eq(contentSources.ownerType, "team"), eq(contentSources.ownerId, team.id)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kinds).toEqual(["workflows"]);
+  });
+
+  it("createTeam with no adoptSources writes only the team and membership", async () => {
+    const team = await createTeam(db, { orgId, name: "Empty", creatorUserId: "u1" });
+    expect(team.adoptedSources).toEqual([]);
+    const sources = await db.select().from(contentSources);
+    expect(sources).toHaveLength(0);
+    const members = await listTeamMembers(db, team.id);
+    expect(members).toEqual([{ userId: "u1", role: "admin" }]);
+  });
+
+  it("rolls adoption back with the team when the source insert conflicts", async () => {
+    await expect(
+      createTeam(db, {
+        orgId,
+        name: "Platform",
+        creatorUserId: "u1",
+        adoptSources: [
+          { repoFullName: "tkhq/a", ref: "", subpath: "", kinds: ["workflows"] },
+          { repoFullName: "tkhq/a", ref: "other", subpath: "", kinds: ["workflows"] },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    expect(await listTeamsForUser(db, "u1")).toHaveLength(0);
+    expect(await db.select().from(contentSources)).toHaveLength(0);
+  });
+
+  it("deleteTeam reaps owned workflows when the callback does", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_reap",
+      orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "adopted",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    await deleteTeam(db, {
+      teamId: team.id,
+      reapOwnedWorkflows: async (tx) => {
+        await tx
+          .delete(workflowDefinitions)
+          .where(and(eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, team.id)));
+      },
+    });
+
+    expect(await listTeamsForUser(db, "u1")).toHaveLength(0);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+
+  it("deleteTeam refuses when reap reports an unsettled run", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_live",
+      orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "live",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    await expect(
+      deleteTeam(db, {
+        teamId: team.id,
+        reapOwnedWorkflows: async () => {
+          throw new TeamHasActiveRunsError(team.id);
+        },
+      }),
+    ).rejects.toThrow(TeamHasActiveRunsError);
+
+    expect(await listTeamsForUser(db, "u1")).toHaveLength(1);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(1);
+  });
+
+  it("deleteTeam refuses an unsettled run without waiting on its own transaction", async () => {
+    // `reapTeamWorkflows` runs inside the delete transaction. Its run
+    // check once read through the process-wide `PgWorkflowStore`, a second
+    // handle over the SAME PGlite instance as `db`, and that read waited
+    // on the open transaction forever. The check must read `workflow_runs`
+    // through `tx`. A hang here is the bug.
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_busy",
+      orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "busy",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+    await db.insert(workflowRuns).values({
+      id: "run_busy",
+      workflowId: "wf_busy",
+      definitionVersionId: "v1",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      params: {},
+      status: "running",
+      ownerType: "team",
+      ownerId: team.id,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("deleteTeam hung on its own transaction")), 5_000);
+    });
+    try {
+      await expect(
+        Promise.race([
+          deleteTeam(db, {
+            teamId: team.id,
+            reapOwnedWorkflows: (tx) => reapTeamWorkflows(tx, team.id),
+          }),
+          timeout,
+        ]),
+      ).rejects.toThrow(TeamHasActiveRunsError);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    expect(await listTeamsForUser(db, "u1")).toHaveLength(1);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(1);
   });
 
   it("addMember rejects a userId with no org_members row in the team's org", async () => {

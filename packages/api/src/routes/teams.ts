@@ -4,7 +4,7 @@
  *   GET    /api/teams                       → list teams the caller belongs to
  *   POST   /api/teams                       → create a team (caller auto-admitted as admin)
  *   PATCH  /api/teams/:id                   → update team settings (default model, TKAI-255)
- *   DELETE /api/teams/:id                   → delete a team (409s while it owns any workflow)
+ *   DELETE /api/teams/:id                   → delete a team (409s while a team-owned run is unsettled)
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
  *   DELETE /api/teams/:id/members/:userId   → remove a member
@@ -53,10 +53,14 @@ import {
   agentSessions,
   assistants,
   childWatches,
+  contentSources,
   teamMembers,
   teams,
+  type ContentSourceRow,
   type TeamRow,
 } from "../schema/index.js";
+import { listWorkflowSources } from "../services/content-sources.js";
+import { reapTeamWorkflows } from "../workflows/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
 import { assertModelSelectable } from "../services/approved-models.js";
@@ -68,11 +72,11 @@ import {
 } from "../assistants/service.js";
 import {
   addMember,
-  assertNoTeamOwnedWorkflows,
   canAdministerTeam,
   ConfigManagedTeamError,
   createTeam,
   deleteTeam,
+  TeamHasActiveRunsError,
   getTeamInOrg,
   IdpManagedTeamError,
   type IdpManagedMutation,
@@ -98,6 +102,7 @@ import type {
   ListTeamsResponse,
   PatchTeamResponse,
   SetTeamMemberRoleRequest,
+  SkillSourceSummary,
   TeamRole,
   TeamSummary,
 } from "../wire/types.js";
@@ -123,6 +128,24 @@ async function rowToSummary(
     callerRole: mine?.role ?? null,
     defaultModel: row.defaultModel,
     defaultReasoning: row.defaultReasoning,
+  };
+}
+
+function toAdoptedSourceSummary(row: ContentSourceRow): SkillSourceSummary {
+  return {
+    id: row.id,
+    repo: row.repoFullName,
+    ref: row.ref,
+    subpath: row.subpath,
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
+    kinds: row.kinds,
+    enabled: row.enabled,
+    status: row.status,
+    skillCount: 0,
+    lastSyncedAt: row.lastSyncedAt,
+    lastSha: row.lastSha,
+    lastMessage: row.lastError,
   };
 }
 
@@ -182,6 +205,7 @@ function handleServiceError(err: unknown): { body: { error: string; code?: strin
     err instanceof TeamNameConflictError ||
     err instanceof LastAdminError ||
     err instanceof TeamOwnsWorkflowsError ||
+    err instanceof TeamHasActiveRunsError ||
     err instanceof IdpManagedTeamError ||
     err instanceof ConfigManagedTeamError
   ) {
@@ -382,7 +406,7 @@ teamsRouter.get("/:id/members", async (c) => {
 // ── Create ────────────────────────────────────────────────────────────────
 
 teamsRouter.post("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, contentSync } = c.var.providers;
   const user = c.var.user;
 
   let body: CreateTeamRequest;
@@ -396,9 +420,32 @@ teamsRouter.post("/", async (c) => {
   }
 
   try {
-    const team = await createTeam(db, { orgId: user.orgId, name: body.name, creatorUserId: user.id });
+    const orgSources = await listWorkflowSources(db, {
+      orgId: user.orgId,
+      ownerType: "org",
+      ownerId: user.orgId,
+    });
+    const team = await createTeam(db, {
+      orgId: user.orgId,
+      name: body.name,
+      creatorUserId: user.id,
+      adoptSources: orgSources.map((source) => ({
+        repoFullName: source.repoFullName,
+        ref: source.ref,
+        subpath: source.subpath,
+        kinds: source.kinds,
+      })),
+    });
+    const adoptedSources: SkillSourceSummary[] = [];
+    for (const source of team.adoptedSources) {
+      // A failed first sync is reported on the row, same as source create.
+      await contentSync.syncOnce(source.id);
+      const rows = await db.select().from(contentSources).where(eq(contentSources.id, source.id)).limit(1);
+      adoptedSources.push(toAdoptedSourceSummary(rows[0] ?? source));
+    }
     const resp: CreateTeamResponse = {
       team: await rowToSummary(db, team, user.id),
+      adoptedSources,
       defaultAssistant: toAssistantSummary(team.defaultAssistant),
     };
     return c.json(resp, 201);
@@ -511,51 +558,44 @@ teamsRouter.delete("/:id", async (c) => {
   const refusal = (await idpManagedRefusal(db, team, "delete")) ?? configManagedDeleteRefusal(team);
   if (refusal) return c.json(refusal, 409);
 
-  // Refuse for owned workflows BEFORE the destroy loop below. deleteTeam
-  // re-checks inside its transaction (authoritative under the ownership
-  // lock), but a refusal there would land after the assistants' engine
-  // sessions were already destroyed — turning a refused, no-op-looking
-  // delete into permanent history loss.
+  // A team's assistants die with it (TKAI-296). Read their session ids
+  // before the rows go: deleteTeam retires the assistants and soft-deletes
+  // the sessions in its transaction, and the engine teardown below needs
+  // the ids after that.
+  const teamAssistants = await db
+    .select({ sessionId: assistants.sessionId })
+    .from(assistants)
+    .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, id)));
+
+  // The transaction commits FIRST. It takes the ownership lock, reaps idle
+  // workflows, refuses on an unsettled run, and retires the assistants.
+  // Only a committed delete destroys engine sessions: a refusal inside the
+  // transaction after the sessions were torn down would leave a team whose
+  // rows survived but whose conversations are gone.
   try {
-    await assertNoTeamOwnedWorkflows(db, id);
+    await deleteTeam(db, {
+      teamId: id,
+      reapOwnedWorkflows: (tx) => reapTeamWorkflows(tx, id),
+    });
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
 
-  // A team's assistants die with it (TKAI-296). Tear down their engine
-  // sessions and sandboxes first — the same order DELETE /api/sessions/:id
-  // uses — then deleteTeam retires the rows and soft-deletes the sessions
-  // in its transaction. Archived assistants included: an archived
-  // non-default's session can still be live.
-  const teamAssistants = await db
-    .select({ sessionId: assistants.sessionId })
-    .from(assistants)
-    .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, id)));
+  // Tear down the engine sessions and sandboxes after the commit. The
+  // rows are retired, so a wake cannot rebuild a torn-down session.
+  // `engineHost.destroy` handles a session that is already soft-deleted:
+  // its cold branch deletes the durable engine rows and revokes the
+  // session's tokens and grants. A destroy that fails here is covered by
+  // the sandbox reconcile sweep, whose orphan rule reclaims a sandbox
+  // whose owning session is gone (CLAUDE.md, 2026-08-22 precedent).
   for (const row of teamAssistants) {
     await engineHost.destroy(row.sessionId).catch((err) => {
       console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
     });
   }
-
-  try {
-    await deleteTeam(db, { teamId: id });
-    // Destroy again after the commit: a wake racing the window between the
-    // first destroy and the retire can re-cache a rebuilt session, and
-    // cache hits bypass the archived-wake guard. Now the rows are retired,
-    // so a torn-down ghost cannot rebuild.
-    for (const row of teamAssistants) {
-      await engineHost.destroy(row.sessionId).catch((err) => {
-        console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
-      });
-    }
-    return c.json({ ok: true });
-  } catch (err) {
-    const mapped = handleServiceError(err);
-    if (mapped) return c.json(mapped.body, mapped.status);
-    throw err;
-  }
+  return c.json({ ok: true });
 });
 
 // ── Members: add/update ─────────────────────────────────────────────────

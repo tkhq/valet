@@ -32,6 +32,7 @@ import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
 import { ContentSyncService } from "./service.js";
 import { TemplateCollector } from "./template-collector.js";
 import { WorkflowCollector } from "./workflow-collector.js";
+import { InMemoryCredentialStore } from "@valet/engine";
 
 const ORG = "org1";
 const TEAM = "team_1";
@@ -141,7 +142,7 @@ describe("template collector", () => {
       db,
       reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
       collectors: [
-        new WorkflowCollector(),
+        new WorkflowCollector({ plugins: [], credentials: new InMemoryCredentialStore() }),
         new TemplateCollector({
           reserved: () => new Map(shipped.map((id) => [id, "plugin-github"])),
         }),

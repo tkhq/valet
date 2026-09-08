@@ -19,6 +19,7 @@ import {
   orgs,
   runtimeGrants,
   workflowDefinitions,
+  workflowRuns,
   workflowSchedules,
   workflowVersions,
 } from "../schema/index.js";
@@ -414,19 +415,59 @@ describe("team-owned workflows", () => {
     expect(body.ownerId).toBe("local-user");
   });
 
-  it("409s deleting a team that still owns a workflow", async () => {
+  it("deleting a team reaps an idle team-owned workflow with it", async () => {
     api = await bootTestApi();
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await fetch(`${api.baseUrl}/api/workflows`, {
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+    const { id: workflowId } = (await created.json()) as CreateWorkflowResponse;
+
+    // The reap runs inside the delete transaction and reads `workflow_runs`
+    // through it. Reading through the process-wide store instead waits on
+    // that transaction forever on PGlite, so this request must return.
+    const res = await fetch(`${api.baseUrl}/api/teams/${team.id}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const left = await api.providers.db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, workflowId));
+    expect(left).toHaveLength(0);
+  });
+
+  it("409s deleting a team whose workflow has an unsettled run", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "team-wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+    const { id: workflowId } = (await created.json()) as CreateWorkflowResponse;
+    await api.providers.db.insert(workflowRuns).values({
+      id: "run_team_live",
+      workflowId,
+      definitionVersionId: "v1",
+      definition: VALID_DEFINITION,
+      params: {},
+      status: "running",
+      ownerType: "team",
+      ownerId: team.id,
+      createdAt: 1_000,
+      updatedAt: 1_000,
     });
 
     const res = await fetch(`${api.baseUrl}/api/teams/${team.id}`, { method: "DELETE" });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; code?: string };
-    expect(body.code).toBe("team_owns_workflows");
+    expect(body.code).toBe("team_has_active_runs");
+    const left = await api.providers.db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, workflowId));
+    expect(left).toHaveLength(1);
   });
 });
 
@@ -818,10 +859,19 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     const stub = new StubRunHost();
     api = await bootTestApi({ workflowRunHost: stub });
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    // A team-owned run needs a live definition: the store refuses one whose
+    // definition is gone, so the run must belong to a real team workflow.
+    const created = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "team wf", definition: VALID_DEFINITION, teamId: team.id }),
+    });
+    expect(created.status).toBe(201);
+    const { id: workflowId } = (await created.json()) as { id: string };
     const runId = "wfrun_team_outsider";
     await api.providers.workflowStore.createRun(
       runId,
-      { workflowId: "wf_whatever", definitionVersionId: "v1" },
+      { workflowId, definitionVersionId: "v1" },
       VALID_DEFINITION,
       "v1",
       { ownerType: "team", ownerId: team.id },

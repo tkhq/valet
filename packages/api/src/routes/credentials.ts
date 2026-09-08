@@ -131,6 +131,17 @@ async function resolveCredentialOwner(
   return { type: "user", id: user.id };
 }
 
+/**
+ * A team credential write changes which of the team's mirrored workflows
+ * may arm, and no commit lands to make the sync notice. Runs after the
+ * write, so the pass reads the credential as it now stands.
+ */
+async function resyncTeamWorkflows(c: Context<AppEnv>, teamIds: Iterable<string>): Promise<void> {
+  for (const teamId of new Set(teamIds)) {
+    await c.var.providers.contentSync.resyncTeamWorkflowSources(teamId);
+  }
+}
+
 function isCredentialKind(type: StoredCredential["type"]): type is PutCredentialRequest["type"] {
   return (CREDENTIAL_TYPES as StoredCredential["type"][]).includes(type);
 }
@@ -261,7 +272,8 @@ credentialsRouter.get("/", async (c) => {
       if (from) {
         const stillMember = await isTeamMember(db, owner.id, from);
         const source = stillMember ? await engineCredentials.get({ type: "user", id: from }, row.service) : null;
-        referenceBroken = !stillMember || source === null || !rowHasSecret(source);
+        referenceBroken =
+          !stillMember || source === null || (!rowHasSecret(source) && !onePasswordMeta(source));
       }
       // The same summary a user row gets, so health fields and the
       // 1Password reference are not lost. Secret columns are left out;
@@ -461,6 +473,7 @@ credentialsRouter.put("/:service", async (c) => {
       if (rejected) return rejected;
     }
     await engineCredentials.save(owner, service, credential);
+    if (owner.type === "team") await resyncTeamWorkflows(c, [owner.id]);
     const resp: PutCredentialResponse = { ok: true };
     return c.json(resp);
   }
@@ -503,6 +516,7 @@ credentialsRouter.put("/:service", async (c) => {
   }
 
   await engineCredentials.save(owner, service, credential);
+  if (owner.type === "team") await resyncTeamWorkflows(c, [owner.id]);
 
   const resp: PutCredentialResponse = { ok: true };
   return c.json(resp);
@@ -599,6 +613,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
       409,
     );
   }
+  await resyncTeamWorkflows(c, [body.teamId]);
   const resp: DelegateCredentialResponse = { ok: true };
   return c.json(resp, 201);
 });
@@ -626,6 +641,7 @@ credentialsRouter.delete("/:service/delegations/:teamId", async (c) => {
     return c.json({ error: "Team not found." }, 404);
   }
   await engineCredentials.delete({ type: "team", id: teamId }, service);
+  await resyncTeamWorkflows(c, [teamId]);
   const resp: DeleteCredentialResponse = { ok: true };
   return c.json(resp);
 });
@@ -640,8 +656,11 @@ credentialsRouter.delete("/:service", async (c) => {
   const service = c.req.param("service");
 
   await engineCredentials.delete(owner, service);
+  if (owner.type === "team") await resyncTeamWorkflows(c, [owner.id]);
   if (owner.type === "user") {
-    await deleteDelegationsFrom(db, { userId: user.id, service });
+    // Every team that rode this credential loses it, so each is resynced.
+    const revoked = await deleteDelegationsFrom(db, { userId: user.id, service });
+    await resyncTeamWorkflows(c, revoked);
   }
 
   const resp: DeleteCredentialResponse = { ok: true };

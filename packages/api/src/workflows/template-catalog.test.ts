@@ -38,8 +38,8 @@ import {
   findCatalogTemplate,
   listCatalogTemplates,
   templateInputs,
-  toolNodesOf,
 } from "./templates.js";
+import { toolNodesOf } from "./tool-nodes.js";
 
 // A seeded template names no action, so the environment needs no action
 // hook. The model hook is real: a model id that leaves the catalog must
