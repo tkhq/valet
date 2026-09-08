@@ -1,7 +1,9 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ArtifactListItem } from "@valet/api/wire";
+import { useState } from "react";
 import { useArtifacts, useRevokeArtifact } from "~/api/artifacts";
-import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
@@ -69,6 +71,10 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
   // shared mutation would disable and error every row in the list for one
   // revoke, instead of just the row the caller acted on.
   const revoke = useRevokeArtifact();
+  // Per-row for the same reason: one boolean shared by the list would open
+  // every row's dialog at once, and the open dialog must name the row the
+  // caller clicked.
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
 
   return (
     <div className="py-2.5">
@@ -107,20 +113,29 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
           <button
             type="button"
             disabled={revoke.isPending}
-            onClick={() => {
-              if (window.confirm("Revoke this link? Viewers get a 404.")) revoke.mutate({ id: artifact.id });
-            }}
+            onClick={() => setConfirmRevoke(true)}
             className="text-xs text-danger-500 hover:underline disabled:pointer-events-none disabled:opacity-50"
           >
             {revoke.isPending ? "Revoking…" : "Revoke"}
           </button>
         </div>
       </div>
-      {revoke.error && (
-        <p className="mt-1 text-xs text-danger-500">
-          Revoke failed: {revoke.error.message}. Retry, or refresh the page.
-        </p>
-      )}
+      {/* The dialog is where a failed revoke is reported: it stays open on
+          failure, so the caller reads the server's message beside the
+          button that produced it. */}
+      <ConfirmDialog
+        open={confirmRevoke}
+        onOpenChange={setConfirmRevoke}
+        title={`Revoke the link to ${artifact.title}?`}
+        description="Anyone who opens the link gets a 404, and the page leaves this gallery. Publish it again to get a new link."
+        confirmLabel="Revoke"
+        pendingLabel="Revoking…"
+        pending={revoke.isPending}
+        error={revoke.error != null ? errorText(revoke.error) : undefined}
+        onConfirm={() =>
+          revoke.mutate({ id: artifact.id }, { onSuccess: () => setConfirmRevoke(false) })
+        }
+      />
     </div>
   );
 }

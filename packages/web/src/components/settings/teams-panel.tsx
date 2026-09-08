@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
-import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
+import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import {
   Avatar,
   AvatarFallback,
@@ -388,8 +388,24 @@ function TeamCredentials({
 }) {
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
+  // One row at a time, held in state, so the list renders ONE dialog. A
+  // single boolean would open the same dialog for every row and disconnect
+  // whichever service the last click happened to leave in scope.
+  const [disconnecting, setDisconnecting] = useState<CredentialSummary | null>(null);
   const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
   const rows = credsQ.data?.credentials ?? [];
+
+  // A direct row and a delegated row cost different things. Deleting the
+  // direct row destroys the team's own credential; dropping a delegated row
+  // only cuts the team's link to a member who still holds theirs.
+  function disconnectNote(row: CredentialSummary): string {
+    const loss = `Sessions and workflows that run as ${team.name} lose access to ${row.service}.`;
+    return row.delegatedFrom
+      ? `${loss} This removes the team's link only. ${nameFor(row.delegatedFrom)} keeps their own ` +
+          `${row.service} connection and can share it with the team again from Integrations.`
+      : `${loss} This deletes the credential stored on the team. Connect ${row.service} again from ` +
+          `Integrations to give the team access back.`;
+  }
 
   return (
     <div>
@@ -425,14 +441,7 @@ function TeamCredentials({
                   variant="ghost"
                   disabled={disconnect.isPending}
                   aria-label={`Disconnect ${row.service} from ${team.name}`}
-                  onClick={() => {
-                    if (!confirm(`Disconnect ${row.service} from ${team.name}?`)) return;
-                    void disconnect.mutateAsync({
-                      service: row.service,
-                      scope: "team",
-                      teamId: team.id,
-                    });
-                  }}
+                  onClick={() => setDisconnecting(row)}
                 >
                   Disconnect
                 </Button>
@@ -441,6 +450,27 @@ function TeamCredentials({
           </li>
         ))}
       </ul>
+
+      {disconnecting && (
+        <ConfirmDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setDisconnecting(null);
+          }}
+          title={`Disconnect ${disconnecting.service} from ${team.name}?`}
+          description={disconnectNote(disconnecting)}
+          confirmLabel="Disconnect"
+          pendingLabel="Disconnecting…"
+          pending={disconnect.isPending}
+          error={disconnect.error != null ? errorText(disconnect.error) : undefined}
+          onConfirm={() =>
+            disconnect.mutate(
+              { service: disconnecting.service, scope: "team", teamId: team.id },
+              { onSuccess: () => setDisconnecting(null) },
+            )
+          }
+        />
+      )}
     </div>
   );
 }

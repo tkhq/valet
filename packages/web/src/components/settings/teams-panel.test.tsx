@@ -7,7 +7,7 @@
  */
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { OrgDirectoryUserWire } from "@valet/api/wire";
 
 /** Renders a real anchor so `getByRole("link")` and href assertions work
@@ -176,13 +176,22 @@ let teamCredentials: Array<{
   referenceBroken?: boolean;
 }> = [];
 
+/** Shared across renders so the disconnect tests can assert on the call. */
+const disconnectMutate = vi.fn();
+let disconnectPending = false;
+let disconnectError: Error | null = null;
+
 vi.mock("~/api/integrations", () => ({
   useCredentials: () => ({
     data: { credentials: teamCredentials },
     isLoading: false,
     error: null,
   }),
-  useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+  useDisconnectCredential: () => ({
+    mutate: disconnectMutate,
+    isPending: disconnectPending,
+    error: disconnectError,
+  }),
 }));
 
 import { TeamsPanel } from "./teams-panel";
@@ -558,10 +567,13 @@ describe("TeamsPanel — team credentials", () => {
     callerRole = "admin";
     orgRole = "member";
     teamCredentials = [];
+    disconnectMutate.mockClear();
   });
 
   afterEach(() => {
     teamCredentials = [];
+    disconnectPending = false;
+    disconnectError = null;
   });
 
   it("names the empty place when the team has no credentials", () => {
@@ -594,6 +606,118 @@ describe("TeamsPanel — team credentials", () => {
     openTeam();
     expect(screen.getByText("Stored on the team")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Disconnect linear from Platform" })).toBeNull();
+  });
+});
+
+/**
+ * Disconnecting a team credential asks in the page, not through
+ * `window.confirm`. The native call was no confirmation at all for a
+ * scripted client — browser automation accepts it — so the first assertion
+ * here is that the click alone writes nothing.
+ */
+describe("TeamsPanel — disconnecting a team credential", () => {
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "member";
+    disconnectMutate.mockClear();
+    teamCredentials = [
+      { service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z" },
+      {
+        service: "slack",
+        type: "oauth2",
+        connectedAt: "2026-09-02T00:00:00Z",
+        delegatedFrom: "u2",
+      },
+    ];
+  });
+
+  afterEach(() => {
+    teamCredentials = [];
+    disconnectPending = false;
+    disconnectError = null;
+  });
+
+  async function clickDisconnect(service: string) {
+    openTeam();
+    fireEvent.click(screen.getByRole("button", { name: `Disconnect ${service} from Platform` }));
+    return screen.findByRole("dialog");
+  }
+
+  it("opens the dialog and disconnects nothing on the click alone", async () => {
+    const dialog = await clickDisconnect("linear");
+    expect(disconnectMutate).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("Disconnect linear from Platform?")).toBeTruthy();
+  });
+
+  it("names the row that was clicked, not the first row", async () => {
+    // One dialog serves the whole list, so it must read the row held in
+    // state. A single boolean would name whichever row rendered first.
+    const dialog = await clickDisconnect("slack");
+    expect(within(dialog).getByText("Disconnect slack from Platform?")).toBeTruthy();
+    expect(within(dialog).queryByText("Disconnect linear from Platform?")).toBeNull();
+  });
+
+  it("says the team credential is deleted, and how to get access back", async () => {
+    const dialog = await clickDisconnect("linear");
+    expect(within(dialog).getByText(/deletes the credential stored on the team/)).toBeTruthy();
+    expect(within(dialog).getByText(/Connect linear again from Integrations/)).toBeTruthy();
+  });
+
+  it("says a delegated row only cuts the link, and names the delegator", async () => {
+    const dialog = await clickDisconnect("slack");
+    expect(within(dialog).getByText(/removes the team's link only/)).toBeTruthy();
+    expect(within(dialog).getByText(/Two keeps their own slack connection/)).toBeTruthy();
+  });
+
+  it("confirming disconnects with the team scope and id", async () => {
+    const dialog = await clickDisconnect("linear");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+
+    expect(disconnectMutate).toHaveBeenCalledTimes(1);
+    expect(disconnectMutate.mock.calls[0]?.[0]).toEqual({
+      service: "linear",
+      scope: "team",
+      teamId: "team_1",
+    });
+  });
+
+  it("closes on success", async () => {
+    const dialog = await clickDisconnect("linear");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+
+    const options = disconnectMutate.mock.calls[0]?.[1] as { onSuccess: () => void };
+    options.onSuccess();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("cancelling disconnects nothing and closes the dialog", async () => {
+    const dialog = await clickDisconnect("linear");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(disconnectMutate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("shows the server error in the dialog instead of swallowing it", async () => {
+    disconnectError = new Error("Team not found.");
+    const dialog = await clickDisconnect("linear");
+    expect(within(dialog).getByText(/Team not found\./)).toBeTruthy();
+  });
+
+  it("says it is working while the disconnect is in flight", async () => {
+    // The row button disables itself while a disconnect runs, so the dialog
+    // has to open first and the pending state arrive on the next render.
+    const view = render(<TeamsPanel orgMembers={orgMembers} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect linear from Platform" }));
+    await screen.findByRole("dialog");
+
+    disconnectPending = true;
+    view.rerender(<TeamsPanel orgMembers={orgMembers} />);
+
+    expect(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Disconnecting…" }),
+    ).toBeTruthy();
   });
 });
 

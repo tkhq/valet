@@ -6,18 +6,22 @@
  * mutation it fires, not that TanStack Query itself resolves anything.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "@valet/api/wire";
 
 const createManifestMutateAsync = vi.fn();
 const saveCredentialMutateAsync = vi.fn();
 const refreshMutate = vi.fn();
 const deleteAppMutate = vi.fn();
+/** The dialog this section replaced `window.confirm` with must never fall
+ * back to it: browser automation auto-accepts the native one. */
+const confirmSpy = vi.fn(() => true);
 
 let githubAppData: GetGithubAppResponse | undefined;
 let isLoading = false;
 let isError = false;
 let saveCredentialError: Error | null = null;
+let deleteAppError: Error | null = null;
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -37,7 +41,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
       error: saveCredentialError,
     }),
     useRefreshGithubApp: () => ({ mutate: refreshMutate, isPending: false }),
-    useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false }),
+    useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false, error: deleteAppError }),
   };
 });
 
@@ -51,7 +55,8 @@ describe("GithubAppSection", () => {
     isLoading = false;
     isError = false;
     saveCredentialError = null;
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    deleteAppError = null;
+    vi.stubGlobal("confirm", confirmSpy);
   });
 
   it("shows a loading spinner", () => {
@@ -387,22 +392,83 @@ describe("GithubAppSection", () => {
     expect(refreshMutate).toHaveBeenCalled();
   });
 
-  it("Remove App confirms then fires the delete mutation", () => {
-    githubAppData = {
-      configured: true,
-      app: {
-        appId: "123",
-        appSlug: "valet-acme",
-        htmlUrl: "https://github.com/apps/valet-acme",
-        installUrl: "https://github.com/apps/valet-acme/installations/new",
-      },
-      installations: [],
-      webhook: { mode: "manual" },
+  // ── Removing the App: the confirm step ────────────────────────────────
+  //
+  // `window.confirm` used to guard this. Browser automation auto-accepts the
+  // native dialog, so for any scripted client that guard was not a guard at
+  // all. These three tests pin the replacement: the click only opens, the
+  // confirm button is what deletes, and dismissing deletes nothing.
+
+  const CONFIGURED: GetGithubAppResponse = {
+    configured: true,
+    app: {
+      appId: "123",
+      appSlug: "valet-acme",
+      htmlUrl: "https://github.com/apps/valet-acme",
+      installUrl: "https://github.com/apps/valet-acme/installations/new",
+    },
+    installations: [],
+    webhook: { mode: "manual" },
     installationsCheckedAt: null,
-    };
+  };
+
+  /** Clicks Remove App in the card (not the one inside the dialog). */
+  function clickRemoveInCard(): void {
+    const card = screen.getByText("valet-acme").closest("div.rounded-md");
+    if (!card) throw new Error("app card not found");
+    fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "Remove App" }));
+  }
+
+  it("Remove App opens the confirm dialog and deletes nothing yet", () => {
+    githubAppData = CONFIGURED;
     render(<GithubAppSection />);
-    fireEvent.click(screen.getByRole("button", { name: "Remove App" }));
-    expect(confirm).toHaveBeenCalled();
-    expect(deleteAppMutate).toHaveBeenCalled();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    clickRemoveInCard();
+
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText("Remove the GitHub App?")).toBeTruthy();
+    // The description says what is lost and how to get back.
+    expect(dialog.getByText(/lose that access|lose access/i)).toBeTruthy();
+    expect(dialog.getByText(/App ID and private key/)).toBeTruthy();
+    // Nothing has been deleted, and the native dialog is not involved.
+    expect(deleteAppMutate).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("confirming in the dialog fires the delete mutation with no arguments", () => {
+    githubAppData = CONFIGURED;
+    render(<GithubAppSection />);
+
+    clickRemoveInCard();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove App" }));
+
+    expect(deleteAppMutate).toHaveBeenCalledTimes(1);
+    // Same call the pre-dialog code made: `deleteApp.mutate()`.
+    expect(deleteAppMutate.mock.calls[0][0]).toBeUndefined();
+  });
+
+  it("cancelling the dialog fires nothing", () => {
+    githubAppData = CONFIGURED;
+    render(<GithubAppSection />);
+
+    clickRemoveInCard();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+
+    expect(deleteAppMutate).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("the dialog shows the server's refusal instead of swallowing it", () => {
+    githubAppData = CONFIGURED;
+    deleteAppError = new ApiError(403, "DELETE /org/github-app → 403", {
+      error: "Only an org admin can remove the GitHub App. Ask an admin to remove it.",
+    });
+    render(<GithubAppSection />);
+
+    clickRemoveInCard();
+    expect(
+      within(screen.getByRole("dialog")).getByText(/Only an org admin can remove the GitHub App/),
+    ).toBeTruthy();
   });
 });

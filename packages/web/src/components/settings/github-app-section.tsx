@@ -4,7 +4,7 @@ import type {
   GithubAppInstallationSummary,
   PostGithubAppManifestResponse,
 } from "@valet/api/wire";
-import { Badge, Button, Input, Spinner, Switch, Textarea } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Spinner, Switch, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { livePollInterval } from "~/lib/use-live-query";
 import { relativeTime } from "~/lib/relative-time";
@@ -565,6 +565,7 @@ function ConfiguredCard({
 }) {
   const refresh = useRefreshGithubApp();
   const deleteApp = useDeleteGithubApp();
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const app = data.app;
   const uninstalled = data.installations.length === 0;
 
@@ -637,17 +638,28 @@ function ConfiguredCard({
             variant="danger"
             size="sm"
             disabled={deleteApp.isPending}
-            onClick={() => {
-              if (!confirm("Remove the GitHub App? Sessions using it for repo access will lose that access.")) {
-                return;
-              }
-              deleteApp.mutate();
-            }}
+            onClick={() => setConfirmRemove(true)}
           >
             {deleteApp.isPending ? "Removing…" : "Remove App"}
           </Button>
         </div>
       </div>
+
+      {/* The server only drops this org's credential row and its installation
+          rows; the App itself stays on GitHub. So the way back is the
+          "I already have a GitHub App" path, which the section renders again
+          as soon as the credential is gone. */}
+      <ConfirmDialog
+        open={confirmRemove}
+        onOpenChange={setConfirmRemove}
+        title="Remove the GitHub App?"
+        description="Sessions using it for repo access lose that access. The App stays on GitHub, so you can connect it again with its App ID and private key."
+        confirmLabel="Remove App"
+        pendingLabel="Removing…"
+        pending={deleteApp.isPending}
+        error={deleteApp.error != null ? errorText(deleteApp.error) : undefined}
+        onConfirm={() => deleteApp.mutate(undefined, { onSuccess: () => setConfirmRemove(false) })}
+      />
 
       <div className="space-y-2">
         <div className="flex flex-wrap items-baseline justify-between gap-2">

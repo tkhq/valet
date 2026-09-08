@@ -8,7 +8,7 @@
  * "a turn is running" / "sandbox is not ready to pause" bodies).
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { ListAssistantsResponse, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
@@ -424,32 +424,56 @@ describe("SessionHeader — overflow menu", () => {
     });
   });
 
-  it("Delete session confirms with copy naming threads, history, and child sessions", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  /**
+   * Delete used to sit behind `window.confirm`. That is not a confirmation
+   * for an agent or a scripted client — browser automation accepts the
+   * native prompt before a person ever sees the question — so the menu item
+   * must OPEN the dialog and delete nothing on its own.
+   */
+  it("Delete session opens a confirm dialog and deletes nothing yet", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
     await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
 
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    const message = String(confirmSpy.mock.calls[0]?.[0] ?? "");
-    expect(message).toMatch(/threads/i);
-    expect(message).toMatch(/child sessions/i);
-    expect(deleteMutateAsync).toHaveBeenCalledWith("sess-1");
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Delete this session permanently?")).toBeTruthy();
+    // The one string the old prompt carried, still carried: what is lost.
+    expect(
+      within(dialog).getByText(
+        "This deletes all threads, history, and child sessions, and tears down the sandbox.",
+      ),
+    ).toBeTruthy();
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
   });
 
-  it("a declined confirm does not delete", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  it("confirming the dialog deletes with the same argument as before", async () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
     await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Delete session" }));
+
+    expect(deleteMutateAsync).toHaveBeenCalledWith("sess-1");
+  });
+
+  it("cancelling the dialog does not delete", async () => {
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
     expect(deleteMutateAsync).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });
 
@@ -515,15 +539,19 @@ describe("SessionHeader — no delete on the user's own assistant", () => {
 
   it("surfaces a failed delete's error text instead of swallowing it", async () => {
     deleteMutateAsync.mockRejectedValueOnce(new Error("a turn is running"));
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
     await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Delete session" }));
 
-    await waitFor(() => expect(screen.getByText("a turn is running")).toBeTruthy());
-    confirmSpy.mockRestore();
+    // Inside the dialog, not behind it: the modal covers the header's own
+    // error slot, and `window.confirm` could not have shown this at all.
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByText("a turn is running")).toBeTruthy(),
+    );
   });
 });
 
@@ -549,58 +577,73 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
   }
 
   it("offers to turn the services on for a headless session", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm");
     const user = userEvent.setup();
     renderWithProfile("headless");
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
     await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
 
+    // The menu item asks; it does not restart the sandbox. A native
+    // confirm() is auto-accepted by browser automation, so the restart used
+    // to happen with nobody having answered the question.
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Turn on Terminal and VS Code?")).toBeTruthy();
+    expect(setProfileMutateAsync).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Turn on" }));
     expect(setProfileMutateAsync).toHaveBeenCalledWith("full");
     confirmSpy.mockRestore();
   });
 
   it("offers to turn them off again for a full session", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     renderWithProfile("full");
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
     await user.click(screen.getByRole("menuitem", { name: /turn off terminal and vs code/i }));
 
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Turn off Terminal and VS Code?")).toBeTruthy();
+    expect(setProfileMutateAsync).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Turn off" }));
     expect(setProfileMutateAsync).toHaveBeenCalledWith("headless");
-    confirmSpy.mockRestore();
   });
 
   it("names the cost before restarting the sandbox", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     const user = userEvent.setup();
     renderWithProfile("headless");
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
     await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
 
-    const message = String(confirmSpy.mock.calls[0]?.[0] ?? "");
-    expect(message).toMatch(/restarts/i);
-    expect(message).toMatch(/files are kept/i);
-    // A declined confirm changes nothing.
+    const dialog = await screen.findByRole("dialog");
+    const cost = within(dialog).getByText(/restarts/i);
+    expect(cost.textContent).toMatch(/files are kept/i);
+
+    // A cancelled dialog changes nothing.
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(setProfileMutateAsync).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("surfaces the server's error text", async () => {
     setProfileMutateAsync = vi
       .fn()
       .mockRejectedValue(new Error("a turn is running. Wait for it to finish, then change the profile."));
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     renderWithProfile("headless");
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
     await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Turn on" }));
 
-    await waitFor(() => expect(screen.getByText(/a turn is running/i)).toBeTruthy());
-    confirmSpy.mockRestore();
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByText(/a turn is running/i)).toBeTruthy(),
+    );
   });
 
   it("hides the switch from a plain team member", () => {
@@ -882,6 +925,27 @@ describe("SessionHeader — team assistant", () => {
     expect(
       screen.getByRole("menuitem", { name: /delete this team's assistant/i }),
     ).toBeTruthy();
+  });
+
+  // The team-assistant copy names the team that loses the conversation —
+  // the one thing the plain-session copy cannot say.
+  it("names the team in the assistant's confirm dialog, and deletes only on confirm", async () => {
+    withTeam("admin", "Triage");
+    const user = userEvent.setup();
+    renderTeamHeader();
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /delete this team's assistant/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Delete Triage?")).toBeTruthy();
+    expect(
+      within(dialog).getByText("Everyone on Platform loses this conversation and its threads."),
+    ).toBeTruthy();
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Delete assistant" }));
+    expect(deleteMutateAsync).toHaveBeenCalledWith("assistant:asst_team");
   });
 
   it("keeps the controls on a personal session", () => {

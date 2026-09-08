@@ -32,8 +32,9 @@
  */
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
-import { Badge, Button } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
+import { errorText } from "~/lib/error-text";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
@@ -244,6 +245,10 @@ function ServiceBlock({
   orgNote?: React.ReactNode;
 }) {
   const [connecting, setConnecting] = useState(false);
+  // Each service owns its own confirm state: a plugin can render one
+  // ServiceBlock per credential service, and a shared flag would open every
+  // one of their dialogs at once.
+  const [disconnecting, setDisconnecting] = useState(false);
   const disconnect = useDisconnectCredential();
   const health = serviceHealth(service);
   const badge = healthBadge(health);
@@ -280,15 +285,15 @@ function ServiceBlock({
     </Button>
   );
 
+  // Disconnect asks first, in a dialog and not in `window.confirm`: the
+  // native prompt carries no pending state, drops the server's error, and any
+  // scripted client accepts it without a person reading it.
   const disconnectControl = (
     <Button
       variant="ghost"
       size="sm"
       aria-label={`Disconnect ${title}`}
-      onClick={() => {
-        if (!confirm(`Disconnect ${title}?`)) return;
-        void disconnect.mutateAsync({ service: service.service });
-      }}
+      onClick={() => setDisconnecting(true)}
       disabled={disconnect.isPending}
     >
       {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
@@ -390,6 +395,25 @@ function ServiceBlock({
         slug={slug}
         open={connecting}
         onOpenChange={setConnecting}
+      />
+      {/* The description states what the request really does: it deletes the
+          stored credential, and the API revokes every team delegation that
+          rode on it (DELETE /api/credentials/:service). */}
+      <ConfirmDialog
+        open={disconnecting}
+        onOpenChange={setDisconnecting}
+        title={`Disconnect ${title}?`}
+        description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
+        confirmLabel="Disconnect"
+        pendingLabel="Disconnecting…"
+        pending={disconnect.isPending}
+        error={disconnect.error != null ? errorText(disconnect.error) : undefined}
+        onConfirm={() =>
+          disconnect.mutate(
+            { service: service.service },
+            { onSuccess: () => setDisconnecting(false) },
+          )
+        }
       />
     </>
   );

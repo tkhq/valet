@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { GetSlackAppResponse } from "@valet/api/wire";
-import { Badge, Button, Input, Spinner, Textarea } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Spinner, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { useDeleteSlackApp, useSaveSlackCredential, useSlackApp } from "~/api/settings";
 
@@ -296,6 +296,7 @@ function ConnectedCard({ data }: { data: GetSlackAppResponse }) {
   const manifestJson = JSON.stringify(data.manifest, null, 2);
   const manifestRef = useRef<HTMLTextAreaElement>(null);
   const [copied, setCopied] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const copyManifest = async () => {
     try {
       await navigator.clipboard.writeText(manifestJson);
@@ -350,17 +351,26 @@ function ConnectedCard({ data }: { data: GetSlackAppResponse }) {
             variant="danger"
             size="sm"
             disabled={deleteApp.isPending}
-            onClick={() => {
-              if (!confirm("Disconnect Slack? The agent stops answering in this workspace until a credential is saved again.")) {
-                return;
-              }
-              deleteApp.mutate();
-            }}
+            onClick={() => setConfirmDisconnect(true)}
           >
             {deleteApp.isPending ? "Disconnecting…" : "Disconnect"}
           </Button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmDisconnect}
+        onOpenChange={setConfirmDisconnect}
+        title="Disconnect Slack?"
+        description="This deletes the organization's stored Slack credential. The agent stops answering in this workspace until you save the credential again on this page."
+        confirmLabel="Disconnect"
+        pendingLabel="Disconnecting…"
+        pending={deleteApp.isPending}
+        error={deleteApp.error != null ? errorText(deleteApp.error) : undefined}
+        onConfirm={() =>
+          deleteApp.mutate(undefined, { onSuccess: () => setConfirmDisconnect(false) })
+        }
+      />
 
       <details className="rounded-md border border-line p-4">
         <summary className="cursor-pointer text-sm font-medium text-ink">

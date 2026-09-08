@@ -6,16 +6,18 @@
  * itself resolves anything.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { GetSlackAppResponse } from "@valet/api/wire";
 
 const saveCredentialMutateAsync = vi.fn();
 const deleteAppMutate = vi.fn();
+let nativeConfirm = vi.fn(() => true);
 
 let slackAppData: GetSlackAppResponse | undefined;
 let isLoading = false;
 let isError = false;
 let saveCredentialError: Error | null = null;
+let deleteAppError: Error | null = null;
 let lastRequestedName: string | undefined;
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
@@ -33,7 +35,11 @@ vi.mock("~/api/settings", async (importOriginal) => {
       isPending: false,
       error: saveCredentialError,
     }),
-    useDeleteSlackApp: () => ({ mutate: deleteAppMutate, isPending: false }),
+    useDeleteSlackApp: () => ({
+      mutate: deleteAppMutate,
+      isPending: false,
+      error: deleteAppError,
+    }),
   };
 });
 
@@ -91,8 +97,13 @@ describe("SlackAppSection", () => {
     isLoading = false;
     isError = false;
     saveCredentialError = null;
+    deleteAppError = null;
     lastRequestedName = undefined;
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    // The disconnect must never reach `window.confirm`: browser automation
+    // auto-accepts it, so a native confirm is no confirmation at all. A spy
+    // that answers "yes" makes a reintroduced call visible here.
+    nativeConfirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", nativeConfirm);
   });
 
   it("shows a loading spinner", () => {
@@ -225,7 +236,7 @@ describe("SlackAppSection", () => {
     expect(screen.getByText(/not a bot token/)).toBeTruthy();
   });
 
-  it("connected: shows the workspace and disconnects after confirm", () => {
+  it("connected: shows the workspace", () => {
     slackAppData = slackAppResponse({
       connected: true,
       teamName: "Acme",
@@ -236,18 +247,53 @@ describe("SlackAppSection", () => {
     expect(screen.getByText("Acme")).toBeTruthy();
     expect(screen.getByText("Workspace T12345")).toBeTruthy();
     expect(screen.getByText("Connected")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-    expect(deleteAppMutate).toHaveBeenCalled();
   });
 
-  it("connected: a declined confirm does not disconnect", () => {
-    vi.stubGlobal("confirm", vi.fn(() => false));
+  it("connected: Disconnect asks first and deletes nothing on its own", () => {
     slackAppData = slackAppResponse({ connected: true, teamName: "Acme" });
     render(<SlackAppSection />);
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    expect(screen.getByText("Disconnect Slack?")).toBeTruthy();
+    expect(screen.getByText(/The agent stops answering in this workspace/)).toBeTruthy();
     expect(deleteAppMutate).not.toHaveBeenCalled();
+    expect(nativeConfirm).not.toHaveBeenCalled();
+  });
+
+  it("connected: confirming the dialog disconnects", () => {
+    slackAppData = slackAppResponse({ connected: true, teamName: "Acme" });
+    render(<SlackAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    // Two "Disconnect" buttons are on screen now — the card's and the
+    // dialog's. The dialog owns the one inside the confirm.
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+
+    expect(deleteAppMutate).toHaveBeenCalledTimes(1);
+    // The old code called `mutate()` with no variables; keep that call shape.
+    expect(deleteAppMutate.mock.calls[0]?.[0]).toBeUndefined();
+  });
+
+  it("connected: cancelling the dialog disconnects nothing", () => {
+    slackAppData = slackAppResponse({ connected: true, teamName: "Acme" });
+    render(<SlackAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(deleteAppMutate).not.toHaveBeenCalled();
+    expect(screen.queryByText("Disconnect Slack?")).toBeNull();
+  });
+
+  it("connected: the dialog shows the error the disconnect failed with", () => {
+    slackAppData = slackAppResponse({ connected: true, teamName: "Acme" });
+    deleteAppError = new Error("Slack rejected the request");
+    render(<SlackAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    expect(screen.getByText(/Slack rejected the request/)).toBeTruthy();
   });
 
   it("connected: lists the scopes the installed app did not grant", () => {
