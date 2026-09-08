@@ -139,6 +139,55 @@ describe("connectModeFor", () => {
     await expect(resolve({ plugins, decl, service: "slack" })).resolves.toBe("unconfigured");
   });
 
+  // Team credentials design: a team may hold its own token for an
+  // org-provided service. For that team the token is the integration, so
+  // with no org row the service is still available to it.
+  it("requires.orgCredential with no org row but the owning team's own row is \"manual\"", async () => {
+    const decl: CredentialDeclaration = {
+      type: "bot_token",
+      configKeys: ["accessToken"],
+      requires: { orgCredential: true },
+    };
+    const plugins = [makePlugin("slack", { credentials: [decl] })];
+    const store = new InMemoryCredentialStore();
+    await store.save({ type: "team", id: "team-1" }, "slack", { type: "bot_token", accessToken: "xoxb-team" });
+
+    await expect(
+      connectModeFor({
+        plugins,
+        decl,
+        service: "slack",
+        orgId: ORG,
+        credentials: store,
+        env: {},
+        owner: { type: "team", id: "team-1" },
+      }),
+    ).resolves.toBe("manual");
+    // Another team, or a user, gets nothing from that row.
+    await expect(
+      connectModeFor({
+        plugins,
+        decl,
+        service: "slack",
+        orgId: ORG,
+        credentials: store,
+        env: {},
+        owner: { type: "team", id: "team-2" },
+      }),
+    ).resolves.toBe("unconfigured");
+    await expect(
+      connectModeFor({
+        plugins,
+        decl,
+        service: "slack",
+        orgId: ORG,
+        credentials: store,
+        env: {},
+        owner: { type: "user", id: "u1" },
+      }),
+    ).resolves.toBe("unconfigured");
+  });
+
   it("a declaration with no oauth and no requires is \"manual\"", async () => {
     const decl: CredentialDeclaration = { type: "api_key", configKeys: ["apiKey"] };
     const plugins = [makePlugin("linear", { credentials: [decl] })];

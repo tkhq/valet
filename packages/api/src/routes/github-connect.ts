@@ -38,6 +38,7 @@ import { resolveReturnOrigin } from "./credential-connect.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import { loadAppConfig, relinkInstallations, type GithubAppDeps } from "../services/github-app.js";
 import { githubInstallations } from "../schema/index.js";
+import { deleteDelegationsFrom } from "../services/credential-delegations.js";
 import type { GetGithubOrgStatusResponse, PostGithubConnectResponse } from "../wire/types.js";
 
 export const githubConnectRouter = new Hono<AppEnv>();
@@ -261,6 +262,9 @@ githubConnectRouter.delete("/", async (c) => {
   const { db, engineCredentials } = c.var.providers;
 
   await engineCredentials.delete({ type: "user", id: user.id }, GITHUB_CREDENTIAL_SERVICE);
+  // A team reference to this row goes with it (team credentials design,
+  // decision 4), the same cascade `DELETE /api/credentials/github` runs.
+  await deleteDelegationsFrom(db, { userId: user.id, service: GITHUB_CREDENTIAL_SERVICE });
   await db
     .update(githubInstallations)
     .set({ linkedUserId: null, updatedAt: Date.now() })

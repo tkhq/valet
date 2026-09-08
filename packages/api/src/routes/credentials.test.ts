@@ -10,6 +10,8 @@ import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, users } from "../schema/index.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
+import { addMember, createTeam } from "../services/teams.js";
+import { startSlackFixture, type SlackFixture } from "../test-helpers/slack-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -863,5 +865,366 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     });
     expect(put.status).toBe(400);
     expect(await put.json()).toEqual({ error: "onepassword is a reserved service name" });
+  });
+});
+
+describe("team credential scope (TKAI-205)", () => {
+  async function teamWithMember(plugins: ValetPlugin[] = []) {
+    api = await bootTestApi({ plugins });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org",
+      name: "Platform",
+      creatorUserId: "local-user",
+    });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    return team;
+  }
+
+  it("lets a member read team scope and refuses a non-admin PUT with 404", async () => {
+    const team = await teamWithMember();
+    const putAdmin = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "team-lin", scope: "team", teamId: team.id }),
+    });
+    expect(putAdmin.status).toBe(200);
+
+    const getMember = await fetch(
+      `${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`,
+      { headers: MEMBER_HEADERS },
+    );
+    expect(getMember.status).toBe(200);
+    const { credentials: listed } = (await getMember.json()) as ListCredentialsResponse;
+    expect(listed).toEqual([
+      expect.objectContaining({ service: "linear", type: "api_key" }),
+    ]);
+    expect(JSON.stringify(listed)).not.toContain("team-lin");
+
+    const putMember = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "nope", scope: "team", teamId: team.id }),
+    });
+    expect(putMember.status).toBe(404);
+  });
+
+  it("delegates and revokes a personal credential, and 409s an occupied slot", async () => {
+    const team = await teamWithMember();
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(201);
+
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([
+      expect.objectContaining({ service: "linear", delegatedFrom: "test-member", referenceBroken: false }),
+    ]);
+
+    // A caller with nothing to share is told to connect first; the slot
+    // check only applies once the caller holds a source credential.
+    const unconnected = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(unconnected.status).toBe(400);
+    expect(((await unconnected.json()) as { error: string }).error).toContain("Connect linear in Integrations first");
+
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "admin-lin" }),
+    });
+    const occupied = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(occupied.status).toBe(409);
+    expect(((await occupied.json()) as { error: string }).error).toContain("Ask a team admin to disconnect it first.");
+
+    const revoke = await fetch(
+      `${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`,
+      { method: "DELETE", headers: MEMBER_HEADERS },
+    );
+    expect(revoke.status).toBe(200);
+    const after = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(after.credentials).toEqual([]);
+  });
+
+  // A team row is read with org-scoped 1Password tokens only, so a
+  // personal-scope reference stored at team scope could never resolve.
+  it("refuses a team-scope 1Password reference with a personal token, naming the fix", async () => {
+    const team = await teamWithMember();
+    const fake = new FakeOnePasswordService();
+    api!.providers.onePassword = fake;
+    const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        scope: "team",
+        teamId: team.id,
+        onepassword: { reference: "op://vault/item/field", tokenScope: "personal" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    const body = (await put.json()) as { error: string };
+    expect(body.error).toContain("tokenScope to org");
+    expect(body.error).toContain("store the secret directly");
+    expect(fake.resolveCalls).toEqual([]);
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+  });
+
+  // The same scope rule holds for a delegated reference: the team read
+  // runs on org-scoped tokens, so a personal reference on the source row
+  // would never resolve for the team.
+  it("refuses to delegate a personal-scope 1Password reference, naming the fix", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://vault/item/field", tokenScope: "personal" } },
+    });
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(400);
+    const { error } = (await share.json()) as { error: string };
+    expect(error).toBe(
+      "linear is stored as a personal 1Password reference, which a team cannot read. " +
+        "Store it again with tokenScope org, or store the secret directly, then share it.",
+    );
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+  });
+
+  // A team may store its own Slack bot token. It is checked against Slack
+  // the same way the org token is (bot token, required scopes), but it
+  // needs no signing secret because Slack events route through the org app.
+  describe("team Slack token", () => {
+    const slackDeclaration: ValetPlugin = {
+      name: "slack",
+      version: "0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    let slack: SlackFixture | undefined;
+    const savedApiBase = process.env.VALET_SLACK_API_BASE;
+
+    afterEach(async () => {
+      await slack?.close();
+      slack = undefined;
+      if (savedApiBase === undefined) delete process.env.VALET_SLACK_API_BASE;
+      else process.env.VALET_SLACK_API_BASE = savedApiBase;
+    });
+
+    function useFixture(fixture: SlackFixture): void {
+      slack = fixture;
+      process.env.VALET_SLACK_API_BASE = fixture.url;
+    }
+
+    it("rejects a token Slack rejects, naming the fix, and stores nothing", async () => {
+      const team = await teamWithMember([slackDeclaration]);
+      useFixture(startSlackFixture({ body: { ok: false, error: "invalid_auth" } }));
+      const put = await fetch(`${api!.baseUrl}/api/credentials/slack`, {
+        method: "PUT",
+        headers: HEADERS,
+        body: JSON.stringify({ type: "bot_token", accessToken: "xoxb-team", scope: "team", teamId: team.id }),
+      });
+      expect(put.status).toBe(400);
+      const { error } = (await put.json()) as { error: string };
+      expect(error).toContain("invalid_auth");
+      expect(error).toContain("OAuth & Permissions");
+      expect(slack?.calls).toEqual(["Bearer xoxb-team"]);
+      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack")).toBeNull();
+    });
+
+    it("stores a verified bot token without a signing secret and records the workspace", async () => {
+      const team = await teamWithMember([slackDeclaration]);
+      useFixture(startSlackFixture());
+      const put = await fetch(`${api!.baseUrl}/api/credentials/slack`, {
+        method: "PUT",
+        headers: HEADERS,
+        body: JSON.stringify({ type: "bot_token", accessToken: "xoxb-team", scope: "team", teamId: team.id }),
+      });
+      expect(put.status).toBe(200);
+      expect(slack?.calls).toEqual(["Bearer xoxb-team"]);
+      const stored = await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack");
+      expect(stored?.accessToken).toBe("xoxb-team");
+      expect(stored?.metadata).toMatchObject({ teamId: "T0FIXTURE", teamName: "Fixture Workspace", botUserId: "U0BOTFIXTURE" });
+      expect(stored?.metadata?.webhookSecret).toBeUndefined();
+      expect(stored?.scopes).toContain("assistant:write");
+    });
+
+    // A personal Slack token is one person's identity. A team runs on a
+    // verified bot token stored at team scope, or on the org bot; the
+    // delegate route must refuse the personal row the way PUT already does.
+    it("refuses to delegate a personal Slack connection, naming the team token path", async () => {
+      const team = await teamWithMember([slackDeclaration]);
+      await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "slack", {
+        type: "bot_token",
+        accessToken: "xoxp-personal",
+      });
+      const share = await fetch(`${api!.baseUrl}/api/credentials/slack/delegate`, {
+        method: "POST",
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ teamId: team.id }),
+      });
+      expect(share.status).toBe(400);
+      const { error } = (await share.json()) as { error: string };
+      expect(error).toBe(
+        "Slack cannot be shared from a personal connection. " +
+          "Store a team bot token in Settings → Organization → Teams, or use the organization's Slack.",
+      );
+      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "slack")).toBeNull();
+    });
+  });
+
+  it("lists a team row's health fields and 1Password reference like a user row", async () => {
+    const team = await teamWithMember();
+    api!.providers.onePassword = new FakeOnePasswordService();
+    const putDirect = await fetch(`${api!.baseUrl}/api/credentials/github-team`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "oauth2",
+        accessToken: "team-gh",
+        scope: "team",
+        teamId: team.id,
+        metadata: { login: "octo", identityOnly: true, refreshFailedAt: 1700000000000 },
+      }),
+    });
+    expect(putDirect.status).toBe(200);
+    const putRef = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        scope: "team",
+        teamId: team.id,
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(putRef.status).toBe(200);
+
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          service: "github-team",
+          type: "oauth2",
+          login: "octo",
+          identityOnly: true,
+          refreshFailedAt: 1700000000000,
+        }),
+        expect.objectContaining({ service: "linear", type: "api_key", onepasswordRef: "op://vault/item/field" }),
+      ]),
+    );
+    expect(JSON.stringify(listed)).not.toContain("team-gh");
+  });
+
+  it("names the corrective action on a malformed delegate body and a non-shareable credential", async () => {
+    const team = await teamWithMember();
+    const malformed = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: "{not json",
+    });
+    expect(malformed.status).toBe(400);
+    expect(((await malformed.json()) as { error: string }).error).toContain("Send a JSON body with teamId.");
+
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "app_install",
+      accessToken: "ghs_install",
+    });
+    const unshareable = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(unshareable.status).toBe(400);
+    expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect github for the team instead.");
+  });
+
+  it("refuses to overwrite a direct team credential, even when a pre-read saw the slot empty", async () => {
+    const team = await teamWithMember();
+    const putDirect = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "team-lin", scope: "team", teamId: team.id }),
+    });
+    expect(putDirect.status).toBe(200);
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+
+    // Models the read-then-write window of a concurrent delegation or an
+    // admin's direct PUT: whatever a pre-read reports, the write itself
+    // must refuse an occupied slot.
+    const store = api!.providers.engineCredentials;
+    api!.providers.engineCredentials = {
+      get: (owner, service) => store.get(owner, service),
+      save: (owner, service, credential) => store.save(owner, service, credential),
+      delete: (owner, service) => store.delete(owner, service),
+      list: async () => [],
+    };
+
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(409);
+
+    const direct = await store.get({ type: "team", id: team.id }, "linear");
+    expect(direct).toMatchObject({ type: "api_key", apiKey: "team-lin" });
+    expect(direct?.metadata).toBeUndefined();
+  });
+
+  it("deletes matching team references when the source user credential is deleted", async () => {
+    const team = await teamWithMember();
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    expect(
+      (
+        await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+          method: "POST",
+          headers: MEMBER_HEADERS,
+          body: JSON.stringify({ teamId: team.id }),
+        })
+      ).status,
+    ).toBe(201);
+
+    expect(
+      (
+        await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+          method: "DELETE",
+          headers: MEMBER_HEADERS,
+        })
+      ).status,
+    ).toBe(200);
+
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([]);
   });
 });

@@ -249,7 +249,8 @@ async function computeResult(
   // disappears from a live session's `list_tools` — deterministically, with
   // the corrective action named. Scans the full registry (see
   // `ActionInvokerOpts.plugins`) because the declaration can live on a
-  // different plugin than the action's owner.
+  // different plugin than the action's owner. `owner` lets a team run pass
+  // on the team's own row when the org row is absent.
   const registry = registryOf(opts);
   const declared = findCredentialDeclaration(registry, credentialService);
   // Kept past the gate: the team refusal below reads it to tell an
@@ -264,6 +265,7 @@ async function computeResult(
       orgId: ctx.orgId,
       credentials: opts.credentials,
       env: process.env,
+      owner,
     });
     if (mode === "unconfigured") {
       return {
