@@ -31,7 +31,7 @@ skills: [loadSkillFromMarkdown(skillMd, "plugin", "github")];
 
 There is no directory scanner. Each plugin names the file it loads, so a new skill needs an explicit line in the plugin manifest.
 
-`packages/plugin-valet/skills/valet-product-knowledge/SKILL.md` ships product research rules. It uses a distinct name because a plugin skill shadows a stored skill with the same name. This lets a synced `using-valet` skill remain available.
+`packages/plugin-valet/skills/using-valet/SKILL.md` ships product research rules. `mergedSkillSources` (`packages/api/src/plugins/assemble.ts:139-149`) gives a bundled skill precedence over a stored or synced skill with the same name. For `using-valet`, this precedence is deliberate: the core bundled skill is canonical.
 
 ## Frontmatter
 

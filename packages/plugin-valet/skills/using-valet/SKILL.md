@@ -1,5 +1,5 @@
 ---
-name: valet-product-knowledge
+name: using-valet
 description: Answer questions about Valet product capabilities. Use for "can Valet do X", "does Valet support", "does Valet support workflows", "how do I use Valet", or "what features does Valet have". Do not use for Valet development or a specific integration.
 ---
 
