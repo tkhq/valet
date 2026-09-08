@@ -44,16 +44,24 @@ function normalizePath(path: string): string {
 }
 
 /**
- * True when `file` matches at least one of `globs`. An empty glob list means
- * the cell is unscoped (recon / verify / repo-wide) and every path matches, so
- * the caller must decide whether an empty list is "unscoped" before it calls.
+ * True when `file` matches at least one of `globs`. A literal scope matches
+ * itself (a scope-as-file) or a child path (a scope-as-directory). The child
+ * match requires a slash boundary, so `src/ump` cannot match `src/umpx`. An
+ * empty glob list means the cell is unscoped (recon / verify / repo-wide) and
+ * every path matches, so the caller must decide whether an empty list is
+ * "unscoped" before it calls.
  */
 export function pathMatchesGlobs(file: string, globs: readonly string[]): boolean {
   const target = normalizePath(file);
   if (globs.length === 0) return true;
   for (const glob of globs) {
-    const g = glob.trim();
+    const g = normalizePath(glob);
     if (g === "") continue;
+    if (!g.includes("*")) {
+      const scope = g.replace(/\/+$/, "");
+      if (target === scope || target.startsWith(`${scope}/`)) return true;
+      continue;
+    }
     if (globToRegExp(g).test(target)) return true;
   }
   return false;
