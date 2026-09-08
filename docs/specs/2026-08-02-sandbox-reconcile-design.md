@@ -197,6 +197,7 @@ The index repair creates per-ref uniqueness before it drops the old per-reposito
 
 This change does not move `/prebuilt/repo` into the session's working directory. Artifact reuse, image pull policy, and toolchain pins require separate changes.
 
+Anonymous public-repository bakes use the bound ref with the same rules as authenticated bakes.
 
 ## Anonymous image bake policy
 

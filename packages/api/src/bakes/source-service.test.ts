@@ -1037,12 +1037,15 @@ describe("SourceService", () => {
     it("bakes a public repository without an org GitHub credential", async () => {
       // A different org with no credential seeded.
       await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW, allowAnonymousImageBakes: true });
-      await service.ensureRepoSource("org-nocred", repo);
+      await service.ensureRepoSource("org-nocred", { ...repo, ref: "dev-v2" });
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, "org-nocred"));
       expect(sources).toHaveLength(1);
+      expect(sources[0].repoRef).toBe("dev-v2");
       expect(builder.specs).toHaveLength(1);
       expect(builder.specs[0].gitToken).toBeUndefined();
       expect(builder.specs[0].commitSha).toBeTruthy();
+      expect(fixture.calls.some((call) => call.path === "/repos/acme/widgets/commits/dev-v2")).toBe(true);
+      expect(fixture.calls.some((call) => call.path === "/repos/acme/widgets/commits/main")).toBe(false);
       expect(fixture.calls.every((call) => !call.authHeader)).toBe(true);
     });
 
