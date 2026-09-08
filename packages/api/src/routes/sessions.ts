@@ -762,6 +762,7 @@ sessionsRouter.post("/", async (c) => {
       host: repo.host ?? "github",
       fullName: repo.fullName,
       cloneUrl: repo.cloneUrl,
+      ref: repo.ref,
     });
   }
 

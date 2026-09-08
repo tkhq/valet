@@ -892,8 +892,37 @@ describe("pg app schema + migrations", () => {
   // `addColumnsMissingFromAppliedMigrations` can repair the gap. Simulate
   // that database by dropping the columns, then re-run the migrations.
   describe("column repair for in-place 0000 edits", () => {
+    it("upgrades populated repo sources to per-ref uniqueness without losing bakes", async () => {
+      await db.query('DROP INDEX "image_sources_org_repo_ref"');
+      await db.query('ALTER TABLE "image_sources" DROP COLUMN "repo_ref"');
+      await db.query(`CREATE UNIQUE INDEX "image_sources_org_repo" ON "image_sources"
+        ("org_id","repo_host","repo_full_name") WHERE kind = 'repo'`);
+      await db.query(`INSERT INTO image_sources
+        (id, org_id, kind, name, repo_host, repo_full_name, created_at, updated_at)
+        VALUES ('ref-legacy', 'ref-org', 'repo', 'acme/widgets', 'github', 'acme/widgets', 1, 1)`);
+      await db.query(`INSERT INTO bakes (id, source_id, identity_hash, image_ref, status, created_at)
+        VALUES ('ref-legacy-bake', 'ref-legacy', 'identity', 'legacy-image', 'pushed', 1)`);
+      await applyAppMigrations(db);
+      expect((await db.query('SELECT repo_ref FROM image_sources WHERE id = $1', ['ref-legacy'])).rows)
+        .toEqual([{ repo_ref: "" }]);
+      expect((await db.query('SELECT image_ref FROM bakes WHERE id = $1', ['ref-legacy-bake'])).rows)
+        .toEqual([{ image_ref: "legacy-image" }]);
+      for (const ref of ["main", "dev-v2"]) {
+        await db.query(`INSERT INTO image_sources
+          (id, org_id, kind, name, repo_host, repo_full_name, repo_ref, created_at, updated_at)
+          VALUES ($1, 'ref-org', 'repo', 'acme/widgets', 'github', 'acme/widgets', $2, 1, 1)`, [`ref-${ref}`, ref]);
+      }
+      await expect(db.query(`INSERT INTO image_sources
+        (id, org_id, kind, name, repo_host, repo_full_name, repo_ref, created_at, updated_at)
+        VALUES ('ref-duplicate', 'ref-org', 'repo', 'acme/widgets', 'github', 'acme/widgets', 'dev-v2', 1, 1)`))
+        .rejects.toThrow(/unique|duplicate/i);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      await db.query("DELETE FROM image_sources WHERE org_id = 'ref-org'");
+    });
+
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
       { table: "image_sources", column: "sandbox_resources" },
+      { table: "image_sources", column: "repo_ref" },
       { table: "skill_sources", column: "created_by" },
       { table: "skill_sources", column: "kinds" },
       { table: "skill_sources", column: "discovery_scan" },

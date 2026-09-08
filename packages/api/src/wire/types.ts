@@ -4179,6 +4179,8 @@ export interface SourceSummary {
   setupCommands: string[] | null;
   repoHost: string | null;
   repoFullName: string | null;
+  /** Empty means the default branch. Optional for older API servers. */
+  repoRef?: string;
   cloneUrl: string | null;
   /** Saved repository defaults. Optional while older API servers remain deployed. */
   sandboxResources?: { cpu?: number; memory?: string } | null;
@@ -4226,8 +4228,8 @@ export interface TriggerBakeResponse {
   bake: BakeSummary;
 }
 
-/** `GET /api/sources/for-repo?fullName=owner/repo` — any authed org
- * member. The newest `pushed` build for the caller's org + repo, or
+/** `GET /api/sources/for-repo?fullName=owner/repo&ref=branch&host=github` — any authed org
+ * member. The newest `pushed` build for the caller's org + host + repo + ref, or
  * `null`. Deliberately narrow (no `imageRef`/`error`/`logTail`) — this is
  * the one prebuild read a non-admin member can hit. */
 export interface GetPrebuildForRepoResponse {

@@ -166,9 +166,27 @@ interface SchemaRepair {
  * Every entry must also be safe to ROLL BACK: the previous release may boot
  * this database again. Adding a column or a table is safe; renaming or
  * dropping is not, because the older release repairs the OLD name and its
- * statement then stops its boot. Do not rename or drop here.
+ * statement then stops its boot. Do not rename or drop here, except for the
+ * repo-ref index replacement below. Older repair lists do not recreate that
+ * index; the sandbox reconciliation spec documents its coordinated rollout.
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  {
+    describe: "image_sources.repo_ref column",
+    probe: { kind: "column", table: "image_sources", column: "repo_ref" },
+    sql: `ALTER TABLE "image_sources" ADD COLUMN IF NOT EXISTS "repo_ref" text NOT NULL DEFAULT ''`,
+  },
+  {
+    // Replace uniqueness atomically. Older releases do not repair the old
+    // index, but cannot select ref-specific sources. See the rollout note.
+    describe: "image_sources_org_repo_ref index",
+    probe: { kind: "index", index: "image_sources_org_repo_ref" },
+    sql: `DO $$ BEGIN
+      CREATE UNIQUE INDEX IF NOT EXISTS "image_sources_org_repo_ref"
+        ON "image_sources" ("org_id","repo_host","repo_full_name","repo_ref") WHERE kind = 'repo';
+      DROP INDEX IF EXISTS "image_sources_org_repo";
+    END $$`,
+  },
   {
     describe: "image_sources.sandbox_resources column",
     probe: { kind: "column", table: "image_sources", column: "sandbox_resources" },

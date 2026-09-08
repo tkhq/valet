@@ -197,6 +197,31 @@ describe("resolvePrebuildImage", () => {
     expect(await resolvePrebuildImage(db, meta(), fakeProvider(true))).toBeNull();
   });
 
+  it("does not give a default-branch image to a session bound to another ref", async () => {
+    const sourceId = await seedConfig(db);
+    await seedPrebuild(db, sourceId, {
+      id: "pb-main", status: "pushed", imageRef: "main-image", commitSha: "main-sha", createdAt: NOW,
+    });
+    const session = meta();
+    session.repos = session.repos?.map((repo) => ({ ...repo, ref: "dev-v2" }));
+    expect(await resolvePrebuildImage(db, session, fakeProvider(true))).toBeNull();
+  });
+
+  it("selects the matching ref even when another ref has a newer bake", async () => {
+    const defaultId = await seedConfig(db);
+    const branchId = "cfg-branch";
+    await db.insert(imageSources).values({
+      id: branchId, orgId: ORG, kind: "repo", name: "widgets@dev-v2", repoHost: "github",
+      repoFullName: REPO, repoRef: "dev-v2", createdAt: NOW, updatedAt: NOW,
+    });
+    await seedPrebuild(db, defaultId, { id: "pb-default", status: "pushed", imageRef: "default-image", commitSha: "main-sha", createdAt: NOW + 100 });
+    await seedPrebuild(db, branchId, { id: "pb-branch", status: "pushed", imageRef: "branch-image", commitSha: "dev-sha", createdAt: NOW });
+    const session = meta();
+    session.repos = session.repos?.map((repo) => ({ ...repo, ref: "dev-v2" }));
+    expect(await resolvePrebuildImage(db, session, fakeProvider(true))).toMatchObject({ imageRef: "branch-image", bakedSha: "dev-sha" });
+    expect(await resolvePrebuildImage(db, meta(), fakeProvider(true))).toMatchObject({ imageRef: "default-image" });
+  });
+
   it("capability-false: provider without customImage ignores the pushed image → null", async () => {
     const cfg = await seedConfig(db);
     await seedPrebuild(db, cfg, {
