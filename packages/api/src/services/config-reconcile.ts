@@ -45,6 +45,7 @@ import {
   type LlmProviderKind,
 } from "./llm-providers.js";
 import { deleteMirroredContent, parseRepoInput } from "./content-sources.js";
+import { resolveDefaultAssistant } from "../assistants/service.js";
 import type { SourceService } from "../bakes/source-service.js";
 
 // ---------------------------------------------------------------------------
@@ -437,6 +438,11 @@ async function adoptTeamForConfig(
  * by trusting the id it just wrote. `onConflictDoNothing` hides a lost race:
  * a login that mirrored a group of this name between the two statements would
  * otherwise slip an `idp` row into the resolved id and take its members.
+ *
+ * A row this function inserts gets its default assistant in the same
+ * transaction, as `createTeam` does (TKAI-337): every `/chat` affordance for
+ * a team keys off "the team owns an assistant". A lost race inserts nothing,
+ * so it seeds nothing for the id it did not write.
  */
 async function resolveConfigTeam(
   db: AppDb,
@@ -449,10 +455,15 @@ async function resolveConfigTeam(
   const existing = await findTeamByName(db, orgId, name);
   if (existing) return adoptTeamForConfig(db, existing, name, configPath);
 
-  await db
-    .insert(teams)
-    .values({ id: configTeamId(name), orgId, name, origin: "config", createdAt: Date.now() })
-    .onConflictDoNothing();
+  await db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(teams)
+      .values({ id: configTeamId(name), orgId, name, origin: "config", createdAt: Date.now() })
+      .onConflictDoNothing()
+      .returning({ id: teams.id });
+    const created = inserted[0];
+    if (created) await resolveDefaultAssistant(tx, orgId, { type: "team", id: created.id });
+  });
 
   const after = await findTeamByName(db, orgId, name);
   if (!after) return undefined;

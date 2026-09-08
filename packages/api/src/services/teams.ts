@@ -7,7 +7,8 @@
  * never both succeed.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
@@ -23,9 +24,10 @@ import {
   teamMembers,
   teams,
   workflowDefinitions,
+  type AssistantRow,
   type TeamRow,
 } from "../schema/index.js";
-import { retireAssistant } from "../assistants/service.js";
+import { resolveDefaultAssistant, retireAssistant } from "../assistants/service.js";
 import { getOrgFeatures, isOrgAdmin } from "./org.js";
 import { deleteMirroredContent } from "./content-sources.js";
 
@@ -244,11 +246,64 @@ async function getMember(
   return rows[0];
 }
 
+/** Seeds the default assistant for one principal inside the caller's
+ * transaction. Same shape as `resolveDefaultAssistant`. */
+export type SeedDefaultAssistant = (
+  tx: AppQueryable,
+  orgId: string,
+  principal: Principal,
+) => Promise<AssistantRow>;
+
+/**
+ * One-time backfill for teams written before every team writer seeded a
+ * default assistant. Runs at boot, after migrations: each team with no
+ * default gets one through the same seed the writers use. Idempotent, and
+ * a team that already holds a default, or one that was seeded by a
+ * concurrent boot, is skipped by the seed's own conflict handling. Returns
+ * the ids it seeded so the boot log can name them.
+ */
+export async function seedMissingTeamDefaults(db: AppDb): Promise<string[]> {
+  const rows = await db
+    .select({ id: teams.id, orgId: teams.orgId })
+    .from(teams)
+    .leftJoin(
+      assistants,
+      and(
+        eq(assistants.ownerType, "team"),
+        eq(assistants.ownerId, teams.id),
+        eq(assistants.orgId, teams.orgId),
+        eq(assistants.isDefault, true),
+      ),
+    )
+    .where(isNull(assistants.id))
+    .orderBy(teams.createdAt);
+  const seeded: string[] = [];
+  for (const row of rows) {
+    await resolveDefaultAssistant(db, row.orgId, { type: "team", id: row.id });
+    seeded.push(row.id);
+  }
+  return seeded;
+}
+
 export interface CreateTeamOptions {
   orgId: string;
   name: string;
   creatorUserId: string;
+  /**
+   * Replaces the assistant seed. Only a test sets this, to prove the team
+   * insert rolls back when the seed throws. Defaults to the real seed.
+   */
+  seedDefaultAssistant?: SeedDefaultAssistant;
 }
+
+/**
+ * The new team row plus what the create transaction seeded beside it. The
+ * route answers POST from this, so it never re-reads rows it already holds.
+ */
+export type CreatedTeam = TeamRow & {
+  /** The default assistant seeded in the same transaction as the team. */
+  defaultAssistant: AssistantRow;
+};
 
 /**
  * Creates a team; the creator is auto-admitted as its first admin. The
@@ -256,8 +311,15 @@ export interface CreateTeamOptions {
  * a belt-and-suspenders catch on the `teams_org_name` unique constraint) so
  * two concurrent creates of the same name can't both pass the pre-check and
  * race into a raw 500 — the loser always sees `TeamNameConflictError`.
+ *
+ * A default assistant is seeded in the SAME transaction (TKAI-337). Every
+ * `/chat` UI affordance for a team keys off "the team owns an assistant"
+ * (group header, `+` button, scoped default), and lazy creation left a
+ * brand-new team as a dead end that silently opened the caller's personal
+ * conversation. The seed and the team insert live and die together.
  */
-export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<TeamRow> {
+export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<CreatedTeam> {
+  const seedDefaultAssistant = opts.seedDefaultAssistant ?? resolveDefaultAssistant;
   const id = newTeamId();
   const now = Date.now();
   // A team created through this service is always `local`: it belongs to the
@@ -274,7 +336,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
   };
 
   try {
-    await db.transaction(async (tx) => {
+    const defaultAssistant = await db.transaction(async (tx) => {
       const existingRows = await tx
         .select()
         .from(teams)
@@ -284,13 +346,13 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
 
       await tx.insert(teams).values(row);
       await tx.insert(teamMembers).values({ teamId: id, userId: opts.creatorUserId, role: "admin" });
+      return seedDefaultAssistant(tx, opts.orgId, { type: "team", id });
     });
+    return { ...row, defaultAssistant };
   } catch (err) {
     if (isTeamNameUniqueViolation(err)) throw new TeamNameConflictError(opts.orgId, opts.name);
     throw err;
   }
-
-  return row;
 }
 
 export interface AddMemberOptions {

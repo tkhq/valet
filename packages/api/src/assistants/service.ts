@@ -213,13 +213,17 @@ function newAssistantRow(args: {
  * number of assistants, so only this lookup can say which one automation
  * means.
  *
+ * Takes `AppQueryable` so a writer that creates the principal can seed its
+ * default inside the same transaction (`createTeam`, TKAI-337): if the
+ * team insert rolls back, the assistant goes with it.
+ *
  * Concurrent first calls (two tabs, or a workflow racing a human) both see
  * no default and both insert. The partial unique index picks one winner;
  * `onConflictDoNothing` turns the loser's insert into a no-op instead of an
  * uncaught constraint throw, and the re-read returns the winner's row.
  */
 export async function resolveDefaultAssistant(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   principal: Principal,
 ): Promise<AssistantRow> {

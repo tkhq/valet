@@ -61,7 +61,11 @@ import { isOrgAdmin } from "../services/org.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
+import {
+  ensureDefaultAssistantSession,
+  listAssistantsForOwners,
+  toAssistantSummary,
+} from "../assistants/service.js";
 import {
   addMember,
   assertNoTeamOwnedWorkflows,
@@ -393,7 +397,10 @@ teamsRouter.post("/", async (c) => {
 
   try {
     const team = await createTeam(db, { orgId: user.orgId, name: body.name, creatorUserId: user.id });
-    const resp: CreateTeamResponse = { team: await rowToSummary(db, team, user.id) };
+    const resp: CreateTeamResponse = {
+      team: await rowToSummary(db, team, user.id),
+      defaultAssistant: toAssistantSummary(team.defaultAssistant),
+    };
     return c.json(resp, 201);
   } catch (err) {
     const mapped = handleServiceError(err);

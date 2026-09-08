@@ -1,8 +1,16 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import {
+  assistants,
+  orgMembers,
+  orgs,
+  teamMembers,
+  teams,
+  users,
+  workflowDefinitions,
+} from "../schema/index.js";
 import {
   addMember,
   ConfigManagedTeamError,
@@ -17,11 +25,13 @@ import {
   NotOrgMemberError,
   NotTeamMemberError,
   removeMember,
+  seedMissingTeamDefaults,
   setRole,
   TeamNameConflictError,
   TeamOwnsWorkflowsError,
 } from "./teams.js";
 import { setOrgFeatures } from "./org.js";
+import { createAssistant, findDefaultAssistant } from "../assistants/service.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
@@ -40,6 +50,29 @@ describe("teams service", () => {
     await seedUser(db, "u3", orgId);
   });
 
+  // Teams written before the seed shipped have no default assistant, and a
+  // member switching to one would hit a notice with no create path. The boot
+  // backfill gives every such team its default once and leaves teams that
+  // already hold one alone.
+  it("seedMissingTeamDefaults gives a pre-existing team its default once", async () => {
+    const now = Date.now();
+    await db.insert(teams).values({ id: "team_old", orgId, name: "Old", origin: "local", createdAt: now });
+    await db.insert(teams).values({ id: "team_named", orgId, name: "Named", origin: "local", createdAt: now });
+    await createAssistant(db, orgId, { type: "team", id: "team_named" }, "Bot");
+    const seeded = await createTeam(db, { orgId, name: "Fresh", creatorUserId: "u1" });
+
+    // "Named" already holds a default: its first assistant became one.
+    expect(await seedMissingTeamDefaults(db)).toEqual(["team_old"]);
+    for (const id of ["team_old", "team_named", seeded.id]) {
+      const row = await findDefaultAssistant(db, orgId, { type: "team", id });
+      expect(row?.isDefault).toBe(true);
+    }
+    const namedRows = await db.select().from(assistants).where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, "team_named")));
+    expect(namedRows.map((r) => r.name)).toEqual(["Bot"]);
+
+    expect(await seedMissingTeamDefaults(db)).toEqual([]);
+  });
+
   it("createTeam auto-admits the creator as admin", async () => {
     const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
     expect(team.name).toBe("Platform");
@@ -48,6 +81,79 @@ describe("teams service", () => {
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(1);
     expect(teams[0].id).toBe(team.id);
+  });
+
+  it("createTeam seeds the team's default assistant in the same transaction (TKAI-337)", async () => {
+    // Every `/chat` UI affordance for a team keys off "the team owns an
+    // assistant". Lazy creation left a brand-new team with no group, no
+    // `+`, and silently opened the caller's personal assistant. The row
+    // must be present the moment the team is.
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+
+    const owned = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
+    expect(owned).toHaveLength(1);
+    expect(owned[0]?.isDefault).toBe(true);
+    expect(owned[0]?.archivedAt).toBeNull();
+    expect(owned[0]?.orgId).toBe(orgId);
+    // Session address follows the assistant id (`assistant:{id}`), so the
+    // rail and every dispatch resolve to the same session.
+    expect(owned[0]?.sessionId).toBe(`assistant:${owned[0]!.id}`);
+  });
+
+  it("createTeam returns the seeded default assistant with the team", async () => {
+    // The route answers POST with the assistant so the client can open it
+    // at once. A re-read after commit would be a second query for a row the
+    // transaction already holds, and a miss there would surface as a 500.
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+
+    const owned = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
+    expect(team.defaultAssistant).toEqual(owned[0]);
+    expect(team.defaultAssistant.isDefault).toBe(true);
+  });
+
+  it("createTeam rolls the assistant back with the team on a name conflict", async () => {
+    // The seed lives inside the create transaction, so a duplicate name
+    // must leave neither row behind — otherwise a retry after a rejected
+    // create would strand a dangling-owner assistant.
+    await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    const before = await db.select().from(assistants);
+
+    await expect(
+      createTeam(db, { orgId, name: "Platform", creatorUserId: "u2" }),
+    ).rejects.toThrow(TeamNameConflictError);
+
+    const after = await db.select().from(assistants);
+    expect(after).toHaveLength(before.length);
+  });
+
+  it("createTeam rolls the team back when the assistant seed throws", async () => {
+    // The seed is injected rather than module-mocked: a `vi.mock` of the
+    // assistants module resolved to a different instance under CI and the
+    // real seed ran, so the create resolved instead of rejecting.
+    await expect(
+      createTeam(db, {
+        orgId,
+        name: "Rollback",
+        creatorUserId: "u1",
+        seedDefaultAssistant: async () => {
+          throw new Error("seed failed");
+        },
+      }),
+    ).rejects.toThrow("seed failed");
+
+    const leftoverTeams = await db.select().from(teams).where(eq(teams.name, "Rollback"));
+    const leftoverAssistants = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team")));
+    expect(leftoverTeams).toHaveLength(0);
+    expect(leftoverAssistants).toHaveLength(0);
   });
 
   it("rejects a duplicate team name within the same org", async () => {
