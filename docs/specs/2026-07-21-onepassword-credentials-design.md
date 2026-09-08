@@ -121,6 +121,12 @@ session can be prompted by people other than the actor frozen onto it, so its
 reads never reach that actor's personal vault. The same rule governs the
 sandbox broker.
 
+A team admin may narrow a team's reads to a list of `op://` references
+(`docs/specs/2026-09-04-team-onepassword-vaults-design.md`). The lease gates
+the reference on the team row and on the org-provided row. It does not narrow
+the vault lookup, which matches on item title and yields no reference to
+check. With no lease, a team read has the org scope in full.
+
 ## Owner-precedence contract
 
 **Credential reads follow user row → org row precedence for ALL credential

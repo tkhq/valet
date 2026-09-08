@@ -191,6 +191,12 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
     useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
     usePatchTeam: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+    // The 1Password references block on an expanded team reads and writes
+    // through these hooks; stubbed like the rest so no QueryClientProvider
+    // is needed here.
+    useTeamOnePasswordRefs: () => ({ data: { refs: [] }, isLoading: false, error: null }),
+    usePutTeamOnePasswordRefs: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+    useDeleteTeamOnePasswordRefs: () => ({ mutate: vi.fn(), isPending: false, error: null }),
     // The team default-model combobox reads the catalog through this hook.
     useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
     // The Size group (Task 15) and the team-defaults reasoning select read

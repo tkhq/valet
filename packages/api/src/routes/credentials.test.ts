@@ -616,8 +616,31 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     });
     expect(put.status).toBe(400);
     expect(await put.json()).toEqual({
-      error: "onepassword.reference must be a string that starts with op://",
+      error: "onepassword.reference must be an op://vault/item/field reference",
     });
+  });
+
+  // One op:// grammar for the write path, the sandbox broker, and the team
+  // grant. A reference this route stores must be one a team admin can grant,
+  // or a stored row can never be leased to a team.
+  it("a reference with too few segments 400s, so every stored ref is grantable", async () => {
+    api = await bootTestApi();
+    const fake = new FakeOnePasswordService();
+    api.providers.onePassword = fake;
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        onepassword: { reference: "op://vault", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "onepassword.reference must be an op://vault/item/field reference",
+    });
+    expect(fake.resolveCalls).toEqual([]);
   });
 
   it("non-enum tokenScope 400s", async () => {

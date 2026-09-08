@@ -40,6 +40,11 @@ import {
   type OnePasswordService,
   OnePasswordScope,
 } from "./onepassword.js";
+import {
+  isTeamOpRefGranted,
+  loadTeamOnePasswordRefs,
+  refuseUngrantedTeamOpRef,
+} from "./team-onepassword-grant.js";
 
 /** Internal services that must never surface as ordinary session/workflow
  * credentials. `onepassword` rows are the service-account tokens themselves;
@@ -276,12 +281,26 @@ export async function resolveTeamCredentialRead(
   const scopes = ctx.scopes ?? ["org"];
   const readCtx = { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes };
   const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
+  // The team lease, when an admin wrote one, gates every op:// ref this read
+  // dereferences: the team row and the org-provided row alike. The by-name
+  // vault search below stays on the org scope; a title match yields no ref
+  // to check, and `team-service-readiness.ts` mirrors that search as is.
+  const granted = await loadTeamOnePasswordRefs(deps.credentials, ctx.teamId);
+  refuseUngrantedReference(granted, teamRow);
   const fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
   if (fromTeam) return fromTeam;
   if (orgFallback === "none") return null;
   if (orgFallback === "org-provided") {
-    const fromOrg = await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes }, service);
+    const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
+    refuseUngrantedReference(granted, orgRow);
+    const fromOrg = await resolveRow(deps, orgRow, readCtx, "resolve");
     if (fromOrg) return fromOrg;
   }
   return lookupInOnePassword(deps, readCtx, service);
+}
+
+/** Throws the typed refusal when `row` points at a ref outside the team lease. */
+function refuseUngrantedReference(granted: readonly string[] | null, row: StoredCredential | null): void {
+  const meta = row ? onePasswordMeta(row) : null;
+  if (meta && !isTeamOpRefGranted(granted, meta.reference)) refuseUngrantedTeamOpRef();
 }

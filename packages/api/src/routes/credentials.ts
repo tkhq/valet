@@ -50,7 +50,12 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
-import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../services/onepassword.js";
+import {
+  isOnePasswordReference,
+  ONEPASSWORD_SERVICE,
+  OnePasswordAuthError,
+  onePasswordMeta,
+} from "../services/onepassword.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
@@ -154,8 +159,9 @@ function parseOnePasswordField(
   }
   const candidate = value as Record<string, unknown>;
   const { reference, tokenScope } = candidate;
-  if (typeof reference !== "string" || !reference.startsWith("op://")) {
-    return { ok: false, error: "onepassword.reference must be a string that starts with op://" };
+  // The grant grammar, so a stored reference is one a team admin can lease.
+  if (typeof reference !== "string" || !isOnePasswordReference(reference)) {
+    return { ok: false, error: "onepassword.reference must be an op://vault/item/field reference" };
   }
   if (tokenScope !== "org" && tokenScope !== "personal") {
     return { ok: false, error: "onepassword.tokenScope must be org or personal" };
@@ -267,6 +273,10 @@ credentialsRouter.get("/", async (c) => {
       .from(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, owner.id)));
     for (const row of rows) {
+      // The team 1Password grant reuses this service name. List it on
+      // GET /api/teams/:id/onepassword-refs, not as an integration credential.
+      if (row.service === ONEPASSWORD_SERVICE) continue;
+      if (!isCredentialKind(row.type)) continue;
       const from = delegatedFromMeta(row.metadata);
       let referenceBroken: boolean | undefined;
       if (from) {
@@ -322,6 +332,16 @@ credentialsRouter.put("/:service", async (c) => {
   const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, "write");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
+
+  if (service === ONEPASSWORD_SERVICE && scope === "team") {
+    return c.json(
+      {
+        error:
+          "A team 1Password token is not supported yet. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
+      },
+      400,
+    );
+  }
 
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
@@ -526,6 +546,15 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   const { engineCredentials, db, plugins } = c.var.providers;
   const user = c.var.user;
   const service = c.req.param("service");
+  if (service === ONEPASSWORD_SERVICE) {
+    return c.json(
+      {
+        error:
+          "A team 1Password token is not supported yet. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
+      },
+      400,
+    );
+  }
   let body: DelegateCredentialRequest;
   try {
     body = (await c.req.json()) as DelegateCredentialRequest;
@@ -654,6 +683,15 @@ credentialsRouter.delete("/:service", async (c) => {
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
   const service = c.req.param("service");
+  if (service === ONEPASSWORD_SERVICE && owner.type === "team") {
+    return c.json(
+      {
+        error:
+          "A team 1Password token is not supported yet. Revoke op:// references at DELETE /api/teams/:id/onepassword-refs.",
+      },
+      400,
+    );
+  }
 
   await engineCredentials.delete(owner, service);
   if (owner.type === "team") await resyncTeamWorkflows(c, [owner.id]);
