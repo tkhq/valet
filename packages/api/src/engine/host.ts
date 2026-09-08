@@ -1450,9 +1450,12 @@ export class EngineHost {
 
       return {
         image: spec.image !== stockImage ? spec.image : undefined,
-        specHash: specHash(spec, resources),
+        specHash: specHash(spec, resources, repoFlags.preserveResourceFields),
         steps,
         ...(resources !== undefined ? { resources } : {}),
+        ...(repoFlags.preserveResourceFields !== undefined
+          ? { preserveResourceFields: repoFlags.preserveResourceFields }
+          : {}),
       };
     };
   }
@@ -1729,7 +1732,7 @@ export class EngineHost {
     const result = applySandboxResourceOverrides(resolved, meta.sandboxResourceOverrides);
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
-      if (result.resourcesWithheld) {
+      if (result.preserveResourceFields && result.preserveResourceFields.length > 0) {
         if (!this.resourceWithholdingWarnings.has(warningKey)) {
           console.warn(
             `EngineHost: sandbox resource settings for ${primary.fullName} are withheld from existing compute because YAML authority is unavailable. ` +

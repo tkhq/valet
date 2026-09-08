@@ -219,15 +219,15 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
   // (`onePasswordScopesFor`). Child and assistant sessions are built with an
   // explicit owner, so their engine principal is truthful, and an
   // orchestrator target may have no row at all — hence the fallback.
-  const ownerRows = await deps.db
-    .select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+  const sessionRows = await deps.db
+    .select()
     .from(agentSessions)
     .where(eq(agentSessions.id, args.to))
     .limit(1);
-  const owner = ownerRows[0] ?? { ownerType: toData.owner.type, ownerId: toData.owner.id };
+  const owner = sessionRows[0] ?? { ownerType: toData.owner.type, ownerId: toData.owner.id };
   const session = await deps.engineHost.sessionFor(
     args.to,
-    await loadSessionMeta(deps.db, {
+    await loadSessionMeta(deps.db, sessionRows[0] ?? {
       id: args.to,
       userId: toData.userId,
       orgId: toData.orgId,

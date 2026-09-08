@@ -100,10 +100,11 @@
 import type * as k8s from "@kubernetes/client-node";
 import { createHash } from "node:crypto";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import type { Sandbox, SandboxStatus } from "@valet/engine";
+import type { Sandbox, SandboxResourceField, SandboxStatus } from "@valet/engine";
 import {
   IMAGE_FINGERPRINT_ENV,
   imageFingerprint,
+  NEVER_READY_OWNER_ANNOTATION_KEY,
   SANDBOX_CONTAINER_NAME,
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
@@ -297,7 +298,9 @@ export interface PatchSandboxParams {
   namespace: string;
   plural: string;
   name: string;
-  body: { spec: { operatingMode: "Running" | "Suspended" } };
+  body:
+    | { spec: { operatingMode: "Running" | "Suspended" } }
+    | { metadata: { annotations: Record<string, string | null> } };
 }
 
 /** The subset of `@kubernetes/client-node`'s `CustomObjectsApi` this
@@ -528,7 +531,8 @@ export function sandboxCpuMemoryResources(template: unknown): SandboxCpuMemoryRe
 function preserveCpuMemory(
   template: SandboxCR["spec"]["podTemplate"],
   previous: SandboxCpuMemoryResources,
-): unknown {
+  fields: readonly SandboxResourceField[] = ["cpu", "memory"],
+): SandboxCR["spec"]["podTemplate"] {
   return {
     ...template,
     spec: {
@@ -541,9 +545,11 @@ function preserveCpuMemory(
         } = { ...container.resources };
         for (const side of ["requests", "limits"] as const) {
           const values: NonNullable<typeof resources.requests> = { ...resources[side] };
-          delete values.cpu;
-          delete values.memory;
-          Object.assign(values, previous[side]);
+          for (const field of fields) {
+            delete values[field];
+            const previousValue = previous[side]?.[field];
+            if (previousValue !== undefined) values[field] = previousValue;
+          }
           if (Object.keys(values).length > 0) resources[side] = values;
           else delete resources[side];
         }
@@ -586,8 +592,10 @@ export async function applySandbox(
   manifest: SandboxCR,
   opts: {
     preserveResourcesOnAdopt?: boolean;
+    preserveResourceFieldsOnAdopt?: readonly SandboxResourceField[];
     resourceOverrides?: NonNullable<Sandbox["resourceOverrides"]>;
     readResourceOverrides?: () => Promise<NonNullable<Sandbox["resourceOverrides"]> | undefined>;
+    neverReadyOwner?: string;
   } = {},
 ): Promise<ApplySandboxResult> {
   const { group, version } = parseApiVersion(cfg.apiVersion);
@@ -598,13 +606,23 @@ export async function applySandbox(
     manifest.spec.podTemplate, resourceFingerprint(sandboxCpuMemoryResources(manifest.spec.podTemplate)),
   );
   const requestedTemplate = withImageFingerprint(resourceTemplate, sandboxImage);
+  const baseFreshMetadata = resourceOverridesMetadata(manifest.metadata, opts.resourceOverrides);
+  const freshMetadata = opts.neverReadyOwner === undefined
+    ? baseFreshMetadata
+    : {
+        ...baseFreshMetadata,
+        annotations: {
+          ...baseFreshMetadata.annotations,
+          [NEVER_READY_OWNER_ANNOTATION_KEY]: opts.neverReadyOwner,
+        },
+      };
   try {
     const created = await api.createNamespacedCustomObject({
       group,
       version,
       namespace: cfg.namespace,
       plural: SANDBOX_PLURAL,
-      body: { ...manifest, metadata: resourceOverridesMetadata(manifest.metadata, opts.resourceOverrides),
+      body: { ...manifest, metadata: freshMetadata,
         spec: { ...manifest.spec, podTemplate: requestedTemplate } },
     });
     return { cr: parseSandboxCRRead(created), adopted: false, resourceOverrides: opts.resourceOverrides };
@@ -621,9 +639,29 @@ export async function applySandbox(
   }
   // Migrate before the CR update can start replacement. Once stored, the
   // record survives pod deletion and a crash before create() returns.
-  const resourceOverrides = opts.preserveResourcesOnAdopt
+  const preserveResourceFields = opts.preserveResourceFieldsOnAdopt ??
+    (opts.preserveResourcesOnAdopt ? (["cpu", "memory"] as const) : []);
+  const previousResourceOverrides = preserveResourceFields.length > 0
     ? readResourceOverridesAnnotation(existing) ?? await opts.readResourceOverrides?.() ?? null
-    : opts.resourceOverrides;
+    : undefined;
+  let resourceOverrides: Sandbox["resourceOverrides"] = opts.resourceOverrides;
+  if (preserveResourceFields.length > 0) {
+    if (previousResourceOverrides === null) {
+      resourceOverrides = null;
+    } else {
+      resourceOverrides = { ...previousResourceOverrides };
+      for (const field of ["cpu", "memory"] as const) {
+        if (preserveResourceFields.includes(field)) continue;
+        delete resourceOverrides[field];
+        if (field === "cpu" && opts.resourceOverrides?.cpu !== undefined) {
+          resourceOverrides.cpu = opts.resourceOverrides.cpu;
+        }
+        if (field === "memory" && opts.resourceOverrides?.memory !== undefined) {
+          resourceOverrides.memory = opts.resourceOverrides.memory;
+        }
+      }
+    }
+  }
   // Adopt must satisfy create()'s postcondition: a READY sandbox. `create()`
   // unconditionally ends in `waitReady` (see provider.ts), so adopting a CR
   // AS Suspended can never satisfy the caller — the controller keeps the pod
@@ -648,16 +686,26 @@ export async function applySandbox(
     existing.spec.operatingMode === "Suspended"
       ? { ...manifest.spec, podTemplate: requestedTemplate, operatingMode: manifest.spec.operatingMode ?? "Running" }
       : { ...manifest.spec, podTemplate: requestedTemplate };
-  if (opts.preserveResourcesOnAdopt) {
+  if (preserveResourceFields.length > 0) {
     const previousResources = sandboxCpuMemoryResources(existing.spec.podTemplate);
     // Legacy no-opinion adoption keeps fingerprint absence. Only an
     // authoritative opinion can start the one-time fingerprint migration roll.
+    const preservedTemplate = preserveCpuMemory(manifest.spec.podTemplate, previousResources, preserveResourceFields);
+    const resourceFingerprintValue = preserveResourceFields.length === 2
+      ? podTemplateResourceFingerprint(existing.spec.podTemplate)
+      : resourceFingerprint(sandboxCpuMemoryResources(preservedTemplate));
     const template = withImageFingerprint(
-      withResourceFingerprint(manifest.spec.podTemplate, podTemplateResourceFingerprint(existing.spec.podTemplate)),
+      withResourceFingerprint(preservedTemplate, resourceFingerprintValue),
       sandboxImage,
     );
-    spec = { ...spec, podTemplate: preserveCpuMemory(template, previousResources) };
+    spec = { ...spec, podTemplate: template };
   }
+
+  const metadata = resourceOverridesMetadata(manifest.metadata, resourceOverrides);
+  const neverReadyOwner = existing.metadata.annotations?.[NEVER_READY_OWNER_ANNOTATION_KEY];
+  metadata.annotations = { ...metadata.annotations };
+  if (neverReadyOwner === undefined) delete metadata.annotations[NEVER_READY_OWNER_ANNOTATION_KEY];
+  else metadata.annotations[NEVER_READY_OWNER_ANNOTATION_KEY] = neverReadyOwner;
 
   const replaced = await api.replaceNamespacedCustomObject({
     group,
@@ -668,7 +716,7 @@ export async function applySandbox(
     body: {
       apiVersion: manifest.apiVersion,
       kind: manifest.kind,
-      metadata: { ...resourceOverridesMetadata(manifest.metadata, resourceOverrides), resourceVersion: existing.metadata.resourceVersion },
+      metadata: { ...metadata, resourceVersion: existing.metadata.resourceVersion },
       spec,
     },
   });
@@ -679,6 +727,23 @@ export async function applySandbox(
     resourceOverrides,
     ...(previousSession !== undefined ? { previousSession } : {}),
   };
+}
+
+/** Clear fresh-create cleanup ownership after the CR reaches Ready. */
+export async function clearNeverReadyOwner(
+  api: SandboxCustomObjectsApi,
+  cfg: K8sProviderConfig,
+  name: string,
+): Promise<void> {
+  const { group, version } = parseApiVersion(cfg.apiVersion);
+  await api.patchNamespacedCustomObject({
+    group,
+    version,
+    namespace: cfg.namespace,
+    plural: SANDBOX_PLURAL,
+    name,
+    body: { metadata: { annotations: { [NEVER_READY_OWNER_ANNOTATION_KEY]: null } } },
+  });
 }
 
 /** Returns `null` when the CR does not exist (404) — never throws for the

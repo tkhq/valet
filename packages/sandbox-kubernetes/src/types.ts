@@ -115,8 +115,8 @@ export interface SandboxResourceOpts {
  * Kubernetes expects (e.g. "500m", "2", "1Gi"). `ephemeral-storage` is
  * node-local disk: container rootfs writes + emptyDir usage (TKAI-349). */
 export interface ResourceList {
-  cpu?: string;
-  memory?: string;
+  cpu?: string | number;
+  memory?: string | number;
   "ephemeral-storage"?: string;
 }
 

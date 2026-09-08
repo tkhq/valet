@@ -151,10 +151,18 @@ class FakeCustomObjectsApi implements SandboxCustomObjectsApi {
     if (!existing) {
       throw new FakeApiError(404, `sandboxes.agents.x-k8s.io "${params.name}" not found`);
     }
-    const patched: SandboxCRRead = {
-      ...existing,
-      spec: { ...existing.spec, operatingMode: params.body.spec.operatingMode },
-    };
+    const patched: SandboxCRRead = "spec" in params.body
+      ? { ...existing, spec: { ...existing.spec, operatingMode: params.body.spec.operatingMode } }
+      : {
+          ...existing,
+          metadata: {
+            ...existing.metadata,
+            annotations: Object.fromEntries(Object.entries({
+              ...existing.metadata.annotations,
+              ...params.body.metadata.annotations,
+            }).filter(([, value]) => value !== null)) as Record<string, string>,
+          },
+        };
     this.store.set(params.name, patched);
     return patched;
   }
@@ -902,6 +910,7 @@ describe("setOperatingMode", () => {
     // fields).
     expect(call.body).toEqual({ spec: { operatingMode: "Suspended" } });
     expect(Object.keys(call.body)).toEqual(["spec"]);
+    if (!("spec" in call.body)) throw new Error("expected operating-mode patch");
     expect(Object.keys(call.body.spec)).toEqual(["operatingMode"]);
     expect(api.createCalls).toBe(0);
     expect(api.replaceCalls).toBe(0);

@@ -5,11 +5,16 @@ import type { PrebuildResources } from "../prebuilds/recipe.js";
 import { imageSources } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 
+type ResourceField = keyof Pick<PrebuildResources, "cpu" | "memory">;
+const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory"];
+
 export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   /** Fresh compute can use these values even when existing compute must be preserved. */
   initialResources?: PrebuildResources;
-  /** Settings exist, but one authority read failed, so reconciliation must preserve live resources. */
+  /** A repository authority read failed, so reconciliation must preserve live resources. */
   resourcesWithheld?: boolean;
+  /** Live fields to preserve because repository authority was unavailable. */
+  preserveResourceFields?: readonly ResourceField[];
 }
 
 /** Apply one child's resource request after repository and saved defaults.
@@ -19,15 +24,19 @@ export function applySandboxResourceOverrides(
   overrides: PrebuildResources | undefined,
 ): ResolvedRepoPrebuildFlags {
   if (!overrides || Object.keys(overrides).length === 0) return flags;
-  // A partial desired resource object is authoritative at the engine layer:
-  // omitted fields are reset to deployment defaults on adoption. When repo
-  // authority is unavailable, keep reconciliation non-authoritative and put
-  // the child override only in initialResources. Fresh child compute uses it;
-  // retries and restarts preserve the CR's recorded effective resources.
-  if (flags.resourcesWithheld) {
+  // A partial desired resource object resets omitted fields on adoption unless
+  // the engine carries a preservation mask. When repository authority is
+  // unavailable, task-supplied fields stay authoritative and omitted fields
+  // preserve the CR's live values. Fresh compute uses every available default.
+  const unavailableFields = flags.preserveResourceFields ??
+    (flags.resourcesWithheld ? RESOURCE_FIELDS : undefined);
+  if (unavailableFields) {
+    const preserveResourceFields = unavailableFields.filter((field) => overrides[field] === undefined);
     return {
       ...flags,
       initialResources: { ...flags.initialResources, ...overrides },
+      resources: { ...overrides },
+      preserveResourceFields,
     };
   }
   return {
@@ -76,6 +85,8 @@ export async function resolveRepoResources(
     ...flags,
     ...(saved.ok && yaml.outcome !== "error" ? { resources: combined } : {}),
     ...(Object.keys(combined).length > 0 ? { initialResources: combined } : {}),
-    ...(Object.keys(combined).length > 0 && (!saved.ok || yaml.outcome === "error") ? { resourcesWithheld: true } : {}),
+    ...(!saved.ok || yaml.outcome === "error"
+      ? { resourcesWithheld: true, preserveResourceFields: RESOURCE_FIELDS }
+      : {}),
   };
 }

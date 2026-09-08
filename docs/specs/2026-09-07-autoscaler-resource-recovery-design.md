@@ -76,8 +76,15 @@ which adopts the same CR and leaves its pod in place. The grace uses CR age, so 
 retry does not restart the window.
 
 After ten minutes, an unscheduled Pending pod becomes a terminal
-`SandboxStartupError`. A fresh create can then remove its CR and pending pod. An
-adopted CR keeps the existing workspace-survival behavior.
+`SandboxStartupError`. This includes a pod that the scheduler has not judged and
+a pod without a recognized capacity shortage. A fresh create can then remove its
+CR and pending pod.
+
+The provider writes never-ready ownership to a CR annotation only when it creates
+the CR. Retry adoption preserves that annotation, including across an API
+restart. The provider removes the annotation after the pod reaches Ready. A
+post-grace retry deletes an adopted CR only when the durable owner matches the
+current session. A pre-existing adopted CR never gains cleanup ownership.
 
 ### 3. Return an actionable terminal message
 
@@ -117,6 +124,13 @@ rules as repository sandbox resources.
 Each supplied field overrides the matching repository or deployment value.
 Each omitted field keeps its existing value. An empty `resources` object has no
 effect. This merge lets the model reduce only the resource named by the scheduler.
+
+If a saved-default or repository-YAML read fails, the desired spec carries a
+field-level preservation mask. A supplied task field remains authoritative. An
+omitted field preserves the live value during adoption. Fresh compute merges any
+available default with the task override. If both authority reads fail, the mask
+still preserves omitted fields instead of treating a partial task override as a
+complete resource opinion.
 
 The override applies to the new child only. The task tool passes it through
 `SpawnChildRequest`, `ChildSpawner`, and `EngineHost.childSessionFor`.
@@ -163,11 +177,16 @@ becomes terminal only after the grace period.
 - Pure lifecycle tests distinguish capacity and structural scheduler messages.
 - Provider tests prove a capacity-blocked fresh CR survives readiness timeout.
 - Provider tests prove adoption keeps the same pending pod through later retries.
+- Provider tests prove never-ready cleanup survives an API restart.
+- Provider tests prove a once-ready CR cannot gain post-grace cleanup ownership.
+- Provider tests prove all owned post-grace Pending diagnoses clean up the CR.
 - Provider tests check the ten-minute terminal message and resource details.
 - Task-tool tests validate and forward the nested resource object.
 - Child-spawner tests prove resource parameters reach child creation and storage.
 - Host tests prove per-field precedence over repository resources.
+- Engine and provider tests prove partial authority preserves only omitted fields.
 - Host rebuild tests prove persisted overrides survive cache eviction.
+- Signal tests prove rebuilds load persisted profile, Docker, and resource shape.
 - Schema tests cover the new nullable column and schema repair.
 - Existing Kubernetes, engine, API, typecheck, and end-to-end suites remain green.
 

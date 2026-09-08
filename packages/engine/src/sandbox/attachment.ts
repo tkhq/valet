@@ -3,6 +3,7 @@ import type {
   Sandbox,
   SandboxCreateOpts,
   SandboxProvider,
+  SandboxResourceField,
   SpecProvider,
 } from "../types.js";
 import { markSpanError, withSpan } from "../tracing.js";
@@ -34,10 +35,36 @@ const REPLACE_BACKOFF_CAP_MS = 30 * 60_000;
 function resourceDrift(
   desired: DesiredSandboxSpec["resources"],
   applied: AppliedState["resources"],
+  preserved: readonly SandboxResourceField[] = [],
 ): boolean {
-  return desired !== undefined && (
-    desired.cpu !== applied?.cpu || desired.memory !== applied?.memory
-  );
+  if (desired === undefined && preserved.length === 0) return false;
+  return (["cpu", "memory"] as const).some((field) =>
+    !preserved.includes(field) && desired?.[field] !== applied?.[field]);
+}
+
+function effectiveResources(
+  desired: DesiredSandboxSpec,
+  fallback: AppliedState["resources"],
+): AppliedState["resources"] {
+  const preserved = desired.preserveResourceFields ??
+    (desired.resources === undefined ? (["cpu", "memory"] as const) : []);
+  const result: NonNullable<AppliedState["resources"]> = {};
+  const cpu = preserved.includes("cpu") ? fallback?.cpu : desired.resources?.cpu;
+  const memory = preserved.includes("memory") ? fallback?.memory : desired.resources?.memory;
+  if (cpu !== undefined) result.cpu = cpu;
+  if (memory !== undefined) result.memory = memory;
+  if (Object.keys(result).length === 0 && desired.resources === undefined && fallback === undefined) {
+    return undefined;
+  }
+  return result;
+}
+
+function createResourceOpinion(resources: SandboxCreateOpts["resources"]): AppliedState["resources"] {
+  if (!resources) return undefined;
+  const result: NonNullable<AppliedState["resources"]> = {};
+  if (resources.cpu !== undefined) result.cpu = resources.cpu;
+  if (resources.memory !== undefined) result.memory = resources.memory;
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 /** A cached observation of what the live sandbox has applied (spec decision 4). */
@@ -470,7 +497,7 @@ export class SandboxAttachment {
       // Only isolated providers replace on image or resource drift (decision 8).
       // Non-isolated providers still converge preparation steps in place.
       const ignoredResourceDrift = this.provider?.capabilities().isolated !== true &&
-        resourceDrift(desired.resources, observed.resources);
+        resourceDrift(desired.resources, observed.resources, desired.preserveResourceFields);
       if (ignoredResourceDrift) {
         const warningKey = JSON.stringify([desired.resources, observed.resources]);
         if (this.ignoredResourceDriftKey !== warningKey) {
@@ -586,18 +613,25 @@ export class SandboxAttachment {
   private replacementNeeded(desired: DesiredSandboxSpec, applied = this.observation?.applied): boolean {
     return this.provider?.capabilities().isolated === true && (
       (desired.image !== undefined && desired.image !== applied?.image) ||
-      resourceDrift(desired.resources, applied?.resources)
+      resourceDrift(desired.resources, applied?.resources, desired.preserveResourceFields)
     );
   }
 
   /** Replace only the repository CPU/memory opinion; keep other resources. */
-  private persistResources(resources: DesiredSandboxSpec["resources"]): void {
+  private persistResources(
+    resources: DesiredSandboxSpec["resources"],
+    preserved: readonly SandboxResourceField[] = [],
+  ): void {
     if (resources === undefined) return;
     const next = { ...this.createOpts.resources };
-    delete next.cpu;
-    delete next.memory;
-    if (resources.cpu !== undefined) next.cpu = resources.cpu;
-    if (resources.memory !== undefined) next.memory = resources.memory;
+    if (!preserved.includes("cpu")) {
+      delete next.cpu;
+      if (resources.cpu !== undefined) next.cpu = resources.cpu;
+    }
+    if (!preserved.includes("memory")) {
+      delete next.memory;
+      if (resources.memory !== undefined) next.memory = resources.memory;
+    }
     this.createOpts = { ...this.createOpts, resources: next };
   }
 
@@ -606,7 +640,7 @@ export class SandboxAttachment {
       ...this.createOpts,
       image: desired.image ?? (applied.image || this.createOpts.image),
     };
-    this.persistResources(desired.resources ?? applied.resources);
+    this.persistResources(effectiveResources(desired, applied.resources));
   }
 
   private async observe(sandbox: Sandbox, epoch: number): Promise<AppliedState> {
@@ -887,12 +921,15 @@ export class SandboxAttachment {
       if (desired?.image !== undefined && desired.image !== this.createOpts.image) {
         this.createOpts = { ...this.createOpts, image: desired.image };
       }
-      this.persistResources(desired?.resources);
+      this.persistResources(desired?.resources, desired?.preserveResourceFields);
+      const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
+        (desired !== undefined && desired.resources === undefined ? (["cpu", "memory"] as const) : undefined);
       const sandbox = await provider.create({
         ...this.createOpts,
         image: bootImage,
         preserveResourcesOnAdopt: desired !== undefined && desired.resources === undefined,
-        readResourceOverrides: desired !== undefined && desired.resources === undefined
+        preserveResourceFieldsOnAdopt,
+        readResourceOverrides: preserveResourceFieldsOnAdopt !== undefined && preserveResourceFieldsOnAdopt.length > 0
           ? async (existing) => {
             try {
               return (await readAppliedState(existing))?.resources;
@@ -912,14 +949,18 @@ export class SandboxAttachment {
           const appliedImage = applied?.image || bootImage || "";
           // Provider metadata survives a provider-side image rollout and API
           // restart. Null forbids a fallback to stale rebuilt create options.
-          let resources = desired.resources ?? sandbox.resourceOverrides ?? applied?.resources;
+          const fallbackResources = sandbox.resourceOverrides === null
+            ? undefined
+            : sandbox.resourceOverrides ?? applied?.resources ??
+              (sandbox.adopted ? undefined : createResourceOpinion(this.createOpts.resources));
+          let resources = effectiveResources(desired, fallbackResources);
           if (resources === undefined && applied === null && sandbox.resourceOverrides !== null) {
             const { cpu, memory } = this.createOpts.resources ?? {};
             if (cpu !== undefined || memory !== undefined) {
               resources = { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) };
             }
           }
-          if (sandbox.resourceOverrides === null && desired.resources === undefined) {
+          if (sandbox.resourceOverrides === null && preserveResourceFieldsOnAdopt?.length === 2) {
             // Discard rejected options now so a later no-opinion replacement
             // cannot revive them. Keep any recovered applied opinion instead.
             this.persistResources(resources ?? {});

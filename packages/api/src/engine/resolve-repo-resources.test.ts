@@ -30,7 +30,7 @@ describe("applySandboxResourceOverrides", () => {
     expect(applySandboxResourceOverrides(resolved, overrides)).toBe(resolved);
   });
 
-  it("applies fresh overrides but preserves live resources when repository resources are withheld", () => {
+  it("applies supplied overrides and preserves only omitted live fields when repository resources are withheld", () => {
     const withheld = {
       docker: false,
       outcome: "error" as const,
@@ -41,6 +41,23 @@ describe("applySandboxResourceOverrides", () => {
     expect(applySandboxResourceOverrides(withheld, { cpu: 2 })).toEqual({
       ...withheld,
       initialResources: { cpu: 2, memory: "8Gi" },
+      resources: { cpu: 2 },
+      preserveResourceFields: ["memory"],
+    });
+  });
+
+  it("applies a partial override without resetting omitted fields when both authority reads fail", () => {
+    const unavailable = {
+      docker: false,
+      outcome: "error" as const,
+      preserveResourceFields: ["cpu", "memory"] as const,
+    };
+
+    expect(applySandboxResourceOverrides(unavailable, { memory: "4Gi" })).toEqual({
+      ...unavailable,
+      initialResources: { memory: "4Gi" },
+      resources: { memory: "4Gi" },
+      preserveResourceFields: ["cpu"],
     });
   });
 });
@@ -127,5 +144,22 @@ describe("resolveRepoResources", () => {
     expect(failed.resources).toBeUndefined();
     expect(failed.initialResources).toEqual({ cpu: 8 });
     expect(failed.resourcesWithheld).toBe(true);
+  });
+
+  it("preserves both live fields when both authority reads fail without defaults", async () => {
+    vi.spyOn(harness.appDb, "select").mockImplementation(() => { throw new Error("database unavailable"); });
+    const failed = await resolveRepoResources(harness.appDb, "org-a", primary, async () => ({
+      docker: false,
+      outcome: "error",
+    }));
+
+    expect(failed.resources).toBeUndefined();
+    expect(failed.initialResources).toBeUndefined();
+    expect(failed.preserveResourceFields).toEqual(["cpu", "memory"]);
+    expect(applySandboxResourceOverrides(failed, { memory: "4Gi" })).toMatchObject({
+      initialResources: { memory: "4Gi" },
+      resources: { memory: "4Gi" },
+      preserveResourceFields: ["cpu"],
+    });
   });
 });

@@ -651,6 +651,24 @@ describe("create() resource adoption and pod rollout", () => {
     expect(objectsApi.calls.slice(0, 3)).toEqual(["create", "get", "replace"]);
   });
 
+  it("partial authority applies CPU and preserves live memory on adoption", async () => {
+    const { provider, objectsApi, deletedPods } = setup(prior, { cpu: 1, memory: "2Gi" });
+
+    await provider.create({
+      workspace: "/ws/resources",
+      resources: { cpu: 2, memory: "2Gi" },
+      preserveResourceFieldsOnAdopt: ["memory"],
+    });
+
+    expect(objectsApi.cr.spec.podTemplate).toMatchObject({
+      spec: { containers: [{ resources: {
+        requests: { cpu: "2", memory: "4Gi" },
+        limits: { cpu: "2", memory: "8Gi" },
+      } }] },
+    });
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
   it.each([
     { cpu: 2, memory: "8Gi" },
     { cpu: 4, memory: "4Gi" },
@@ -1028,6 +1046,7 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
   createCalls = 0;
   replaceCalls = 0;
   deleteCalls = 0;
+  ready = false;
 
   constructor(createdAt?: string) {
     this.cr = createdAt === undefined ? null : this.initialCr("ws-capacity", createdAt);
@@ -1049,6 +1068,19 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
     };
   }
 
+  setReady(ready: boolean, createdAt?: string): void {
+    this.ready = ready;
+    if (this.cr === null) return;
+    if (createdAt !== undefined) this.cr.metadata.creationTimestamp = createdAt;
+    this.cr.status = {
+      conditions: [{
+        type: "Ready",
+        status: ready ? "True" : "False",
+        reason: ready ? "DependenciesReady" : "PodPending",
+      }],
+    };
+  }
+
   async createNamespacedCustomObject(params: CreateSandboxParams): Promise<unknown> {
     this.createCalls++;
     if (this.cr !== null) throw new FakeApiError(409, "already exists");
@@ -1064,7 +1096,11 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
           "agents.x-k8s.io/pod-name": "pod-capacity-1",
         },
       },
-      status: { conditions: [{ type: "Ready", status: "False", reason: "PodPending" }] },
+      status: { conditions: [{
+        type: "Ready",
+        status: this.ready ? "True" : "False",
+        reason: this.ready ? "DependenciesReady" : "PodPending",
+      }] },
     };
     return this.cr;
   }
@@ -1101,14 +1137,20 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
     return { items: [] };
   }
 
-  async patchNamespacedCustomObject(): Promise<unknown> {
+  async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
+    if (this.cr !== null && "metadata" in params.body) {
+      this.cr.metadata.annotations = Object.fromEntries(Object.entries({
+        ...this.cr.metadata.annotations,
+        ...params.body.metadata.annotations,
+      }).filter(([, value]) => value !== null)) as Record<string, string>;
+    }
     return {};
   }
 }
 
 function makeCapacityPendingProvider(opts: {
   createdAt?: string;
-  schedulerMessage?: string;
+  schedulerMessage?: string | null;
   requests?: { cpu?: string | number; memory?: string | number };
 }) {
   const objectsApi = new CapacityPendingObjectsApi(opts.createdAt);
@@ -1118,12 +1160,21 @@ function makeCapacityPendingProvider(opts: {
     async getPodStatus(_namespace, podName) {
       if (!objectsApi.podPresent) return null;
       podReads.push({ name: podName, uid: podIdentity.uid });
+      if (objectsApi.ready) {
+        return {
+          phase: "Running",
+          sandboxImage: providerCfg.defaultImage,
+          sandboxResources: {},
+          resourceFingerprint: resourceFingerprint({}),
+          conditions: [{ type: "Ready", status: "True" }],
+        };
+      }
       return {
         phase: "Pending",
         sandboxImage: providerCfg.defaultImage,
         sandboxResources: opts.requests === undefined ? {} : { requests: opts.requests },
         resourceFingerprint: resourceFingerprint({}),
-        conditions: [{
+        conditions: opts.schedulerMessage === null ? [] : [{
           type: "PodScheduled",
           status: "False",
           reason: "Unschedulable",
@@ -1148,7 +1199,18 @@ function makeCapacityPendingProvider(opts: {
     },
     providerCfg,
   );
-  return { provider, objectsApi, podDeleteApi, podReads };
+  const restart = () => new KubernetesSandboxProvider(
+    {
+      objectsApi,
+      podsApi: new FakePodsApi(),
+      podStatusApi,
+      podDeleteApi,
+      execApi: fakePodExecApi,
+      livenessApi: new FakeLivenessApi(),
+    },
+    providerCfg,
+  );
+  return { provider, restart, objectsApi, podDeleteApi, podReads };
 }
 
 async function captureAfter(promise: Promise<unknown>, elapsedMs: number): Promise<unknown> {
@@ -1227,6 +1289,49 @@ describe("create() capacity retention and diagnosis", () => {
     }
   });
 
+  it("cleans an owned never-ready CR after a provider restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, restart, objectsApi } = makeCapacityPendingProvider({});
+
+      await captureAfter(provider.create({ workspace: "/ws/capacity", sessionId: "session-a" }), 60_000);
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans an owned post-grace Pending CR without a recognized shortage", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, restart, objectsApi } = makeCapacityPendingProvider({ schedulerMessage: null });
+
+      await captureAfter(provider.create({ workspace: "/ws/capacity", sessionId: "session-a" }), 60_000);
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("not yet judged by the scheduler");
+      expect(objectsApi.deleteCalls).toBe(1);
+      expect(objectsApi.cr).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves a pre-existing adopted workspace after capacity grace expires", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
@@ -1241,6 +1346,29 @@ describe("create() capacity retention and diagnosis", () => {
       expect(objectsApi.deleteCalls).toBe(0);
       expect(objectsApi.cr).not.toBeNull();
       expect(objectsApi.podPresent).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a once-ready CR if it becomes capacity-blocked later", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider, restart, objectsApi } = makeCapacityPendingProvider({});
+      objectsApi.setReady(true);
+      await provider.create({ workspace: "/ws/capacity", sessionId: "session-a" });
+
+      expect(objectsApi.cr?.metadata.annotations?.["valet.dev/never-ready-owner"]).toBeUndefined();
+      objectsApi.setReady(false, "2026-09-07T12:00:00.000Z");
+      const error = expectError(await captureAfter(
+        restart().create({ workspace: "/ws/capacity", sessionId: "session-a" }),
+        60_000,
+      ));
+
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(objectsApi.cr).not.toBeNull();
     } finally {
       vi.useRealTimers();
     }

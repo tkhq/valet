@@ -33,6 +33,7 @@ class RecordingProvider implements SandboxProvider {
   createImages: (string | undefined)[] = [];
   createResources: SandboxCreateOpts["resources"][] = [];
   preserveResourcesOnAdopt: boolean[] = [];
+  preserveResourceFieldsOnAdopt: SandboxCreateOpts["preserveResourceFieldsOnAdopt"][] = [];
   destroyCalls: string[] = [];
   releaseCalls: string[] = [];
   suspendCalls: string[] = [];
@@ -95,10 +96,13 @@ class RecordingProvider implements SandboxProvider {
     this.createImages.push(opts.image);
     this.createResources.push(opts.resources === undefined ? undefined : { ...opts.resources });
     this.preserveResourcesOnAdopt.push(opts.preserveResourcesOnAdopt === true);
-    if (this.adopt && opts.preserveResourcesOnAdopt && this.rollAdoptedImage) {
+    this.preserveResourceFieldsOnAdopt.push(opts.preserveResourceFieldsOnAdopt);
+    const preservesOnAdopt = opts.preserveResourcesOnAdopt ||
+      (opts.preserveResourceFieldsOnAdopt?.length ?? 0) > 0;
+    if (this.adopt && preservesOnAdopt && this.rollAdoptedImage) {
       this.resourceOverrides = await opts.readResourceOverrides?.(this.adopt) ?? null;
     }
-    const sb = this.adopt && opts.preserveResourcesOnAdopt && !this.rollAdoptedImage
+    const sb = this.adopt && preservesOnAdopt && !this.rollAdoptedImage
       ? this.adopt
       : new VirtualSandbox(`sb-${this.nextId++}`);
     Object.assign(sb, { resourceOverrides: this.resourceOverrides, adopted: this.adopt !== undefined });
@@ -251,6 +255,29 @@ describe("SandboxAttachment.reconcile", () => {
     expect((await readAppliedState(replacement))?.resources).toEqual(resources);
     expect((await readAppliedState(adopted))?.resources).toEqual({ cpu: 4, memory: "8Gi" });
     expect(stepCalls).toBe(1);
+  });
+
+  it("adoption applies an authoritative CPU override and preserves live memory", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: {}, resources: { cpu: 4, memory: "8Gi" },
+    }));
+    const provider = new RecordingProvider({ adopt: adopted, resourceOverrides: { cpu: 4, memory: "8Gi" } });
+    const fake = new FakeSpecProvider({
+      image: "img:v1",
+      specHash: "h2",
+      resources: { cpu: 2 },
+      preserveResourceFields: ["memory"],
+      steps: [],
+    });
+
+    const att = await reachReady(provider, fake, { resources: { cpu: 2, memory: "2Gi" } });
+
+    expect(provider.preserveResourceFieldsOnAdopt).toEqual([["memory"]]);
+    expect(provider.createResources).toEqual([{ cpu: 2, memory: "2Gi" }]);
+    const current = att.current();
+    if (!current) throw new Error("expected ready sandbox");
+    expect((await readAppliedState(current))?.resources).toEqual({ cpu: 2, memory: "8Gi" });
   });
 
   it.each([{ cpu: 4, memory: "8Gi" }, {}, undefined])("provider image rollout preserves the legacy resource opinion %j, not stale create options", async (resources) => {
