@@ -1198,15 +1198,17 @@ describe("create() capacity retention and diagnosis", () => {
 
   it("reports requested CPU and memory after the ten-minute grace", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
     try {
       const schedulerReason = "0/3 nodes are available: 3 Insufficient cpu, 3 Insufficient memory";
       const { provider, objectsApi } = makeCapacityPendingProvider({
-        createdAt: "2026-09-07T12:00:00.000Z",
         schedulerMessage: `${schedulerReason}.`,
         requests: { cpu: "4", memory: "8Gi" },
       });
 
+      const firstError = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(firstError).not.toBeInstanceOf(SandboxStartupError);
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
       const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
       expect(error).toBeInstanceOf(SandboxStartupError);
       expect(error.message).toContain("over 10 minutes");
@@ -1220,6 +1222,25 @@ describe("create() capacity retention and diagnosis", () => {
       expect(objectsApi.deleteCalls).toBe(1);
       expect(objectsApi.cr).toBeNull();
       expect(objectsApi.podPresent).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a pre-existing adopted workspace after capacity grace expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider, objectsApi } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        requests: { cpu: "4", memory: "8Gi" },
+      });
+
+      const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(objectsApi.cr).not.toBeNull();
+      expect(objectsApi.podPresent).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -1248,9 +1269,9 @@ describe("create() capacity retention and diagnosis", () => {
       const error = expectError(await waiting);
       expect(error).toBeInstanceOf(SandboxStartupError);
       expect(failedAt).toBe(startedAt);
-      expect(objectsApi.deleteCalls).toBe(1);
-      expect(objectsApi.cr).toBeNull();
-      expect(objectsApi.podPresent).toBe(false);
+      expect(objectsApi.deleteCalls).toBe(0);
+      expect(objectsApi.cr).not.toBeNull();
+      expect(objectsApi.podPresent).toBe(true);
     } finally {
       vi.useRealTimers();
     }

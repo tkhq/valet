@@ -718,6 +718,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   readonly backend = "kubernetes";
   private readonly deps: KubernetesSandboxProviderDeps;
   private readonly cfg: K8sProviderConfig;
+  /** CRs created by this provider instance that have never reached Ready.
+   * The UID prevents a later CR with the same deterministic name from being
+   * mistaken for the failed provision. Session ownership prevents a shared
+   * workspace from transferring destructive cleanup rights on adoption. */
+  private readonly pendingCreateOwners = new Map<string, { uid?: string; sessionId?: string }>();
 
   constructor(deps: KubernetesSandboxProviderDeps, cfg: K8sProviderConfig) {
     this.deps = deps;
@@ -823,6 +828,16 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           : undefined,
       },
     );
+
+    if (!adopted) {
+      this.pendingCreateOwners.set(name, { uid: applied.metadata.uid, sessionId: opts.sessionId });
+    } else {
+      const owner = this.pendingCreateOwners.get(name);
+      if (owner !== undefined &&
+        (owner.uid !== applied.metadata.uid || owner.sessionId !== opts.sessionId)) {
+        this.pendingCreateOwners.delete(name);
+      }
+    }
 
     // Workspace strings are not guaranteed per-session (the web defaults every
     // session on a repo to one shared path), so an adopt can silently hand one
@@ -994,7 +1009,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         resourceFingerprint: podTemplateResourceFingerprint(applied.spec.podTemplate),
       });
     } catch (err) {
-      if (err instanceof SandboxStartupError && (!adopted || err instanceof CapacityStartupError)) {
+      const pendingOwner = this.pendingCreateOwners.get(name);
+      const ownsPendingCreate = pendingOwner !== undefined &&
+        pendingOwner.uid === applied.metadata.uid && pendingOwner.sessionId === opts.sessionId;
+      if (err instanceof SandboxStartupError && (!adopted || (err instanceof CapacityStartupError && ownsPendingCreate))) {
         // Narrow, documented exception to decision 5 ("only the session-
         // deletion path deletes a CR"): a CR this very call created, whose
         // pod terminally failed to start. Left standing it queues phantom
@@ -1010,9 +1028,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         await this.destroy(name).catch((cleanupErr) => {
           console.error(`k8s sandbox ${name}: CR cleanup after failed create failed:`, cleanupErr);
         });
+        this.pendingCreateOwners.delete(name);
       }
       throw err;
     }
+    this.pendingCreateOwners.delete(name);
     const sandbox = this.makeSandbox(name, Boolean(opts.docker));
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
