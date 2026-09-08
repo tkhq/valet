@@ -296,13 +296,10 @@ export async function ownedDefinitionRow(
  * `credentialOwnerFor` in `plugins/action-invoker.ts` maps an org owner onto
  * the org's stored credentials, so a plain member could otherwise turn a
  * published graph into recurring work that runs with the org's credentials,
- * choosing the cadence and the input. A manual run is exempt because
- * `startWorkflowRun` stamps the run to the caller, who then resolves their
- * own credentials.
- *
- * The team case is not a precedent for allowing this: `credentialOwnerFor`
- * returns no owner for a team, so no team-triggered run has ever resolved a
- * stored credential.
+ * choosing the cadence and the input. A manual run of an org-owned
+ * workflow stays exempt: `startWorkflowRun` still stamps that run to the
+ * caller. A team-owned or user-owned manual run uses the definition owner
+ * and records the clicker as `actorUserId`.
  */
 export async function armableDefinitionRow(
   db: AppDb,
@@ -1073,9 +1070,15 @@ export async function startWorkflowRun(
     input: trigger,
   };
 
+  // Team and user runs use the definition owner, matching the scheduler,
+  // event dispatcher, and webhook. An org-owned row stays caller-owned:
+  // any org member can read one, and stamping the org would let them run
+  // with the org's stored credentials. Actor is the clicker on every path.
+  const runAsCaller = row.ownerType === "org";
   await deps.workflowRunHost.start(runId, params, definition, {
-    ownerType: "user",
-    ownerId: owner.userId,
+    ownerType: runAsCaller ? "user" : row.ownerType,
+    ownerId: runAsCaller ? owner.userId : row.ownerId,
+    actorUserId: owner.userId,
   });
   return { runId };
 }
@@ -1132,6 +1135,7 @@ function toRunSummary(item: WorkflowRunListItem): WorkflowRunSummary {
     parentRunId: item.parentRunId,
     parentNodeId: item.parentNodeId,
     parentIteration: item.parentIteration,
+    actorUserId: item.actorUserId,
   };
 }
 

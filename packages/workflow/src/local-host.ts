@@ -59,7 +59,7 @@ import { detachedFromTrace } from '@valet/engine';
 import { driveUntilPark, settleAndNotify, type OnRunSettled } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
-import { WorkflowFenceError, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowStore } from './store.js';
+import { WorkflowFenceError, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
 
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
 export interface RunHost {
@@ -68,7 +68,7 @@ export interface RunHost {
     runId: string,
     params: RunParams,
     definition: unknown,
-    owner?: { ownerType: string; ownerId: string },
+    owner?: WorkflowRunOwnerInput,
   ): Promise<void>;
   /** Resume a parked run now. Spurious wakes are safe. */
   wake(runId: string): Promise<void>;
@@ -198,7 +198,7 @@ export class LocalRunHost implements RunHost {
     runId: string,
     params: RunParams,
     definition: unknown,
-    owner?: { ownerType: string; ownerId: string },
+    owner?: WorkflowRunOwnerInput,
   ): Promise<void> {
     // The durable createRun is unconditional: a caller that got a runId back
     // must be able to find the run in the store even if the host is mid-

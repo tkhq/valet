@@ -70,7 +70,7 @@ export type {
   WorkflowTemplateFileMeta,
 } from './file.js';
 
-export { WorkflowCursorError, WorkflowFenceError, decodeRunCursor, encodeRunCursor } from './store.js';
+export { WorkflowCursorError, WorkflowFenceError, decodeRunCursor, encodeRunCursor, splitRunOwner } from './store.js';
 export type {
   ListRunsFilter,
   ListRunsPage,
@@ -81,6 +81,8 @@ export type {
   RunWaitCondition,
   WorkflowRun,
   WorkflowRunListItem,
+  WorkflowRunOwnerInput,
+  WorkflowRunPrincipal,
   WorkflowStore,
 } from './store.js';
 

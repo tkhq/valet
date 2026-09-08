@@ -81,7 +81,34 @@ export interface WorkflowRun extends RunParkState {
    * claim-lease owner (a worker instance id). Optional: a caller that
    * doesn't pass `owner` to `createRun` gets an unset owner.
    */
-  owner?: { ownerType: string; ownerId: string };
+  owner?: WorkflowRunPrincipal;
+  /**
+   * Who clicked Run. Display and audit only. Absent on a scheduled,
+   * event, or webhook start, and never used for credential resolution.
+   */
+  actorUserId?: string;
+}
+
+/** Principal ownership recorded on a run. Credential resolution uses this. */
+export type WorkflowRunPrincipal = { ownerType: string; ownerId: string };
+
+/**
+ * Argument to `createRun` / `RunHost.start`. `actorUserId` is stored
+ * beside the principal, not inside it, so a child run that copies
+ * `run.owner` does not inherit the clicker.
+ */
+export type WorkflowRunOwnerInput = WorkflowRunPrincipal & { actorUserId?: string };
+
+/** Split the start argument so the principal and the clicker stay distinct. */
+export function splitRunOwner(owner?: WorkflowRunOwnerInput): {
+  principal?: WorkflowRunPrincipal;
+  actorUserId?: string;
+} {
+  if (!owner) return {};
+  return {
+    principal: { ownerType: owner.ownerType, ownerId: owner.ownerId },
+    actorUserId: owner.actorUserId,
+  };
 }
 
 /** A durable signal row (approval resolution, cancellation, etc.). */
@@ -128,7 +155,9 @@ export interface WorkflowRunListItem {
   outcome?: RunParkState['outcome'];
   createdAt: number;
   updatedAt: number;
-  owner?: { ownerType: string; ownerId: string };
+  owner?: WorkflowRunPrincipal;
+  /** Who clicked Run. Absent on an unattended start. */
+  actorUserId?: string;
   /** What a parked run is blocked on. Carried on the list item so a run
    * list can name the gate without a per-run fetch. Empty unless parked. */
   waitingOn: RunWaitCondition[];
@@ -204,7 +233,7 @@ export interface WorkflowStore {
     params: RunParams,
     definition: unknown,
     definitionVersionId: string,
-    owner?: { ownerType: string; ownerId: string },
+    owner?: WorkflowRunOwnerInput,
   ): Promise<WorkflowRun>;
 
   getRun(runId: string): Promise<WorkflowRun | null>;
