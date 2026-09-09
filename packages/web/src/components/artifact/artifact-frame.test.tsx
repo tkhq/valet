@@ -6,6 +6,7 @@
  * That means `srcDoc` must NOT change when only `theme` changes, across
  * re-renders with the same content props.
  */
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, waitFor } from "@testing-library/react";
 
@@ -64,6 +65,27 @@ describe("ArtifactFrame", () => {
       expect.objectContaining({ type: "valet-artifact:mermaid-result", id: "mermaid-0" }),
       "*",
     ));
+  });
+
+  it("accepts Mermaid requests after StrictMode re-runs lifecycle effects", async () => {
+    renderMermaidMock.mockReset();
+    renderMermaidMock.mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg"><text>ok</text></svg>');
+    const { container } = render(
+      <StrictMode>
+        <ArtifactFrame title="Flow" rendered="<pre><code>ignored</code></pre>" theme="light" />
+      </StrictMode>,
+    );
+    const iframe = container.querySelector("iframe");
+    if (!iframe?.contentWindow) throw new Error("artifact iframe did not mount");
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: iframe.contentWindow,
+        data: { type: "valet-artifact:mermaid", id: "mermaid-0", source: "graph TD; A-->B" },
+      }),
+    );
+
+    await waitFor(() => expect(renderMermaidMock).toHaveBeenCalledTimes(1));
   });
 
   it("does change srcDoc when the rendered content changes", () => {
@@ -240,6 +262,23 @@ describe("ArtifactMermaidCoordinator", () => {
 
     resolveFirst('<svg xmlns="http://www.w3.org/2000/svg" />');
     await waitFor(() => expect(render).toHaveBeenCalledTimes(2));
+  });
+
+  it("renders all 100 Mermaid blocks the artifact runtime discovers", async () => {
+    let resolveFirst: (svg: string) => void = () => {};
+    const render = vi
+      .fn<(source: string, id: string, theme: "default" | "dark") => Promise<string>>()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg" />');
+    const coordinator = new ArtifactMermaidCoordinator(render, vi.fn());
+
+    coordinator.request("mermaid-0", "source-0", "default");
+    for (let index = 1; index < 100; index += 1) {
+      coordinator.request(`mermaid-${index}`, `source-${index}`, "default");
+    }
+
+    resolveFirst('<svg xmlns="http://www.w3.org/2000/svg" />');
+    await waitFor(() => expect(render).toHaveBeenCalledTimes(100));
   });
 
   it("limits queued requests from one artifact frame", async () => {

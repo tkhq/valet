@@ -149,7 +149,7 @@ A fenced `mermaid` block compiles to the standard `language-mermaid` code marker
 
 The renderer uses Mermaid's `strict` security level and disables HTML labels. A second SVG filter removes executable elements, event handlers, remote links, and remote CSS loads. The UI loads the filtered SVG as an image, so SVG scripts cannot run.
 
-If rendering fails, the frame shows an error and the original source. A theme change requests a new render. A content change remounts the frame and discovers the new blocks. The parent coalesces duplicate active, pending, and completed block, source, and theme requests. A newer request always replaces an older result for the same block. It keeps one active render and at most 32 replacement and completed requests per frame. A frame reload or unmount invalidates its coordinator. A stale render cannot send a result to a new or removed frame. The global render queue skips invalidated work before Mermaid loads or parses it.
+If rendering fails, the frame shows an error and the original source. A theme change requests a new render. A content change remounts the frame and discovers the new blocks. The parent coalesces duplicate active, pending, and completed block, source, and theme requests. A newer request always replaces an older result for the same block. It keeps one active render, at most 100 replacement requests, and at most 32 completed requests per frame. The replacement bound includes all 100 blocks the runtime discovers. A frame reload or unmount invalidates its coordinator. A stale render cannot send a result to a new or removed frame. The global render queue skips invalidated work before Mermaid loads or parses it.
 
 ### Why one render path
 

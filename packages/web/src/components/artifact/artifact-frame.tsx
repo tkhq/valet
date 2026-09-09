@@ -57,7 +57,8 @@ function asRect(v: unknown): ArtifactAnchorRect | null {
 }
 
 const VDID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-export const MAX_PENDING_MERMAID_REQUESTS = 32;
+// The artifact runtime discovers no more than 100 Mermaid blocks per frame.
+export const MAX_PENDING_MERMAID_REQUESTS = 100;
 export const MAX_COMPLETED_MERMAID_REQUESTS = 32;
 
 type MermaidRender = (
@@ -245,7 +246,10 @@ export function ArtifactFrame({
     mermaidCoordinator.clear();
   }, [srcDoc]);
 
-  useEffect(() => () => mermaidCoordinator.dispose(), [mermaidCoordinator]);
+  // React StrictMode runs an effect cleanup before it re-runs the effect.
+  // Clearing invalidates queued work on a real unmount without permanently
+  // disposing the ref-held coordinator during that development-only cycle.
+  useEffect(() => () => mermaidCoordinator.clear(), [mermaidCoordinator]);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
