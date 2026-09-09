@@ -4512,6 +4512,48 @@ export interface ListEventDropsResponse {
   lastEventAt: number | null;
 }
 
+// ── REST: changelog ────────────────────────────────────────────────────
+
+export type ChangelogCategory = "feature" | "improvement" | "fix" | "security";
+
+export interface ChangelogEntry {
+  title: string;
+  description: string;
+  category: ChangelogCategory;
+  sources: { commitSha: string; pullRequest?: number };
+  links?: Array<{ label: string; url: string }>;
+  /** True when the generator had no pull-request identifier to preserve. */
+  followUp: boolean;
+}
+
+export interface ChangelogCheckpoint {
+  /** Idempotency key: `<version>@<releasedSha>`. */
+  id: string;
+  version: string;
+  releasedAt: string;
+  releasedSha: string;
+  previousSha: string | null;
+  releaseUrl?: string;
+  entries: ChangelogEntry[];
+}
+
+export interface ChangelogManifest {
+  schema: "valet-changelog/v1";
+  generatedAt: string;
+  checkpoints: ChangelogCheckpoint[];
+}
+
+export interface GetChangelogResponse {
+  manifest: ChangelogManifest;
+  artifact: {
+    version: string;
+    sha: string | null;
+    checkpointId: string | null;
+    /** `exact` means the manifest has this artifact SHA. */
+    status: "exact" | "latest-known" | "empty";
+  };
+}
+
 // ── REST: health (single-binary CLI, portable-runtime plan) ──────────────
 //
 // `GET /api/health` — public, unauthenticated. The API currently answers

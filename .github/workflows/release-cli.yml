@@ -62,6 +62,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # pnpm version comes from package.json "packageManager".
       - uses: pnpm/action-setup@v4
@@ -77,6 +79,17 @@ jobs:
           bun-version: 1.2.17
 
       - run: pnpm install --frozen-lockfile
+
+      - name: Generate release checkpoint
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          node packages/api/scripts/generate-changelog.mjs \
+            --version "$version" \
+            --release-sha "$GITHUB_SHA" \
+            --metadata packages/api/src/changelog/release.json \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
 
       # registry.gen.ts is committed, but regenerate so a tag always reflects
       # the current plugin set.

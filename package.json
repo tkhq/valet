@@ -13,6 +13,7 @@
     "build": "pnpm --filter @valet/worker build",
     "deploy": "pnpm --filter @valet/worker deploy",
     "db:migrate": "pnpm --filter @valet/worker db:migrate",
+    "changelog:generate": "node packages/api/scripts/generate-changelog.mjs",
     "typecheck": "tsc --build",
     "test": "vitest run",
     "test:watch": "vitest",
