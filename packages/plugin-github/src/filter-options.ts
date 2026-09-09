@@ -1,6 +1,5 @@
 import type { FilterOption, FilterOptionContext, FilterOptionResolver } from "@valet/engine";
 import { credentialSecret } from "@valet/engine";
-import { matchesSearchQuery } from "@valet/shared";
 import { Octokit } from "octokit";
 import { resolveGithubApiUrl } from "./actions/api.js";
 
@@ -34,9 +33,11 @@ function octokitFor(token: string): Octokit {
   return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
 }
 
-/** Shared local OR matching for provider-populated typeahead values. */
+/** Case-insensitive substring match against the typeahead query. An empty
+ * query matches everything. */
 function matchesQuery(value: string, q: string | undefined): boolean {
-  return matchesSearchQuery(q ?? "", [value]);
+  if (!q) return true;
+  return value.toLowerCase().includes(q.toLowerCase());
 }
 
 interface RepositoryRow {

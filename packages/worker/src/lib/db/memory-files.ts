@@ -408,7 +408,7 @@ export async function searchMemoryFiles(
   pathPrefix?: string,
   limit = 20,
 ): Promise<MemoryFileSearchResult[]> {
-  const ftsQuery = buildFTS5Query(query);
+  let ftsQuery = buildFTS5Query(query);
   if (!ftsQuery) return [];
 
   const queryTerms = query
@@ -439,7 +439,13 @@ export async function searchMemoryFiles(
     return result.results || [];
   };
 
-  const rows = await runSearch(ftsQuery);
+  let rows = await runSearch(ftsQuery);
+  if (rows.length === 0 && ftsQuery.includes(' AND ')) {
+    // Fallback: try OR instead of AND, but strip NOT clauses to avoid
+    // precedence issues (e.g. "a OR b NOT c" groups as "a OR (b NOT c)")
+    const orQuery = ftsQuery.replace(/ NOT (\([^)]+\)|"[^"]*"\*?)/, '').replace(/ AND /g, ' OR ');
+    rows = await runSearch(orQuery);
+  }
 
   const scored = rows.map((row: any) => {
     const bm25 = normalizeBM25(row.bm25_score as number);

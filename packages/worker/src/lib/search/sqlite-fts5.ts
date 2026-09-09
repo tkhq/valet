@@ -1,6 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import type { SearchProvider } from './types.js';
-import { buildFTS5Query } from '../db/memory-search-helpers.js';
 
 /**
  * SQLite FTS5 implementation of SearchProvider.
@@ -16,7 +15,12 @@ export class SqliteFts5SearchProvider implements SearchProvider {
   ): Promise<Array<{ id: string; content: string; category: string; relevance: number }>> {
     const limit = opts?.limit || 50;
 
-    const ftsQuery = buildFTS5Query(query);
+    const ftsQuery = query
+      .replace(/[^\w\s]/g, '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => `"${w}"`)
+      .join(' OR ');
 
     if (!ftsQuery) {
       return this.listPlain(userId, opts?.category, limit);

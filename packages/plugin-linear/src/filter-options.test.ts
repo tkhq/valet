@@ -78,9 +78,6 @@ describe("linear.teams resolver", () => {
 
     const byName = await resolve(ctx({ q: "engineer" }));
     expect(byName.map((o) => o.id)).toEqual(["ENG"]);
-
-    const broad = await resolve(ctx({ q: "tkai engineering" }));
-    expect(broad.map((o) => o.id)).toEqual(["TKAI", "ENG"]);
   });
 
   it("returns [] when the credential is null", async () => {

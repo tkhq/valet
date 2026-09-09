@@ -15,7 +15,7 @@ export function extractTitle(content: string, path: string): string {
  * - Quoted phrases ("exact phrase") → exact FTS5 phrase match, no prefix wildcard
  * - Plain terms → prefix wildcard match ("term"*)
  * - Terms prefixed with - → negation (NOT)
- * - Multiple positive terms → ORed together
+ * - Multiple positive terms → ANDed together
  * - Single-character terms and empty tokens are skipped
  *
  * Returns empty string if no valid terms remain.
@@ -46,7 +46,7 @@ export function buildFTS5Query(raw: string): string {
 
   if (terms.length === 0) return '';
 
-  let query = terms.length === 1 ? terms[0] : `(${terms.join(' OR ')})`;
+  let query = terms.join(' AND ');
   if (notTerms.length > 0) {
     query += notTerms.length === 1
       ? ' NOT ' + notTerms[0]
