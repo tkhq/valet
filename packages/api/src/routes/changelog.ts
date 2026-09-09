@@ -4,12 +4,12 @@
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
-import { changelogManifest, changelogResponse } from "../changelog/manifest.js";
+import { bundledChangelogResponse } from "../changelog/manifest.js";
 import type { GetChangelogResponse } from "../wire/types.js";
 
 export const changelogRouter = new Hono<AppEnv>();
 
 changelogRouter.get("/", (c) => {
-  const body: GetChangelogResponse = changelogResponse(changelogManifest);
+  const body: GetChangelogResponse = bundledChangelogResponse();
   return c.json(body);
 });

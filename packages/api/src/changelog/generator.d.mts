@@ -41,7 +41,7 @@ export function generateCheckpoint(options: {
   version: string;
   releaseSha: string;
   previousSha?: string | null;
-  releasedAt?: string;
+  releasedAt: string;
   releaseUrl?: string;
 }): GeneratedCheckpoint;
 export function upsertCheckpoint(
@@ -51,5 +51,5 @@ export function upsertCheckpoint(
 export function backfillTags(options: {
   repo: string;
   manifest: GeneratedManifest;
-  pattern: string;
+  patterns: string[];
 }): GeneratedManifest;

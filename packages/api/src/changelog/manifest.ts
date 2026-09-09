@@ -9,6 +9,11 @@ import type {
 } from "../wire/types.js";
 
 const CATEGORIES: ReadonlySet<string> = new Set(["feature", "improvement", "fix", "security"]);
+const EMPTY_MANIFEST: ChangelogManifest = {
+  schema: "valet-changelog/v1",
+  generatedAt: new Date(0).toISOString(),
+  checkpoints: [],
+};
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -76,8 +81,7 @@ function checkpoint(value: unknown): ChangelogCheckpoint {
     typeof row.releasedSha !== "string" ||
     (row.previousSha !== null && typeof row.previousSha !== "string") ||
     (row.releaseUrl !== undefined && typeof row.releaseUrl !== "string") ||
-    !Array.isArray(row.entries) ||
-    row.entries.length === 0
+    !Array.isArray(row.entries)
   ) {
     throw new Error("Invalid changelog checkpoint. Regenerate the release manifest.");
   }
@@ -113,8 +117,6 @@ export function parseChangelogManifest(value: unknown): ChangelogManifest {
   return { schema: "valet-changelog/v1", generatedAt: row.generatedAt, checkpoints };
 }
 
-export const changelogManifest = parseChangelogManifest(bundledManifest);
-
 export function changelogResponse(
   manifest: ChangelogManifest,
   version = process.env.VALET_RELEASE_VERSION || bundledRelease.version,
@@ -131,4 +133,25 @@ export function changelogResponse(
       status: exact ? "exact" : latest ? "latest-known" : "empty",
     },
   };
+}
+
+export function safeChangelogResponse(
+  value: unknown,
+  version?: string,
+  sha?: string | null,
+  report: (message: string, error: unknown) => void = console.error,
+): GetChangelogResponse {
+  try {
+    return changelogResponse(parseChangelogManifest(value), version, sha);
+  } catch (error) {
+    report("Bundled changelog is invalid. Regenerate the release manifest.", error);
+    return changelogResponse(EMPTY_MANIFEST, version, sha);
+  }
+}
+
+let bundledResponse: GetChangelogResponse | undefined;
+
+export function bundledChangelogResponse(): GetChangelogResponse {
+  bundledResponse ??= safeChangelogResponse(bundledManifest);
+  return bundledResponse;
 }

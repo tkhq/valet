@@ -54,6 +54,15 @@ describe("ChangelogPage", () => {
     await waitFor(() => {
       expect(window.localStorage.getItem("valet:changelog-seen:user-1")).toBe("1.0.0@abc");
     });
+    expect(await screen.findByText("New")).toBeTruthy();
+  });
+
+  it("shows releases that contain no user-facing changes", () => {
+    const entries = data.manifest.checkpoints[0].entries;
+    data.manifest.checkpoints[0].entries = [];
+    render(<ChangelogPage />);
+    expect(screen.getByText("No user-facing changes shipped in this release.")).toBeTruthy();
+    data.manifest.checkpoints[0].entries = entries;
   });
 
   it("explains when this commit has no exact checkpoint", () => {

@@ -1,18 +1,18 @@
 {
   "schema": "valet-changelog/v1",
-  "generatedAt": "2026-09-05T14:25:00-07:00",
+  "generatedAt": "2026-09-05T21:25:29.000Z",
   "checkpoints": [
     {
       "id": "0.10.7@ec05505e2505cbd83aa5664574a9a1b8f0003b8e",
       "version": "0.10.7",
-      "releasedAt": "2026-09-05T14:25:00-07:00",
+      "releasedAt": "2026-09-05T21:25:29.000Z",
       "releasedSha": "ec05505e2505cbd83aa5664574a9a1b8f0003b8e",
       "previousSha": "88f997197d1312f57885bc1811ae547d22f2b9e1",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.7",
       "entries": [
         {
           "title": "Spread sandbox pods across nodes and zones",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Spread sandbox pods across nodes and zones.",
           "category": "fix",
           "sources": {
             "commitSha": "82134114237223633203926e41ca5dc62d7c3f97",
@@ -24,11 +24,11 @@
               "url": "https://github.com/tkhq/valet/pull/582"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Update model catalog for Fable and Astra",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Update model catalog for Fable and Astra.",
           "category": "feature",
           "sources": {
             "commitSha": "05e05daf596d10d88f8bcc9cff5ca36dba68383e",
@@ -40,11 +40,11 @@
               "url": "https://github.com/tkhq/valet/pull/583"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Show active agent model in session UI",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Show active agent model in session UI.",
           "category": "fix",
           "sources": {
             "commitSha": "18b0aff4d91b9854dca618adc03ef2b9508c7cf7",
@@ -56,53 +56,21 @@
               "url": "https://github.com/tkhq/valet/pull/581"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Per-assistant display name and avatar on outbound posts (TKAI-387)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "efc242da7a51e98bce6762c9d36bc854574ba9de",
-            "pullRequest": 575
-          },
-          "links": [
-            {
-              "label": "PR #575",
-              "url": "https://github.com/tkhq/valet/pull/575"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Add repository sandbox CPU and memory settings",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "ec05505e2505cbd83aa5664574a9a1b8f0003b8e",
-            "pullRequest": 585
-          },
-          "links": [
-            {
-              "label": "PR #585",
-              "url": "https://github.com/tkhq/valet/pull/585"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         }
       ]
     },
     {
       "id": "0.10.6@88f997197d1312f57885bc1811ae547d22f2b9e1",
       "version": "0.10.6",
-      "releasedAt": "2026-09-04T17:40:05-07:00",
+      "releasedAt": "2026-09-05T00:40:29.000Z",
       "releasedSha": "88f997197d1312f57885bc1811ae547d22f2b9e1",
       "previousSha": "d18458ae0f1d375fe7fd8f4566f4bdfef3f9d9a7",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.6",
       "entries": [
         {
           "title": "Edit an existing subscription from its row menu",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Edit an existing subscription from its row menu.",
           "category": "feature",
           "sources": {
             "commitSha": "d8baa7dbf8524cc7467775b5029da7fd98d45484",
@@ -114,11 +82,11 @@
               "url": "https://github.com/tkhq/valet/pull/542"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Model size tiers (XS/S/M/L/XL) — agents request a tier, config resolves the id (TKAI-285)",
-          "description": "This change is now available in Valet.",
+          "title": "Model size tiers (XS/S/M/L/XL) — agents request a tier, config resolves the id",
+          "description": "Available now: Model size tiers (XS/S/M/L/XL) — agents request a tier, config resolves the id.",
           "category": "feature",
           "sources": {
             "commitSha": "b16a4ba8cb178e27965ca569b552b68a80ed0ece",
@@ -130,43 +98,11 @@
               "url": "https://github.com/tkhq/valet/pull/521"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Replace hardcoded model ids with tier vocabulary in agent-facing text (TKAI-254)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "b0d878a88fcf1370b78f1ae2958eb0d6946eec54",
-            "pullRequest": 524
-          },
-          "links": [
-            {
-              "label": "PR #524",
-              "url": "https://github.com/tkhq/valet/pull/524"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Repo-declared base layers (baseSetup) + prebuild CLI context cache",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "7861a19507be7b9b6cf0ea69056fd8464449aa38",
-            "pullRequest": 557
-          },
-          "links": [
-            {
-              "label": "PR #557",
-              "url": "https://github.com/tkhq/valet/pull/557"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Read prebuild flags for host 'github' (TKAI-385)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Read prebuild flags for host 'github'",
+          "description": "Fixed: Read prebuild flags for host 'github'.",
           "category": "fix",
           "sources": {
             "commitSha": "51b7ea2fc17dddf0f279b6794f104cfc8bd7388d",
@@ -178,27 +114,11 @@
               "url": "https://github.com/tkhq/valet/pull/558"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Let a caller find a credential, and say which token to use",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "8d3d25ac48b7ea4747f96ea14dbae9c0b371508e",
-            "pullRequest": 545
-          },
-          "links": [
-            {
-              "label": "PR #545",
-              "url": "https://github.com/tkhq/valet/pull/545"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Scope agent model switches to the turn that asked (TKAI-338)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Scope agent model switches to the turn that asked",
+          "description": "Fixed: Scope agent model switches to the turn that asked.",
           "category": "fix",
           "sources": {
             "commitSha": "00583a56909906e5607c2c72d6f89604736409aa",
@@ -210,11 +130,11 @@
               "url": "https://github.com/tkhq/valet/pull/562"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Child sessions read repo prebuild flags (TKAI-385)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Child sessions read repo prebuild flags",
+          "description": "Fixed: Child sessions read repo prebuild flags.",
           "category": "fix",
           "sources": {
             "commitSha": "e29b62d4e001af797ba049db5d9588de3c6098d9",
@@ -226,11 +146,11 @@
               "url": "https://github.com/tkhq/valet/pull/561"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Prebuild-flags read fails loud, never caches errors (TKAI-401)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Prebuild-flags read fails loud, never caches errors",
+          "description": "Fixed: Prebuild-flags read fails loud, never caches errors.",
           "category": "fix",
           "sources": {
             "commitSha": "c36ff416893061acdc3d77f57bf704241b188c65",
@@ -242,11 +162,11 @@
               "url": "https://github.com/tkhq/valet/pull/563"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Adopted claims converge to the declared size (TKAI-402)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Adopted claims converge to the declared size",
+          "description": "Fixed: Adopted claims converge to the declared size.",
           "category": "fix",
           "sources": {
             "commitSha": "b0116b968e125e6bef28e5a986e7f71e319d6074",
@@ -258,11 +178,11 @@
               "url": "https://github.com/tkhq/valet/pull/564"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Validate workspace quantity env at boot (TKAI-403)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Validate workspace quantity env at boot",
+          "description": "Fixed: Validate workspace quantity env at boot.",
           "category": "fix",
           "sources": {
             "commitSha": "43edef770446554d47208986263dd619c5ce5b82",
@@ -274,43 +194,11 @@
               "url": "https://github.com/tkhq/valet/pull/565"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Model selector overhaul: tiers, approved models, reasoning levels",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "cd57e07cf3ae82a533957b407af8d55ab24a291e",
-            "pullRequest": 568
-          },
-          "links": [
-            {
-              "label": "PR #568",
-              "url": "https://github.com/tkhq/valet/pull/568"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Fix model picker defaults and new-thread behavior",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "eb40e239ba12782525ec1722de2056b49e2b9002",
-            "pullRequest": 570
-          },
-          "links": [
-            {
-              "label": "PR #570",
-              "url": "https://github.com/tkhq/valet/pull/570"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Prevent runaway CPU from re-render cascade and WS reconnect loop",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Prevent runaway CPU from re-render cascade and WS reconnect loop.",
           "category": "fix",
           "sources": {
             "commitSha": "db393036a71c64f65eca0e48713e16b531114253",
@@ -322,11 +210,11 @@
               "url": "https://github.com/tkhq/valet/pull/567"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Make the v2 client installable as a PWA",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Make the v2 client installable as a PWA.",
           "category": "feature",
           "sources": {
             "commitSha": "7b17c521481ca336f204ab0c468181b77e649260",
@@ -338,59 +226,11 @@
               "url": "https://github.com/tkhq/valet/pull/569"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Retry file uploads after sandbox wake",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "01b3a7aba4a18d0c3e730f47f35fd3acdae01b95",
-            "pullRequest": 544
-          },
-          "links": [
-            {
-              "label": "PR #544",
-              "url": "https://github.com/tkhq/valet/pull/544"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Bake bun into the sandbox image",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "b9041ca8bb4fb739c7ee7f992154ad0d6bf4ecae",
-            "pullRequest": 577
-          },
-          "links": [
-            {
-              "label": "PR #577",
-              "url": "https://github.com/tkhq/valet/pull/577"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Align agent guidance with supervised model selection",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "6f092c1b3a377e6812f7144c1b5dcf742429f8ab",
-            "pullRequest": 579
-          },
-          "links": [
-            {
-              "label": "PR #579",
-              "url": "https://github.com/tkhq/valet/pull/579"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Add api scheduling and resource defaults",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Add api scheduling and resource defaults.",
           "category": "fix",
           "sources": {
             "commitSha": "88f997197d1312f57885bc1811ae547d22f2b9e1",
@@ -402,53 +242,21 @@
               "url": "https://github.com/tkhq/valet/pull/580"
             }
           ],
-          "followUp": false
+          "followUp": true
         }
       ]
     },
     {
       "id": "0.10.5@d18458ae0f1d375fe7fd8f4566f4bdfef3f9d9a7",
       "version": "0.10.5",
-      "releasedAt": "2026-09-03T16:36:05-07:00",
+      "releasedAt": "2026-09-03T23:36:38.000Z",
       "releasedSha": "d18458ae0f1d375fe7fd8f4566f4bdfef3f9d9a7",
       "previousSha": "093eec6b033192e702e96b3d81cf7d36ea97fbea",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.5",
       "entries": [
         {
-          "title": "Close the 1Password token form after a replace",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "90a9a4ce29356e6478e1687c29189d16c9cfe5ee",
-            "pullRequest": 535
-          },
-          "links": [
-            {
-              "label": "PR #535",
-              "url": "https://github.com/tkhq/valet/pull/535"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Make a rotated 1Password token bite at once",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "e4e2f477fbbfba134115f2a4a5694c104a64d8bc",
-            "pullRequest": 536
-          },
-          "links": [
-            {
-              "label": "PR #536",
-              "url": "https://github.com/tkhq/valet/pull/536"
-            }
-          ],
-          "followUp": false
-        },
-        {
           "title": "List the bot's joined channels in the event-filter picker",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: List the bot's joined channels in the event-filter picker.",
           "category": "fix",
           "sources": {
             "commitSha": "d811e156d116e584a38c2ff07210068fa1d6ab40",
@@ -460,11 +268,11 @@
               "url": "https://github.com/tkhq/valet/pull/537"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Route a rule to a chosen assistant, not just the default",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Route a rule to a chosen assistant, not just the default.",
           "category": "feature",
           "sources": {
             "commitSha": "da3b7214b3d81552c10414593ef617c5f3b63114",
@@ -476,11 +284,11 @@
               "url": "https://github.com/tkhq/valet/pull/538"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Long-trajectory suite from real session patterns",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Long-trajectory suite from real session patterns.",
           "category": "feature",
           "sources": {
             "commitSha": "308b37cb57e8a7f58c9fd448dc14d2b8ce3087ef",
@@ -492,43 +300,11 @@
               "url": "https://github.com/tkhq/valet/pull/541"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Install gh in the docker sandbox image",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "d8919496782e10048aee0453bf61a2be20ae4254",
-            "pullRequest": 546
-          },
-          "links": [
-            {
-              "label": "PR #546",
-              "url": "https://github.com/tkhq/valet/pull/546"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Skip a detected prebuild step when the image lacks its toolchain",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "b4520d0b85c6b026e8da0f1e3e34111934cdf7d9",
-            "pullRequest": 547
-          },
-          "links": [
-            {
-              "label": "PR #547",
-              "url": "https://github.com/tkhq/valet/pull/547"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Allow thread renaming",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Allow thread renaming.",
           "category": "feature",
           "sources": {
             "commitSha": "af54d813ac021b88286a7ffea2a382f0bdf1366c",
@@ -540,59 +316,11 @@
               "url": "https://github.com/tkhq/valet/pull/465"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Mirror workflows, templates, and memories from a repository",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "7bff06adb7df136c3898e48510c14f0cada3faf4",
-            "pullRequest": 550
-          },
-          "links": [
-            {
-              "label": "PR #550",
-              "url": "https://github.com/tkhq/valet/pull/550"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Artifact pages: sandboxed HTML artifacts, versions, element comments",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "1ce81e928a605acd8ab2c35dec2161972366dd24",
-            "pullRequest": 539
-          },
-          "links": [
-            {
-              "label": "PR #539",
-              "url": "https://github.com/tkhq/valet/pull/539"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Sandbox workspace that fits large clones: blobless clones + on-demand PVC growth",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "cfbe73866174f7c084cf2eef05f15f0073353053",
-            "pullRequest": 551
-          },
-          "links": [
-            {
-              "label": "PR #551",
-              "url": "https://github.com/tkhq/valet/pull/551"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Repo-declared workspace size via .valet/prebuild.yaml (TKAI-385)",
-          "description": "This change is now available in Valet.",
+          "title": "Repo-declared workspace size via .valet/prebuild.yaml",
+          "description": "Available now: Repo-declared workspace size via .valet/prebuild.yaml.",
           "category": "feature",
           "sources": {
             "commitSha": "d18458ae0f1d375fe7fd8f4566f4bdfef3f9d9a7",
@@ -604,21 +332,21 @@
               "url": "https://github.com/tkhq/valet/pull/553"
             }
           ],
-          "followUp": false
+          "followUp": true
         }
       ]
     },
     {
       "id": "0.10.4@093eec6b033192e702e96b3d81cf7d36ea97fbea",
       "version": "0.10.4",
-      "releasedAt": "2026-09-02T19:56:10-07:00",
+      "releasedAt": "2026-09-03T02:56:38.000Z",
       "releasedSha": "093eec6b033192e702e96b3d81cf7d36ea97fbea",
       "previousSha": "d7050f6f184253c220371c22748a8b7d8d2baccb",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.4",
       "entries": [
         {
-          "title": "1Password credential references and a sandbox secret broker (TKAI-204)",
-          "description": "This change is now available in Valet.",
+          "title": "1Password credential references and a sandbox secret broker",
+          "description": "Available now: 1Password credential references and a sandbox secret broker.",
           "category": "feature",
           "sources": {
             "commitSha": "56f29995311d68a98351849adbf65d0548749d8e",
@@ -630,43 +358,11 @@
               "url": "https://github.com/tkhq/valet/pull/421"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Generalize the skill sync rail into a content sync rail (TKAI-223, 1/2)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "8cecccb81796470895b9523dd4ce827da0368813",
-            "pullRequest": 408
-          },
-          "links": [
-            {
-              "label": "PR #408",
-              "url": "https://github.com/tkhq/valet/pull/408"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Scan .valet/skills and re-scan when discovery rules change (TKAI-223, 2/2)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "8b6cf61568d7a3463af91d6662388679538e68c1",
-            "pullRequest": 409
-          },
-          "links": [
-            {
-              "label": "PR #409",
-              "url": "https://github.com/tkhq/valet/pull/409"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Remove 20-item cap on empty-query channel/user picker (TKAI-340)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Remove 20-item cap on empty-query channel/user picker",
+          "description": "Fixed: Remove 20-item cap on empty-query channel/user picker.",
           "category": "fix",
           "sources": {
             "commitSha": "7ff8008aedb6c8ad2266849e81cc84e86853e314",
@@ -678,11 +374,11 @@
               "url": "https://github.com/tkhq/valet/pull/532"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Tier sandbox retention by session class, children to 24h",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Tier sandbox retention by session class, children to 24h.",
           "category": "feature",
           "sources": {
             "commitSha": "093eec6b033192e702e96b3d81cf7d36ea97fbea",
@@ -694,21 +390,21 @@
               "url": "https://github.com/tkhq/valet/pull/534"
             }
           ],
-          "followUp": false
+          "followUp": true
         }
       ]
     },
     {
       "id": "0.10.3@d7050f6f184253c220371c22748a8b7d8d2baccb",
       "version": "0.10.3",
-      "releasedAt": "2026-09-02T18:17:06-07:00",
+      "releasedAt": "2026-09-03T01:18:08.000Z",
       "releasedSha": "d7050f6f184253c220371c22748a8b7d8d2baccb",
       "previousSha": "b861063263042c3ab08c5729ad38f65c867e0fa0",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.3",
       "entries": [
         {
           "title": "Scope the agent status badge to the active thread",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Scope the agent status badge to the active thread.",
           "category": "fix",
           "sources": {
             "commitSha": "a44fc15ae4a69e44fd19042656f8c77ccfdb0315",
@@ -720,11 +416,11 @@
               "url": "https://github.com/tkhq/valet/pull/415"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Make the dev-stack PGlite data dir worktree-local",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Make the dev-stack PGlite data dir worktree-local.",
           "category": "feature",
           "sources": {
             "commitSha": "832db38e17e4ab1e960ef0367e70797cb445bce7",
@@ -736,11 +432,11 @@
               "url": "https://github.com/tkhq/valet/pull/422"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Mark threads with a pending gate in the thread tree",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Mark threads with a pending gate in the thread tree.",
           "category": "feature",
           "sources": {
             "commitSha": "fb0c00f55a2cbfc54b9747b735cfe5999a2651fd",
@@ -752,11 +448,11 @@
               "url": "https://github.com/tkhq/valet/pull/424"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Approval notifications in Slack carry approve/deny buttons",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Approval notifications in Slack carry approve/deny buttons.",
           "category": "feature",
           "sources": {
             "commitSha": "ab715071ba6ab3c8fcbb10cec2cdcb93c56156c2",
@@ -768,11 +464,11 @@
               "url": "https://github.com/tkhq/valet/pull/425"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Assistant rail needs-you dot reads live pending gates (TKAI-257)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Assistant rail needs-you dot reads live pending gates",
+          "description": "Fixed: Assistant rail needs-you dot reads live pending gates.",
           "category": "fix",
           "sources": {
             "commitSha": "eaeb6ab1cb84aae3ff7ea903d357836cf6e6a564",
@@ -784,27 +480,11 @@
               "url": "https://github.com/tkhq/valet/pull/427"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Workflow file envelope and its parser (TKAI-223)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "5528941a9b641e3003285cd43f32dbbbea5f636c",
-            "pullRequest": 407
-          },
-          "links": [
-            {
-              "label": "PR #407",
-              "url": "https://github.com/tkhq/valet/pull/407"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Show org Sync errors and run config sources",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Show org Sync errors and run config sources.",
           "category": "fix",
           "sources": {
             "commitSha": "f51d7853949b09a8ebbcb27c5fe55afc48613026",
@@ -816,11 +496,11 @@
               "url": "https://github.com/tkhq/valet/pull/418"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Share and download buttons for memories and artifacts",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Share and download buttons for memories and artifacts.",
           "category": "feature",
           "sources": {
             "commitSha": "5e46172204d35c564f5ff7be00781d60a989d1ed",
@@ -832,11 +512,11 @@
               "url": "https://github.com/tkhq/valet/pull/428"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Render slash-command skill invocations as skill tool cards",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Render slash-command skill invocations as skill tool cards.",
           "category": "feature",
           "sources": {
             "commitSha": "2ef64a90f6ad05654338cabd30df5af97016c43d",
@@ -848,11 +528,11 @@
               "url": "https://github.com/tkhq/valet/pull/426"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Thread the workspace owner into the memory doc pane (TKAI-262)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Thread the workspace owner into the memory doc pane",
+          "description": "Fixed: Thread the workspace owner into the memory doc pane.",
           "category": "fix",
           "sources": {
             "commitSha": "590601ea2e652b4a99a50844474df29afb6a7363",
@@ -864,11 +544,11 @@
               "url": "https://github.com/tkhq/valet/pull/429"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Hide org source actions from members (TKAI-275)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Hide org source actions from members",
+          "description": "Fixed: Hide org source actions from members.",
           "category": "fix",
           "sources": {
             "commitSha": "fc8983d41706f986faf472a6c603a921b664b11d",
@@ -880,27 +560,11 @@
               "url": "https://github.com/tkhq/valet/pull/430"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "New message on active thread steers instead of queueing (TKAI-240)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "dedd03fc1b53f76d8f39a975525edc1646ed5f32",
-            "pullRequest": 416
-          },
-          "links": [
-            {
-              "label": "PR #416",
-              "url": "https://github.com/tkhq/valet/pull/416"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Make gate denial and expiry terminal for the turn",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Make gate denial and expiry terminal for the turn.",
           "category": "fix",
           "sources": {
             "commitSha": "bd7199ae65b544d6403af63f9890347acb9ea34c",
@@ -912,43 +576,11 @@
               "url": "https://github.com/tkhq/valet/pull/431"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Scope the events page to the active workspace (TKAI-224)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "2b33ff386a72ee1fabf5407e9269237733809e0c",
-            "pullRequest": 402
-          },
-          "links": [
-            {
-              "label": "PR #402",
-              "url": "https://github.com/tkhq/valet/pull/402"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "An event subscription follows its workflow's owner (TKAI-224 follow-up)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "95bcdf7691a76b190abee00841b4d9dcce38f0ac",
-            "pullRequest": 411
-          },
-          "links": [
-            {
-              "label": "PR #411",
-              "url": "https://github.com/tkhq/valet/pull/411"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "LLM recording gateway + unified usage dashboard",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: LLM recording gateway + unified usage dashboard.",
           "category": "feature",
           "sources": {
             "commitSha": "fa591f60d81b982efe8460c692e4b6dd5ae977e4",
@@ -960,11 +592,11 @@
               "url": "https://github.com/tkhq/valet/pull/432"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Boot-repair #432's proxy table + cost_entries view rewrite",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Boot-repair #432's proxy table + cost_entries view rewrite.",
           "category": "fix",
           "sources": {
             "commitSha": "ceae46444038f77636d3ebc476f924f30f1b0fd6",
@@ -976,11 +608,11 @@
               "url": "https://github.com/tkhq/valet/pull/433"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Thin usage spend-chart date labels so they don't overlap",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Thin usage spend-chart date labels so they don't overlap.",
           "category": "fix",
           "sources": {
             "commitSha": "2829c296bb1bcc20770e201cce2dc3eeef037593",
@@ -992,43 +624,11 @@
               "url": "https://github.com/tkhq/valet/pull/434"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Team switcher: scope usage to the selected team workspace (TKAI-226)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "5387dfc256ce701ab37bf30f3356bd8c13ac1886",
-            "pullRequest": 435
-          },
-          "links": [
-            {
-              "label": "PR #435",
-              "url": "https://github.com/tkhq/valet/pull/435"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Land the assistant editor on dev-v2 (stranded PR #325)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "28703bbec51ceb0670c534566df33e20f490801d",
-            "pullRequest": 437
-          },
-          "links": [
-            {
-              "label": "PR #437",
-              "url": "https://github.com/tkhq/valet/pull/437"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Searchable, scrollable add-member picker on Settings > Teams",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Searchable, scrollable add-member picker on Settings > Teams.",
           "category": "fix",
           "sources": {
             "commitSha": "4f1d9013a6a325ca42293555e2c8140ef8fcb306",
@@ -1040,75 +640,11 @@
               "url": "https://github.com/tkhq/valet/pull/438"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Let any org member create teams and run the ones they admin",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "1ef4cd73dd190a1be1988842eb0c816cf54c6ec7",
-            "pullRequest": 439
-          },
-          "links": [
-            {
-              "label": "PR #439",
-              "url": "https://github.com/tkhq/valet/pull/439"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Declare team-scoped content sources in valet.yaml (TKAI-248)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "9383b7e32649b91f06ea134ee947161660804800",
-            "pullRequest": 419
-          },
-          "links": [
-            {
-              "label": "PR #419",
-              "url": "https://github.com/tkhq/valet/pull/419"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Port v1 orchestrator procedure onto v2 system prompts (TKAI-239)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "677735ac45a82908e0de847cf177d7a63348b32a",
-            "pullRequest": 417
-          },
-          "links": [
-            {
-              "label": "PR #417",
-              "url": "https://github.com/tkhq/valet/pull/417"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Attribute user messages to their sender on shared sessions",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "e5fd20bfe948a73d27318eb37cad309da70d32f0",
-            "pullRequest": 441
-          },
-          "links": [
-            {
-              "label": "PR #441",
-              "url": "https://github.com/tkhq/valet/pull/441"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Slack workflow triggers + store only subscribed events",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Slack workflow triggers + store only subscribed events.",
           "category": "feature",
           "sources": {
             "commitSha": "e30a0382a3729d4ab88a9471881ffc434202ab2a",
@@ -1120,11 +656,11 @@
               "url": "https://github.com/tkhq/valet/pull/443"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Expand nightly memory sweep into self-improvement pass",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Expand nightly memory sweep into self-improvement pass.",
           "category": "feature",
           "sources": {
             "commitSha": "4093681dd0e08d66630ca2a3961d802f1f77f0ba",
@@ -1136,11 +672,11 @@
               "url": "https://github.com/tkhq/valet/pull/444"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Channel replies, assistant identity, and a routing wizard",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Channel replies, assistant identity, and a routing wizard.",
           "category": "feature",
           "sources": {
             "commitSha": "2c97cb39a86076a6b0f8b050599af2f9735a33ab",
@@ -1152,27 +688,11 @@
               "url": "https://github.com/tkhq/valet/pull/445"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Valet Security: engagement-runner design spec",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "d7c3e43bf50386a77ee776618a95f4be0cb574a0",
-            "pullRequest": 436
-          },
-          "links": [
-            {
-              "label": "PR #436",
-              "url": "https://github.com/tkhq/valet/pull/436"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Plain-language event labels and a compact filter picker",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Plain-language event labels and a compact filter picker.",
           "category": "fix",
           "sources": {
             "commitSha": "1c7a2d5364c26ec7e9e6f86b39fe1ee30d97175b",
@@ -1184,11 +704,11 @@
               "url": "https://github.com/tkhq/valet/pull/447"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Reply in the Slack thread and bind one thread per conversation",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Reply in the Slack thread and bind one thread per conversation.",
           "category": "fix",
           "sources": {
             "commitSha": "dfd8c7b694be0153d4011bedbd7aa6a5d472366b",
@@ -1200,11 +720,11 @@
               "url": "https://github.com/tkhq/valet/pull/446"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Slack thread auto-follow + outcome-first automations",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Slack thread auto-follow + outcome-first automations.",
           "category": "feature",
           "sources": {
             "commitSha": "c6db8d407ad0054c9b652d8c052016cfe4a1eb87",
@@ -1216,11 +736,11 @@
               "url": "https://github.com/tkhq/valet/pull/448"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Linear issue filing (save_issue) + gitleaks arch",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Linear issue filing (save_issue) + gitleaks arch.",
           "category": "fix",
           "sources": {
             "commitSha": "4be659fa007106bca3050043225951b0bb7af2d3",
@@ -1232,27 +752,11 @@
               "url": "https://github.com/tkhq/valet/pull/450"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Slack thread context + agent-readable participation",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "0429f887aa297cb1efc439ab53a2687b1f15ab4d",
-            "pullRequest": 452
-          },
-          "links": [
-            {
-              "label": "PR #452",
-              "url": "https://github.com/tkhq/valet/pull/452"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Close restart-durability holes across the engagement loop",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Close restart-durability holes across the engagement loop.",
           "category": "fix",
           "sources": {
             "commitSha": "1e618e06e5962e9af5c56747cc9b8061f59378d8",
@@ -1264,27 +768,11 @@
               "url": "https://github.com/tkhq/valet/pull/451"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Treat 1:1 threads as addressed",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "d90671e8c0187d0ec717b9f9dfee5c15675a5009",
-            "pullRequest": 453
-          },
-          "links": [
-            {
-              "label": "PR #453",
-              "url": "https://github.com/tkhq/valet/pull/453"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Halt-and-wait tool for the runner; fix k8s job kickoff; scope out v1",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Halt-and-wait tool for the runner; fix k8s job kickoff; scope out v1.",
           "category": "fix",
           "sources": {
             "commitSha": "899b4876cde8cee3ff818033bcaec9a4d3cfe497",
@@ -1296,11 +784,11 @@
               "url": "https://github.com/tkhq/valet/pull/456"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Scope Import/Export and hint copy to the workspace",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Scope Import/Export and hint copy to the workspace.",
           "category": "fix",
           "sources": {
             "commitSha": "5c62fee1c300f70b8dbf946215cd0708afb042cb",
@@ -1312,11 +800,11 @@
               "url": "https://github.com/tkhq/valet/pull/457"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Scope chat to active workspace, show team child runs",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Scope chat to active workspace, show team child runs.",
           "category": "fix",
           "sources": {
             "commitSha": "5de830f2f335798457de72924b472d830196e6ca",
@@ -1328,11 +816,11 @@
               "url": "https://github.com/tkhq/valet/pull/454"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Scope the hub Runs and Triggers tabs to the workspace",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Scope the hub Runs and Triggers tabs to the workspace.",
           "category": "fix",
           "sources": {
             "commitSha": "e9c4bb7b7b96ceaf1c89976f2fbef3b33e15e81e",
@@ -1344,11 +832,11 @@
               "url": "https://github.com/tkhq/valet/pull/455"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Deep links adopt the resource's workspace",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Deep links adopt the resource's workspace.",
           "category": "fix",
           "sources": {
             "commitSha": "207b27b752b4d72977070f47c232aec6198eba17",
@@ -1360,11 +848,11 @@
               "url": "https://github.com/tkhq/valet/pull/459"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Scheduled prompts follow the workspace switcher",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Scheduled prompts follow the workspace switcher.",
           "category": "fix",
           "sources": {
             "commitSha": "b766c86233106d6637b654e9933763b4f79dfd54",
@@ -1376,11 +864,11 @@
               "url": "https://github.com/tkhq/valet/pull/458"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Widen sidebar New thread button to sidebar width",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Widen sidebar New thread button to sidebar width.",
           "category": "fix",
           "sources": {
             "commitSha": "eda18d00b25c441fa29497da14a235f7a3941689",
@@ -1392,11 +880,11 @@
               "url": "https://github.com/tkhq/valet/pull/463"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Style Slack approval messages as Block Kit cards (TKAI-289)",
-          "description": "This change is now available in Valet.",
+          "title": "Style Slack approval messages as Block Kit cards",
+          "description": "Available now: Style Slack approval messages as Block Kit cards.",
           "category": "feature",
           "sources": {
             "commitSha": "630aeb1e36556d67d7295acda47ca693335c4ee6",
@@ -1408,11 +896,11 @@
               "url": "https://github.com/tkhq/valet/pull/467"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Remove Delete session from the user's own assistant page",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Remove Delete session from the user's own assistant page.",
           "category": "fix",
           "sources": {
             "commitSha": "19451570a65955db79604243124ac37cbb8d3df8",
@@ -1424,11 +912,11 @@
               "url": "https://github.com/tkhq/valet/pull/466"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Retire the assistant row when its session is deleted",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Retire the assistant row when its session is deleted.",
           "category": "fix",
           "sources": {
             "commitSha": "33f85b3dea1f8a106a0c3896a7eef4a3f9238b3e",
@@ -1440,11 +928,11 @@
               "url": "https://github.com/tkhq/valet/pull/468"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Deliver mid-turn assistant text to channel origins",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Deliver mid-turn assistant text to channel origins.",
           "category": "fix",
           "sources": {
             "commitSha": "eac94fa37839d29026e14e48f3d7944dfa7e0898",
@@ -1456,11 +944,11 @@
               "url": "https://github.com/tkhq/valet/pull/469"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Auto-post only a turn's first message to channel origins",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Auto-post only a turn's first message to channel origins.",
           "category": "fix",
           "sources": {
             "commitSha": "7aa1721e9577396a608ce989d5d0d4b3e717af50",
@@ -1472,11 +960,11 @@
               "url": "https://github.com/tkhq/valet/pull/470"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Auto-post the turn-final message too, not just the first",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Auto-post the turn-final message too, not just the first.",
           "category": "fix",
           "sources": {
             "commitSha": "6d5dda3b53825421064e747905a8777d5e86de63",
@@ -1488,11 +976,11 @@
               "url": "https://github.com/tkhq/valet/pull/472"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Gate send_message, restore update/delete_message tools",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Gate send_message, restore update/delete_message tools.",
           "category": "fix",
           "sources": {
             "commitSha": "2bc9d1cfa7698b1f654836048fe5a856d581396a",
@@ -1504,11 +992,11 @@
               "url": "https://github.com/tkhq/valet/pull/474"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Forwarded messages reach the agent in v2 (TKAI-300)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Forwarded messages reach the agent in v2",
+          "description": "Fixed: Forwarded messages reach the agent in v2.",
           "category": "fix",
           "sources": {
             "commitSha": "b6093d878c2acfe74e818d966d586468bfd07d42",
@@ -1520,11 +1008,11 @@
               "url": "https://github.com/tkhq/valet/pull/473"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Coalesce overheard Slack messages into a single digest (TKAI-297)",
-          "description": "This change is now available in Valet.",
+          "title": "Coalesce overheard Slack messages into a single digest",
+          "description": "Available now: Coalesce overheard Slack messages into a single digest.",
           "category": "feature",
           "sources": {
             "commitSha": "feafa89257446683c3449a8a0da374ff341dae59",
@@ -1536,11 +1024,11 @@
               "url": "https://github.com/tkhq/valet/pull/475"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Scope Slack mention subscriptions to the user and channels",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Scope Slack mention subscriptions to the user and channels.",
           "category": "feature",
           "sources": {
             "commitSha": "6ce4af447e11cf381b9d6577e53102cd4ad68ae6",
@@ -1552,11 +1040,11 @@
               "url": "https://github.com/tkhq/valet/pull/476"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Restore personal, team, and org model preferences in v2 (TKAI-255)",
-          "description": "This change is now available in Valet.",
+          "title": "Restore personal, team, and org model preferences in v2",
+          "description": "Available now: Restore personal, team, and org model preferences in v2.",
           "category": "feature",
           "sources": {
             "commitSha": "11b56e0dbbd48346423afa1621aaf5368f3243e3",
@@ -1568,11 +1056,11 @@
               "url": "https://github.com/tkhq/valet/pull/477"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Order thread history by (created_at, seq) to fix chat order",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Order thread history by (created_at, seq) to fix chat order.",
           "category": "fix",
           "sources": {
             "commitSha": "27c9d5424934c800749bfeef8dde019604254baa",
@@ -1584,11 +1072,11 @@
               "url": "https://github.com/tkhq/valet/pull/479"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Unstick UI after renaming the orchestrator (TKAI-295)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Unstick UI after renaming the orchestrator",
+          "description": "Fixed: Unstick UI after renaming the orchestrator.",
           "category": "fix",
           "sources": {
             "commitSha": "e1361e34dd988a372a671b424db6371417c38914",
@@ -1600,11 +1088,11 @@
               "url": "https://github.com/tkhq/valet/pull/480"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Detect and gate subscription collisions at create/edit (TKAI-294)",
-          "description": "This change is now available in Valet.",
+          "title": "Detect and gate subscription collisions at create/edit",
+          "description": "Available now: Detect and gate subscription collisions at create/edit.",
           "category": "feature",
           "sources": {
             "commitSha": "9ea2d6708d6c9f7f5b1375767ee4350df88e4dda",
@@ -1616,27 +1104,11 @@
               "url": "https://github.com/tkhq/valet/pull/481"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Slack thread AX: overheard re-hydration, dropped-reply feedback, seed-race fix (TKAI-284)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "ff71e07ce7f6f40313d28464d433d22529a39cc6",
-            "pullRequest": 482
-          },
-          "links": [
-            {
-              "label": "PR #482",
-              "url": "https://github.com/tkhq/valet/pull/482"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Pin thread models at creation; make autocompaction visible and correct (TKAI-201)",
-          "description": "This change is now available in Valet.",
+          "title": "Pin thread models at creation; make autocompaction visible and correct",
+          "description": "Available now: Pin thread models at creation; make autocompaction visible and correct.",
           "category": "feature",
           "sources": {
             "commitSha": "77148670e03c66bf3dc58d4ee939dd4c86424fab",
@@ -1648,11 +1120,11 @@
               "url": "https://github.com/tkhq/valet/pull/483"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Compaction keeps a model-scaled tail, not 8k (TKAI-305)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Compaction keeps a model-scaled tail, not 8k",
+          "description": "Fixed: Compaction keeps a model-scaled tail, not 8k.",
           "category": "fix",
           "sources": {
             "commitSha": "a20a1640e7915ed998cbef2b88e6f5be576e20a9",
@@ -1664,11 +1136,11 @@
               "url": "https://github.com/tkhq/valet/pull/484"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Compaction hardening from Claude Code's playbook (TKAI-306)",
-          "description": "This change is now available in Valet.",
+          "title": "Compaction hardening from Claude Code's playbook",
+          "description": "Available now: Compaction hardening from Claude Code's playbook.",
           "category": "feature",
           "sources": {
             "commitSha": "aa0efbd7a737c21c2130685861ce2a38f28ad93a",
@@ -1680,11 +1152,11 @@
               "url": "https://github.com/tkhq/valet/pull/485"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Add channels:join scope, SlackApi.joinChannel, and slack.join_channel action",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Add channels:join scope, SlackApi.joinChannel, and slack.join_channel action.",
           "category": "feature",
           "sources": {
             "commitSha": "b1532733803d275023597e3cc6af7be1658f95f6",
@@ -1696,11 +1168,11 @@
               "url": "https://github.com/tkhq/valet/pull/471"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Tool-execution safety - sequential mutations, read-before-write gate (TKAI-318)",
-          "description": "This change is now available in Valet.",
+          "title": "Tool-execution safety - sequential mutations, read-before-write gate",
+          "description": "Available now: Tool-execution safety - sequential mutations, read-before-write gate.",
           "category": "feature",
           "sources": {
             "commitSha": "2fc5805d6e752fd17c1d7f6b410565dadebeb2c4",
@@ -1712,11 +1184,11 @@
               "url": "https://github.com/tkhq/valet/pull/486"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Provider-call resilience for unattended sessions (TKAI-319)",
-          "description": "This change is now available in Valet.",
+          "title": "Provider-call resilience for unattended sessions",
+          "description": "Available now: Provider-call resilience for unattended sessions.",
           "category": "feature",
           "sources": {
             "commitSha": "d978807c3fa9ac16346baf86159edae6597d0b6f",
@@ -1728,11 +1200,11 @@
               "url": "https://github.com/tkhq/valet/pull/487"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Prompt-cache wiring and break telemetry (TKAI-320)",
-          "description": "This change is now available in Valet.",
+          "title": "Prompt-cache wiring and break telemetry",
+          "description": "Available now: Prompt-cache wiring and break telemetry.",
           "category": "feature",
           "sources": {
             "commitSha": "6347dba77a7da3fcd4b45fb159ca1ac83207e4cc",
@@ -1744,27 +1216,11 @@
               "url": "https://github.com/tkhq/valet/pull/488"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Valet Security v1-draft (in-sandbox scanners + pivot-coordinator)",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "d90f511cc854df11d66ce398d41daab304f77e20",
-            "pullRequest": 462
-          },
-          "links": [
-            {
-              "label": "PR #462",
-              "url": "https://github.com/tkhq/valet/pull/462"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Stop compaction loop on input larger than the window",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Stop compaction loop on input larger than the window.",
           "category": "fix",
           "sources": {
             "commitSha": "6b8815c5255f88304db3332c7f690de3337a46c1",
@@ -1776,27 +1232,11 @@
               "url": "https://github.com/tkhq/valet/pull/494"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Collapse sidebar subconversations",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "231411a82971f218ccda562c71126cab3780e1c3",
-            "pullRequest": 496
-          },
-          "links": [
-            {
-              "label": "PR #496",
-              "url": "https://github.com/tkhq/valet/pull/496"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Fetch the model registry at runtime (TKAI-327)",
-          "description": "This change is now available in Valet.",
+          "title": "Fetch the model registry at runtime",
+          "description": "Available now: Fetch the model registry at runtime.",
           "category": "feature",
           "sources": {
             "commitSha": "e5434ea7f33fae0b139b7fdf3b1b19fbac02d188",
@@ -1808,11 +1248,11 @@
               "url": "https://github.com/tkhq/valet/pull/498"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Auto-post to a channel only for channel turns (TKAI-323)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Auto-post to a channel only for channel turns",
+          "description": "Fixed: Auto-post to a channel only for channel turns.",
           "category": "fix",
           "sources": {
             "commitSha": "a3022165e0e0f147d5ef8f7574773b0bf2aaa8f4",
@@ -1824,43 +1264,11 @@
               "url": "https://github.com/tkhq/valet/pull/492"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Accent border on user message rows",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "7485b384afb7c2fb48999c7051e3fea3b73f28fa",
-            "pullRequest": 499
-          },
-          "links": [
-            {
-              "label": "PR #499",
-              "url": "https://github.com/tkhq/valet/pull/499"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Sort session list by last activity instead of update time",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "307b68b03ee8bfccd84c48a25757eff66a7a4190",
-            "pullRequest": 527
-          },
-          "links": [
-            {
-              "label": "PR #527",
-              "url": "https://github.com/tkhq/valet/pull/527"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Package scaffold, core types, YAML case loader (TKAI-328)",
-          "description": "This change is now available in Valet.",
+          "title": "Package scaffold, core types, YAML case loader",
+          "description": "Available now: Package scaffold, core types, YAML case loader.",
           "category": "feature",
           "sources": {
             "commitSha": "9e6265df94d96423d1e2501b191424937f16d113",
@@ -1872,11 +1280,11 @@
               "url": "https://github.com/tkhq/valet/pull/502"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Engine runner and trajectory extraction (TKAI-329)",
-          "description": "This change is now available in Valet.",
+          "title": "Engine runner and trajectory extraction",
+          "description": "Available now: Engine runner and trajectory extraction.",
           "category": "feature",
           "sources": {
             "commitSha": "bcd3c745ee8d7ebcd8920542d7830ae003e7d2f7",
@@ -1888,27 +1296,11 @@
               "url": "https://github.com/tkhq/valet/pull/503"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Deterministic check handlers and dispatch (TKAI-330)",
-          "description": "This change is now available in Valet.",
-          "category": "feature",
-          "sources": {
-            "commitSha": "3796f3c64077ba71a38b523750b877b63e0b9908",
-            "pullRequest": 504
-          },
-          "links": [
-            {
-              "label": "PR #504",
-              "url": "https://github.com/tkhq/valet/pull/504"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "LLM-as-judge check handlers (TKAI-331)",
-          "description": "This change is now available in Valet.",
+          "title": "LLM-as-judge check handlers",
+          "description": "Available now: LLM-as-judge check handlers.",
           "category": "feature",
           "sources": {
             "commitSha": "55d66b29c0d2fe77bf2bc2d5f97b20897b6f732a",
@@ -1920,11 +1312,11 @@
               "url": "https://github.com/tkhq/valet/pull/505"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Scorecard formatting and baseline comparison (TKAI-332)",
-          "description": "This change is now available in Valet.",
+          "title": "Scorecard formatting and baseline comparison",
+          "description": "Available now: Scorecard formatting and baseline comparison.",
           "category": "feature",
           "sources": {
             "commitSha": "6397db0806dcdf09b8e0d296a9dd3cec7de692a2",
@@ -1936,11 +1328,11 @@
               "url": "https://github.com/tkhq/valet/pull/506"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "CLI entry point, make eval target, starter cases (TKAI-333)",
-          "description": "This change is now available in Valet.",
+          "title": "CLI entry point, make eval target, starter cases",
+          "description": "Available now: CLI entry point, make eval target, starter cases.",
           "category": "feature",
           "sources": {
             "commitSha": "96014f9beb7ccc2e84a36b15877cf9c612e787cb",
@@ -1952,11 +1344,11 @@
               "url": "https://github.com/tkhq/valet/pull/507"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Mock plugin catalog for integration-free cases (TKAI-335)",
-          "description": "This change is now available in Valet.",
+          "title": "Mock plugin catalog for integration-free cases",
+          "description": "Available now: Mock plugin catalog for integration-free cases.",
           "category": "feature",
           "sources": {
             "commitSha": "0f8e923c5f5887e05b2d139704ce79fbde4bc62e",
@@ -1968,11 +1360,11 @@
               "url": "https://github.com/tkhq/valet/pull/508"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Real plugin catalog with live credentials (TKAI-336)",
-          "description": "This change is now available in Valet.",
+          "title": "Real plugin catalog with live credentials",
+          "description": "Available now: Real plugin catalog with live credentials.",
           "category": "feature",
           "sources": {
             "commitSha": "1a823ab1b5abe8daa3a77c641f0381ce21dc934f",
@@ -1984,11 +1376,11 @@
               "url": "https://github.com/tkhq/valet/pull/509"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Thumbs up/down ratings and flagged trajectory pull (TKAI-334)",
-          "description": "This change is now available in Valet.",
+          "title": "Thumbs up/down ratings and flagged trajectory pull",
+          "description": "Available now: Thumbs up/down ratings and flagged trajectory pull.",
           "category": "feature",
           "sources": {
             "commitSha": "24ee6fe534c5bedee4c9b4b626d2ab31805100ad",
@@ -2000,11 +1392,11 @@
               "url": "https://github.com/tkhq/valet/pull/510"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Hard model-comparison suite (12 cases) + saved haiku baselines",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Hard model-comparison suite (12 cases) + saved haiku baselines.",
           "category": "feature",
           "sources": {
             "commitSha": "b657872a95d575b5b6cc41c0880cb0864fb73bd1",
@@ -2016,27 +1408,11 @@
               "url": "https://github.com/tkhq/valet/pull/513"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Trajectory fidelity - child rollups, turn linkage, elision handling",
-          "description": "This change is now available in Valet.",
-          "category": "feature",
-          "sources": {
-            "commitSha": "c844b061d052ed99a3df8a50c6dfcb44fe8b4f28",
-            "pullRequest": 516
-          },
-          "links": [
-            {
-              "label": "PR #516",
-              "url": "https://github.com/tkhq/valet/pull/516"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Pass@k sampling, variance-aware baselines, temperature seam",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Pass@k sampling, variance-aware baselines, temperature seam.",
           "category": "feature",
           "sources": {
             "commitSha": "222dddfe9b7453eac77f9ecebf6626374db1fb0c",
@@ -2048,43 +1424,11 @@
               "url": "https://github.com/tkhq/valet/pull/517"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Judge rigor - self-judge escalation, task context, majority vote",
-          "description": "This change is now available in Valet.",
-          "category": "feature",
-          "sources": {
-            "commitSha": "a6306092be4025e186d9989b0d0100ffe5d26d09",
-            "pullRequest": 518
-          },
-          "links": [
-            {
-              "label": "PR #518",
-              "url": "https://github.com/tkhq/valet/pull/518"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Flagged corpus round trip, live-baseline guard, pruning",
-          "description": "This change is now available in Valet.",
-          "category": "feature",
-          "sources": {
-            "commitSha": "ea93a75452fa36dac0136cfdcd9971c8c4a6764a",
-            "pullRequest": 519
-          },
-          "links": [
-            {
-              "label": "PR #519",
-              "url": "https://github.com/tkhq/valet/pull/519"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Product-mode drive, action pins, case variants (TKAI-213)",
-          "description": "This change is now available in Valet.",
+          "title": "Product-mode drive, action pins, case variants",
+          "description": "Available now: Product-mode drive, action pins, case variants.",
           "category": "feature",
           "sources": {
             "commitSha": "df0ed0ec33c27f60f3e0fa28c2290d8737279dec",
@@ -2096,11 +1440,11 @@
               "url": "https://github.com/tkhq/valet/pull/520"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Builder cases with harness-run verify_command checks",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Builder cases with harness-run verify_command checks.",
           "category": "feature",
           "sources": {
             "commitSha": "099e7e764eb6015ec10ef8562fb492d7fd34878a",
@@ -2112,11 +1456,11 @@
               "url": "https://github.com/tkhq/valet/pull/526"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
-          "title": "Reasoning-effort seam and bench axis (TKAI-352)",
-          "description": "This change is now available in Valet.",
+          "title": "Reasoning-effort seam and bench axis",
+          "description": "Available now: Reasoning-effort seam and bench axis.",
           "category": "feature",
           "sources": {
             "commitSha": "734af06cec6b4c89150352f1b2a804a7347118cd",
@@ -2128,11 +1472,11 @@
               "url": "https://github.com/tkhq/valet/pull/529"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Keyboard shortcuts and an archive menu",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Keyboard shortcuts and an archive menu.",
           "category": "feature",
           "sources": {
             "commitSha": "7eb61f44c82b3d68106edb5d4e17e5be839c72cf",
@@ -2144,11 +1488,11 @@
               "url": "https://github.com/tkhq/valet/pull/367"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Ephemeral-storage caps, DinD emptyDir sizeLimit, node spread for sandbox pods",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Ephemeral-storage caps, DinD emptyDir sizeLimit, node spread for sandbox pods.",
           "category": "fix",
           "sources": {
             "commitSha": "d7050f6f184253c220371c22748a8b7d8d2baccb",
@@ -2160,21 +1504,21 @@
               "url": "https://github.com/tkhq/valet/pull/530"
             }
           ],
-          "followUp": false
+          "followUp": true
         }
       ]
     },
     {
       "id": "0.10.2@b861063263042c3ab08c5729ad38f65c867e0fa0",
       "version": "0.10.2",
-      "releasedAt": "2026-08-26T13:14:11-07:00",
+      "releasedAt": "2026-08-26T20:14:37.000Z",
       "releasedSha": "b861063263042c3ab08c5729ad38f65c867e0fa0",
       "previousSha": "e33701dc8efe22aa61a6afaa7e51e64136271013",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.2",
       "entries": [
         {
-          "title": "Owner-scope workflow trigger reads and mutations (TKAI-227)",
-          "description": "This release corrects this behavior for users.",
+          "title": "Owner-scope workflow trigger reads and mutations",
+          "description": "Fixed: Owner-scope workflow trigger reads and mutations.",
           "category": "fix",
           "sources": {
             "commitSha": "5cc277fa993e95c55c363c3b6d4e3105a33e51b3",
@@ -2186,11 +1530,11 @@
               "url": "https://github.com/tkhq/valet/pull/400"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Sandbox file uploads (text, zip, PDF)",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Sandbox file uploads (text, zip, PDF).",
           "category": "feature",
           "sources": {
             "commitSha": "2c0ab8d77020bb73380ee67deb4e1902a8f4fc7f",
@@ -2202,11 +1546,11 @@
               "url": "https://github.com/tkhq/valet/pull/399"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Usage-card org bars render and cap at top 15",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Usage-card org bars render and cap at top 15.",
           "category": "fix",
           "sources": {
             "commitSha": "78a5accaf25ae7e51c923b6a4edc19fd1c157790",
@@ -2218,11 +1562,11 @@
               "url": "https://github.com/tkhq/valet/pull/404"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Oauth scopes for config-declared MCP servers",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Oauth scopes for config-declared MCP servers.",
           "category": "feature",
           "sources": {
             "commitSha": "f7dc5a4543c2aae124a1e790c6717e7cef7e2c85",
@@ -2234,27 +1578,11 @@
               "url": "https://github.com/tkhq/valet/pull/406"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Switch v2 pi-ai to @earendil-works 0.84.2",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "4e90ff0b13cfaf4e84d4a6ac1cfa95d064ac8e98",
-            "pullRequest": 346
-          },
-          "links": [
-            {
-              "label": "PR #346",
-              "url": "https://github.com/tkhq/valet/pull/346"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "MCP OAuth registration scopes + lock-free schema repairs",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: MCP OAuth registration scopes + lock-free schema repairs.",
           "category": "fix",
           "sources": {
             "commitSha": "e2f2423608b1080d9d958e0d84a9e6c2199e8e24",
@@ -2266,11 +1594,11 @@
               "url": "https://github.com/tkhq/valet/pull/410"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Serialize gate cycles; terminalize orphaned decision gates",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Serialize gate cycles; terminalize orphaned decision gates.",
           "category": "fix",
           "sources": {
             "commitSha": "cdceff6dc64cd455a79be134198df617f770c3bb",
@@ -2282,11 +1610,11 @@
               "url": "https://github.com/tkhq/valet/pull/413"
             }
           ],
-          "followUp": false
+          "followUp": true
         },
         {
           "title": "Bind the HTTP listener before boot-restore work",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Bind the HTTP listener before boot-restore work.",
           "category": "fix",
           "sources": {
             "commitSha": "b861063263042c3ab08c5729ad38f65c867e0fa0",
@@ -2298,21 +1626,21 @@
               "url": "https://github.com/tkhq/valet/pull/414"
             }
           ],
-          "followUp": false
+          "followUp": true
         }
       ]
     },
     {
       "id": "0.10.1@e33701dc8efe22aa61a6afaa7e51e64136271013",
       "version": "0.10.1",
-      "releasedAt": "2026-08-22T22:53:02-04:00",
+      "releasedAt": "2026-08-23T02:53:28.000Z",
       "releasedSha": "e33701dc8efe22aa61a6afaa7e51e64136271013",
       "previousSha": "8420d06e610166bb473cfc9e192d5d6325eff8b4",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.1",
       "entries": [
         {
           "title": "Tool-card default preference and auto-collapse on complete",
-          "description": "This change is now available in Valet.",
+          "description": "Available now: Tool-card default preference and auto-collapse on complete.",
           "category": "feature",
           "sources": {
             "commitSha": "44c3c43a48dbe41a7a4a2830cbb7eea05245e76f",
@@ -2324,69 +1652,21 @@
               "url": "https://github.com/tkhq/valet/pull/387"
             }
           ],
-          "followUp": false
-        },
-        {
-          "title": "Sandbox lifecycle correctness: delete on settle, orphan sweep, Pending fail-fast, leak metrics",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "79928e5ccbb38e7455420ef09ed4335be3ccbdbe",
-            "pullRequest": 393
-          },
-          "links": [
-            {
-              "label": "PR #393",
-              "url": "https://github.com/tkhq/valet/pull/393"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Sandbox tiering layer 2: Tier-0 sessions, stranded-idle hibernation, per-org capacity gate",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "98a54d04bf777d7f5b49c856fd2abf6cc92a7640",
-            "pullRequest": 394
-          },
-          "links": [
-            {
-              "label": "PR #394",
-              "url": "https://github.com/tkhq/valet/pull/394"
-            }
-          ],
-          "followUp": false
-        },
-        {
-          "title": "Share memory files as links + full-page memory viewer",
-          "description": "This change is now available in Valet.",
-          "category": "improvement",
-          "sources": {
-            "commitSha": "e33701dc8efe22aa61a6afaa7e51e64136271013",
-            "pullRequest": 395
-          },
-          "links": [
-            {
-              "label": "PR #395",
-              "url": "https://github.com/tkhq/valet/pull/395"
-            }
-          ],
-          "followUp": false
+          "followUp": true
         }
       ]
     },
     {
       "id": "0.10.0@8420d06e610166bb473cfc9e192d5d6325eff8b4",
       "version": "0.10.0",
-      "releasedAt": "2026-08-21T17:23:16-04:00",
+      "releasedAt": "2026-08-21T21:23:40.000Z",
       "releasedSha": "8420d06e610166bb473cfc9e192d5d6325eff8b4",
       "previousSha": "f15155a29e7ae650ab978acd71baf11ed90eb440",
       "releaseUrl": "https://github.com/tkhq/valet/releases/tag/chart%2Fvalet-v0.10.0",
       "entries": [
         {
           "title": "Stop stale sandbox/pod accumulation — hibernated-sandbox reaper + failed-pod janitor",
-          "description": "This release corrects this behavior for users.",
+          "description": "Fixed: Stop stale sandbox/pod accumulation — hibernated-sandbox reaper + failed-pod janitor.",
           "category": "fix",
           "sources": {
             "commitSha": "8420d06e610166bb473cfc9e192d5d6325eff8b4",
@@ -2398,7 +1678,7 @@
               "url": "https://github.com/tkhq/valet/pull/391"
             }
           ],
-          "followUp": false
+          "followUp": true
         }
       ]
     }

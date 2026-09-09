@@ -63,16 +63,15 @@ jobs:
 
       - name: Generate release checkpoint
         if: matrix.image.name == 'valet-api' && startsWith(github.ref, 'refs/tags/v')
-        id: changelog
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           node packages/api/scripts/generate-changelog.mjs \
-            --version "$version" \
-            --release-sha "$GITHUB_SHA" \
-            --metadata packages/api/src/changelog/release.json \
-            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+            --backfill-tags 'chart/valet-v*' \
+            --backfill-tags 'v*' \
+            --artifact-version "$version" \
+            --artifact-sha "$GITHUB_SHA" \
+            --metadata packages/api/src/changelog/release.json
 
       # GHCR requires a lowercase namespace; github.repository_owner isn't
       # guaranteed lowercase.

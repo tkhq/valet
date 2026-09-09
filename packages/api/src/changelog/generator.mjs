@@ -3,12 +3,19 @@ import { execFileSync } from "node:child_process";
 export const CHANGELOG_SCHEMA = "valet-changelog/v1";
 
 const INTERNAL_PREFIXES = new Set(["build", "chore", "ci", "docs", "refactor", "test"]);
-const INTERNAL_PATH = /^(?:\.github\/|docs\/|scripts\/)|(?:^|\/)(?:__tests__|test|tests)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const USER_PREFIXES = new Set(["feat", "fix", "security"]);
+const INTERNAL_PATH = /^(?:\.github\/|docs\/|scripts\/|packages\/eval\/)|(?:^|\/)(?:__tests__|test|tests)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const DEPENDENCY_TITLE = /\b(?:dependabot|renovate|dependencies|dependency update|bump\s+\S+\s+from\s+)\b/i;
 const USER_VISIBLE_MARKER = /\[(?:user-visible|changelog)\]/i;
 
 function git(repo, args) {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+}
+
+function normalizeTimestamp(value) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new Error(`Invalid release timestamp: ${value}`);
+  return new Date(timestamp).toISOString();
 }
 
 function commit(repo, sha) {
@@ -37,19 +44,27 @@ function cleanTitle(subject) {
   const withoutMarker = subject.replace(USER_VISIBLE_MARKER, "").trim();
   const withoutPr = withoutMarker.replace(/\s*\(#\d+\)\s*$/, "");
   const withoutPrefix = withoutPr.replace(/^[a-z]+(?:\([^)]+\))?!?:\s*/i, "");
-  const withoutIssue = withoutPrefix.replace(/^(?:TKAI-\d+\s*[:\-]?\s*)/i, "");
+  const withoutIssue = withoutPrefix
+    .replace(/^(?:TKAI-\d+\s*[:\-]?\s*)/i, "")
+    .replace(/\s*\(TKAI-\d+\)\s*$/i, "");
   if (!withoutIssue) return "Product update";
   return withoutIssue.charAt(0).toUpperCase() + withoutIssue.slice(1);
 }
 
-function descriptionFromBody(body, category) {
+function fallbackDescription(title, category) {
+  const topic = title.replace(/[.!?]+$/, "");
+  if (category === "fix") return `Fixed: ${topic}.`;
+  if (category === "security") return `Security update: ${topic}.`;
+  if (category === "feature") return `Available now: ${topic}.`;
+  return `Improved: ${topic}.`;
+}
+
+function descriptionFromBody(body, title, category) {
   const marked = /^(?:user impact|changelog):\s*(.+)$/im.exec(body)?.[1]?.replace(/\s+/g, " ").trim();
-  if (marked) return marked.length > 240 ? `${marked.slice(0, 237).trimEnd()}...` : marked;
-  return category === "fix"
-    ? "This release corrects this behavior for users."
-    : category === "security"
-      ? "This release improves product security."
-      : "This change is now available in Valet.";
+  if (marked) {
+    return { description: marked.length > 240 ? `${marked.slice(0, 237).trimEnd()}...` : marked, followUp: false };
+  }
+  return { description: fallbackDescription(title, category), followUp: true };
 }
 
 export function shouldIncludeCommit(change) {
@@ -57,7 +72,7 @@ export function shouldIncludeCommit(change) {
   if (explicit) return true;
   if (/^Merge\b/i.test(change.subject) || DEPENDENCY_TITLE.test(change.subject)) return false;
   const prefix = /^([a-z]+)(?:\([^)]+\))?!?:/i.exec(change.subject)?.[1]?.toLowerCase();
-  if (prefix && INTERNAL_PREFIXES.has(prefix)) return false;
+  if (!prefix || INTERNAL_PREFIXES.has(prefix) || !USER_PREFIXES.has(prefix)) return false;
   return change.files.length === 0 || change.files.some((path) => !INTERNAL_PATH.test(path));
 }
 
@@ -65,33 +80,31 @@ export function entryFromCommit(change) {
   const pr = /\(#(\d+)\)\s*$/.exec(change.subject)?.[1];
   const category = classifyCommit(change.subject);
   const title = cleanTitle(change.subject);
+  const { description, followUp } = descriptionFromBody(change.body, title, category);
   return {
     title,
-    description: descriptionFromBody(change.body, category),
+    description,
     category,
     sources: {
       commitSha: change.commitSha,
       ...(pr ? { pullRequest: Number(pr) } : {}),
     },
     ...(pr ? { links: [{ label: `PR #${pr}`, url: `https://github.com/tkhq/valet/pull/${pr}` }] } : {}),
-    followUp: !pr,
+    followUp,
   };
 }
 
 export function generateCheckpoint({ repo, version, releaseSha, previousSha = null, releasedAt, releaseUrl }) {
+  if (!releasedAt) throw new Error("Set releasedAt from authoritative release metadata.");
   const resolvedSha = git(repo, ["rev-parse", `${releaseSha}^{commit}`]);
   const resolvedPrevious = previousSha ? git(repo, ["rev-parse", `${previousSha}^{commit}`]) : null;
-  const date = releasedAt ?? git(repo, ["show", "-s", "--format=%aI", resolvedSha]);
   const entries = commitsInRange(repo, resolvedPrevious, resolvedSha)
     .filter(shouldIncludeCommit)
     .map(entryFromCommit);
-  if (entries.length === 0) {
-    throw new Error(`Changelog range ${resolvedPrevious ?? "(start)"}..${resolvedSha} has no user-facing entries.`);
-  }
   return {
     id: `${version}@${resolvedSha}`,
     version,
-    releasedAt: date,
+    releasedAt: normalizeTimestamp(releasedAt),
     releasedSha: resolvedSha,
     previousSha: resolvedPrevious,
     ...(releaseUrl ? { releaseUrl } : {}),
@@ -99,32 +112,66 @@ export function generateCheckpoint({ repo, version, releaseSha, previousSha = nu
   };
 }
 
+function normalizeCheckpoint(checkpoint) {
+  return { ...checkpoint, releasedAt: normalizeTimestamp(checkpoint.releasedAt) };
+}
+
 export function upsertCheckpoint(manifest, checkpoint) {
   if (manifest.schema !== CHANGELOG_SCHEMA || !Array.isArray(manifest.checkpoints)) {
     throw new Error(`Manifest must use schema ${CHANGELOG_SCHEMA}.`);
   }
-  const existing = manifest.checkpoints.find((item) => item.id === checkpoint.id);
-  if (existing && JSON.stringify(existing) !== JSON.stringify(checkpoint)) {
-    throw new Error(`Checkpoint ${checkpoint.id} is immutable and does not match the generated data.`);
+  const normalized = normalizeCheckpoint(checkpoint);
+  const existing = manifest.checkpoints.find((item) => item.id === normalized.id);
+  if (existing && JSON.stringify(normalizeCheckpoint(existing)) !== JSON.stringify(normalized)) {
+    throw new Error(`Checkpoint ${normalized.id} is immutable and does not match the generated data.`);
   }
-  const checkpoints = existing ? manifest.checkpoints : [...manifest.checkpoints, checkpoint];
-  checkpoints.sort((a, b) => b.releasedAt.localeCompare(a.releasedAt) || b.id.localeCompare(a.id));
-  return { schema: CHANGELOG_SCHEMA, generatedAt: checkpoint.releasedAt, checkpoints };
+  const checkpoints = existing
+    ? manifest.checkpoints.map(normalizeCheckpoint)
+    : [...manifest.checkpoints.map(normalizeCheckpoint), normalized];
+  checkpoints.sort(
+    (a, b) => Date.parse(b.releasedAt) - Date.parse(a.releasedAt) || b.id.localeCompare(a.id),
+  );
+  return {
+    schema: CHANGELOG_SCHEMA,
+    generatedAt: checkpoints[0]?.releasedAt ?? new Date(0).toISOString(),
+    checkpoints,
+  };
 }
 
-export function backfillTags({ repo, manifest, pattern }) {
-  const refs = git(repo, ["tag", "--list", pattern, "--sort=creatordate"]);
-  const tags = refs ? refs.split("\n") : [];
+export function backfillTags({ repo, manifest, patterns }) {
+  const refs = git(repo, [
+    "tag",
+    "--list",
+    ...patterns,
+    "--sort=creatordate",
+    "--format=%(refname:short)%00%(creatordate:iso-strict)",
+  ]);
+  const baseline = manifest.checkpoints[0];
+  const baselineTime = baseline ? Date.parse(baseline.releasedAt) : Number.NEGATIVE_INFINITY;
+  const tags = refs
+    ? refs.split("\n").map((line) => {
+        const [tag, releasedAt] = line.split("\0");
+        return { tag, releasedAt };
+      }).filter(({ releasedAt }) => Date.parse(releasedAt) > baselineTime)
+    : [];
   let next = manifest;
-  let previousSha = tags[0] ? git(repo, ["rev-parse", `${tags[0]}^`]) : null;
-  for (const tag of tags) {
+  let previousSha = baseline?.releasedSha ?? (tags[0] ? git(repo, ["rev-parse", `${tags[0].tag}^`]) : null);
+  for (const { tag, releasedAt } of tags) {
     const releaseSha = git(repo, ["rev-list", "-n", "1", tag]);
+    if (previousSha) {
+      try {
+        git(repo, ["merge-base", "--is-ancestor", previousSha, releaseSha]);
+      } catch {
+        throw new Error(`Release tag ${tag} does not descend from checkpoint ${previousSha}.`);
+      }
+    }
     const version = tag.replace(/^chart\/valet-v/, "").replace(/^v/, "");
     const checkpoint = generateCheckpoint({
       repo,
       version,
       releaseSha,
       previousSha,
+      releasedAt,
       releaseUrl: `https://github.com/tkhq/valet/releases/tag/${encodeURIComponent(tag)}`,
     });
     next = upsertCheckpoint(next, checkpoint);

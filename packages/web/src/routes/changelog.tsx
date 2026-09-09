@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { ExternalLink } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
@@ -6,9 +6,9 @@ import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
 import { Badge, Spinner } from "~/components/primitives";
 import {
+  lastSeenCheckpoint,
   markChangelogSeen,
   unreadCheckpointIds,
-  useLastSeenCheckpoint,
 } from "~/lib/changelog-read-state";
 
 export const Route = createFileRoute("/changelog")({ component: ChangelogPage });
@@ -32,13 +32,17 @@ export function ChangelogPage() {
   const changelog = useChangelog();
   const me = useMe();
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
-  const seenId = useLastSeenCheckpoint(me.data?.id);
-  const unread = unreadCheckpointIds(checkpoints, seenId);
+  const [seenWhenOpened, setSeenWhenOpened] = useState<string | null>();
+  const unread = seenWhenOpened === undefined
+    ? new Set<string>()
+    : unreadCheckpointIds(checkpoints, seenWhenOpened);
   const newestId = checkpoints[0]?.id;
 
   useEffect(() => {
-    if (me.data && newestId) markChangelogSeen(me.data.id, newestId);
-  }, [me.data, newestId]);
+    if (!me.data || !newestId || seenWhenOpened !== undefined) return;
+    setSeenWhenOpened(lastSeenCheckpoint(me.data.id));
+    markChangelogSeen(me.data.id, newestId);
+  }, [me.data, newestId, seenWhenOpened]);
 
   if (changelog.isPending) {
     return (
@@ -91,11 +95,14 @@ export function ChangelogPage() {
                   )}
                 </div>
 
-                <ul className="divide-y divide-line">
-                  {checkpoint.entries.map((entry) => {
-                    const category = CATEGORY[entry.category];
-                    const commit = entry.sources.commitSha;
-                    return (
+                {checkpoint.entries.length === 0 ? (
+                  <p className="py-5 text-sm text-muted">No user-facing changes shipped in this release.</p>
+                ) : (
+                  <ul className="divide-y divide-line">
+                    {checkpoint.entries.map((entry) => {
+                      const category = CATEGORY[entry.category];
+                      const commit = entry.sources.commitSha;
+                      return (
                       <li key={`${checkpoint.id}-${commit}`} className="py-5">
                         <div className="flex flex-wrap items-center gap-2">
                           <h3 className="font-medium text-ink">{entry.title}</h3>
@@ -123,9 +130,10 @@ export function ChangelogPage() {
                           </a>
                         </div>
                       </li>
-                    );
-                  })}
-                </ul>
+                      );
+                    })}
+                  </ul>
+                )}
               </section>
             ))}
           </div>

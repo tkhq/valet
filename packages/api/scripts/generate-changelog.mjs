@@ -9,9 +9,12 @@ import {
   upsertCheckpoint,
 } from "../src/changelog/generator.mjs";
 
+function options(name) {
+  return process.argv.flatMap((value, index) => (value === name ? [process.argv[index + 1]] : []));
+}
+
 function option(name) {
-  const index = process.argv.indexOf(name);
-  return index === -1 ? undefined : process.argv[index + 1];
+  return options(name)[0];
 }
 
 const repo = resolve(option("--repo") ?? ".");
@@ -19,8 +22,8 @@ const manifestPath = resolve(option("--manifest") ?? "packages/api/src/changelog
 const initial = existsSync(manifestPath)
   ? JSON.parse(readFileSync(manifestPath, "utf8"))
   : { schema: CHANGELOG_SCHEMA, generatedAt: new Date(0).toISOString(), checkpoints: [] };
-const pattern = option("--backfill-tags");
-let manifest = pattern ? backfillTags({ repo, manifest: initial, pattern }) : initial;
+const patterns = options("--backfill-tags");
+let manifest = patterns.length ? backfillTags({ repo, manifest: initial, patterns }) : initial;
 
 const version = option("--version");
 const releaseSha = option("--release-sha");
@@ -40,15 +43,25 @@ if (version && releaseSha) {
     }),
   );
 }
-if (!pattern && !version) {
+if (!patterns.length && !version) {
   throw new Error("Set --backfill-tags or a release version and SHA.");
 }
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+const empty = manifest.checkpoints.filter((checkpoint) => checkpoint.entries.length === 0);
+if (empty.length) {
+  console.warn(`Warning: ${empty.length} release checkpoint(s) contain no user-facing changes.`);
+}
+
 const metadataPath = option("--metadata");
-if (metadataPath && version && releaseSha) {
-  const resolvedSha = execFileSync("git", ["-C", repo, "rev-parse", `${releaseSha}^{commit}`], {
+const artifactVersion = option("--artifact-version") ?? version;
+const artifactSha = option("--artifact-sha") ?? releaseSha;
+if (metadataPath && artifactVersion && artifactSha) {
+  const resolvedSha = execFileSync("git", ["-C", repo, "rev-parse", `${artifactSha}^{commit}`], {
     encoding: "utf8",
   }).trim();
-  writeFileSync(resolve(metadataPath), `${JSON.stringify({ version, sha: resolvedSha }, null, 2)}\n`);
+  writeFileSync(
+    resolve(metadataPath),
+    `${JSON.stringify({ version: artifactVersion, sha: resolvedSha }, null, 2)}\n`,
+  );
 }
 console.log(`Wrote ${manifest.checkpoints.length} checkpoint(s) to ${manifestPath}.`);
