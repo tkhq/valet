@@ -15,6 +15,14 @@ const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const connectMutate = vi.fn();
 const disconnectMutate = vi.fn();
 let disconnectError: Error | null = null;
+// React Query holds `mutation.error` until the next mutate, so a dialog that
+// does not clear it opens showing the PREVIOUS attempt's refusal. A real
+// `reset()` clears the error; a stub that only counts calls cannot tell a
+// component that clears from one that does not, and the whole suite stays
+// green over the bug. Clear the variable the mock's `error` reads.
+const disconnectReset = vi.fn(() => {
+  disconnectError = null;
+});
 
 let confirmSpy = vi.fn(() => true);
 let orgData: { callerRole: "admin" | "member" } = { callerRole: "admin" };
@@ -44,7 +52,7 @@ vi.mock("~/api/integrations", () => ({
     mutate: disconnectMutate,
     isPending: false,
     error: disconnectError,
-    reset: vi.fn(),
+    reset: disconnectReset,
   }),
 }));
 
@@ -197,15 +205,21 @@ describe("OnePasswordPanel", () => {
   /** Admin, org token connected, personal row hidden: one Remove button. */
   function renderConnectedOrgToken() {
     settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
-    render(<OnePasswordPanel />);
+    return render(<OnePasswordPanel />);
   }
 
   /** Member, personal token connected, org row hidden: one Remove button. */
   function renderConnectedPersonalToken() {
     orgData = { callerRole: "member" };
     settingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: true };
-    render(<OnePasswordPanel />);
+    return render(<OnePasswordPanel />);
   }
+
+  /** A refusal the server answers a removal with. */
+  const refusal = (status: number, message: string) =>
+    new ApiError(status, `DELETE /credentials/onepassword → ${status}`, { error: message });
+  const ORG_REFUSAL = "Only an admin can remove the organization token. Ask an admin.";
+  const PERSONAL_REFUSAL = "The token store is unavailable. Try again in a moment.";
 
   it("org token: Remove opens the confirm dialog and disconnects nothing", async () => {
     renderConnectedOrgToken();
@@ -241,18 +255,37 @@ describe("OnePasswordPanel", () => {
     expect(screen.getByText("Connected")).toBeTruthy();
   });
 
-  // `confirm()` could not show why a removal failed; the dialog can.
+  // `confirm()` could not show why a removal failed; the dialog can. The
+  // refusal is set AFTER the confirm click, which is the only order
+  // production produces: the server cannot answer a request the user has
+  // not sent yet. Setting it before the dialog opens would assert the
+  // stale-error path instead, which is the bug the next test guards.
   it("org token: the dialog shows the server's reason for a failed removal", async () => {
-    disconnectError = new ApiError(403, "DELETE /credentials/onepassword → 403", {
-      error: "Only an admin can remove the organization token. Ask an admin.",
-    });
+    const { rerender } = renderConnectedOrgToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+    const opened = await screen.findByRole("dialog");
+    fireEvent.click(within(opened).getByRole("button", { name: "Remove token" }));
+
+    disconnectError = refusal(403, ORG_REFUSAL);
+    rerender(<OnePasswordPanel />);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(ORG_REFUSAL)).toBeTruthy();
+  });
+
+  // The refusal belongs to the attempt that produced it. React Query holds
+  // it until the next mutate, so the opening control clears it — otherwise
+  // the dialog opens already accusing the user of a failure they have not
+  // repeated. Radix never calls `onOpenChange(true)` on these controlled,
+  // trigger-less dialogs, so a clear placed there never runs at all.
+  it("org token: reopening after a refusal starts with no error", async () => {
+    disconnectError = refusal(403, ORG_REFUSAL);
     renderConnectedOrgToken();
     fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(
-      within(dialog).getByText("Only an admin can remove the organization token. Ask an admin."),
-    ).toBeTruthy();
+    expect(within(dialog).getByText("Remove the organization 1Password token?")).toBeTruthy();
+    expect(within(dialog).queryByText(ORG_REFUSAL)).toBeNull();
   });
 
   it("personal token: Remove opens the confirm dialog and disconnects nothing", async () => {
@@ -276,6 +309,19 @@ describe("OnePasswordPanel", () => {
       { service: "onepassword" },
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
+  });
+
+  // The personal row carries its own copy of the clear, on its own Remove
+  // control. Covering only the org row above would let a regression ship in
+  // half the panel with the suite still green.
+  it("personal token: reopening after a refusal starts with no error", async () => {
+    disconnectError = refusal(503, PERSONAL_REFUSAL);
+    renderConnectedPersonalToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Remove your personal 1Password token?")).toBeTruthy();
+    expect(within(dialog).queryByText(PERSONAL_REFUSAL)).toBeNull();
   });
 
   it("personal token: cancelling the dialog disconnects nothing", async () => {

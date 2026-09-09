@@ -334,7 +334,14 @@ function TeamRow({
             <DropdownMenuContent align="end">
               <DropdownMenuItem
                 className="text-danger-500"
-                onSelect={() => setConfirmDelete(true)}
+                onSelect={() => {
+                  // Clear the previous attempt's refusal as the dialog
+                  // opens: React Query holds `error` until the next mutate,
+                  // so a delete refused for a running workflow would greet
+                  // the next open before anything is confirmed.
+                  deleteTeam.reset();
+                  setConfirmDelete(true);
+                }}
               >
                 Delete team
               </DropdownMenuItem>

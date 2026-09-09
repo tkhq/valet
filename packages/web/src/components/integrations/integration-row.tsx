@@ -293,7 +293,14 @@ function ServiceBlock({
       variant="ghost"
       size="sm"
       aria-label={`Disconnect ${title}`}
-      onClick={() => setDisconnecting(true)}
+      onClick={() => {
+        // Clear the previous attempt's refusal as the dialog opens. React
+      // Query holds `error` until the next mutate, and Radix never calls
+      // `onOpenChange(true)` for a controlled dialog with no trigger, so
+      // the clear belongs here, on the only thing that opens it.
+        disconnect.reset();
+        setDisconnecting(true);
+      }}
       disabled={disconnect.isPending}
     >
       {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
@@ -403,10 +410,6 @@ function ServiceBlock({
         open={disconnecting}
         onOpenChange={(open) => {
           setDisconnecting(open);
-          // React Query holds `error` until the next mutate, so a dialog
-          // reopened after a refusal would present the OLD failure as this
-          // attempt's. Clear it as the dialog opens.
-          if (open) disconnect.reset();
         }}
         title={`Disconnect ${title}?`}
         description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}

@@ -417,12 +417,32 @@ const githubAppTemplate: WorkflowTemplate = {
   ),
 };
 
+/** The same service, pinned the other way: the run acts as the person who
+ * owns the workflow, so a team run reads the team's own github row and the
+ * App can never stand in for it. Its answer must not decide the App-pinned
+ * template's answer. */
+const githubUserTemplate: WorkflowTemplate = {
+  id: "github-user-issues",
+  name: "User issues",
+  description: "Lists issues as the workflow owner.",
+  category: "Chat",
+  apps: ["github"],
+  steps: ["List"],
+  definition: definition(
+    [
+      { id: "start", type: "trigger" },
+      { id: "issues", type: "tool", service: "github", action: "list_issues", params: {}, credential: "user" },
+    ],
+    [{ from: "start", to: "issues" }],
+  ),
+};
+
 const githubPlugin: ValetPlugin = {
   name: "github",
   version: "0.0.1",
   actions: [{ service: "github", actions: [action("github.list_issues", "low")] }],
   credentials: [{ type: "oauth2", service: "github", configKeys: [] }],
-  templates: [githubAppTemplate],
+  templates: [githubAppTemplate, githubUserTemplate],
 };
 
 const chatPlugin: ValetPlugin = {
@@ -616,6 +636,89 @@ describe("listWorkflowTemplateSummaries", () => {
     const list = await listWorkflowTemplateSummaries(deps(), OWNER);
     expect(list.find((t) => t.id === "gmail-sweep")?.schedule).toEqual({ cron: "0 12 * * 1-5", timezone: "UTC" });
     expect(list.find((t) => t.id === "linear-digest")?.schedule).toBeNull();
+  });
+});
+
+// ─── Listing in a team workspace ─────────────────────────────────────────
+
+/**
+ * A listing taken in a team workspace has to measure the team, because a
+ * team install does. The gallery reads `requires[].connected` to decide
+ * whether to offer Install at all, so a listing judged by the caller's own
+ * connections produces a card that refuses an install the server would
+ * accept — and connecting the service personally never changes it. Both
+ * directions are pinned here against the same predicate the install gate
+ * uses (`teamServiceReadiness`).
+ */
+describe("listWorkflowTemplateSummaries in a team workspace", () => {
+  it("reports a service the team holds as connected, though the caller has not connected it", async () => {
+    await seedTeam("team-list-1", [OWNER.userId]);
+    await credentials.save({ type: "team", id: "team-list-1" }, "gmail", {
+      type: "oauth2",
+      accessToken: "team-gmail",
+    });
+
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER, { teamId: "team-list-1" });
+    expect(list.find((t) => t.id === "gmail-sweep")?.requires).toEqual([
+      { service: "gmail", connected: true },
+    ]);
+  });
+
+  it("reports a service only the caller holds as not connected for the team", async () => {
+    await seedTeam("team-list-2", [OWNER.userId]);
+    await connect("gmail");
+
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER, { teamId: "team-list-2" });
+    expect(list.find((t) => t.id === "gmail-sweep")?.requires).toEqual([
+      { service: "gmail", connected: false },
+    ]);
+    // The same caller's PERSONAL listing still reads connected: the two
+    // answers differ because the two installs differ.
+    const personal = await listWorkflowTemplateSummaries(deps(), OWNER);
+    expect(personal.find((t) => t.id === "gmail-sweep")?.requires).toEqual([
+      { service: "gmail", connected: true },
+    ]);
+  });
+
+  it("offers exactly what the install accepts, in both directions", async () => {
+    await seedTeam("team-list-3", [OWNER.userId]);
+    await credentials.save({ type: "team", id: "team-list-3" }, "gmail", {
+      type: "oauth2",
+      accessToken: "team-gmail",
+    });
+
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER, { teamId: "team-list-3" });
+    const offered = list.filter((t) => t.requires.every((r) => r.connected)).map((t) => t.id);
+    for (const id of ["gmail-sweep", "linear-digest"]) {
+      const install = await installWorkflowTemplate(deps(), OWNER, id, { teamId: "team-list-3" });
+      expect(offered.includes(id)).toBe(install.ok);
+    }
+  });
+
+  it("keeps an App-pinned template readable when another template pins the owner's own token", async () => {
+    // One readiness answer per service for the whole listing is the cheap
+    // way to do this, and it is only correct while the nodes of one service
+    // are read together. `github` here carries two pins that resolve
+    // differently: the App pin is ready, the user pin is not. Merging them
+    // would hide the ready one behind the blocked one.
+    await seedTeam("team-list-4", [OWNER.userId]);
+    await credentials.save({ type: "org", id: OWNER.orgId }, "github_app", {
+      type: "api_key",
+      apiKey: "-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----",
+      accessToken: "client-secret",
+      refreshToken: "webhook-secret",
+      metadata: { appId: "1", appSlug: "valet", oauthClientId: "iv1", htmlUrl: "https://github.com/apps/valet" },
+    });
+
+    const list = await listWorkflowTemplateSummaries(deps([githubPlugin]), OWNER, {
+      teamId: "team-list-4",
+    });
+    expect(list.find((t) => t.id === "github-app-issues")?.requires).toEqual([
+      { service: "github", connected: true },
+    ]);
+    expect(list.find((t) => t.id === "github-user-issues")?.requires).toEqual([
+      { service: "github", connected: false },
+    ]);
   });
 });
 

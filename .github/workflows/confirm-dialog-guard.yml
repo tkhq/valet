@@ -16,5 +16,11 @@ jobs:
       # rather than the PR's diff, so it needs no base commit.
       - uses: actions/checkout@v4
 
+      # The test runs before the scan, so a regression in the guard's pattern
+      # fails here instead of letting the scan report ok over a tree that
+      # breaks the rule. Standard library only, so there is nothing to install.
+      - name: The guard's own pattern must still hold
+        run: python3 scripts/ci/confirm_dialog_guard_test.py
+
       - name: A destructive action must use the ConfirmDialog primitive
         run: python3 scripts/ci/confirm_dialog_guard.py

@@ -115,12 +115,18 @@ function TeamShareRow({
         // The team row carries no secret, so this drops the team's link and
         // leaves the caller connected. `settings/teams-panel.tsx` names the
         // same action the same way for a delegated row.
+        //
+        // `mutate`, not `mutateAsync`: the row reads the failure off
+        // `revoke.error` above and needs nothing from the promise.
+        // `mutateAsync` rejects, and a dropped rejection reaches
+        // `window.onunhandledrejection`, which reports the same failure a
+        // second time.
         <Button
           size="sm"
           variant="ghost"
           disabled={pending}
           aria-label={`Stop sharing ${title} with ${team.name}`}
-          onClick={() => void revoke.mutateAsync({ service, teamId: team.id })}
+          onClick={() => revoke.mutate({ service, teamId: team.id })}
         >
           {revoke.isPending ? "Stopping…" : "Stop sharing"}
         </Button>
@@ -129,7 +135,7 @@ function TeamShareRow({
           size="sm"
           disabled={pending || occupied || credsQ.isLoading}
           aria-label={`Share ${title} with ${team.name}`}
-          onClick={() => void delegate.mutateAsync({ service, body: { teamId: team.id } })}
+          onClick={() => delegate.mutate({ service, body: { teamId: team.id } })}
         >
           {delegate.isPending ? "Sharing…" : "Share"}
         </Button>

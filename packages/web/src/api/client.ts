@@ -1037,8 +1037,14 @@ export const api = {
   deleteWorkflowWebhook: (id: string) =>
     request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
 
-  // workflow templates — the starting points the gallery on /workflows offers
-  listWorkflowTemplates: () => request<ListWorkflowTemplatesResponse>("GET", "/templates"),
+  // workflow templates — the starting points the gallery on /workflows offers.
+  // `teamId` scopes the requirements to a team workspace: the server stamps
+  // each template against the principal the install would act as.
+  listWorkflowTemplates: (teamId?: string) =>
+    request<ListWorkflowTemplatesResponse>(
+      "GET",
+      teamId === undefined ? "/templates" : `/templates?teamId=${encodeURIComponent(teamId)}`,
+    ),
   installWorkflowTemplate: (id: string, body: InstallWorkflowTemplateRequest = {}) =>
     request<InstallWorkflowTemplateResponse>(
       "POST",

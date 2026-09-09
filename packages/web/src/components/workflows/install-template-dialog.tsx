@@ -34,6 +34,11 @@
  * the team, and the server's team-readiness check never ran, because that
  * check only applies to a team install.
  *
+ * The same switcher decides whose gap a blocked requirement is. The
+ * listing is taken in that workspace, so in a team workspace
+ * `connected: false` is the TEAM's gap, and the refusal names the team's
+ * connections rather than the reader's.
+ *
  * A failed install keeps the dialog open with the server's message. The
  * install is one transaction server-side, so a failure leaves nothing
  * behind, and retrying after a correction is safe. A team install refused
@@ -54,6 +59,7 @@ import {
   isInstallable,
   missingNote,
   missingServices,
+  requirementScope,
   unconfiguredNote,
   unconfiguredServices,
 } from "./template-requirements";
@@ -128,6 +134,11 @@ export function InstallTemplateDialog({
   // workflow created new or imported. An Owner select here would ask again
   // what the nav's workspace switcher has already answered.
   const scope = useWorkspaceScope();
+  // The listing this template came from was taken in the same workspace, so
+  // a requirement's `connected: false` is that workspace's gap. Naming the
+  // wrong principal sends the reader to connect a service they may already
+  // have, and the install still refuses.
+  const gapBelongsTo = requirementScope(scope.teamId);
   // `null`, not `undefined`: the wire always carries the field and uses
   // null for "arms no schedule" (`WorkflowTemplateSummary`).
   const scheduled = template.schedule !== null;
@@ -240,7 +251,9 @@ export function InstallTemplateDialog({
           <div className="grid gap-1 rounded border border-line bg-ink-wash px-3 py-2">
             <p className="text-xs font-medium text-ink">You cannot install this yet</p>
             {missing.length > 0 && (
-              <p className="text-xs leading-relaxed text-muted">{missingNote(missing)}</p>
+              <p className="text-xs leading-relaxed text-muted">
+                {missingNote(missing, gapBelongsTo)}
+              </p>
             )}
             {unconfigured.length > 0 && (
               <p className="text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>

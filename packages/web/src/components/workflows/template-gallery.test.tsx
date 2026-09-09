@@ -34,6 +34,13 @@ vi.mock("~/api/templates", () => ({
   useInstallTemplate: () => ({ mutateAsync: installMutateAsync, isPending: false }),
 }));
 
+/** The active workspace, rewritten per test before the gallery renders. */
+let teamId: string | undefined;
+
+vi.mock("~/lib/workspace-scope", () => ({
+  useWorkspaceScope: () => ({ teamId }),
+}));
+
 import { TemplateGallery } from "./template-gallery";
 
 const memorySweep: WorkflowTemplateSummary = {
@@ -112,6 +119,7 @@ beforeEach(() => {
   templatesQuery.data = undefined;
   templatesQuery.isLoading = false;
   templatesQuery.error = null;
+  teamId = undefined;
 });
 
 describe("TemplateGallery", () => {
@@ -446,6 +454,70 @@ describe("TemplateGallery", () => {
       render(<TemplateGallery />);
       expect(screen.getByRole("button", { name: "Use template" })).toBeTruthy();
       expect(screen.queryByRole("button", { name: "What it does" })).toBeNull();
+    });
+  });
+
+  /**
+   * The listing is taken in the workspace the switcher names, so in a team
+   * workspace every `connected` flag is the TEAM's answer. A card that read
+   * it as the reader's own was a dead end: a team holding Slack still got
+   * Install withheld, and connecting Slack personally never changed it.
+   */
+  describe("a team workspace", () => {
+    it("offers the install of a template whose service only the team holds", () => {
+      teamId = "team_ops";
+      templatesQuery.data = {
+        templates: [
+          {
+            ...triageDigest,
+            requires: [
+              { service: "github", connected: true },
+              { service: "slack", connected: true },
+            ],
+          },
+        ],
+      };
+      render(<TemplateGallery />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+      const dialog = within(screen.getByRole("dialog"));
+      expect((dialog.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+    });
+
+    it("sends a team gap to the sharing control, not to the reader's own connections", () => {
+      teamId = "team_ops";
+      templatesQuery.data = {
+        templates: [
+          {
+            ...triageDigest,
+            requires: [
+              { service: "github", connected: true },
+              { service: "slack", connected: false },
+            ],
+          },
+        ],
+      };
+      render(<TemplateGallery />);
+
+      expect(screen.queryByText("Connect Slack")).toBeNull();
+      const share = screen.getByText("Share Slack with the team").closest("a");
+      expect(share?.getAttribute("to") ?? share?.getAttribute("href")).toBe("/integrations");
+
+      fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+      expect(
+        within(screen.getByRole("dialog")).getByText(
+          "Slack is not connected for this team. Connect Slack on the Integrations page and share it with the team, then install this template.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("names the page when a team is missing more than one service", () => {
+      teamId = "team_ops";
+      templatesQuery.data = { templates: [triageDigest] };
+      render(<TemplateGallery />);
+      expect(screen.getByText("Share integrations with the team")).toBeTruthy();
     });
   });
 

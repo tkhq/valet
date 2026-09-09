@@ -155,6 +155,70 @@ describe("GET /api/templates", () => {
   });
 });
 
+/**
+ * `?teamId=` asks the question the team install answers. Without it the
+ * gallery judged the caller while the install judged the team, so a team
+ * that held Gmail still got a card with Install disabled and no way to
+ * change the answer.
+ */
+describe("GET /api/templates?teamId=", () => {
+  async function seedTeam(a: TestApi, teamId: string, userId: string): Promise<void> {
+    await a.providers.db.insert(teams).values({ id: teamId, orgId: "local-org", name: teamId, createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values({ teamId, userId, role: "member" });
+  }
+
+  it("reports a service the team holds as connected, though the caller has not connected it", async () => {
+    const a = await boot();
+    await seedTeam(a, "t-list", "local-user");
+    await a.providers.engineCredentials.save({ type: "team", id: "t-list" }, "gmail", {
+      type: "oauth2",
+      accessToken: "team-token",
+    });
+
+    const res = await fetch(`${a.baseUrl}/api/templates?teamId=t-list`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowTemplatesResponse;
+    expect(body.templates.find((t) => t.id === "gmail-sweep")?.requires).toEqual([
+      { service: "gmail", connected: true },
+    ]);
+  });
+
+  it("reports a service only the caller holds as not connected for the team", async () => {
+    const a = await boot();
+    await seedTeam(a, "t-list-2", "local-user");
+    await a.providers.engineCredentials.save({ type: "user", id: "local-user" }, "gmail", {
+      type: "oauth2",
+      accessToken: "token",
+    });
+
+    const body = (await (
+      await fetch(`${a.baseUrl}/api/templates?teamId=t-list-2`)
+    ).json()) as ListWorkflowTemplatesResponse;
+    expect(body.templates.find((t) => t.id === "gmail-sweep")?.requires).toEqual([
+      { service: "gmail", connected: false },
+    ]);
+  });
+
+  it("404s a team the caller does not belong to, whatever that team has connected", async () => {
+    const a = await boot();
+    await seedTeam(a, "t-theirs", "someone-else");
+    await a.providers.engineCredentials.save({ type: "team", id: "t-theirs" }, "gmail", {
+      type: "oauth2",
+      accessToken: "team-token",
+    });
+
+    const res = await fetch(`${a.baseUrl}/api/templates?teamId=t-theirs`);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toContain("Choose a team you belong to");
+  });
+
+  it("treats an empty teamId as no team, not as an unknown one", async () => {
+    const a = await boot();
+    const res = await fetch(`${a.baseUrl}/api/templates?teamId=`);
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("POST /api/templates/:id/install", () => {
   it("installs from an empty body and the workflow shows up in the list", async () => {
     const a = await boot();

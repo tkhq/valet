@@ -232,7 +232,14 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
           size="sm"
           aria-label={`Unlink ${title}`}
           disabled={unlink.isPending}
-          onClick={() => setConfirmUnlink(true)}
+          onClick={() => {
+            // Clear the previous attempt's refusal as the dialog opens. React
+          // Query holds `error` until the next mutate, and Radix never calls
+          // `onOpenChange(true)` for a controlled dialog with no trigger, so
+          // the clear belongs here, on the only thing that opens it.
+            unlink.reset();
+            setConfirmUnlink(true);
+          }}
         >
           {unlink.isPending ? "Unlinking…" : "Unlink"}
         </Button>
@@ -240,10 +247,6 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
           open={confirmUnlink}
           onOpenChange={(open) => {
             setConfirmUnlink(open);
-            // React Query holds `error` until the next mutate, so a dialog
-          // reopened after a refusal would present the OLD failure as this
-          // attempt's. Clear it as the dialog opens.
-            if (open) unlink.reset();
           }}
           title={`Unlink ${title}?`}
           description={unlinkDescription}

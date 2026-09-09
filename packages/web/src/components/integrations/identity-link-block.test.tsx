@@ -14,6 +14,12 @@ import { ApiError } from "~/api/client";
 const unlinkMutate = vi.fn();
 let unlinkPending = false;
 let unlinkError: Error | null = null;
+// A real React Query `reset()` clears the mutation's error. A bare `vi.fn()`
+// double keeps the error alive forever, which hides every stale-error bug in
+// the dialog this file covers.
+const unlinkReset = vi.fn(() => {
+  unlinkError = null;
+});
 
 vi.mock("~/api/queries", () => ({
   useIdentityLinks: () => ({ data: { links: [] }, isLoading: false, error: null }),
@@ -24,7 +30,7 @@ vi.mock("~/api/queries", () => ({
     mutate: unlinkMutate,
     isPending: unlinkPending,
     error: unlinkError,
-    reset: vi.fn(),
+    reset: unlinkReset,
   }),
 }));
 
@@ -43,6 +49,8 @@ const LINKED: IdentityLinkStatus = {
 describe("IdentityLinkBlock unlink", () => {
   beforeEach(() => {
     unlinkMutate.mockReset();
+    // mockClear, not mockReset: the clearing implementation is the point.
+    unlinkReset.mockClear();
     unlinkPending = false;
     unlinkError = null;
   });
@@ -73,10 +81,31 @@ describe("IdentityLinkBlock unlink", () => {
   });
 
   it("shows the server error in the dialog instead of swallowing it", () => {
-    unlinkError = new ApiError(500, "Slack is unreachable. Try again in a minute.");
-    render(<IdentityLinkBlock link={LINKED} title="Slack" />);
+    const { rerender } = render(<IdentityLinkBlock link={LINKED} title="Slack" />);
+    // Reach the error the way production does: the dialog opens clean, the user
+    // confirms, and the refusal lands on the dialog that is already open.
     fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
+    unlinkError = new ApiError(500, "Slack is unreachable. Try again in a minute.");
+    rerender(<IdentityLinkBlock link={LINKED} title="Slack" />);
     expect(screen.getByText("Slack is unreachable. Try again in a minute.")).toBeTruthy();
+  });
+
+  it("reopening after a refusal starts with no error", () => {
+    const { rerender } = render(<IdentityLinkBlock link={LINKED} title="Slack" />);
+    fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
+    unlinkError = new ApiError(500, "Slack is unreachable. Try again in a minute.");
+    rerender(<IdentityLinkBlock link={LINKED} title="Slack" />);
+    expect(screen.getByText("Slack is unreachable. Try again in a minute.")).toBeTruthy();
+
+    // React Query holds the error until the next mutate, so the second visit
+    // must clear it. A dialog that opens already refused reads as a fresh
+    // failure the user never caused.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
+    expect(screen.getByText("Unlink Slack?")).toBeTruthy();
+    expect(screen.queryByText("Slack is unreachable. Try again in a minute.")).toBeNull();
   });
 
   it("shows pending state on the confirm button while the unlink runs", () => {

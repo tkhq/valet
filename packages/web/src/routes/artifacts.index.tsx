@@ -113,7 +113,14 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
           <button
             type="button"
             disabled={revoke.isPending}
-            onClick={() => setConfirmRevoke(true)}
+            onClick={() => {
+              // Clear the previous attempt's refusal as the dialog opens. React
+            // Query holds `error` until the next mutate, and Radix never calls
+            // `onOpenChange(true)` for a controlled dialog with no trigger, so
+            // the clear belongs here, on the only thing that opens it.
+              revoke.reset();
+              setConfirmRevoke(true);
+            }}
             className="text-xs text-danger-500 hover:underline disabled:pointer-events-none disabled:opacity-50"
           >
             {revoke.isPending ? "Revoking…" : "Revoke"}
@@ -133,9 +140,6 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
         open={confirmRevoke}
         onOpenChange={(open) => {
           setConfirmRevoke(open);
-          // Reopening must not present the last attempt's refusal as this
-          // one's: React Query holds `error` until the next mutate.
-          if (open) revoke.reset();
         }}
         title={`Revoke the link to ${artifact.title}?`}
         description="Anyone who opens the link gets a 404, and the page leaves this gallery. Publish it again to get a new link."

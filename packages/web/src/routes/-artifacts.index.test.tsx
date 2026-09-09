@@ -86,7 +86,16 @@ vi.mock("~/api/artifacts", () => ({
     useArtifactsMock(...args);
     return { data: artifactsData, isLoading: false, error: null };
   },
-  useRevokeArtifact: () => ({ mutate: revokeMutate, isPending: revokePending, error: revokeError , reset: vi.fn() }),
+  useRevokeArtifact: () => ({
+    mutate: revokeMutate,
+    isPending: revokePending,
+    error: revokeError,
+    // A real reset CLEARS the error. A bare vi.fn() would let a reset that is
+    // never called pass this suite.
+    reset: () => {
+      revokeError = null;
+    },
+  }),
 }));
 
 import { ArtifactsPage } from "./artifacts.index";
@@ -213,14 +222,35 @@ describe("ArtifactsPage", () => {
   });
 
   it("shows a corrective error in the dialog and keeps the row when revoke fails", () => {
-    revokeError = new Error("network unreachable");
-    renderPage();
+    // The failure has to ARRIVE while the dialog is open, the way production
+    // produces it. Setting it before the open would test the stale-error path
+    // the reopen case below forbids.
+    const view = renderPage();
     const dialog = openDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
+
+    revokeError = new Error("network unreachable");
+    view.rerender(<ArtifactsPage />);
 
     expect(
-      within(dialog).getByText("network unreachable. Check the server is running, then try again."),
+      within(screen.getByRole("dialog")).getByText(
+        "network unreachable. Check the server is running, then try again.",
+      ),
     ).toBeTruthy();
     expect(screen.getByText("Deploy report")).toBeTruthy();
+  });
+
+  it("reopening after a failed revoke starts with no error", () => {
+    // React Query holds `error` until the next mutate, so the dialog has to
+    // clear it as it opens. Radix never calls `onOpenChange(true)` for a
+    // controlled dialog with no trigger, so the clear belongs on the row
+    // button, which is the only thing that opens this.
+    revokeError = new Error("network unreachable");
+    renderPage();
+
+    const dialog = openDialog();
+
+    expect(within(dialog).queryByText(/network unreachable/)).toBeNull();
   });
 
   it("disables the row control and names the pending state while revoking", () => {

@@ -13,6 +13,12 @@
  * on its first run — a worse outcome than a card that says what to connect
  * and links to the page that connects it.
  *
+ * "Not connected" is measured against the workspace the nav switcher names,
+ * because that workspace owns the install: the reader's own credentials in
+ * their workspace, the TEAM's in a team's. Measured against the reader in a
+ * team workspace, a team that holds Slack got a card with Install withheld
+ * and a button offering to connect a service the run would never read.
+ *
  * A service this organization has not configured is a different case, and
  * the card must not treat it as the first one. The integrations page hides
  * an unconfigured service (integration-availability design), so a "Connect
@@ -37,11 +43,14 @@ import { Button, Spinner } from "~/components/primitives";
 import { ServiceIcon } from "~/components/service-icon";
 import { displayName } from "~/components/integrations/display-name";
 import { useWorkflowTemplates } from "~/api/templates";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { InstallTemplateDialog } from "./install-template-dialog";
 import { describeCadence } from "./cadence";
 import {
+  connectLabel,
   isInstallable,
   missingServices,
+  requirementScope,
   unconfiguredNote,
   unconfiguredServices,
 } from "./template-requirements";
@@ -89,13 +98,19 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
   const missing = missingServices(template.requires);
   const unconfigured = unconfiguredServices(template.requires);
   const ready = isInstallable(template.requires);
+  const scope = useWorkspaceScope();
+  // The listing was taken in this workspace, so a requirement's
+  // `connected: false` is this workspace's gap: the reader's own in their
+  // workspace, the team's in a team's. The control has to name the work
+  // that actually closes it.
+  const gapBelongsTo = requirementScope(scope.teamId);
 
   return (
     <div className="flex flex-col rounded-lg border border-line bg-paper p-4 transition-shadow hover:shadow-sm">
       {template.requires.length > 0 && (
         <div className="mb-3 flex items-center gap-1.5">
-          {/* A service the caller has not connected is dimmed, so the chain
-              shows at a glance which mark is the blocked one. Opacity, not
+          {/* A service this workspace has not connected is dimmed, so the
+              chain shows at a glance which mark is the blocked one. Opacity, not
               the grey `quiet` tile: grey already means "built in, nothing to
               connect" on the integrations page. */}
           {template.requires.map((req) => (
@@ -142,9 +157,7 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
             </Button>
           ) : missing.length > 0 ? (
             <Button size="sm" variant="secondary" asChild>
-              <Link to="/integrations">
-                {missing.length === 1 ? `Connect ${missing[0]}` : "Connect integrations"}
-              </Link>
+              <Link to="/integrations">{connectLabel(missing, gapBelongsTo)}</Link>
             </Button>
           ) : null}
         </div>

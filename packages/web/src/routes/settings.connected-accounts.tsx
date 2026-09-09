@@ -258,8 +258,14 @@ function GithubRow() {
             onClick={() => {
               // Reconnecting over a repo-capable token overwrites it, so it
               // asks first; a first connect has nothing to overwrite.
-              if (repoCapable) setConfirmReplace(true);
-              else void connect();
+              if (repoCapable) {
+                // `connectError` outlives the dialog so the row below can
+                // carry it, so a dialog reopened after a refusal would
+                // present the OLD failure as this attempt's. Clear it here,
+                // the one path that opens the dialog.
+                setConnectError(null);
+                setConfirmReplace(true);
+              } else void connect();
             }}
           >
             {connectGithub.isPending
@@ -274,7 +280,14 @@ function GithubRow() {
               variant="ghost"
               size="sm"
               disabled={disconnectGithub.isPending}
-              onClick={() => setConfirmDisconnect(true)}
+              onClick={() => {
+                // Clear the previous attempt's refusal as the dialog opens. React
+              // Query holds `error` until the next mutate, and Radix never calls
+              // `onOpenChange(true)` for a controlled dialog with no trigger, so
+              // the clear belongs here, on the only thing that opens it.
+                disconnectGithub.reset();
+                setConfirmDisconnect(true);
+              }}
             >
               {disconnectGithub.isPending ? "Disconnecting…" : "Disconnect GitHub"}
             </Button>
@@ -312,10 +325,6 @@ function GithubRow() {
           open={confirmDisconnect}
           onOpenChange={(open) => {
             setConfirmDisconnect(open);
-            // React Query holds `error` until the next mutate, so a dialog
-          // reopened after a refusal would present the OLD failure as this
-          // attempt's. Clear it as the dialog opens.
-            if (open) disconnectGithub.reset();
           }}
           title="Disconnect GitHub?"
           description="Valet deletes your stored GitHub token, so the assistant can no longer clone or push to your repos. Teams you shared it with lose access too. Connect GitHub again to restore it."

@@ -13,6 +13,12 @@ const createManifestMutateAsync = vi.fn();
 const saveCredentialMutateAsync = vi.fn();
 const refreshMutate = vi.fn();
 const deleteAppMutate = vi.fn();
+/** A real React Query `reset()` clears the mutation's error. A stub that only
+ * records the call cannot tell a working clear from a dead one, so this one
+ * clears the variable that feeds the mock's `error`. */
+const deleteAppReset = vi.fn(() => {
+  deleteAppError = null;
+});
 /** The dialog this section replaced `window.confirm` with must never fall
  * back to it: browser automation auto-accepts the native one. */
 const confirmSpy = vi.fn(() => true);
@@ -41,7 +47,12 @@ vi.mock("~/api/settings", async (importOriginal) => {
       error: saveCredentialError,
     }),
     useRefreshGithubApp: () => ({ mutate: refreshMutate, isPending: false }),
-    useDeleteGithubApp: () => ({ mutate: deleteAppMutate, isPending: false, error: deleteAppError , reset: vi.fn() }),
+    useDeleteGithubApp: () => ({
+      mutate: deleteAppMutate,
+      isPending: false,
+      error: deleteAppError,
+      reset: deleteAppReset,
+    }),
   };
 });
 
@@ -396,8 +407,9 @@ describe("GithubAppSection", () => {
   //
   // `window.confirm` used to guard this. Browser automation auto-accepts the
   // native dialog, so for any scripted client that guard was not a guard at
-  // all. These three tests pin the replacement: the click only opens, the
-  // confirm button is what deletes, and dismissing deletes nothing.
+  // all. These tests pin the replacement: the click only opens, the confirm
+  // button is what deletes, dismissing deletes nothing, and a reopened dialog
+  // carries no refusal from the attempt before it.
 
   const CONFIGURED: GetGithubAppResponse = {
     configured: true,
@@ -459,16 +471,45 @@ describe("GithubAppSection", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  const REFUSAL = new ApiError(403, "DELETE /org/github-app → 403", {
+    error: "Only an org admin can remove the GitHub App. Ask an admin to remove it.",
+  });
+
   it("the dialog shows the server's refusal instead of swallowing it", () => {
     githubAppData = CONFIGURED;
-    deleteAppError = new ApiError(403, "DELETE /org/github-app → 403", {
-      error: "Only an org admin can remove the GitHub App. Ask an admin to remove it.",
-    });
-    render(<GithubAppSection />);
+    const { rerender } = render(<GithubAppSection />);
 
+    // Produce the refusal the way production does: the error only exists once
+    // this attempt has been confirmed. Setting it before the dialog opens
+    // would assert the stale-error path the section now clears.
     clickRemoveInCard();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove App" }));
+    deleteAppError = REFUSAL;
+    rerender(<GithubAppSection />);
+
     expect(
       within(screen.getByRole("dialog")).getByText(/Only an org admin can remove the GitHub App/),
     ).toBeTruthy();
+  });
+
+  it("reopening after a refusal starts with no error", () => {
+    githubAppData = CONFIGURED;
+    const { rerender } = render(<GithubAppSection />);
+
+    // First attempt, refused.
+    clickRemoveInCard();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove App" }));
+    deleteAppError = REFUSAL;
+    rerender(<GithubAppSection />);
+    expect(within(screen.getByRole("dialog")).getByText(/Only an org admin/)).toBeTruthy();
+
+    // React Query holds that error until the next mutate, so the control that
+    // opens the dialog has to clear it. Otherwise the second attempt opens
+    // already showing a refusal the user has not earned yet.
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    clickRemoveInCard();
+
+    expect(within(screen.getByRole("dialog")).queryByText(/Only an org admin/)).toBeNull();
+    expect(deleteAppReset).toHaveBeenCalled();
   });
 });

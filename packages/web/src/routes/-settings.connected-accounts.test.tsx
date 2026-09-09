@@ -39,6 +39,12 @@ let disconnectCredentialState: {
   error: Error | null;
   variables?: { service: string };
 } = { isPending: false, error: null };
+// A real React Query `reset()` clears the mutation's error, and the page
+// leans on that to open the disconnect dialog clean. A stub that only counts
+// calls would let a dialog full of the previous attempt's refusal pass.
+const disconnectGithubReset = vi.fn(() => {
+  disconnectGithubState = { ...disconnectGithubState, error: null };
+});
 
 let linksData: { links: IdentityLinkStatus[] } | undefined;
 let isLoading = false;
@@ -68,7 +74,11 @@ vi.mock("~/api/queries", async (importOriginal) => {
 
 vi.mock("~/api/repos", () => ({
   useConnectGithub: () => ({ mutateAsync: connectGithubMutateAsync, isPending: false }),
-  useDisconnectGithub: () => ({ mutate: disconnectGithubMutate, ...disconnectGithubState , reset: vi.fn() }),
+  useDisconnectGithub: () => ({
+    mutate: disconnectGithubMutate,
+    ...disconnectGithubState,
+    reset: disconnectGithubReset,
+  }),
 }));
 
 vi.mock("~/api/integrations", () => ({
@@ -105,7 +115,7 @@ function renderRepoCapable() {
     ],
   };
   connectGithubMutateAsync.mockResolvedValue({ url: "https://github.com/x" });
-  render(<ConnectedAccountsPage />);
+  return render(<ConnectedAccountsPage />);
 }
 
 function renderCredentials(credentials: CredentialSummary[]) {
@@ -366,6 +376,34 @@ describe("ConnectedAccountsPage", () => {
       expect(screen.getByRole("dialog")).toBeTruthy();
     });
 
+    it("REPLACE-WARNING: reopening after a refusal starts with no error", async () => {
+      const refusal = "GitHub App is not configured. Ask an admin to add it under Integrations.";
+      renderRepoCapable();
+      connectGithubMutateAsync.mockRejectedValue(new Error(refusal));
+
+      fireEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
+      const dialog = await screen.findByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect GitHub" }));
+      expect(await within(dialog).findByText(refusal)).toBeTruthy();
+
+      // Closing the dialog hands the failure to the row below, which is the
+      // only place left to read it.
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(screen.getByText(refusal)).toBeTruthy();
+
+      // Reopening is a fresh attempt. The previous refusal must not read as
+      // this attempt's, so it is gone until the user presses Reconnect again.
+      fireEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
+      const reopened = await screen.findByRole("dialog");
+      expect(within(reopened).queryByText(refusal)).toBeNull();
+      expect(screen.queryByText(refusal)).toBeNull();
+
+      // Pressing Reconnect again is what brings a failure back.
+      fireEvent.click(within(reopened).getByRole("button", { name: "Reconnect GitHub" }));
+      expect(await within(reopened).findByText(refusal)).toBeTruthy();
+    });
+
     it("Disconnect GitHub asks in-page and fires nothing until confirmed", async () => {
       renderRepoCapable();
 
@@ -403,21 +441,54 @@ describe("ConnectedAccountsPage", () => {
     });
 
     it("Disconnect GitHub shows the server's refusal in the dialog", async () => {
-      disconnectGithubState = {
-        isPending: false,
-        error: new ApiError(409, "DELETE /me/github → 409", {
-          error: "A running session holds this token. Stop the session, then disconnect.",
-        }),
-      };
-      renderRepoCapable();
+      const refusal = "A running session holds this token. Stop the session, then disconnect.";
+      const { rerender } = renderRepoCapable();
 
       fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
       const dialog = await screen.findByRole("dialog");
-      expect(
-        within(dialog).getByText(
-          "A running session holds this token. Stop the session, then disconnect.",
-        ),
-      ).toBeTruthy();
+      // A refused disconnect never reaches `onSuccess`, so the dialog stays
+      // open to carry the failure.
+      disconnectGithubMutate.mockImplementationOnce(() => {});
+      fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+
+      // The failure arrives the way production produces it: the mutation
+      // settles with an error only after the user pressed Disconnect.
+      disconnectGithubState = {
+        isPending: false,
+        error: new ApiError(409, "DELETE /me/github → 409", { error: refusal }),
+      };
+      rerender(<ConnectedAccountsPage />);
+
+      expect(within(await screen.findByRole("dialog")).getByText(refusal)).toBeTruthy();
+    });
+
+    it("Disconnect GitHub: reopening after a refusal starts with no error", async () => {
+      const refusal = "A running session holds this token. Stop the session, then disconnect.";
+      // The state React Query leaves behind after a refused disconnect: the
+      // error stays on the mutation until the next mutate.
+      disconnectGithubState = {
+        isPending: false,
+        error: new ApiError(409, "DELETE /me/github → 409", { error: refusal }),
+      };
+      const { rerender } = renderRepoCapable();
+
+      // Opening is a fresh attempt, so the previous attempt's refusal must not
+      // read as this one's.
+      fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).queryByText(refusal)).toBeNull();
+      expect(screen.queryByText(refusal)).toBeNull();
+
+      // Pressing Disconnect again is what brings a failure back.
+      disconnectGithubMutate.mockImplementationOnce(() => {});
+      fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+      disconnectGithubState = {
+        isPending: false,
+        error: new ApiError(409, "DELETE /me/github → 409", { error: refusal }),
+      };
+      rerender(<ConnectedAccountsPage />);
+
+      expect(within(await screen.findByRole("dialog")).getByText(refusal)).toBeTruthy();
     });
 
     it("shows an Install on your personal account link when the org App is configured", () => {

@@ -8,6 +8,7 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { OrgDirectoryUserWire } from "@valet/api/wire";
 
 /** Renders a real anchor so `getByRole("link")` and href assertions work
@@ -43,6 +44,18 @@ const addMemberMutate = vi.fn();
 const patchTeamMutate = vi.fn();
 let addMemberError: Error | null = null;
 let addMemberPending = false;
+
+/** Shared across renders so the delete tests can assert on the call. */
+const deleteTeamMutate = vi.fn();
+let deleteTeamPending = false;
+let deleteTeamError: Error | null = null;
+/** React Query's `reset` drops the last failure. The stub clears the error
+ * the same way, because the delete dialog leans on that to open clean after
+ * a refused delete rather than reopening on the refusal the admin already
+ * read. */
+const deleteTeamReset = vi.fn(() => {
+  deleteTeamError = null;
+});
 
 let callerRole: "admin" | "member" | null = "member";
 let orgRole: "admin" | "member" = "member";
@@ -112,7 +125,12 @@ vi.mock("~/api/settings", () => ({
     error: null,
   }),
   useCreateTeam: () => ({ mutate: vi.fn(), isPending: false }),
-  useDeleteTeam: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useDeleteTeam: () => ({
+    mutate: deleteTeamMutate,
+    isPending: deleteTeamPending,
+    error: deleteTeamError,
+    reset: deleteTeamReset,
+  }),
   useAddTeamMember: () => ({
     mutate: addMemberMutate,
     isPending: addMemberPending,
@@ -364,6 +382,80 @@ describe("TeamsPanel role gating", () => {
     orgRole = "admin";
     openTeam();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+  });
+});
+
+describe("TeamsPanel — deleting a team", () => {
+  /** The 409 a delete gets back while a team workflow run is unsettled, in
+   * the words `TeamHasActiveRunsError` uses. */
+  const REFUSAL =
+    "team team_1 has an unsettled workflow run. Wait for it to finish, or cancel it, then delete the team.";
+  /** Enough of it to find in the dialog. */
+  const REFUSAL_MATCH = /unsettled workflow run/;
+
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "member";
+    deleteTeamMutate.mockClear();
+    deleteTeamReset.mockClear();
+  });
+
+  afterEach(() => {
+    deleteTeamPending = false;
+    deleteTeamError = null;
+  });
+
+  /** The menu lives in a portal, and its trigger opens on pointerdown, so
+   * these two clicks need a real pointer sequence. */
+  async function openDeleteDialog(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: "Platform actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete team" }));
+    return screen.findByRole("dialog");
+  }
+
+  it("opens the dialog and deletes nothing on the menu click alone", async () => {
+    const user = userEvent.setup();
+    render(<TeamsPanel orgMembers={orgMembers} />);
+
+    const dialog = await openDeleteDialog(user);
+    expect(deleteTeamMutate).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("Delete Platform?")).toBeTruthy();
+  });
+
+  it("shows the server's refusal after the admin confirms", async () => {
+    const user = userEvent.setup();
+    const view = render(<TeamsPanel orgMembers={orgMembers} />);
+
+    const dialog = await openDeleteDialog(user);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete team" }));
+    expect(deleteTeamMutate).toHaveBeenCalled();
+
+    deleteTeamError = new Error(REFUSAL);
+    view.rerender(<TeamsPanel orgMembers={orgMembers} />);
+
+    expect(within(screen.getByRole("dialog")).getByText(REFUSAL_MATCH)).toBeTruthy();
+  });
+
+  it("reopens clean after a refused delete, with nothing confirmed yet", async () => {
+    // React Query holds `error` until the next mutate, so a dialog that
+    // reads it straight through greets the admin with the refusal from the
+    // last attempt before this one has been confirmed.
+    const user = userEvent.setup();
+    const view = render(<TeamsPanel orgMembers={orgMembers} />);
+
+    const dialog = await openDeleteDialog(user);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete team" }));
+    deleteTeamError = new Error(REFUSAL);
+    view.rerender(<TeamsPanel orgMembers={orgMembers} />);
+    expect(within(screen.getByRole("dialog")).getByText(REFUSAL_MATCH)).toBeTruthy();
+
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    deleteTeamMutate.mockClear();
+    const reopened = await openDeleteDialog(user);
+    expect(within(reopened).queryByText(REFUSAL_MATCH)).toBeNull();
+    expect(deleteTeamMutate).not.toHaveBeenCalled();
   });
 });
 

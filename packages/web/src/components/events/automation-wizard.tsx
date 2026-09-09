@@ -53,6 +53,7 @@ import {
   type UiFilterRow,
 } from "~/components/events/filter-editor";
 import { useAssistants } from "~/api/assistants";
+import { assistantLabel } from "~/components/session/assistant-rail";
 import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
 import { useIdentityLinks } from "~/api/queries";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
@@ -114,6 +115,11 @@ function initialTarget(scopedTeamId: string | undefined): TargetChoice {
  * The empty option is not "none" — it is the owner's default, resolved at
  * delivery. Choosing it stores no id, which is what keeps a rule following a
  * later change of default.
+ *
+ * Each named row goes through the shared `assistantLabel`, so an unnamed
+ * assistant reads here exactly as it reads in the rail, the chat header and
+ * the team dashboard: a seeded default is "Default assistant", not "Untitled
+ * assistant".
  */
 function AssistantSelect({
   owner,
@@ -146,7 +152,7 @@ function AssistantSelect({
         </option>
         {owned.map((a) => (
           <option key={a.id} value={a.id}>
-            {a.name?.trim() || "Untitled assistant"}
+            {assistantLabel(a)}
           </option>
         ))}
       </select>

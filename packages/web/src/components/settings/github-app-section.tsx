@@ -638,7 +638,14 @@ function ConfiguredCard({
             variant="danger"
             size="sm"
             disabled={deleteApp.isPending}
-            onClick={() => setConfirmRemove(true)}
+            onClick={() => {
+              // Clear the previous attempt's refusal as the dialog opens. React
+            // Query holds `error` until the next mutate, and Radix never calls
+            // `onOpenChange(true)` for a controlled dialog with no trigger, so
+            // the clear belongs here, on the only thing that opens it.
+              deleteApp.reset();
+              setConfirmRemove(true);
+            }}
           >
             {deleteApp.isPending ? "Removing…" : "Remove App"}
           </Button>
@@ -653,10 +660,6 @@ function ConfiguredCard({
         open={confirmRemove}
         onOpenChange={(open) => {
           setConfirmRemove(open);
-          // React Query holds `error` until the next mutate, so a dialog
-          // reopened after a refusal would present the OLD failure as this
-          // attempt's. Clear it as the dialog opens.
-          if (open) deleteApp.reset();
         }}
         title="Remove the GitHub App?"
         description="Sessions using it for repo access lose that access. The App stays on GitHub, so you can connect it again with its App ID and private key."

@@ -4,9 +4,10 @@
  * `../workflows/templates.ts`, so the agent-facing surface can reuse the
  * same install path without a second implementation.
  *
- * Owner-scoped exactly like `routes/workflows.ts`: the listing stamps each
- * template with the CALLER's own connection state, and an install produces
- * a workflow owned by the caller (or by a team the caller belongs to).
+ * Owner-scoped exactly like `routes/workflows.ts`: an install produces a
+ * workflow owned by the caller, or by a team the caller belongs to, and
+ * the listing stamps each template with the connection state of that same
+ * principal — the caller by default, the team named by `?teamId=`.
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
@@ -16,6 +17,7 @@ import {
   type TemplateServiceDeps,
 } from "../workflows/templates.js";
 import type { WorkflowOwner } from "../workflows/service.js";
+import { isTeamMember } from "../services/teams.js";
 import type { Providers } from "../providers/types.js";
 import type {
   InstallWorkflowTemplateRequest,
@@ -42,12 +44,33 @@ function callerOwner(user: { id: string; orgId: string }): WorkflowOwner {
   return { userId: user.id, orgId: user.orgId };
 }
 
+/**
+ * `?teamId=` scopes the listing to a team workspace, so each template's
+ * requirements report what THAT team can act as. Without it a card judged
+ * the caller while the install judged the team, and a team holding a
+ * service still got an Install button it could not press.
+ *
+ * Membership is checked before the listing runs, and a team the caller is
+ * not on reads exactly like one that does not exist — the same
+ * existence-hiding convention `GET /api/workflows` and the install path
+ * follow. The refusal must not vary with what the team has connected, or
+ * it would report that team's credential state to a stranger.
+ */
 templatesRouter.get("/", async (c) => {
+  // An empty value means "not set": a client that always sends the field
+  // must not get a 404 for leaving it blank (`routes/workflows.ts`).
+  const raw = c.req.query("teamId");
+  const teamId = raw === undefined || raw === "" ? undefined : raw;
+  if (teamId !== undefined && !(await isTeamMember(c.var.providers.db, teamId, c.var.user.id))) {
+    return c.json({ error: `Team not found: ${teamId}. Choose a team you belong to.` }, 404);
+  }
+
   const resp: ListWorkflowTemplatesResponse = {
-    templates: await listWorkflowTemplateSummaries(templateDeps(c.var.providers), {
-      userId: c.var.user.id,
-      orgId: c.var.user.orgId,
-    }),
+    templates: await listWorkflowTemplateSummaries(
+      templateDeps(c.var.providers),
+      { userId: c.var.user.id, orgId: c.var.user.orgId },
+      { teamId },
+    ),
   };
   return c.json(resp);
 });

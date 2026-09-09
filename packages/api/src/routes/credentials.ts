@@ -130,6 +130,7 @@ const SERVICE_DISPLAY_NAMES: Record<string, string> = {
   google_workspace: "Google Workspace",
   deepwiki: "DeepWiki",
   onepassword: "1Password",
+  github_app: "GitHub App",
 };
 
 /** The service key as a sentence subject (`slack` → `Slack`, `github` →
@@ -138,6 +139,11 @@ const SERVICE_DISPLAY_NAMES: Record<string, string> = {
 function displayName(service: string): string {
   const known = SERVICE_DISPLAY_NAMES[service];
   if (known) return known;
+  // A namespaced key (`llm:prov_1`) is an internal service id the caller
+  // sent, not a product. Echo it, so the refusal names the same string the
+  // caller can search for. Config-declared MCP services are stored under
+  // the bare entry name (`plugins/config-mcp.ts`), so they never land here.
+  if (service.includes(":")) return service;
   return service
     .split(/[-_]/)
     .filter(Boolean)
@@ -409,7 +415,7 @@ credentialsRouter.put("/:service", async (c) => {
       });
       if (mode === "unconfigured") {
         return c.json(
-          { error: `${service} is not configured for this organization. An admin can set it up in Settings → Organization.` },
+          { error: `${displayName(service)} is not configured for this organization. An admin can set it up in Settings → Organization.` },
           403,
         );
       }
@@ -419,7 +425,7 @@ credentialsRouter.put("/:service", async (c) => {
       // declaration (e.g. slack-user OAuth).
       if (mode === "org") {
         return c.json(
-          { error: `${service} is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.` },
+          { error: `${displayName(service)} is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.` },
           403,
         );
       }
@@ -476,7 +482,10 @@ credentialsRouter.put("/:service", async (c) => {
     // silently ignored, never resolved. Reject at write time instead of
     // shipping a credential nothing reads.
     if (service === "github") {
-      return c.json({ error: "github credentials cannot be 1Password references; use the GitHub connect flow" }, 400);
+      return c.json(
+        { error: `${displayName(service)} credentials cannot be 1Password references; use the GitHub connect flow` },
+        400,
+      );
     }
     // The services the read path denies outright are read RAW by the code
     // that owns them: an `llm:*` key through `services/model-resolution.ts`,
@@ -487,7 +496,7 @@ credentialsRouter.put("/:service", async (c) => {
     // code path. Refuse the write rather than ship a row nothing resolves.
     if (isDeniedCredentialService(service)) {
       return c.json(
-        { error: `${service} credentials cannot be 1Password references; set them in their own settings page` },
+        { error: `${displayName(service)} credentials cannot be 1Password references; set them in their own settings page` },
         400,
       );
     }
@@ -510,7 +519,7 @@ credentialsRouter.put("/:service", async (c) => {
     const declared = findCredentialDeclaration(plugins, service);
     if (declared && declared.type !== body.type) {
       return c.json(
-        { error: `${service} credentials are ${declared.type}. Set type to ${declared.type} for this reference.` },
+        { error: `${displayName(service)} credentials are ${declared.type}. Set type to ${declared.type} for this reference.` },
         400,
       );
     }
@@ -745,8 +754,14 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     .onConflictDoNothing()
     .returning({ service: credentials.service });
   if (inserted.length === 0) {
+    // The slot holds either another member's share or a secret the team
+    // stores, and the two are removed under different labels ("Stop
+    // sharing" and "Disconnect"). This answer cannot tell them apart, so it
+    // names the page that shows which one is there rather than a verb that
+    // fits only one of them. The web client's own 409 copy
+    // (`components/integrations/share-with-team.tsx`) says the same thing.
     return c.json(
-      { error: `This team already has a ${label} credential. Ask a team admin to disconnect it first.` },
+      { error: `This team already has ${label}. Ask a team admin to change it in Settings → Organization → Teams.` },
       409,
     );
   }

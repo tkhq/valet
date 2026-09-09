@@ -142,7 +142,13 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
           saving={connect.isPending}
           removing={disconnect.isPending}
           onSave={() => void saveToken()}
-          onRemove={() => setConfirmRemove(true)}
+          onRemove={() => {
+            // Clear the previous attempt's refusal as the dialog opens.
+            // Radix never calls `onOpenChange(true)` for a controlled dialog
+            // with no trigger, so the clear belongs on the control.
+            disconnect.reset();
+            setConfirmRemove(true);
+          }}
           removeLabel="Remove token"
           savedTick={savedTick}
         />
@@ -152,10 +158,6 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
         open={confirmRemove}
         onOpenChange={(open) => {
           setConfirmRemove(open);
-          // React Query holds `error` until the next mutate, so a dialog
-          // reopened after a refusal would present the OLD failure as this
-          // attempt's. Clear it as the dialog opens.
-          if (open) disconnect.reset();
         }}
         title="Remove the organization 1Password token?"
         description={REMOVE_ORG_TOKEN_NOTE}
@@ -213,7 +215,13 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
           saving={connect.isPending}
           removing={disconnect.isPending}
           onSave={() => void saveToken()}
-          onRemove={() => setConfirmRemove(true)}
+          onRemove={() => {
+            // Clear the previous attempt's refusal as the dialog opens.
+            // Radix never calls `onOpenChange(true)` for a controlled dialog
+            // with no trigger, so the clear belongs on the control.
+            disconnect.reset();
+            setConfirmRemove(true);
+          }}
           removeLabel="Remove token"
           savedTick={savedTick}
         />
@@ -223,10 +231,6 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
         open={confirmRemove}
         onOpenChange={(open) => {
           setConfirmRemove(open);
-          // React Query holds `error` until the next mutate, so a dialog
-          // reopened after a refusal would present the OLD failure as this
-          // attempt's. Clear it as the dialog opens.
-          if (open) disconnect.reset();
         }}
         title="Remove your personal 1Password token?"
         description={REMOVE_PERSONAL_TOKEN_NOTE}

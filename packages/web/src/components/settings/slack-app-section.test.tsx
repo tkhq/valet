@@ -11,6 +11,12 @@ import type { GetSlackAppResponse } from "@valet/api/wire";
 
 const saveCredentialMutateAsync = vi.fn();
 const deleteAppMutate = vi.fn();
+// A real React Query `reset()` drops the mutation's error. The double has to
+// do the same, or a dialog that opens on a stale error still looks clean here
+// and the bug ships green.
+const deleteAppReset = vi.fn(() => {
+  deleteAppError = null;
+});
 let nativeConfirm = vi.fn(() => true);
 
 let slackAppData: GetSlackAppResponse | undefined;
@@ -39,7 +45,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
       mutate: deleteAppMutate,
       isPending: false,
       error: deleteAppError,
-      reset: vi.fn(),
+      reset: deleteAppReset,
     }),
   };
 });
@@ -290,11 +296,34 @@ describe("SlackAppSection", () => {
 
   it("connected: the dialog shows the error the disconnect failed with", () => {
     slackAppData = slackAppResponse({ connected: true, teamName: "Acme" });
+    const { rerender } = render(<SlackAppSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+    expect(deleteAppMutate).toHaveBeenCalledTimes(1);
+
+    // Production reaches this error one way only: the mutation the operator
+    // just confirmed rejects while the dialog is still open. Setting the error
+    // before the open would exercise the stale-error path instead.
+    deleteAppError = new Error("Slack rejected the request");
+    rerender(<SlackAppSection />);
+
+    expect(within(screen.getByRole("dialog")).getByText(/Slack rejected the request/)).toBeTruthy();
+  });
+
+  it("connected: reopening after a refusal starts with no error", () => {
+    slackAppData = slackAppResponse({ connected: true, teamName: "Acme" });
+    // The refusal from the previous attempt is still on the mutation: React
+    // Query holds `error` until the next mutate. The Disconnect button clears
+    // it as it opens the dialog, so the second attempt starts clean.
     deleteAppError = new Error("Slack rejected the request");
     render(<SlackAppSection />);
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-    expect(screen.getByText(/Slack rejected the request/)).toBeTruthy();
+
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.queryByText(/Slack rejected the request/)).toBeNull();
   });
 
   it("connected: lists the scopes the installed app did not grant", () => {

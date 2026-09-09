@@ -13,13 +13,19 @@ import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 const disconnectMutate = vi.fn();
 let disconnectPending = false;
 let disconnectError: Error | null = null;
+// React Query's own `reset()` drops the error the last attempt left behind, so
+// the double drops it too. A `vi.fn()` that only records the call cannot tell a
+// dialog that cleared the refusal from one that still shows it.
+const disconnectReset = vi.fn(() => {
+  disconnectError = null;
+});
 
 vi.mock("~/api/integrations", () => ({
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
     isPending: disconnectPending,
     error: disconnectError,
-    reset: vi.fn(),
+    reset: disconnectReset,
   }),
   useConnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
@@ -75,6 +81,7 @@ function nativeConfirm() {
 describe("IntegrationRow disconnect", () => {
   beforeEach(() => {
     disconnectMutate.mockReset();
+    disconnectReset.mockClear();
     disconnectPending = false;
     disconnectError = null;
   });
@@ -120,12 +127,31 @@ describe("IntegrationRow disconnect", () => {
     expect(disconnectMutate).not.toHaveBeenCalled();
   });
 
-  it("shows the server's error instead of swallowing it", () => {
-    disconnectError = new Error("Linear rejected the request");
-    render(<IntegrationRow plugin={PLUGIN} />);
+  it("shows the server's error instead of swallowing it", async () => {
+    const { rerender } = render(<IntegrationRow plugin={PLUGIN} />);
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(disconnectMutate).toHaveBeenCalledTimes(1));
+
+    // The refusal lands the way it does in production: after the request the
+    // open dialog sent, not before the dialog opened.
+    disconnectError = new Error("Linear rejected the request");
+    rerender(<IntegrationRow plugin={PLUGIN} />);
 
     expect(screen.getByRole("dialog").textContent).toContain("Linear rejected the request");
+  });
+
+  it("reopening after a refusal starts with no error", () => {
+    // A refused attempt is still on the mutation, because React Query holds
+    // `error` until the next mutate. Opening the dialog again must not read as
+    // a fresh failure of a request the person has not made yet.
+    disconnectError = new Error("Linear rejected the request");
+    render(<IntegrationRow plugin={PLUGIN} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
+
+    expect(screen.getByRole("dialog").textContent).not.toContain("Linear rejected the request");
+    expect(disconnectReset).toHaveBeenCalledTimes(1);
   });
 
   it("reports the request in flight, which window.confirm could not", () => {

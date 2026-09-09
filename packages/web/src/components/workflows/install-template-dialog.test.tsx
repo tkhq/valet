@@ -146,6 +146,52 @@ describe("InstallTemplateDialog", () => {
     expect(installCall().body).toEqual({});
   });
 
+  /**
+   * The requirements arrive stamped against the workspace the listing was
+   * taken in, so in a team workspace `connected: false` is the TEAM's gap.
+   * Reported as the reader's own it sends somebody to connect a service
+   * they already have, and the install still refuses.
+   */
+  describe("whose gap a blocked requirement reports", () => {
+    const needsLinear: WorkflowTemplateSummary = {
+      ...withoutInputs,
+      requires: [{ service: "linear", connected: false }],
+    };
+
+    it("names the team's connections in a team workspace", () => {
+      teamId = "team_ops";
+      renderDialog(needsLinear);
+
+      expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+      expect(
+        screen.getByText(
+          "Linear is not connected for this team. Connect Linear on the Integrations page and share it with the team, then install this template.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("names the reader's own connections in their own workspace", () => {
+      renderDialog(needsLinear);
+      expect(
+        screen.getByText(
+          "Linear is not connected on your account. Connect it on the Integrations page, then install this template.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("offers the install when the team holds the service the reader does not", () => {
+      teamId = "team_ops";
+      renderDialog({ ...withoutInputs, requires: [{ service: "linear", connected: true }] });
+
+      expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+      expect(screen.queryByText("You cannot install this yet")).toBeNull();
+    });
+  });
+
   it("keeps the dialog open with the server's refusal of a team install", async () => {
     teamId = "team_ops";
     installMutateAsync.mockRejectedValue(

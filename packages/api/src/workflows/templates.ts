@@ -11,11 +11,13 @@
  *      straight off `providers.plugins`, the same way `/api/plugins` reads
  *      services and the event catalog reads `plugin.triggers`.
  *   2. Derives the summary the gallery renders: the services a template
- *      needs and whether the caller connected them, the run-form inputs,
- *      and the caveats. Most caveats are read out of the definition rather
- *      than written by an author, because derived copy cannot drift away
- *      from what the workflow actually does. An author's own caveats are
- *      kept, for the limits a definition cannot show.
+ *      needs and whether the principal the install would act as has
+ *      connected them (the caller, or the team the gallery is scoped to),
+ *      the run-form inputs, and the caveats. Most caveats are read out of
+ *      the definition rather than written by an author, because derived
+ *      copy cannot drift away from what the workflow actually does. An
+ *      author's own caveats are kept, for the limits a definition cannot
+ *      show.
  *   3. Installs a template as a real, owned workflow.
  *
  * Install writes the definition, its version-1 snapshot, and the cron
@@ -523,10 +525,11 @@ export function summarizeTemplate(
  * condition, so a broken template never reaches a deployment silently.
  *
  * The caller is named by user AND organization, because a card reports two
- * different states. `connected` is the person's own credential set. A
+ * different states. `connected` is the credential set of the principal the
+ * install would act as: the person, or the team named by `opts.teamId`. A
  * service this organization has not configured is reported separately
- * (`WorkflowTemplateRequirement.unconfigured`): the person cannot connect
- * it, and the card must say who can.
+ * (`WorkflowTemplateRequirement.unconfigured`): nobody but an admin can
+ * connect it, and the card must say who can.
  */
 /**
  * Services a template may name but that a person cannot use yet.
@@ -547,9 +550,154 @@ function requiredServices(summary: WorkflowTemplateSummary): string[] {
   return summary.requires.map((r) => r.service);
 }
 
+// ─── Team-scoped requirements ────────────────────────────────────────────
+//
+// A listing taken in a team workspace must answer the question the INSTALL
+// answers, and a team install is judged by `teamServiceReadiness` — the
+// team's credentials, the org-provided services, and the GitHub App — not
+// by the caller's own Integrations list. Judged by the caller, a team that
+// holds Linear reads as unconnected, the card withholds Install, and
+// connecting Linear personally never changes the answer. So the same
+// predicate answers both, and the two agree by construction.
+//
+// Readiness is a database read per service plus, for github, an App
+// lookup, and the gallery lists every template the catalog ships. Running
+// it once per template repeats all of that. It is run once per distinct
+// SHAPE instead, which for a normal catalog is once per service.
+
+/**
+ * What a tool node contributes to its service's readiness answer: the
+ * credential pin, and the repository the github branch looks an App
+ * installation up under (`installationResolvesFor` reads `owner` and
+ * `repo`). Two nodes that agree on these get the same answer, so one
+ * stands in for the other. Everything else in a node is invisible to the
+ * predicate.
+ */
+function readinessSignature(node: ToolNode): string {
+  const owner = typeof node.params.owner === "string" ? node.params.owner : "";
+  const repo = typeof node.params.repo === "string" ? node.params.repo : "";
+  // JSON, not a joined string: an `owner` holding the separator would
+  // otherwise read as a different node's signature.
+  return JSON.stringify([node.service, node.credential ?? "auto", owner, repo]);
+}
+
+/**
+ * Each service a definition names, keyed to the shape its nodes make. Two
+ * definitions that give one service the same shape share one answer.
+ *
+ * The shape is the whole node set for that service, not one node:
+ * `teamServiceReadiness` decides github by reading them TOGETHER (every
+ * node pinned `app` takes the App branch; one node pinned `user` keeps the
+ * service on the credential-row path). A template that pins the App and a
+ * template that pins the owner's own token therefore have different shapes
+ * and get separate answers, which is the point — merging them would hide
+ * the ready one behind the blocked one.
+ */
+function readinessShapes(definition: WorkflowDefinition): Map<string, string> {
+  const signatures = new Map<string, Set<string>>();
+  for (const node of toolNodesOf(definition)) {
+    const seen = signatures.get(node.service) ?? new Set<string>();
+    seen.add(readinessSignature(node));
+    signatures.set(node.service, seen);
+  }
+  const shapes = new Map<string, string>();
+  for (const [service, seen] of signatures) shapes.set(service, JSON.stringify([...seen].sort()));
+  return shapes;
+}
+
+/**
+ * Whether the team can act as each (service, shape) pair the listing needs,
+ * keyed by shape.
+ *
+ * The pairs are packed into as few readiness passes as they allow: a pass
+ * carries at most one shape per service, so within it every service's nodes
+ * are still read together. A catalog that gives each service one shape
+ * needs exactly one pass; the number of passes is the largest number of
+ * shapes any single service has.
+ *
+ * The definition each pass is given is a carrier for the nodes and nothing
+ * else. `teamServiceReadiness` reads it through `toolNodesOf` alone, so it
+ * is never validated, run, or written, and repeated node ids do not matter.
+ */
+async function teamReadinessByShape(
+  deps: TemplateServiceDeps,
+  scope: { orgId: string; teamId: string },
+  definitions: readonly WorkflowDefinition[],
+): Promise<Map<string, boolean>> {
+  const shapes = new Map<string, { service: string; nodes: ToolNode[] }>();
+  for (const definition of definitions) {
+    const nodesByService = new Map<string, ToolNode[]>();
+    for (const node of toolNodesOf(definition)) {
+      nodesByService.set(node.service, [...(nodesByService.get(node.service) ?? []), node]);
+    }
+    for (const [service, shape] of readinessShapes(definition)) {
+      if (shapes.has(shape)) continue;
+      shapes.set(shape, { service, nodes: nodesByService.get(service) ?? [] });
+    }
+  }
+
+  const passes: Array<Array<{ shape: string; service: string; nodes: ToolNode[] }>> = [];
+  for (const [shape, entry] of shapes) {
+    let pass = passes.find((p) => !p.some((e) => e.service === entry.service));
+    if (!pass) {
+      pass = [];
+      passes.push(pass);
+    }
+    pass.push({ shape, ...entry });
+  }
+
+  const readyByShape = new Map<string, boolean>();
+  for (const pass of passes) {
+    const readiness = await teamServiceReadiness(
+      { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
+      {
+        orgId: scope.orgId,
+        teamId: scope.teamId,
+        definition: { version: "dag/v1", nodes: pass.flatMap((e) => e.nodes), edges: [] },
+      },
+    );
+    const ready = new Set(readiness.ready);
+    for (const entry of pass) readyByShape.set(entry.shape, ready.has(entry.service));
+  }
+  return readyByShape;
+}
+
+/**
+ * The credential services a team install of this definition could act as.
+ *
+ * `templateRequirements` keys a requirement by CREDENTIAL service
+ * (`credentialService ?? service`, `credentialServiceFor`) while readiness
+ * answers per TOOL service, so the mapping is made here. When two tool
+ * services share one credential service, the requirement counts as
+ * connected only while every one of them is ready: the requirement is a
+ * single flag, and the install refuses on the first tool the team cannot
+ * act as.
+ */
+function teamConnectedServices(
+  definition: WorkflowDefinition,
+  actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
+  readyToolServices: ReadonlySet<string>,
+): Set<string> {
+  const connected = new Set<string>();
+  const blocked = new Set<string>();
+  for (const node of toolNodesOf(definition)) {
+    const entry = actionPluginByService.get(node.service);
+    if (!entry) continue;
+    const { service } = credentialServiceFor(entry);
+    if (readyToolServices.has(node.service)) connected.add(service);
+    else blocked.add(service);
+  }
+  for (const service of blocked) connected.delete(service);
+  return connected;
+}
+
 export async function listWorkflowTemplateSummaries(
   deps: TemplateServiceDeps,
   caller: { userId: string; orgId: string },
+  /** The team workspace the gallery is showing, when it is showing one.
+   * The requirements are then stamped against that team, because that is
+   * the principal its Install button would install as. */
+  opts: { teamId?: string } = {},
 ): Promise<WorkflowTemplateSummary[]> {
   const owner: CredentialOwner = { type: "user", id: caller.userId };
   const availability = {
@@ -574,7 +722,7 @@ export async function listWorkflowTemplateSummaries(
   // set it up.
   const connected = new Set([...personal.map((cred) => cred.service), ...orgProvided]);
 
-  const summaries: WorkflowTemplateSummary[] = [];
+  const listed: SummarizeResult[] = [];
   for (const owned of await listCatalogTemplatesForOwner(deps, caller)) {
     const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
     if (!result.ok) {
@@ -596,9 +744,35 @@ export async function listWorkflowTemplateSummaries(
       );
       continue;
     }
-    summaries.push(result.value.summary);
+    listed.push(result.value);
   }
-  return summaries;
+
+  if (opts.teamId === undefined) return listed.map((entry) => entry.summary);
+
+  // A team workspace restamps `connected` against the team, over the
+  // definitions that survived validation. `unconfigured` is unchanged: it
+  // is the organization's answer, and it is the same for every member and
+  // every team in it.
+  const readyByShape = await teamReadinessByShape(
+    deps,
+    { orgId: caller.orgId, teamId: opts.teamId },
+    listed.map((entry) => entry.definition),
+  );
+  return listed.map(({ summary, definition }) => {
+    const ready = new Set<string>();
+    for (const [service, shape] of readinessShapes(definition)) {
+      if (readyByShape.get(shape) === true) ready.add(service);
+    }
+    return {
+      ...summary,
+      requires: templateRequirements(
+        definition,
+        deps.actionPluginByService,
+        teamConnectedServices(definition, deps.actionPluginByService, ready),
+        unavailable,
+      ),
+    };
+  });
 }
 
 // ─── Install ─────────────────────────────────────────────────────────────
