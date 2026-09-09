@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
-import type { NotificationSummary } from "@valet/api/wire";
+import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
 import {
   useMarkAllNotificationsRead,
   useMarkNotificationRead,
@@ -15,26 +16,44 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/primitives";
-import { relativeTime } from "~/lib/relative-time";
+import { useLivePendingGates } from "~/hooks/use-live-pending-gates";
 import { cn } from "~/lib/cn";
+import { attentionSessionIds, isActionable } from "~/lib/use-attention-ping";
+import { relativeTime } from "~/lib/relative-time";
 
-/**
- * Notifications bell for the top nav (Phase 4 decision 22). Polls
- * GET /api/notifications every 30s (see `useNotifications`), shows an
- * unread-count badge, and lists the 50 most recent in a dropdown. Clicking
- * an item marks it read and navigates to its `href` (a full-page nav —
- * simplest correct thing for a handful of cross-session links; no typed
- * router route exists for an arbitrary notification target).
- *
- * Assistant-centered web UI decision 18: also refetches on dropdown OPEN
- * (in addition to the 30s poll) so a dropdown left closed for a while
- * doesn't show stale unread state the moment it's opened.
- */
+const KIND_LABEL: Record<NotificationKind, string> = {
+  notification: "Notification",
+  question: "Question",
+  escalation: "Escalation",
+  approval: "Approval",
+};
+
+export interface BellState {
+  unreadCount: number;
+  needsAttention: boolean;
+}
+
+/** Derive bell state from the poll and the live gate store. */
+export function deriveBellState(
+  notifications: NotificationSummary[] | undefined,
+  livePendingGates: Readonly<Record<string, boolean>>,
+): BellState {
+  const items = notifications ?? [];
+  const hasUnscopedAction = items.some((n) => isActionable(n) && n.sessionId === undefined);
+  return {
+    unreadCount: items.filter((n) => n.readAt === undefined).length,
+    needsAttention: hasUnscopedAction || attentionSessionIds(items, livePendingGates).size > 0,
+  };
+}
+
+/** Keep actionable notifications above general updates without changing recency within either group. */
+export function sortNotifications(notifications: readonly NotificationSummary[]): NotificationSummary[] {
+  return [...notifications].sort((a, b) => Number(isActionable(b)) - Number(isActionable(a)));
+}
 
 /**
  * Pure `onOpenChange` handler, extracted so the open-refetch behavior is
- * unit-testable without rendering the Radix dropdown (CLAUDE.md: prefer
- * pure functions over exercising private/DOM internals in tests).
+ * unit-testable without rendering the Radix dropdown.
  */
 export function makeOpenChangeHandler(refetch: () => void): (open: boolean) => void {
   return (open) => {
@@ -46,14 +65,19 @@ export function NotificationsBell() {
   const { data, refetch } = useNotifications();
   const markRead = useMarkNotificationRead();
   const markAllRead = useMarkAllNotificationsRead();
+  const livePendingGates = useLivePendingGates();
+  const { unreadCount, needsAttention } = deriveBellState(data?.notifications, livePendingGates);
+  const items = sortNotifications(data?.notifications ?? []);
+  const wasAttention = useRef(needsAttention);
+  const [pulse, setPulse] = useState(false);
 
-  const items = data?.notifications ?? [];
-  const unreadCount = items.filter((n) => !n.readAt).length;
+  useEffect(() => {
+    if (needsAttention && !wasAttention.current) setPulse(true);
+    if (!needsAttention) setPulse(false);
+    wasAttention.current = needsAttention;
+  }, [needsAttention]);
 
   async function onSelectItem(n: NotificationSummary) {
-    // Await the mark-read POST before navigating — `window.location.assign`
-    // triggers a full-page nav in the same tick, which can cancel an
-    // in-flight fetch before the browser sends it.
     try {
       if (!n.readAt) await markRead.mutateAsync(n.id);
     } finally {
@@ -61,19 +85,30 @@ export function NotificationsBell() {
     }
   }
 
+  const ariaLabel = needsAttention
+    ? unreadCount > 0
+      ? `${unreadCount} unread notifications. A decision is required.`
+      : "A decision is required."
+    : unreadCount > 0
+      ? `${unreadCount} unread notifications`
+      : "Notifications";
+
   return (
     <DropdownMenu onOpenChange={makeOpenChangeHandler(refetch)}>
       <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="relative px-2"
-          aria-label={unreadCount > 0 ? `${unreadCount} unread notifications` : "Notifications"}
-        >
-          <Bell className="h-4 w-4" aria-hidden />
+        <Button variant="ghost" size="sm" className="relative px-2" aria-label={ariaLabel}>
+          <Bell
+            className={cn(
+              "h-4 w-4",
+              needsAttention && "text-amber-700 dark:text-amber-300",
+              pulse && "animate-[pulse_700ms_ease-out_1] motion-reduce:animate-none",
+            )}
+            aria-hidden
+            onAnimationEnd={() => setPulse(false)}
+          />
           {unreadCount > 0 && (
             <Badge
-              variant="accent"
+              variant={needsAttention ? "warning" : "accent"}
               className="absolute -top-1 -right-1 min-w-[16px] justify-center px-1 py-0 text-[10px] leading-4"
             >
               {unreadCount > 99 ? "99+" : unreadCount}
@@ -109,7 +144,8 @@ export function NotificationsBell() {
           >
             <span className="flex items-center gap-1.5">
               {!n.readAt && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-600" aria-hidden />}
-              <span className="text-sm font-medium truncate">{n.title}</span>
+              <span className="min-w-0 flex-1 text-sm font-medium truncate">{n.title}</span>
+              {isActionable(n) && <Badge variant="warning">{KIND_LABEL[n.kind]}</Badge>}
             </span>
             <span className="text-xs text-muted">{relativeTime(n.createdAt)}</span>
           </DropdownMenuItem>

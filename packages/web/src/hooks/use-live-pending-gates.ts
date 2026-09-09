@@ -2,8 +2,9 @@ import { useShallow } from "zustand/react/shallow";
 import { useStreamStore } from "~/stores/stream";
 
 /**
- * Live gate state for the sessions a caller renders rows for: a key exists
- * only while that session's WS is open, and its value says whether any
+ * Live gate state for selected sessions, or all tracked sessions when the
+ * caller omits `sessionIds`: a key exists only while that session's WS is
+ * open, and its value says whether any
  * decision gate is pending there (any thread). Sessions without an open
  * socket are absent — their slice, if one lingers from an earlier visit,
  * stops receiving `gate.*` frames the moment the socket closes, so its
@@ -22,12 +23,13 @@ import { useStreamStore } from "~/stores/stream";
  * opens/settles.
  */
 export function useLivePendingGates(
-  sessionIds: readonly string[],
+  sessionIds?: readonly string[],
 ): Readonly<Record<string, boolean>> {
   return useStreamStore(
     useShallow((s) => {
       const out: Record<string, boolean> = {};
-      for (const id of sessionIds) {
+      const ids = sessionIds ?? Object.keys(s.bySession);
+      for (const id of ids) {
         const slice = s.bySession[id];
         if (slice?.conn !== "open") continue;
         out[id] = Object.keys(slice.pendingGates).length > 0;
