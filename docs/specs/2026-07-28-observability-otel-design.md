@@ -114,7 +114,9 @@ cost on the `turn_end` event and patch-capture records on
      three tables with an `org_id`). Any query that joins `agent_sessions`
      alone drops all workflow spend.
    - `cost_total` NULL means unpriced, never free. The engine omits cost for
-     a model it has no price for. Read `priced` before you present a total.
+     a model it has no price for. A nonempty aggregate with no priced turns
+     returns NULL. A mixed aggregate sums priced turns. An empty aggregate
+     returns 0. Read `priced` before you present a total.
 
    The token and cost numbers come from stored generated columns on
    `engine_entries` (`input_tokens` ... `total_tokens`, `cost_total`,

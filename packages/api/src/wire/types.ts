@@ -2226,10 +2226,9 @@ export interface UsageWindow {
   /** Every token the window billed: input + output + cache read + cache
    * write. On a cache-heavy model, input + output is a small part of this. */
   totalTokens: number;
-  /** Estimated USD, summed over PRICED turns only. Turns on an unpriced
-   * model (custom/OpenRouter providers, dev fakes) contribute nothing — read
-   * `unpricedTurns` before you present this as the full spend. */
-  costUsd: number;
+  /** Estimated USD. NULL means every turn in this nonempty bucket is unpriced;
+   * zero means the bucket is empty or its priced turns cost zero. */
+  costUsd: number | null;
   /** Assistant turns that reported usage in the window. */
   turns: number;
   /** Turns of `turns` whose model reported no price. `costUsd` excludes
@@ -2251,7 +2250,8 @@ export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy";
  * efficiency is visible, plus `unpricedTurns` (turns on custom/dev models that
  * burn tokens but carry no cost). */
 export interface UsageBucket {
-  costUsd: number;
+  /** NULL means every turn in this nonempty bucket is unpriced. */
+  costUsd: number | null;
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
@@ -2268,7 +2268,8 @@ export interface UsageBucket {
 export interface UsageBreakdownResponse {
   windowMs: number;
   scope: "me" | "org";
-  totalCostUsd: number;
+  /** NULL means every turn in this nonempty window is unpriced. */
+  totalCostUsd: number | null;
   totalTokens: number;
   totalInputTokens: number;
   totalOutputTokens: number;
@@ -2280,7 +2281,7 @@ export interface UsageBreakdownResponse {
   byModel: (UsageBucket & { model: string | null })[];
   /** Present only for `scope=org`. */
   byUser?: (UsageBucket & { userId: string; name: string })[];
-  byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
+  byDay: { dayMs: number; costUsd: number | null; totalTokens: number }[];
 }
 
 /** `GET /api/usage/items?window=&scope=&useCase=` — drill-down rows for ONE use
@@ -2294,7 +2295,7 @@ export interface UsageDrillItem {
   isChild: boolean;
   parentId: string | null;
   sessionId: string | null;
-  costUsd: number;
+  costUsd: number | null;
   totalTokens: number;
   turns: number;
 }
@@ -2312,7 +2313,7 @@ export interface UsageSessionRow {
   useCase: UsageUseCase;
   isChild: boolean;
   parentSessionId: string | null;
-  costUsd: number;
+  costUsd: number | null;
   totalTokens: number;
   turns: number;
 }

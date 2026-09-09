@@ -45,6 +45,15 @@ function toNum(v: unknown): number {
   return Number(v ?? 0);
 }
 
+/** A NULL cost means every turn in this nonempty bucket was unpriced. */
+function toCost(v: unknown): number | null {
+  return v === null ? null : toNum(v);
+}
+
+function compareCostDesc(a: number | null, b: number | null): number {
+  return (b ?? Number.NEGATIVE_INFINITY) - (a ?? Number.NEGATIVE_INFINITY);
+}
+
 // ── Scope ──────────────────────────────────────────────────────────────────
 
 export interface UsageScope {
@@ -119,7 +128,14 @@ function bucketCols(windowed?: { since: number; suffix: WindowSuffix }): SQL {
   };
   const name = (base: string): SQL => sql.raw(windowed ? `${base}_${windowed.suffix}` : base);
   const cols = BUCKET_METRICS.map(({ column, sum }) => {
-    if (sum !== undefined) return sql`COALESCE(SUM(${sql.raw(sum)})${filter()},0) AS ${name(column)}`;
+    if (sum !== undefined) {
+      if (column === "cost_usd") {
+        // An empty bucket costs $0; a nonempty bucket with no priced turns
+        // stays NULL so consumers cannot present unknown spend as free.
+        return sql`CASE WHEN COUNT(*)${filter()} = 0 THEN 0 ELSE SUM(${sql.raw(sum)})${filter()} END AS ${name(column)}`;
+      }
+      return sql`COALESCE(SUM(${sql.raw(sum)})${filter()},0) AS ${name(column)}`;
+    }
     if (column === "turns") return sql`COUNT(*)${filter()} AS ${name(column)}`;
     return sql`COUNT(*)${filter(sql`NOT priced`)} AS ${name(column)}`;
   });
@@ -130,9 +146,10 @@ const BUCKET_COLS = bucketCols();
 /** The read half of `bucketCols` — one mapper for windowed and unwindowed
  * rows. `UsageBucket` and `UsageWindow` are the same eight fields. */
 function readBucket(row: BucketRow | undefined, suffix?: WindowSuffix): UsageBucket & UsageWindow {
-  const v = (base: string): number => toNum(row?.[suffix !== undefined ? `${base}_${suffix}` : base]);
+  const raw = (base: string): unknown => row?.[suffix !== undefined ? `${base}_${suffix}` : base];
+  const v = (base: string): number => toNum(raw(base));
   return {
-    costUsd: v("cost_usd"),
+    costUsd: toCost(raw("cost_usd")),
     totalTokens: v("total_tokens"),
     inputTokens: v("input_tokens"),
     outputTokens: v("output_tokens"),
@@ -156,17 +173,17 @@ export async function getUsageBreakdown(
 
   const [byUseCase, byModel, byDay, totals, byUser] = await Promise.all([
     db.execute(sql`SELECT use_case, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY use_case`) as Promise<{ rows: (BucketRow & { use_case: string })[] }>,
-    db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
+    db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC NULLS LAST`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
     // `floor` truncates the day index deterministically whether Postgres infers
     // the `${DAY_MS}` parameter as integer or float (a plain `bigint / param`
     // could do float division on real Postgres → one bucket per row).
-    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
+    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, SUM(cost_total) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
     db.execute(sql`SELECT ${BUCKET_COLS} FROM cost_entries WHERE ${where}`) as Promise<{ rows: BucketRow[] }>,
     opts.scope.isOrg
       ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
         // workflow runs) so the per-member sum reconciles with the total —
         // dropping it made Σ byUser < totalCostUsd.
-        (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
+        (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC NULLS LAST`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
       : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
   ]);
 
@@ -194,10 +211,10 @@ export async function getUsageBreakdown(
     totalCacheWriteTokens: total.cacheWriteTokens,
     totalTurns: total.turns,
     unpricedTurns: total.unpricedTurns,
-    byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...readBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
+    byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...readBucket(r) })).sort((a, b) => compareCostDesc(a.costUsd, b.costUsd)),
     byModel: byModel.rows.map((r) => ({ model: r.model, ...readBucket(r) })),
     byUser: byUserOut,
-    byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
+    byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toCost(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
   };
 }
 
@@ -217,16 +234,16 @@ export async function getUsageDrillItems(
     interface Row { session_id: string; title: string | null; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.session_id, s.title, cw.parent_session_id,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+             SUM(ce.cost_total) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
       FROM cost_entries ce
       LEFT JOIN agent_sessions s ON s.id = ce.session_id
       LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
       WHERE ${whereCe} AND ce.session_id IS NOT NULL AND ce.use_case = ${useCase}
       GROUP BY ce.session_id, s.title, cw.parent_session_id
-      ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+      ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
     return r.rows.map((x) => ({
       id: x.session_id, label: x.title ?? x.session_id, useCase, isChild: x.parent_session_id !== null,
-      parentId: x.parent_session_id, sessionId: x.session_id, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+      parentId: x.parent_session_id, sessionId: x.session_id, costUsd: toCost(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
     }));
   }
   if (useCase === "workflow") {
@@ -234,28 +251,28 @@ export async function getUsageDrillItems(
     interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.workflow_run_id, wd.name,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+             SUM(ce.cost_total) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
       FROM cost_entries ce
       LEFT JOIN workflow_definitions wd ON wd.id = ce.workflow_id
       WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_run_id IS NOT NULL
       GROUP BY ce.workflow_run_id, wd.name
-      ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+      ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
     return r.rows.map((x) => ({
       id: x.workflow_run_id ?? "", label: x.name ?? `run ${x.workflow_run_id}`, useCase, isChild: false,
-      parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+      parentId: null, sessionId: null, costUsd: toCost(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
     }));
   }
   // proxy — group the raw proxy rows by harness (cost_entries has no harness).
   const whereProxy = scopeWhere("", since, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
-    SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
+    SELECT harness, SUM(cost_usd) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
     FROM llm_proxy_requests
     WHERE ${whereProxy} AND total_tokens > 0
-    GROUP BY harness ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+    GROUP BY harness ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
   return r.rows.map((x) => ({
     id: x.harness ?? "unknown", label: x.harness ?? "unknown", useCase, isChild: false,
-    parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+    parentId: null, sessionId: null, costUsd: toCost(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
   }));
 }
 
@@ -274,7 +291,7 @@ export async function getUsageSessions(
   interface Row { session_id: string; title: string | null; use_case: string; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const result = (await db.execute(sql`
     SELECT ce.session_id, s.title, ce.use_case, cw.parent_session_id,
-           COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+           SUM(ce.cost_total) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
     FROM cost_entries ce
     LEFT JOIN agent_sessions s ON s.id = ce.session_id
     LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
@@ -282,14 +299,14 @@ export async function getUsageSessions(
       AND ce.session_id IS NOT NULL AND ce.use_case IN ('orchestrator','session')
       ${useCaseFilter}
     GROUP BY ce.session_id, s.title, ce.use_case, cw.parent_session_id
-    ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+    ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
   return result.rows.map((r) => ({
     sessionId: r.session_id,
     title: r.title,
     useCase: r.use_case as UsageUseCase,
     isChild: r.parent_session_id !== null,
     parentSessionId: r.parent_session_id,
-    costUsd: toNum(r.cost_usd),
+    costUsd: toCost(r.cost_usd),
     totalTokens: toNum(r.total_tokens),
     turns: toNum(r.turns),
   }));
@@ -376,7 +393,7 @@ export async function getUsageSummary(db: AppDb, opts: { orgId: string; userId: 
       windowDays: 30,
       members: result.rows
         .map((row) => ({ userId: row.user_id, name: nameById.get(row.user_id) ?? row.user_id, ...readBucket(row, "m") }))
-        .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
+        .sort((a, b) => compareCostDesc(a.costUsd, b.costUsd) || b.totalTokens - a.totalTokens),
     };
   }
   return body;

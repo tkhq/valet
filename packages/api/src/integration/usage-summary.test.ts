@@ -211,7 +211,41 @@ describe("GET /api/usage/summary", () => {
     }
   });
 
-  it("reports an unpriced turn as unpriced, not as $0 of real spend", async () => {
+  it("keeps an all-unpriced aggregate null and ranks it after priced spend", async () => {
+    const api = await bootTestApi();
+    try {
+      const now = Date.now();
+      const { db } = api.providers;
+      await db.update(orgs).set({ features: { organizations: true } }).where(eq(orgs.id, "local-org"));
+      await db.insert(agentSessions).values([
+        { id: "sess-all-unpriced", userId: "local-user", orgId: "local-org", workspace: "/tmp/unpriced", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
+        { id: "sess-priced-member", userId: "test-member", orgId: "local-org", workspace: "/tmp/priced", status: "active", ownerType: "user", ownerId: "test-member", createdAt: now, updatedAt: now },
+      ]);
+      await seedTurn(api, {
+        id: "turn-all-unpriced",
+        sessionId: "sess-all-unpriced",
+        tokens: { input: 40, output: 10, cacheRead: 0, cacheWrite: 0 },
+        costTotal: null,
+        createdAt: now - HOUR_MS,
+      });
+      await seedTurn(api, {
+        id: "turn-priced-member",
+        sessionId: "sess-priced-member",
+        tokens: { input: 40, output: 10, cacheRead: 0, cacheWrite: 0 },
+        costTotal: 1,
+        createdAt: now - HOUR_MS,
+      });
+
+      const body = await getSummary(api);
+      expect(body.me.day).toMatchObject({ turns: 1, unpricedTurns: 1, costUsd: null });
+      expect(body.org?.members.map((member) => member.userId)).toEqual(["test-member", "local-user"]);
+      expect(body.org?.members[1]?.costUsd).toBeNull();
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("sums priced cost and reports unpriced turns in a mixed aggregate", async () => {
     const api = await bootTestApi();
     try {
       const now = Date.now();
@@ -251,7 +285,7 @@ describe("GET /api/usage/summary", () => {
     }
   });
 
-  it("never counts another org's turns, for sessions or workflows", async () => {
+  it("returns zero for an empty bucket and excludes another org's turns", async () => {
     const api = await bootTestApi();
     try {
       const now = Date.now();

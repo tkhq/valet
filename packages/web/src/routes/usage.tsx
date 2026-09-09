@@ -38,8 +38,8 @@ function fmt(n: number) {
   return n.toLocaleString();
 }
 
-function fmtUsd(n: number) {
-  return `$${n.toFixed(4)}`;
+function fmtUsd(n: number | null) {
+  return n === null ? "—" : "$" + n.toFixed(4);
 }
 
 function fmtPct(n: number) {
@@ -172,7 +172,7 @@ function UseCaseRow({
   scope,
 }: {
   useCase: UsageUseCase;
-  costUsd: number;
+  costUsd: number | null;
   totalTokens: number;
   turns: number;
   window: string;
@@ -472,7 +472,7 @@ export function UsagePage() {
                             {row.cacheWriteTokens.toLocaleString()}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-muted">
-                            ${row.costUsd.toFixed(4)}
+                            {row.costUsd === null ? "—" : "$" + row.costUsd.toFixed(4)}
                           </td>
                         </tr>
                       ))}
@@ -512,7 +512,7 @@ export function UsagePage() {
                             {row.totalTokens.toLocaleString()}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-muted">
-                            ${row.costUsd.toFixed(4)}
+                            {row.costUsd === null ? "—" : "$" + row.costUsd.toFixed(4)}
                           </td>
                         </tr>
                       ))}

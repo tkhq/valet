@@ -27,7 +27,7 @@ export function UsageCard() {
   // Ranking while /api/me is still in flight would paint the list without
   // the "You" row, then append it and shift the layout when the id lands.
   const org = data?.org && !me.isPending ? topMembers(data.org.members, me.data?.id) : null;
-  const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd) ?? []));
+  const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd ?? 0) ?? []));
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
@@ -122,7 +122,7 @@ export function topMembers(
   hidden: number;
 } {
   const sorted = [...members].sort(
-    (a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens,
+    (a, b) => (b.costUsd ?? Number.NEGATIVE_INFINITY) - (a.costUsd ?? Number.NEGATIVE_INFINITY) || b.totalTokens - a.totalTokens,
   );
   const meIdx = meId === undefined ? -1 : sorted.findIndex((m) => m.userId === meId);
   const shown = sorted.slice(0, ORG_MEMBER_CAP);
@@ -168,8 +168,8 @@ export interface WindowCostDisplay {
  */
 export function windowCostDisplay(w: UsageWindow): WindowCostDisplay {
   if (w.turns === 0) return { text: formatUsd(0), note: "" };
+  if (w.costUsd === null) return { text: "—", note: "unpriced" };
   if (w.unpricedTurns === 0) return { text: formatUsd(w.costUsd), note: "" };
-  if (w.unpricedTurns >= w.turns) return { text: "—", note: "unpriced" };
   return { text: `${formatUsd(w.costUsd)}+`, note: `${w.unpricedTurns} unpriced` };
 }
 
@@ -196,7 +196,7 @@ function MemberBar({
   max: number;
   isMe: boolean;
 }) {
-  const fraction = max > 0 ? member.costUsd / max : 0;
+  const fraction = max > 0 ? (member.costUsd ?? 0) / max : 0;
   const cost = windowCostDisplay(member);
   return (
     <div className="flex items-center gap-2 text-xs">
