@@ -935,7 +935,7 @@ function actionBridgeTools(opts: ActionBridgeOptions): Promise<ToolDef[]>;
 `list_tools` accepts:
 
 - `service?: string` — filter by service name.
-- `query?: string` — match against action name, id, and description (case-insensitive substring).
+- `query?: string` — match against action name, id, and description. Unquoted whitespace-separated terms use OR semantics. Single-quoted and double-quoted text stays one exact substring phrase. Matching is case-insensitive. A structured id such as `linear.list_projects` stays one term.
 - `limit?: number` — cap results (default 50, max 200).
 
 It returns a structured payload: `{ service, id, name, description, riskLevel, params }` per action, plus per-service auth/availability warnings when credentials are missing or expired.

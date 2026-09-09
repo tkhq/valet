@@ -722,6 +722,17 @@ async function resolveDynamic(
 const LIST_LIMIT_DEFAULT = 50;
 const LIST_LIMIT_MAX = 200;
 
+/** Split a catalog query into OR terms while keeping quoted phrases intact. */
+function catalogQueryTerms(query: string | undefined): string[] {
+  if (!query) return [];
+  return [...query.toLowerCase().matchAll(/"([^"]+)"|'([^']+)'|(\S+)/g)].flatMap(
+    (match) => {
+      const term = match[1] ?? match[2] ?? match[3];
+      return term ? [term] : [];
+    },
+  );
+}
+
 /**
  * `pinnedNames` maps a fully-qualified action id to the direct tool that
  * also invokes it. A pinned action stays listed here: `list_tools` is the
@@ -761,7 +772,8 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       ),
       query: Type.Optional(
         Type.String({
-          description: "Case-insensitive substring match against name, id, and description.",
+          description:
+            "Case-insensitive search against name, id, and description. Unquoted terms use OR; quotes preserve a phrase.",
         }),
       ),
       limit: Type.Optional(
@@ -775,17 +787,18 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
     execute: async (args, ctx): Promise<ToolResult> => {
       const a = args as { service?: string; query?: string; limit?: number };
       const limit = clamp(a.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
-      const q = a.query?.toLowerCase();
+      const queryTerms = catalogQueryTerms(a.query);
 
-      const matchesQuery = (action: PluginAction): boolean =>
-        !q ||
-        action.id.toLowerCase().includes(q) ||
-        action.name.toLowerCase().includes(q) ||
-        action.description.toLowerCase().includes(q);
+      const matchesQuery = (action: PluginAction): boolean => {
+        const fields = [action.id, action.name, action.description].map((field) =>
+          field.toLowerCase(),
+        );
+        return queryTerms.some((term) => fields.some((field) => field.includes(term)));
+      };
 
       let entries = catalog.entries;
       if (a.service) entries = entries.filter((e) => e.service === a.service);
-      if (q) entries = entries.filter((e) => matchesQuery(e.action));
+      if (queryTerms.length > 0) entries = entries.filter((e) => matchesQuery(e.action));
 
       const warnings: Array<{ service: string; reason: string }> = [];
 
@@ -797,9 +810,10 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         dynamicServicesConsidered.add(plugin.service);
         try {
           const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
-          const dynEntries = q
-            ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
-            : resolvedDyn.entries;
+          const dynEntries =
+            queryTerms.length > 0
+              ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
+              : resolvedDyn.entries;
           entries = entries.concat(dynEntries);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
