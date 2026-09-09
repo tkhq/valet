@@ -34,9 +34,18 @@ function loadMermaid(): Promise<typeof import("mermaid")> {
  * Mermaid configuration is global, so renders run in sequence to stop
  * concurrent light and dark diagrams from changing each other's theme.
  */
-export function renderMermaid(source: string, id: string, theme: MermaidTheme): Promise<string> {
+export function renderMermaid(
+  source: string,
+  id: string,
+  theme: MermaidTheme,
+  isCurrent: () => boolean = () => true,
+): Promise<string> {
   const render = async (): Promise<string> => {
+    // Coordinators can invalidate queued artifact work. Check only when this
+    // render reaches the serial queue, before Mermaid loads or parses source.
+    if (!isCurrent()) throw new Error("Mermaid render was cancelled.");
     const { default: mermaid } = await loadMermaid();
+    if (!isCurrent()) throw new Error("Mermaid render was cancelled.");
     mermaid.initialize({ ...SAFE_CONFIG, theme });
     const { svg } = await mermaid.render(id, source);
     return sanitizeMermaidSvg(svg);

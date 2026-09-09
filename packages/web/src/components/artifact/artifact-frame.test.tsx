@@ -15,6 +15,7 @@ vi.mock("~/lib/mermaid", () => ({ renderMermaid: renderMermaidMock }));
 import {
   ArtifactFrame,
   ArtifactMermaidCoordinator,
+  MAX_COMPLETED_MERMAID_REQUESTS,
   MAX_PENDING_MERMAID_REQUESTS,
 } from "./artifact-frame";
 
@@ -57,6 +58,7 @@ describe("ArtifactFrame", () => {
       "graph TD; A-->B",
       expect.stringMatching(/^artifact-mermaid-/),
       "default",
+      expect.any(Function),
     ));
     await waitFor(() => expect(postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: "valet-artifact:mermaid-result", id: "mermaid-0" }),
@@ -97,11 +99,36 @@ describe("ArtifactMermaidCoordinator", () => {
     resolveFirst('<svg xmlns="http://www.w3.org/2000/svg"><text>first</text></svg>');
 
     await waitFor(() => expect(render).toHaveBeenCalledTimes(2));
-    expect(render).toHaveBeenLastCalledWith("latest", "artifact-mermaid-2", "default");
+    expect(render).toHaveBeenLastCalledWith("latest", "artifact-mermaid-2", "default", expect.any(Function));
     await waitFor(() => expect(postResult).toHaveBeenCalledWith(
       expect.objectContaining({ id: "mermaid-0", svg: expect.stringContaining("latest") }),
     ));
     expect(postResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the latest theme when it matches an older completed request", async () => {
+    let resolveDark: (svg: string) => void = () => {};
+    let resolveDefault: (svg: string) => void = () => {};
+    const render = vi
+      .fn<(source: string, id: string, theme: "default" | "dark") => Promise<string>>()
+      .mockResolvedValueOnce('<svg xmlns="http://www.w3.org/2000/svg"><text>default</text></svg>')
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveDark = resolve; }))
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveDefault = resolve; }));
+    const postResult = vi.fn();
+    const coordinator = new ArtifactMermaidCoordinator(render, postResult);
+
+    coordinator.request("mermaid-0", "same source", "default");
+    await waitFor(() => expect(postResult).toHaveBeenCalledTimes(1));
+    coordinator.request("mermaid-0", "same source", "dark");
+    coordinator.request("mermaid-0", "same source", "default");
+    resolveDark('<svg xmlns="http://www.w3.org/2000/svg"><text>dark</text></svg>');
+
+    await waitFor(() => expect(render).toHaveBeenCalledTimes(3));
+    expect(postResult).toHaveBeenCalledTimes(1);
+    resolveDefault('<svg xmlns="http://www.w3.org/2000/svg"><text>default-current</text></svg>');
+    await waitFor(() => expect(postResult).toHaveBeenCalledWith(
+      expect.objectContaining({ svg: expect.stringContaining("default-current") }),
+    ));
   });
 
   it("suppresses a request that already completed", async () => {
@@ -116,6 +143,41 @@ describe("ArtifactMermaidCoordinator", () => {
 
     coordinator.request("mermaid-0", "same source", "default");
     expect(render).toHaveBeenCalledTimes(1);
+  });
+
+  it("evicts old completed requests", async () => {
+    const render = vi
+      .fn<(source: string, id: string, theme: "default" | "dark") => Promise<string>>()
+      .mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg" />');
+    const postResult = vi.fn();
+    const coordinator = new ArtifactMermaidCoordinator(render, postResult);
+
+    for (let index = 0; index <= MAX_COMPLETED_MERMAID_REQUESTS; index += 1) {
+      coordinator.request(`mermaid-${index}`, `source-${index}`, "default");
+      await waitFor(() => expect(postResult).toHaveBeenCalledTimes(index + 1));
+    }
+    coordinator.request("mermaid-0", "source-0", "default");
+
+    expect(render).toHaveBeenCalledTimes(MAX_COMPLETED_MERMAID_REQUESTS + 2);
+  });
+
+  it("marks queued work stale when the frame reloads", () => {
+    let isCurrent: (() => boolean) | undefined;
+    const render = vi.fn((
+      _source: string,
+      _id: string,
+      _theme: "default" | "dark",
+      current: () => boolean,
+    ) => {
+      isCurrent = current;
+      return new Promise<string>(() => {});
+    });
+    const coordinator = new ArtifactMermaidCoordinator(render, vi.fn());
+
+    coordinator.request("mermaid-0", "queued source", "default");
+    coordinator.clear();
+
+    expect(isCurrent?.()).toBe(false);
   });
 
   it("accepts matching requests after a frame reload and drops stale results", async () => {

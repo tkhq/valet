@@ -58,8 +58,14 @@ function asRect(v: unknown): ArtifactAnchorRect | null {
 
 const VDID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const MAX_PENDING_MERMAID_REQUESTS = 32;
+export const MAX_COMPLETED_MERMAID_REQUESTS = 32;
 
-type MermaidRender = (source: string, id: string, theme: "default" | "dark") => Promise<string>;
+type MermaidRender = (
+  source: string,
+  id: string,
+  theme: "default" | "dark",
+  isCurrent: () => boolean,
+) => Promise<string>;
 type MermaidResult =
   | { type: "valet-artifact:mermaid-result"; id: string; svg: string }
   | { type: "valet-artifact:mermaid-result"; id: string; error: true };
@@ -91,15 +97,25 @@ export class ArtifactMermaidCoordinator {
   request(blockId: string, source: string, theme: "default" | "dark"): void {
     if (this.disposed) return;
     const request = { blockId, source, theme };
+    if (this.sameRequest(this.active, request) || this.sameRequest(this.pending.get(blockId), request)) {
+      return;
+    }
+    // A pending replacement is newer than a completed result. Never let the
+    // completed cache discard a request that restores an earlier theme.
     if (
-      this.sameRequest(this.active, request) ||
-      this.sameRequest(this.pending.get(blockId), request) ||
+      (!this.active || this.active.blockId !== blockId) &&
+      !this.pending.has(blockId) &&
       this.sameRequest(this.completed.get(blockId), request)
     ) {
       return;
     }
+    this.completed.delete(blockId);
     if (!this.pending.has(blockId) && this.pending.size === MAX_PENDING_MERMAID_REQUESTS) {
-      return;
+      // Keep the newest request for an active block. A result for an older
+      // theme or source must not win just because other blocks filled the cap.
+      if (this.active?.blockId !== blockId) return;
+      const oldestBlockId = this.pending.keys().next().value;
+      if (oldestBlockId) this.pending.delete(oldestBlockId);
     }
     this.pending.set(blockId, request);
     this.startNext();
@@ -131,7 +147,12 @@ export class ArtifactMermaidCoordinator {
     const generation = this.generation;
     const renderId = `artifact-mermaid-${++this.nextRenderId}`;
 
-    void this.render(request.source, renderId, request.theme).then(
+    const isCurrent = () =>
+      !this.disposed &&
+      generation === this.generation &&
+      this.active === request &&
+      !this.pending.has(request.blockId);
+    void this.render(request.source, renderId, request.theme, isCurrent).then(
       (svg) => this.finish(request, generation, { type: "valet-artifact:mermaid-result", id: blockId, svg }),
       () => this.finish(request, generation, { type: "valet-artifact:mermaid-result", id: blockId, error: true }),
     );
@@ -144,10 +165,19 @@ export class ArtifactMermaidCoordinator {
       generation === this.generation &&
       !this.pending.has(request.blockId)
     ) {
-      this.completed.set(request.blockId, request);
+      this.rememberCompleted(request);
       this.postResult(result);
     }
     this.startNext();
+  }
+
+  private rememberCompleted(request: MermaidRequest): void {
+    this.completed.delete(request.blockId);
+    this.completed.set(request.blockId, request);
+    if (this.completed.size > MAX_COMPLETED_MERMAID_REQUESTS) {
+      const oldestBlockId = this.completed.keys().next().value;
+      if (oldestBlockId) this.completed.delete(oldestBlockId);
+    }
   }
 }
 
