@@ -502,7 +502,11 @@ export class Thread {
   private turnApiKey?: string;
   private readonly threadCreatedAt: number;
 
-  constructor(session: Session, data: ThreadData) {
+  private transcriptPending: boolean;
+  private transcriptLoad?: Promise<void>;
+
+  constructor(session: Session, data: ThreadData, opts: { restoreTranscript?: boolean } = {}) {
+    this.transcriptPending = opts.restoreTranscript ?? false;
     this.session = session;
     this.id = data.id;
     this.key = data.key;
@@ -1811,6 +1815,25 @@ export class Thread {
     }
   }
 
+  /** Load restored history only when this thread needs an agent transcript. */
+  private async ensureTranscript(): Promise<void> {
+    if (!this.transcriptPending) return;
+    if (!this.transcriptLoad) {
+      this.transcriptLoad = withSpan(
+        "thread.hydrate",
+        { "valet.session.id": this.session.id, "valet.thread.id": this.id },
+        async (span) => {
+          const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
+          span.setAttribute("valet.thread.entries_loaded", entries.length);
+          this.rehydrateTranscript(entries);
+        },
+      ).finally(() => {
+        this.transcriptLoad = undefined;
+      });
+    }
+    await this.transcriptLoad;
+  }
+
   /**
    * Reconstruct the agent transcript from persisted DAG entries.
    *
@@ -1833,6 +1856,7 @@ export class Thread {
     // trailing CompactionEntry needs no special case — the estimate already
     // reflects it.
     this.rehydratedCheckPending = this.agent.state.messages.length > 0;
+    this.transcriptPending = false;
   }
 
   /**
@@ -2957,6 +2981,8 @@ export class Thread {
     suspended: SuspendedTurnState,
     mode: "rearm" | "replay",
   ): Promise<void> {
+    // Load before taking ownership so a store failure cannot strand a retained gate claim.
+    await this.ensureTranscript();
     const store = this.session.providers.store;
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
@@ -3141,6 +3167,7 @@ export class Thread {
         },
         { attributeAuthors: this.attributeAuthors, threadKey: this.key },
       );
+      this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
       // Host resolver (if any) delivers this resumed turn's per-turn key before
@@ -3421,6 +3448,7 @@ export class Thread {
    * nest automatically through the host's context manager.
    */
   private async runItem(item: QueueItem): Promise<void> {
+    await this.ensureTranscript();
     return this.inSubmissionContext(() =>
       withSpan(
         "agent.turn",
@@ -4001,6 +4029,7 @@ export class Thread {
   }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return "noop";
+    await this.ensureTranscript();
     return withSpan(
       "compaction",
       {

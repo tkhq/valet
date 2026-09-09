@@ -1046,7 +1046,14 @@ The engine's `convertToLlm` pipeline (the function fed to pi-agent-core's `Agent
 5. Apply pruning's elision: any kept entry's tool-call parts with `elided === true` get a placeholder `[output elided to save context]` in the LLM-visible content; the stored result stays in the DAG.
 6. Yield the resulting `Message[]` to the agent loop.
 
-This is also the rehydration path on `restoreSession` — there is no separate "rebuild context after compaction" code path.
+Restored threads use the same transcript conversion as compaction. `restoreSession` restores thread metadata without reading idle thread entries.
+
+A restored thread loads its transcript before its first prompt, gate recovery, or compaction. Gate recovery loads before acquiring the retained claim. Concurrent loads share one promise. Failed loads remain retryable.
+Startup reconciliation can read entries for unsettled submissions and resume their threads. Interrupted-turn recovery rebuilds the transcript after repairing persisted entries.
+Metadata requests, including `/threads` and `/commands`, do not load idle transcripts. REST message history keeps its existing pagination.
+The `thread.hydrate` span records `valet.thread.entries_loaded` with session and thread identifiers.
+PostgreSQL entry reads emit `store.entries.read` with `valet.entries.loaded` and `valet.entries.parts_bytes` before parsing returned parts. Byte counts use stored UTF-8 JSON without serializing hydrated objects.
+Active threads still load full history and retain their transcript. This change does not establish a per-thread byte ceiling or a cache memory budget.
 
 #### Auto-continue after compaction
 

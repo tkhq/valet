@@ -512,10 +512,8 @@ export class Session {
     }
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
-      const thread = new Thread(session, td);
+      const thread = new Thread(session, td, { restoreTranscript: true });
       session.attachThread(thread);
-      const entries = await providers.store.getEntries(data.id, td.id);
-      thread.rehydrateTranscript(entries);
     }
     // Startup reconciliation (Task 5): every unsettled submission passes through
     // the normative decision tree. Awaited so callers can rely on gate re-arming

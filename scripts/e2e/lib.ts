@@ -91,6 +91,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/orchestrator-info.test.ts",
   "src/integration/team-dashboard.test.ts",
   "src/integration/thread-archive.test.ts",
+  "src/integration/lazy-session-history.test.ts",
   "src/integration/thread-rename.test.ts",
   "src/integration/thread-create-settings.test.ts",
   "src/integration/child-dismiss.test.ts",
