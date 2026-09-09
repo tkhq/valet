@@ -11,9 +11,8 @@ import type { GetSlackAppResponse } from "@valet/api/wire";
 
 const saveCredentialMutateAsync = vi.fn();
 const deleteAppMutate = vi.fn();
-// A real React Query `reset()` drops the mutation's error. The double has to
-// do the same, or a dialog that opens on a stale error still looks clean here
-// and the bug ships green.
+// Clears like the real `reset()`, or a dialog that opens on a stale error
+// still looks clean here and the bug ships green.
 const deleteAppReset = vi.fn(() => {
   deleteAppError = null;
 });
@@ -106,9 +105,8 @@ describe("SlackAppSection", () => {
     saveCredentialError = null;
     deleteAppError = null;
     lastRequestedName = undefined;
-    // The disconnect must never reach `window.confirm`: browser automation
-    // auto-accepts it, so a native confirm is no confirmation at all. A spy
-    // that answers "yes" makes a reintroduced call visible here.
+    // Browser automation auto-accepts `window.confirm`, so a native confirm is
+    // no confirmation at all. Answering "yes" makes a reintroduced call visible.
     nativeConfirm = vi.fn(() => true);
     vi.stubGlobal("confirm", nativeConfirm);
   });
@@ -273,13 +271,12 @@ describe("SlackAppSection", () => {
     render(<SlackAppSection />);
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-    // Two "Disconnect" buttons are on screen now — the card's and the
-    // dialog's. The dialog owns the one inside the confirm.
+    // Two "Disconnect" buttons are on screen now: the card's and the dialog's.
     const dialog = screen.getByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
 
     expect(deleteAppMutate).toHaveBeenCalledTimes(1);
-    // The old code called `mutate()` with no variables; keep that call shape.
+    // The pre-dialog code called `mutate()` with no variables. Same shape.
     expect(deleteAppMutate.mock.calls[0]?.[0]).toBeUndefined();
   });
 
@@ -303,9 +300,9 @@ describe("SlackAppSection", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
     expect(deleteAppMutate).toHaveBeenCalledTimes(1);
 
-    // Production reaches this error one way only: the mutation the operator
-    // just confirmed rejects while the dialog is still open. Setting the error
-    // before the open would exercise the stale-error path instead.
+    // Production order: the mutation the operator just confirmed rejects while
+    // the dialog is open. Setting the error before the open would exercise the
+    // stale-error path instead.
     deleteAppError = new Error("Slack rejected the request");
     rerender(<SlackAppSection />);
 
@@ -314,9 +311,9 @@ describe("SlackAppSection", () => {
 
   it("connected: reopening after a refusal starts with no error", () => {
     slackAppData = slackAppResponse({ connected: true, teamName: "Acme" });
-    // The refusal from the previous attempt is still on the mutation: React
-    // Query holds `error` until the next mutate. The Disconnect button clears
-    // it as it opens the dialog, so the second attempt starts clean.
+    // React Query holds `error` until the next mutate, so the previous
+    // attempt's refusal is still on it. The Disconnect button clears it as it
+    // opens the dialog.
     deleteAppError = new Error("Slack rejected the request");
     render(<SlackAppSection />);
 

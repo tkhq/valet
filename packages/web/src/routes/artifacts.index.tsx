@@ -71,9 +71,6 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
   // shared mutation would disable and error every row in the list for one
   // revoke, instead of just the row the caller acted on.
   const revoke = useRevokeArtifact();
-  // Per-row for the same reason: one boolean shared by the list would open
-  // every row's dialog at once, and the open dialog must name the row the
-  // caller clicked.
   const [confirmRevoke, setConfirmRevoke] = useState(false);
 
   return (
@@ -114,10 +111,9 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
             type="button"
             disabled={revoke.isPending}
             onClick={() => {
-              // Clear the previous attempt's refusal as the dialog opens. React
-            // Query holds `error` until the next mutate, and Radix never calls
-            // `onOpenChange(true)` for a controlled dialog with no trigger, so
-            // the clear belongs here, on the only thing that opens it.
+              // React Query holds `error` until the next mutate, and Radix
+              // never calls `onOpenChange(true)` for a controlled dialog with
+              // no trigger, so the previous refusal is cleared here instead.
               revoke.reset();
               setConfirmRevoke(true);
             }}
@@ -131,16 +127,13 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
           stays open so the caller reads the reason beside the button that
           produced it; the row keeps the message after the dialog is
           dismissed, because a link the caller believes is revoked and is
-          not is a disclosure they must still be able to see. `errorText`
-          supplies the corrective half for a bare network failure. */}
+          not is a disclosure they must still be able to see. */}
       {revoke.error != null && !confirmRevoke && (
         <p className="mt-1 text-xs text-danger-500">{errorText(revoke.error)}</p>
       )}
       <ConfirmDialog
         open={confirmRevoke}
-        onOpenChange={(open) => {
-          setConfirmRevoke(open);
-        }}
+        onOpenChange={setConfirmRevoke}
         title={`Revoke the link to ${artifact.title}?`}
         description="Anyone who opens the link gets a 404, and the page leaves this gallery. Publish it again to get a new link."
         confirmLabel="Revoke"

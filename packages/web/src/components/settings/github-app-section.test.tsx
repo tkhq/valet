@@ -13,14 +13,13 @@ const createManifestMutateAsync = vi.fn();
 const saveCredentialMutateAsync = vi.fn();
 const refreshMutate = vi.fn();
 const deleteAppMutate = vi.fn();
-/** A real React Query `reset()` clears the mutation's error. A stub that only
- * records the call cannot tell a working clear from a dead one, so this one
- * clears the variable that feeds the mock's `error`. */
+/** Clears like the real `reset()`: a stub that only records the call cannot
+ * tell a working clear from a dead one. */
 const deleteAppReset = vi.fn(() => {
   deleteAppError = null;
 });
-/** The dialog this section replaced `window.confirm` with must never fall
- * back to it: browser automation auto-accepts the native one. */
+/** Browser automation auto-accepts `window.confirm`, so the section must
+ * never fall back to it. */
 const confirmSpy = vi.fn(() => true);
 
 let githubAppData: GetGithubAppResponse | undefined;
@@ -404,12 +403,8 @@ describe("GithubAppSection", () => {
   });
 
   // ── Removing the App: the confirm step ────────────────────────────────
-  //
-  // `window.confirm` used to guard this. Browser automation auto-accepts the
-  // native dialog, so for any scripted client that guard was not a guard at
-  // all. These tests pin the replacement: the click only opens, the confirm
-  // button is what deletes, dismissing deletes nothing, and a reopened dialog
-  // carries no refusal from the attempt before it.
+  // `window.confirm` guarded this before, and browser automation auto-accepts
+  // the native dialog, so for a scripted client it was not a guard at all.
 
   const CONFIGURED: GetGithubAppResponse = {
     configured: true,
@@ -440,10 +435,9 @@ describe("GithubAppSection", () => {
 
     const dialog = within(screen.getByRole("dialog"));
     expect(dialog.getByText("Remove the GitHub App?")).toBeTruthy();
-    // The description says what is lost and how to get back.
+    // What is lost, and the way back.
     expect(dialog.getByText(/lose that access|lose access/i)).toBeTruthy();
     expect(dialog.getByText(/App ID and private key/)).toBeTruthy();
-    // Nothing has been deleted, and the native dialog is not involved.
     expect(deleteAppMutate).not.toHaveBeenCalled();
     expect(confirmSpy).not.toHaveBeenCalled();
   });
@@ -456,7 +450,7 @@ describe("GithubAppSection", () => {
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove App" }));
 
     expect(deleteAppMutate).toHaveBeenCalledTimes(1);
-    // Same call the pre-dialog code made: `deleteApp.mutate()`.
+    // The call the pre-dialog code made: `deleteApp.mutate()`.
     expect(deleteAppMutate.mock.calls[0][0]).toBeUndefined();
   });
 
@@ -479,9 +473,8 @@ describe("GithubAppSection", () => {
     githubAppData = CONFIGURED;
     const { rerender } = render(<GithubAppSection />);
 
-    // Produce the refusal the way production does: the error only exists once
-    // this attempt has been confirmed. Setting it before the dialog opens
-    // would assert the stale-error path the section now clears.
+    // Production order: the error exists only once this attempt is confirmed.
+    // Setting it before the open would assert the stale-error path instead.
     clickRemoveInCard();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove App" }));
     deleteAppError = REFUSAL;
@@ -496,7 +489,6 @@ describe("GithubAppSection", () => {
     githubAppData = CONFIGURED;
     const { rerender } = render(<GithubAppSection />);
 
-    // First attempt, refused.
     clickRemoveInCard();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove App" }));
     deleteAppError = REFUSAL;
@@ -504,8 +496,8 @@ describe("GithubAppSection", () => {
     expect(within(screen.getByRole("dialog")).getByText(/Only an org admin/)).toBeTruthy();
 
     // React Query holds that error until the next mutate, so the control that
-    // opens the dialog has to clear it. Otherwise the second attempt opens
-    // already showing a refusal the user has not earned yet.
+    // opens the dialog has to clear it, or the second attempt opens already
+    // showing a refusal the user has not earned.
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     clickRemoveInCard();
 

@@ -639,10 +639,7 @@ function ConfiguredCard({
             size="sm"
             disabled={deleteApp.isPending}
             onClick={() => {
-              // Clear the previous attempt's refusal as the dialog opens. React
-            // Query holds `error` until the next mutate, and Radix never calls
-            // `onOpenChange(true)` for a controlled dialog with no trigger, so
-            // the clear belongs here, on the only thing that opens it.
+              // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
               deleteApp.reset();
               setConfirmRemove(true);
             }}
@@ -652,15 +649,13 @@ function ConfiguredCard({
         </div>
       </div>
 
-      {/* The server only drops this org's credential row and its installation
-          rows; the App itself stays on GitHub. So the way back is the
-          "I already have a GitHub App" path, which the section renders again
-          as soon as the credential is gone. */}
+      {/* The server drops only this org's credential and installation rows;
+          the App itself stays on GitHub. That is why the description promises
+          a way back: the "I already have a GitHub App" path reappears as soon
+          as the credential is gone. */}
       <ConfirmDialog
         open={confirmRemove}
-        onOpenChange={(open) => {
-          setConfirmRemove(open);
-        }}
+        onOpenChange={setConfirmRemove}
         title="Remove the GitHub App?"
         description="Sessions using it for repo access lose that access. The App stays on GitHub, so you can connect it again with its App ID and private key."
         confirmLabel="Remove App"

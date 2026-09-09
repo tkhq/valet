@@ -1,10 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Integrations · identity-link block. The unlink control is destructive: it
- * deletes the pairing between the provider account and the Valet account.
- * These tests pin the confirm step to a real dialog, not `window.confirm`,
- * which browser automation auto-accepts — so the first assertion is that a
- * click alone fires nothing.
+ * Unlinking deletes the pairing between the provider account and the Valet
+ * account, so the confirm step has to be a real dialog: browser automation
+ * auto-accepts `window.confirm`.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -14,9 +12,8 @@ import { ApiError } from "~/api/client";
 const unlinkMutate = vi.fn();
 let unlinkPending = false;
 let unlinkError: Error | null = null;
-// A real React Query `reset()` clears the mutation's error. A bare `vi.fn()`
-// double keeps the error alive forever, which hides every stale-error bug in
-// the dialog this file covers.
+// Clears like the real `reset()`: a bare `vi.fn()` keeps the error alive
+// forever, which would hide every stale-error bug this file covers.
 const unlinkReset = vi.fn(() => {
   unlinkError = null;
 });
@@ -82,8 +79,8 @@ describe("IdentityLinkBlock unlink", () => {
 
   it("shows the server error in the dialog instead of swallowing it", () => {
     const { rerender } = render(<IdentityLinkBlock link={LINKED} title="Slack" />);
-    // Reach the error the way production does: the dialog opens clean, the user
-    // confirms, and the refusal lands on the dialog that is already open.
+    // Production order: the dialog opens clean, the user confirms, and the
+    // refusal lands on the dialog that is already open.
     fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
     fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
     unlinkError = new ApiError(500, "Slack is unreachable. Try again in a minute.");
@@ -97,6 +94,8 @@ describe("IdentityLinkBlock unlink", () => {
     fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
     unlinkError = new ApiError(500, "Slack is unreachable. Try again in a minute.");
     rerender(<IdentityLinkBlock link={LINKED} title="Slack" />);
+    // Without this the "gone after reopen" assertion below could pass on an
+    // error that never rendered at all.
     expect(screen.getByText("Slack is unreachable. Try again in a minute.")).toBeTruthy();
 
     // React Query holds the error until the next mutate, so the second visit

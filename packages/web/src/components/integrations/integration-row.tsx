@@ -285,19 +285,13 @@ function ServiceBlock({
     </Button>
   );
 
-  // Disconnect asks first, in a dialog and not in `window.confirm`: the
-  // native prompt carries no pending state, drops the server's error, and any
-  // scripted client accepts it without a person reading it.
   const disconnectControl = (
     <Button
       variant="ghost"
       size="sm"
       aria-label={`Disconnect ${title}`}
       onClick={() => {
-        // Clear the previous attempt's refusal as the dialog opens. React
-      // Query holds `error` until the next mutate, and Radix never calls
-      // `onOpenChange(true)` for a controlled dialog with no trigger, so
-      // the clear belongs here, on the only thing that opens it.
+        // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
         disconnect.reset();
         setDisconnecting(true);
       }}
@@ -403,14 +397,12 @@ function ServiceBlock({
         open={connecting}
         onOpenChange={setConnecting}
       />
-      {/* The description states what the request really does: it deletes the
-          stored credential, and the API revokes every team delegation that
-          rode on it (DELETE /api/credentials/:service). */}
+      {/* The description names the team shares too: DELETE
+          /api/credentials/:service revokes every delegation that rode on the
+          credential, which the button alone does not suggest. */}
       <ConfirmDialog
         open={disconnecting}
-        onOpenChange={(open) => {
-          setDisconnecting(open);
-        }}
+        onOpenChange={setDisconnecting}
         title={`Disconnect ${title}?`}
         description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
         confirmLabel="Disconnect"

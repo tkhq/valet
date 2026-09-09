@@ -335,10 +335,8 @@ function TeamRow({
               <DropdownMenuItem
                 className="text-danger-500"
                 onSelect={() => {
-                  // Clear the previous attempt's refusal as the dialog
-                  // opens: React Query holds `error` until the next mutate,
-                  // so a delete refused for a running workflow would greet
-                  // the next open before anything is confirmed.
+                  // React Query holds `error` until the next mutate, so
+                  // without this the last refusal greets the next open.
                   deleteTeam.reset();
                   setConfirmDelete(true);
                 }}
@@ -380,18 +378,14 @@ function TeamRow({
 }
 
 /**
- * The row's control, named for what the server does to it. One route serves
- * both rows (`DELETE /api/credentials/:service?scope=team`), but it costs
- * two different things.
- *
- * A delegated row is a secretless reference that follows a member's live
- * credential, so dropping it cuts the team's link and leaves that member
- * connected. That is the same effect as the Integrations share menu's own
- * control (`DELETE /api/credentials/:service/delegations/:teamId`), and both
- * surfaces call it "Stop sharing". A direct row holds the team's own secret
- * and dropping it deletes that secret, which is a disconnect. Calling both
- * "Disconnect" read as though it would take a member's personal connection
- * away with it.
+ * The verb for a removal control. One route serves both rows
+ * (`DELETE /api/credentials/:service?scope=team`), but they cost different
+ * things. A delegated row is a secretless reference that follows a member's
+ * live credential, so dropping it cuts the team's link and leaves that member
+ * connected, which is what the Integrations share menu already calls "Stop
+ * sharing". A direct row holds the team's own secret, and dropping it deletes
+ * that secret. Calling both "Disconnect" read as though it would take a
+ * member's personal connection away with it.
  */
 function removalLabels(
   row: CredentialSummary,
@@ -418,16 +412,13 @@ function TeamCredentials({
 }) {
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
-  // One row at a time, held in state, so the list renders ONE dialog. A
-  // single boolean would open the same dialog for every row and remove
-  // whichever service the last click happened to leave in scope.
+  // One row at a time, so the list renders ONE dialog. A single boolean would
+  // open it for every row and remove whichever service was last in scope.
   const [removing, setRemoving] = useState<CredentialSummary | null>(null);
   const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
   const rows = credsQ.data?.credentials ?? [];
+  const dialogLabels = removing ? removalLabels(removing, team.name) : null;
 
-  // A direct row and a delegated row cost different things. Deleting the
-  // direct row destroys the team's own credential; dropping a delegated row
-  // only cuts the team's link to a member who still holds theirs.
   function removalNote(row: CredentialSummary): string {
     const loss = `Sessions and workflows that run as ${team.name} lose access to ${row.service}.`;
     return row.delegatedFrom
@@ -449,60 +440,59 @@ function TeamCredentials({
         {rows.map((row) => {
           const removal = removalLabels(row, team.name);
           return (
-          <li key={row.service} className="flex items-center justify-between gap-2 py-1">
-            <div className="min-w-0">
-              <p className="truncate text-sm text-ink">{row.service}</p>
-              <p className="text-xs text-muted">
-                {row.delegatedFrom
-                  ? `Shared by ${nameFor(row.delegatedFrom)}`
-                  : "Stored on the team"}
-                {row.referenceBroken ? " · broken" : ""}
-              </p>
-              {row.referenceBroken && (
-                <p className="text-xs text-danger-500">
-                  The source credential is gone or the member left. Re-share it, or store a
-                  direct team credential.
+            <li key={row.service} className="flex items-center justify-between gap-2 py-1">
+              <div className="min-w-0">
+                <p className="truncate text-sm text-ink">{row.service}</p>
+                <p className="text-xs text-muted">
+                  {row.delegatedFrom
+                    ? `Shared by ${nameFor(row.delegatedFrom)}`
+                    : "Stored on the team"}
+                  {row.referenceBroken ? " · broken" : ""}
                 </p>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
-              {canMutate && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={disconnect.isPending}
-                  aria-label={`${removal.action} ${removal.target}`}
-                  onClick={() => {
-                    // Clear the previous attempt's refusal as the dialog
-                    // opens: React Query holds `error` until the next mutate.
-                    disconnect.reset();
-                    setRemoving(row);
-                  }}
-                >
-                  {removal.action}
-                </Button>
-              )}
-            </div>
-          </li>
+                {row.referenceBroken && (
+                  <p className="text-xs text-danger-500">
+                    The source credential is gone or the member left. Re-share it, or store a
+                    direct team credential.
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
+                {canMutate && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={disconnect.isPending}
+                    aria-label={`${removal.action} ${removal.target}`}
+                    onClick={() => {
+                      // Clear the previous attempt's refusal as the dialog
+                      // opens: React Query holds `error` until the next mutate.
+                      disconnect.reset();
+                      setRemoving(row);
+                    }}
+                  >
+                    {removal.action}
+                  </Button>
+                )}
+              </div>
+            </li>
           );
         })}
       </ul>
 
-      {removing && (
+      {removing && dialogLabels && (
         <ConfirmDialog
           open
           onOpenChange={(next) => {
             if (!next) setRemoving(null);
           }}
-          title={`${removalLabels(removing, team.name).action} ${removalLabels(removing, team.name).target}?`}
+          title={`${dialogLabels.action} ${dialogLabels.target}?`}
           description={removalNote(removing)}
-          confirmLabel={removalLabels(removing, team.name).action}
-          pendingLabel={removalLabels(removing, team.name).pending}
+          confirmLabel={dialogLabels.action}
+          pendingLabel={dialogLabels.pending}
           pending={disconnect.isPending}
-          // One mutation serves every row, so a failure belongs to the row
-          // it was fired for. Without the guard, opening a second row's
-          // dialog shows the first row's refusal before anything is clicked.
+          // One mutation serves every row, so opening a second row's dialog
+          // would otherwise show the first row's refusal before any click.
           error={
             disconnect.error != null && disconnect.variables?.service === removing.service
               ? errorText(disconnect.error)

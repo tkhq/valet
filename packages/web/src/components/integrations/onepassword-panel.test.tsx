@@ -15,11 +15,9 @@ const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const connectMutate = vi.fn();
 const disconnectMutate = vi.fn();
 let disconnectError: Error | null = null;
-// React Query holds `mutation.error` until the next mutate, so a dialog that
-// does not clear it opens showing the PREVIOUS attempt's refusal. A real
-// `reset()` clears the error; a stub that only counts calls cannot tell a
-// component that clears from one that does not, and the whole suite stays
-// green over the bug. Clear the variable the mock's `error` reads.
+// Clears like the real `reset()`: a stub that only counts calls cannot tell a
+// component that drops the refusal from one that does not, and the whole suite
+// would stay green over the bug.
 const disconnectReset = vi.fn(() => {
   disconnectError = null;
 });
@@ -65,10 +63,8 @@ describe("OnePasswordPanel", () => {
     orgData = { callerRole: "admin" };
     settingsData = { allowPersonal: false, orgTokenConnected: false, personalTokenConnected: false };
     disconnectError = null;
-    // Removal used to sit behind `window.confirm`, which browser automation
-    // accepts on its own — no confirmation at all for a scripted client.
-    // The stub returns true so a regression here fires the mutation and
-    // fails the "opens the dialog" tests loudly instead of hanging.
+    // Answers "yes" so a reintroduced `window.confirm` fires the mutation and
+    // fails the dialog tests loudly instead of hanging.
     confirmSpy = vi.fn(() => true);
     vi.stubGlobal("confirm", confirmSpy);
   });
@@ -196,11 +192,11 @@ describe("OnePasswordPanel", () => {
     );
   });
   // ── Removing a token ──────────────────────────────────────────────────
-  // Both rows guarded the disconnect call with `window.confirm`: unstyled,
-  // and auto-accepted by browser automation, so a scripted client had no
-  // confirmation step at all. The dialog is the real gate — the row button
-  // only opens it, and nothing leaves the client until the danger button
-  // inside it is pressed.
+  // Both rows guarded the disconnect with `window.confirm`, which browser
+  // automation auto-accepts. The dialog is the real gate: the row button only
+  // opens it. The org row carries the full cycle below; the personal row is a
+  // separate control with its own state, so it keeps the two cases that differ
+  // from the org row's (the arguments it sends, and its own clear).
 
   /** Admin, org token connected, personal row hidden: one Remove button. */
   function renderConnectedOrgToken() {
@@ -255,11 +251,9 @@ describe("OnePasswordPanel", () => {
     expect(screen.getByText("Connected")).toBeTruthy();
   });
 
-  // `confirm()` could not show why a removal failed; the dialog can. The
-  // refusal is set AFTER the confirm click, which is the only order
-  // production produces: the server cannot answer a request the user has
-  // not sent yet. Setting it before the dialog opens would assert the
-  // stale-error path instead, which is the bug the next test guards.
+  // The refusal is set AFTER the confirm click: the server cannot answer a
+  // request the user has not sent. Setting it before the open would assert the
+  // stale-error path instead, which is the next test.
   it("org token: the dialog shows the server's reason for a failed removal", async () => {
     const { rerender } = renderConnectedOrgToken();
     fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
@@ -273,11 +267,9 @@ describe("OnePasswordPanel", () => {
     expect(within(dialog).getByText(ORG_REFUSAL)).toBeTruthy();
   });
 
-  // The refusal belongs to the attempt that produced it. React Query holds
-  // it until the next mutate, so the opening control clears it — otherwise
-  // the dialog opens already accusing the user of a failure they have not
-  // repeated. Radix never calls `onOpenChange(true)` on these controlled,
-  // trigger-less dialogs, so a clear placed there never runs at all.
+  // React Query holds the refusal until the next mutate, so the opening
+  // control clears it. Radix fires no `onOpenChange(true)` on these
+  // controlled, trigger-less dialogs, so a clear placed there never runs.
   it("org token: reopening after a refusal starts with no error", async () => {
     disconnectError = refusal(403, ORG_REFUSAL);
     renderConnectedOrgToken();
@@ -286,16 +278,6 @@ describe("OnePasswordPanel", () => {
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Remove the organization 1Password token?")).toBeTruthy();
     expect(within(dialog).queryByText(ORG_REFUSAL)).toBeNull();
-  });
-
-  it("personal token: Remove opens the confirm dialog and disconnects nothing", async () => {
-    renderConnectedPersonalToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Remove your personal 1Password token?")).toBeTruthy();
-    expect(disconnectMutate).not.toHaveBeenCalled();
-    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   it("personal token: confirming disconnects with no scope field", async () => {
@@ -312,8 +294,8 @@ describe("OnePasswordPanel", () => {
   });
 
   // The personal row carries its own copy of the clear, on its own Remove
-  // control. Covering only the org row above would let a regression ship in
-  // half the panel with the suite still green.
+  // control, so covering only the org row would let a regression ship in half
+  // the panel with the suite green.
   it("personal token: reopening after a refusal starts with no error", async () => {
     disconnectError = refusal(503, PERSONAL_REFUSAL);
     renderConnectedPersonalToken();
@@ -322,16 +304,8 @@ describe("OnePasswordPanel", () => {
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Remove your personal 1Password token?")).toBeTruthy();
     expect(within(dialog).queryByText(PERSONAL_REFUSAL)).toBeNull();
-  });
-
-  it("personal token: cancelling the dialog disconnects nothing", async () => {
-    renderConnectedPersonalToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The open alone sends nothing, and never reaches `window.confirm`.
     expect(disconnectMutate).not.toHaveBeenCalled();
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 });

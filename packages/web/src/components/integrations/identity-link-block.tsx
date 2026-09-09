@@ -215,9 +215,9 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
   }, [expiresInSeconds, delivery, pendingLink]);
 
   if (link.linked) {
-    // Unlinking deletes the pairing row: inbound messages from that account
-    // no longer resolve to this user, and attention pings on the provider
-    // stop with it. Say both, and say how to get back.
+    // Deleting the pairing row costs two things a person would not guess from
+    // "Unlink": inbound messages stop resolving to this user, and attention
+    // pings on the provider stop with them.
     const unlinkDescription =
       `Messages from this ${title} account stop reaching your assistant, and it stops ` +
       `pinging you there when a session needs you. To undo this, link the account ` +
@@ -233,10 +233,7 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
           aria-label={`Unlink ${title}`}
           disabled={unlink.isPending}
           onClick={() => {
-            // Clear the previous attempt's refusal as the dialog opens. React
-          // Query holds `error` until the next mutate, and Radix never calls
-          // `onOpenChange(true)` for a controlled dialog with no trigger, so
-          // the clear belongs here, on the only thing that opens it.
+            // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
             unlink.reset();
             setConfirmUnlink(true);
           }}
@@ -245,9 +242,7 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
         </Button>
         <ConfirmDialog
           open={confirmUnlink}
-          onOpenChange={(open) => {
-            setConfirmUnlink(open);
-          }}
+          onOpenChange={setConfirmUnlink}
           title={`Unlink ${title}?`}
           description={unlinkDescription}
           confirmLabel="Unlink"

@@ -5,12 +5,11 @@
  * is no owner dropdown. The switcher is not this page's owner.
  *
  * "Every team the caller is on" is a filter, not a description of the
- * response. `GET /api/teams` gives an org admin every team in the org
+ * response: `GET /api/teams` gives an org admin every team in the org
  * (`callerRole: null` on the ones they are not on), while
- * `POST /api/credentials/:service/delegate` calls `isTeamMember` and
- * answers 404 for those same teams. An unfiltered list therefore offered
- * an admin rows that could only fail, so the rows are filtered and a note
- * says where to join a team instead.
+ * `POST /api/credentials/:service/delegate` calls `isTeamMember` and answers
+ * 404 for those same teams. Unfiltered, the list offered an admin rows that
+ * could only fail.
  */
 import { useState } from "react";
 import type { TeamSummary } from "@valet/api/wire";
@@ -112,15 +111,13 @@ function TeamShareRow({
         {err && <p className="text-xs text-danger-500">{shareError(err, title)}</p>}
       </div>
       {mine ? (
-        // The team row carries no secret, so this drops the team's link and
+        // "Stop sharing", not "Disconnect": this drops the team's link and
         // leaves the caller connected. `settings/teams-panel.tsx` names the
-        // same action the same way for a delegated row.
+        // same action the same way.
         //
         // `mutate`, not `mutateAsync`: the row reads the failure off
-        // `revoke.error` above and needs nothing from the promise.
-        // `mutateAsync` rejects, and a dropped rejection reaches
-        // `window.onunhandledrejection`, which reports the same failure a
-        // second time.
+        // `revoke.error` above, and a `void mutateAsync(...)` rejection
+        // reaches `window.onunhandledrejection`, reporting it a second time.
         <Button
           size="sm"
           variant="ghost"

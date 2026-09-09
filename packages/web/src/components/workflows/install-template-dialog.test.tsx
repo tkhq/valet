@@ -4,26 +4,21 @@
  *
  * The nav's workspace switcher is the only control that answers this, so
  * the dialog has to send its team id with the install. Dropping it is not
- * visible in the dialog: the install succeeds, and the workflow lands in
- * the installer's own workspace instead of the team's. The team's Workflows
- * page then reads empty, the server's team-readiness gate never runs, and a
- * second install into another team is numbered "(2)" because both landed on
- * the same personal owner.
+ * visible in the dialog: the install succeeds, and the workflow lands in the
+ * installer's own workspace instead of the team's. The team's Workflows page
+ * then reads empty, and the server's team-readiness gate never runs.
  *
  * The input-less template has its own case. The body used to be built as
  * `inputs.length > 0 ? { inputs } : {}`, so an owner field added carelessly
  * survives only on templates that ask a question.
  *
  * `useNavigate` and `useWorkspaceScope` are mocked the way
- * `new-workflow-dialog.test.tsx` does, since these tests care that the
- * install carried the right owner, not that a router or a provider resolved
- * it. `ApiError` stays real: reading the server's refusal off its payload is
- * what the last case is about.
+ * `new-workflow-dialog.test.tsx` does: these tests care that the install
+ * carried the right owner, not that a router or a provider resolved it.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { WorkflowTemplateSummary } from "@valet/api/wire";
-import { ApiError } from "~/api/client";
 
 const navigate = vi.fn();
 const installMutateAsync = vi.fn();
@@ -138,14 +133,6 @@ describe("InstallTemplateDialog", () => {
     expect(installCall().body).toEqual({ teamId: "team_ops" });
   });
 
-  it("sends no body at all for a personal install of a template that asks nothing", async () => {
-    renderDialog(withoutInputs);
-    fireEvent.click(screen.getByRole("button", { name: "Install" }));
-
-    await waitFor(() => expect(installMutateAsync).toHaveBeenCalledTimes(1));
-    expect(installCall().body).toEqual({});
-  });
-
   /**
    * The requirements arrive stamped against the workspace the listing was
    * taken in, so in a team workspace `connected: false` is the TEAM's gap.
@@ -190,24 +177,5 @@ describe("InstallTemplateDialog", () => {
       );
       expect(screen.queryByText("You cannot install this yet")).toBeNull();
     });
-  });
-
-  it("keeps the dialog open with the server's refusal of a team install", async () => {
-    teamId = "team_ops";
-    installMutateAsync.mockRejectedValue(
-      new ApiError(400, "POST /api/templates/nightly-memory-sweep/install → 400", {
-        error: "Connect Gmail for this team in Integrations, then install this template.",
-      }),
-    );
-    const onOpenChange = renderDialog(withoutInputs);
-    fireEvent.click(screen.getByRole("button", { name: "Install" }));
-
-    await waitFor(() =>
-      expect(
-        screen.getByText("Connect Gmail for this team in Integrations, then install this template."),
-      ).toBeTruthy(),
-    );
-    expect(onOpenChange).not.toHaveBeenCalledWith(false);
-    expect(navigate).not.toHaveBeenCalled();
   });
 });

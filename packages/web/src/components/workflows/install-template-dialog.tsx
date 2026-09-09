@@ -4,29 +4,17 @@
  * The card sells the outcome; this dialog shows the mechanism before the
  * user commits — the steps in order, the cadence it arms, the limits it
  * carries, and the fields it needs. Install publishes a normal workflow and
- * lands the user on it, so the first thing they see after installing is the
- * thing they installed, not a list they have to search.
+ * lands the user on it.
  *
- * The fields come from the server as resolved `inputs` (label, placeholder,
- * required), not as a raw trigger schema. A value typed here is BAKED: the
- * server writes it into the definition and drops the field from the trigger
- * schema, so the installed workflow never asks for it again. That is what a
- * scheduled template needs, because a scheduled run applies no schema
- * defaults and has no form to ask. For a manual template it is a choice,
- * and the note above the fields says so — an empty field stays on the run
- * form.
+ * A value typed here is BAKED: the server writes it into the definition and
+ * drops the field from the trigger schema, so the installed workflow never
+ * asks for it again. That is what a scheduled template needs, because a
+ * scheduled run applies no schema defaults and has no form to ask. For a
+ * manual template it is a choice, and the note above the fields says so.
  *
  * The dialog also opens for a template the caller cannot install, because
  * the steps and the limits live nowhere else. Install is refused here, with
  * the services to connect and who can connect them.
- *
- * `required` here means "required TO INSTALL", which only a scheduled
- * template has. Its runs arrive on a timer with no form to answer, so a
- * missing value has nowhere to come from and the server refuses the install
- * (`resolveInstallValues`). A template that runs when a person starts it
- * collects the same fields on the run form instead, so demanding them now
- * would only stop somebody installing a template to look at it and edit it.
- * That is the normal way to meet a template, so nothing is demanded here.
  *
  * The workflow belongs to the workspace the nav switcher names, so the
  * install carries that team id. Without it every install landed on the
@@ -34,16 +22,9 @@
  * the team, and the server's team-readiness check never ran, because that
  * check only applies to a team install.
  *
- * The same switcher decides whose gap a blocked requirement is. The
- * listing is taken in that workspace, so in a team workspace
- * `connected: false` is the TEAM's gap, and the refusal names the team's
- * connections rather than the reader's.
- *
  * A failed install keeps the dialog open with the server's message. The
  * install is one transaction server-side, so a failure leaves nothing
- * behind, and retrying after a correction is safe. A team install refused
- * for a credential the team does not have arrives on that same path, and
- * the server's message names the service to connect.
+ * behind and retrying after a correction is safe.
  */
 import { useId, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -59,7 +40,6 @@ import {
   isInstallable,
   missingNote,
   missingServices,
-  requirementScope,
   unconfiguredNote,
   unconfiguredServices,
 } from "./template-requirements";
@@ -103,11 +83,8 @@ function hasEmptyRequired(
   });
 }
 
-/**
- * How the values in this dialog reach a run, in one sentence the reader
- * meets BEFORE they type. Install writes every value it is given into the
- * definition itself, so a field answered here is answered once and for all.
- */
+/** How the values in this dialog reach a run, in one sentence the reader
+ * meets BEFORE they type. */
 function inputNote(scheduled: boolean): string {
   return scheduled
     ? "This workflow runs on a schedule. A scheduled run has no form to ask, so every required field has to be set now."
@@ -134,20 +111,11 @@ export function InstallTemplateDialog({
   // workflow created new or imported. An Owner select here would ask again
   // what the nav's workspace switcher has already answered.
   const scope = useWorkspaceScope();
-  // The listing this template came from was taken in the same workspace, so
-  // a requirement's `connected: false` is that workspace's gap. Naming the
-  // wrong principal sends the reader to connect a service they may already
-  // have, and the install still refuses.
-  const gapBelongsTo = requirementScope(scope.teamId);
   // `null`, not `undefined`: the wire always carries the field and uses
   // null for "arms no schedule" (`WorkflowTemplateSummary`).
   const scheduled = template.schedule !== null;
   const missing = missingServices(template.requires);
   const unconfigured = unconfiguredServices(template.requires);
-  // The gallery opens this dialog for a card it cannot install, so the
-  // reader can read the steps and the limits before they decide to connect
-  // a service. Install is refused here rather than on the card, and the
-  // refusal names what to do about it.
   const installable = isInstallable(template.requires);
 
   async function submit() {
@@ -220,9 +188,8 @@ export function InstallTemplateDialog({
         {template.inputs.length > 0 && (
           <div className="grid gap-3 border-t border-line pt-4">
             {/* Above the fields, because it changes what the reader types
-                into them. Install writes a value into the definition and
-                the run form stops asking for that field, so "leave it
-                empty" is a real choice and not an oversight. */}
+                into them: "leave it empty" is a real choice, not an
+                oversight. */}
             <p className="text-xs leading-relaxed text-muted">{inputNote(scheduled)}</p>
             {template.inputs.map((input) => (
               <TemplateField
@@ -244,15 +211,13 @@ export function InstallTemplateDialog({
           </div>
         )}
 
-        {/* The reason Install is refused, in the same place a failed
-            install reports its own reason. Each line names the corrective
-            action and who can take it. */}
+        {/* Each line names the corrective action and who can take it. */}
         {!installable && (
           <div className="grid gap-1 rounded border border-line bg-ink-wash px-3 py-2">
             <p className="text-xs font-medium text-ink">You cannot install this yet</p>
             {missing.length > 0 && (
               <p className="text-xs leading-relaxed text-muted">
-                {missingNote(missing, gapBelongsTo)}
+                {missingNote(missing, scope.teamId)}
               </p>
             )}
             {unconfigured.length > 0 && (

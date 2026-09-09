@@ -217,8 +217,8 @@ function GithubRow() {
   const installUrl =
     githubAppQ.data?.configured && githubAppQ.data.app ? githubAppQ.data.app.installUrl : undefined;
 
-  /** Starts the OAuth flow and redirects. Answers whether it started, so
-   * the replace dialog stays open with the reason when it did not. */
+  /** Answers whether the OAuth flow started, so the replace dialog can stay
+   * open carrying the reason when it did not. */
   async function connect(): Promise<boolean> {
     setConnectError(null);
     try {
@@ -257,12 +257,9 @@ function GithubRow() {
             disabled={connectGithub.isPending}
             onClick={() => {
               // Reconnecting over a repo-capable token overwrites it, so it
-              // asks first; a first connect has nothing to overwrite.
+              // asks first; a first connect has nothing to overwrite. And
+              // `connectError` outlives the dialog, so clear it here.
               if (repoCapable) {
-                // `connectError` outlives the dialog so the row below can
-                // carry it, so a dialog reopened after a refusal would
-                // present the OLD failure as this attempt's. Clear it here,
-                // the one path that opens the dialog.
                 setConnectError(null);
                 setConfirmReplace(true);
               } else void connect();
@@ -281,10 +278,9 @@ function GithubRow() {
               size="sm"
               disabled={disconnectGithub.isPending}
               onClick={() => {
-                // Clear the previous attempt's refusal as the dialog opens. React
-              // Query holds `error` until the next mutate, and Radix never calls
-              // `onOpenChange(true)` for a controlled dialog with no trigger, so
-              // the clear belongs here, on the only thing that opens it.
+                // React Query holds `error` until the next mutate, and Radix
+                // never calls `onOpenChange(true)` for a controlled dialog
+                // with no trigger, so the previous refusal is cleared here.
                 disconnectGithub.reset();
                 setConfirmDisconnect(true);
               }}
@@ -294,8 +290,8 @@ function GithubRow() {
           )}
         </div>
 
-        {/* While the replace dialog is open it carries the failure itself,
-            so the same text does not render twice. */}
+        {/* The open replace dialog carries the failure itself, so the same
+            text does not render twice. */}
         {connectError && !confirmReplace && (
           <p className="text-xs text-danger-500">{connectError}</p>
         )}
@@ -323,9 +319,7 @@ function GithubRow() {
         />
         <ConfirmDialog
           open={confirmDisconnect}
-          onOpenChange={(open) => {
-            setConfirmDisconnect(open);
-          }}
+          onOpenChange={setConfirmDisconnect}
           title="Disconnect GitHub?"
           description="Valet deletes your stored GitHub token, so the assistant can no longer clone or push to your repos. Teams you shared it with lose access too. Connect GitHub again to restore it."
           confirmLabel="Disconnect"
@@ -341,9 +335,8 @@ function GithubRow() {
   );
 }
 
-/** What revoking removes: the stored credential plus every team delegation
- * that rode it (`DELETE /api/credentials/:service`). A reference-backed row
- * stores only the `op://` reference, so the 1Password item itself stays. */
+/** A reference-backed row stores only the `op://` reference, so revoking it
+ * leaves the 1Password item itself in place. */
 function revokeDescription(cred: CredentialSummary): string {
   const removed = cred.onepasswordRef
     ? `Valet deletes its stored ${cred.service} reference. The item in 1Password is not deleted.`
@@ -360,7 +353,7 @@ function CredentialsListSection() {
   const credentialsQ = useCredentials();
   const disconnect = useDisconnectCredential();
   // The row being confirmed, not a bare boolean: the rows share one dialog,
-  // and a boolean would open it for every row at once.
+  // which a boolean would open for every row at once.
   const [confirmRevoke, setConfirmRevoke] = useState<CredentialSummary | null>(null);
 
   // `github` gets its own richer row above; `onepassword` (the reserved

@@ -17,6 +17,10 @@
       "types": "./src/lib/memory-links.ts",
       "import": "./src/lib/memory-links.ts"
     },
+    "./service-display-name": {
+      "types": "./src/lib/service-display-name.ts",
+      "import": "./src/lib/service-display-name.ts"
+    },
     "./plugins": {
       "types": "./src/plugins/registry.gen.ts",
       "import": "./src/plugins/registry.gen.ts"

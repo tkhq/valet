@@ -646,9 +646,7 @@ describe("listWorkflowTemplateSummaries", () => {
  * team install does. The gallery reads `requires[].connected` to decide
  * whether to offer Install at all, so a listing judged by the caller's own
  * connections produces a card that refuses an install the server would
- * accept — and connecting the service personally never changes it. Both
- * directions are pinned here against the same predicate the install gate
- * uses (`teamServiceReadiness`).
+ * accept, and connecting the service personally never changes it.
  */
 describe("listWorkflowTemplateSummaries in a team workspace", () => {
   it("reports a service the team holds as connected, though the caller has not connected it", async () => {
@@ -696,11 +694,10 @@ describe("listWorkflowTemplateSummaries in a team workspace", () => {
   });
 
   it("keeps an App-pinned template readable when another template pins the owner's own token", async () => {
-    // One readiness answer per service for the whole listing is the cheap
-    // way to do this, and it is only correct while the nodes of one service
-    // are read together. `github` here carries two pins that resolve
-    // differently: the App pin is ready, the user pin is not. Merging them
-    // would hide the ready one behind the blocked one.
+    // The listing memoizes readiness per definition signature, so two
+    // templates that pin `github` differently must not share an answer:
+    // the App pin here is ready and the user pin is not, and one answer
+    // for both would hide the ready one behind the blocked one.
     await seedTeam("team-list-4", [OWNER.userId]);
     await credentials.save({ type: "org", id: OWNER.orgId }, "github_app", {
       type: "api_key",

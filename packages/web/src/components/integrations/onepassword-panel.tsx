@@ -9,12 +9,11 @@ import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
 
 /**
- * Removing a service-account token is scoped, and the two scopes differ in
- * blast radius: the org row owns one shared token (`scope: "org"`), the
- * personal row owns the caller's own (`scope` omitted, so the server
- * resolves the owner to the session user). A credential whose secret is a
- * 1Password reference resolves through the token its `tokenScope` names, so
- * removing a token breaks exactly those references.
+ * The two removals differ in blast radius, so they get separate copy. A
+ * credential whose secret is a 1Password reference resolves through the token
+ * its `tokenScope` names, so removing a token breaks exactly those
+ * references: org-wide for `scope: "org"`, caller-only when `scope` is
+ * omitted and the server resolves the owner to the session user.
  */
 const REMOVE_ORG_TOKEN_NOTE =
   "This token is shared across the organization. Credentials that read their secret through it " +
@@ -143,9 +142,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
           removing={disconnect.isPending}
           onSave={() => void saveToken()}
           onRemove={() => {
-            // Clear the previous attempt's refusal as the dialog opens.
-            // Radix never calls `onOpenChange(true)` for a controlled dialog
-            // with no trigger, so the clear belongs on the control.
+            // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
             disconnect.reset();
             setConfirmRemove(true);
           }}
@@ -156,9 +153,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
 
       <ConfirmDialog
         open={confirmRemove}
-        onOpenChange={(open) => {
-          setConfirmRemove(open);
-        }}
+        onOpenChange={setConfirmRemove}
         title="Remove the organization 1Password token?"
         description={REMOVE_ORG_TOKEN_NOTE}
         confirmLabel="Remove token"
@@ -216,9 +211,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
           removing={disconnect.isPending}
           onSave={() => void saveToken()}
           onRemove={() => {
-            // Clear the previous attempt's refusal as the dialog opens.
-            // Radix never calls `onOpenChange(true)` for a controlled dialog
-            // with no trigger, so the clear belongs on the control.
+            // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
             disconnect.reset();
             setConfirmRemove(true);
           }}
@@ -229,9 +222,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
 
       <ConfirmDialog
         open={confirmRemove}
-        onOpenChange={(open) => {
-          setConfirmRemove(open);
-        }}
+        onOpenChange={setConfirmRemove}
         title="Remove your personal 1Password token?"
         description={REMOVE_PERSONAL_TOKEN_NOTE}
         confirmLabel="Remove token"

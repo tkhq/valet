@@ -40,7 +40,6 @@ import {
   normalizeInputType,
   triggerDataSchema,
   type ForeachNode,
-  type ToolNode,
   type WorkflowDefinition,
   type WorkflowInputDefinition,
 } from "@valet/workflow";
@@ -56,7 +55,7 @@ import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { teamServiceReadiness } from "./team-service-readiness.js";
+import { teamServiceReadiness, type TeamServiceReadiness } from "./team-service-readiness.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
 import { toolNodesOf } from "./tool-nodes.js";
@@ -559,107 +558,30 @@ function requiredServices(summary: WorkflowTemplateSummary): string[] {
 // holds Linear reads as unconnected, the card withholds Install, and
 // connecting Linear personally never changes the answer. So the same
 // predicate answers both, and the two agree by construction.
-//
-// Readiness is a database read per service plus, for github, an App
-// lookup, and the gallery lists every template the catalog ships. Running
-// it once per template repeats all of that. It is run once per distinct
-// SHAPE instead, which for a normal catalog is once per service.
 
 /**
- * What a tool node contributes to its service's readiness answer: the
- * credential pin, and the repository the github branch looks an App
- * installation up under (`installationResolvesFor` reads `owner` and
- * `repo`). Two nodes that agree on these get the same answer, so one
- * stands in for the other. Everything else in a node is invisible to the
- * predicate.
- */
-function readinessSignature(node: ToolNode): string {
-  const owner = typeof node.params.owner === "string" ? node.params.owner : "";
-  const repo = typeof node.params.repo === "string" ? node.params.repo : "";
-  // JSON, not a joined string: an `owner` holding the separator would
-  // otherwise read as a different node's signature.
-  return JSON.stringify([node.service, node.credential ?? "auto", owner, repo]);
-}
-
-/**
- * Each service a definition names, keyed to the shape its nodes make. Two
- * definitions that give one service the same shape share one answer.
+ * What a definition contributes to its readiness answer: for each tool
+ * node, the service, the credential pin, and the repository the github
+ * branch looks an App installation up under (`installationResolvesFor`
+ * reads `owner` and `repo`). Two definitions with the same signature get
+ * the same answer, so one call stands in for both.
  *
- * The shape is the whole node set for that service, not one node:
- * `teamServiceReadiness` decides github by reading them TOGETHER (every
- * node pinned `app` takes the App branch; one node pinned `user` keeps the
- * service on the credential-row path). A template that pins the App and a
- * template that pins the owner's own token therefore have different shapes
- * and get separate answers, which is the point — merging them would hide
- * the ready one behind the blocked one.
+ * The signature covers every tool node rather than one per service because
+ * `teamServiceReadiness` reads a service's nodes TOGETHER: every node
+ * pinned `app` takes the App branch, and one node pinned `user` keeps the
+ * service on the credential-row path. A template that pins the App and a
+ * template that pins the owner's own token therefore get separate answers.
+ * Merging them would hide the ready one behind the blocked one.
  */
-function readinessShapes(definition: WorkflowDefinition): Map<string, string> {
-  const signatures = new Map<string, Set<string>>();
-  for (const node of toolNodesOf(definition)) {
-    const seen = signatures.get(node.service) ?? new Set<string>();
-    seen.add(readinessSignature(node));
-    signatures.set(node.service, seen);
-  }
-  const shapes = new Map<string, string>();
-  for (const [service, seen] of signatures) shapes.set(service, JSON.stringify([...seen].sort()));
-  return shapes;
-}
-
-/**
- * Whether the team can act as each (service, shape) pair the listing needs,
- * keyed by shape.
- *
- * The pairs are packed into as few readiness passes as they allow: a pass
- * carries at most one shape per service, so within it every service's nodes
- * are still read together. A catalog that gives each service one shape
- * needs exactly one pass; the number of passes is the largest number of
- * shapes any single service has.
- *
- * The definition each pass is given is a carrier for the nodes and nothing
- * else. `teamServiceReadiness` reads it through `toolNodesOf` alone, so it
- * is never validated, run, or written, and repeated node ids do not matter.
- */
-async function teamReadinessByShape(
-  deps: TemplateServiceDeps,
-  scope: { orgId: string; teamId: string },
-  definitions: readonly WorkflowDefinition[],
-): Promise<Map<string, boolean>> {
-  const shapes = new Map<string, { service: string; nodes: ToolNode[] }>();
-  for (const definition of definitions) {
-    const nodesByService = new Map<string, ToolNode[]>();
-    for (const node of toolNodesOf(definition)) {
-      nodesByService.set(node.service, [...(nodesByService.get(node.service) ?? []), node]);
-    }
-    for (const [service, shape] of readinessShapes(definition)) {
-      if (shapes.has(shape)) continue;
-      shapes.set(shape, { service, nodes: nodesByService.get(service) ?? [] });
-    }
-  }
-
-  const passes: Array<Array<{ shape: string; service: string; nodes: ToolNode[] }>> = [];
-  for (const [shape, entry] of shapes) {
-    let pass = passes.find((p) => !p.some((e) => e.service === entry.service));
-    if (!pass) {
-      pass = [];
-      passes.push(pass);
-    }
-    pass.push({ shape, ...entry });
-  }
-
-  const readyByShape = new Map<string, boolean>();
-  for (const pass of passes) {
-    const readiness = await teamServiceReadiness(
-      { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
-      {
-        orgId: scope.orgId,
-        teamId: scope.teamId,
-        definition: { version: "dag/v1", nodes: pass.flatMap((e) => e.nodes), edges: [] },
-      },
-    );
-    const ready = new Set(readiness.ready);
-    for (const entry of pass) readyByShape.set(entry.shape, ready.has(entry.service));
-  }
-  return readyByShape;
+function readinessSignature(definition: WorkflowDefinition): string {
+  const nodes = toolNodesOf(definition).map((node) => {
+    const owner = typeof node.params.owner === "string" ? node.params.owner : "";
+    const repo = typeof node.params.repo === "string" ? node.params.repo : "";
+    // JSON, not a joined string: an `owner` holding the separator would
+    // otherwise read as a different node's signature.
+    return JSON.stringify([node.service, node.credential ?? "auto", owner, repo]);
+  });
+  return JSON.stringify([...new Set(nodes)].sort());
 }
 
 /**
@@ -676,15 +598,16 @@ async function teamReadinessByShape(
 function teamConnectedServices(
   definition: WorkflowDefinition,
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
-  readyToolServices: ReadonlySet<string>,
+  readiness: TeamServiceReadiness,
 ): Set<string> {
+  const ready = new Set(readiness.ready);
   const connected = new Set<string>();
   const blocked = new Set<string>();
   for (const node of toolNodesOf(definition)) {
     const entry = actionPluginByService.get(node.service);
     if (!entry) continue;
     const { service } = credentialServiceFor(entry);
-    if (readyToolServices.has(node.service)) connected.add(service);
+    if (ready.has(node.service)) connected.add(service);
     else blocked.add(service);
   }
   for (const service of blocked) connected.delete(service);
@@ -747,32 +670,39 @@ export async function listWorkflowTemplateSummaries(
     listed.push(result.value);
   }
 
-  if (opts.teamId === undefined) return listed.map((entry) => entry.summary);
+  const teamId = opts.teamId;
+  if (teamId === undefined) return listed.map((entry) => entry.summary);
 
   // A team workspace restamps `connected` against the team, over the
   // definitions that survived validation. `unconfigured` is unchanged: it
-  // is the organization's answer, and it is the same for every member and
-  // every team in it.
-  const readyByShape = await teamReadinessByShape(
-    deps,
-    { orgId: caller.orgId, teamId: opts.teamId },
-    listed.map((entry) => entry.definition),
-  );
-  return listed.map(({ summary, definition }) => {
-    const ready = new Set<string>();
-    for (const [service, shape] of readinessShapes(definition)) {
-      if (readyByShape.get(shape) === true) ready.add(service);
-    }
-    return {
+  // is the organization's answer, the same for every member and team.
+  //
+  // Readiness is a database read per service plus, for github, an App
+  // lookup, so it is memoized per signature. Each call still gets the
+  // template's REAL definition, so a predicate that grows to read more of
+  // it than the tool nodes stays correct here.
+  const readinessBySignature = new Map<string, Promise<TeamServiceReadiness>>();
+  const summaries: WorkflowTemplateSummary[] = [];
+  for (const { summary, definition } of listed) {
+    const signature = readinessSignature(definition);
+    const pending =
+      readinessBySignature.get(signature) ??
+      teamServiceReadiness(
+        { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
+        { orgId: caller.orgId, teamId, definition },
+      );
+    readinessBySignature.set(signature, pending);
+    summaries.push({
       ...summary,
       requires: templateRequirements(
         definition,
         deps.actionPluginByService,
-        teamConnectedServices(definition, deps.actionPluginByService, ready),
+        teamConnectedServices(definition, deps.actionPluginByService, await pending),
         unavailable,
       ),
-    };
-  });
+    });
+  }
+  return summaries;
 }
 
 // ─── Install ─────────────────────────────────────────────────────────────

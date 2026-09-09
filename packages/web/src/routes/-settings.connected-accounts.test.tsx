@@ -29,7 +29,6 @@ const disconnectGithubMutate = vi.fn(
 const disconnectCredentialMutate = vi.fn(
   (_vars: { service: string }, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.(),
 );
-// Pending/error of the two disconnect mutations, per test.
 let disconnectGithubState: { isPending: boolean; error: Error | null } = {
   isPending: false,
   error: null,
@@ -106,8 +105,8 @@ vi.mock("~/api/settings", async (importOriginal) => {
 
 import { ConnectedAccountsPage } from "./settings.connected-accounts";
 
-/** A page whose GitHub credential is repo-capable — the state both GitHub
- * guards (replace on reconnect, disconnect) are written for. */
+/** The state both GitHub guards (replace on reconnect, disconnect) are
+ * written for: a repo-capable credential. */
 function renderRepoCapable() {
   credentialsData = {
     credentials: [
@@ -123,6 +122,17 @@ function renderCredentials(credentials: CredentialSummary[]) {
   render(<ConnectedAccountsPage />);
 }
 
+const linearCred: CredentialSummary = {
+  service: "linear",
+  type: "api_key",
+  connectedAt: "2026-01-02T00:00:00Z",
+};
+const notionCred: CredentialSummary = {
+  service: "notion",
+  type: "api_key",
+  connectedAt: "2026-01-03T00:00:00Z",
+};
+
 describe("ConnectedAccountsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -136,8 +146,7 @@ describe("ConnectedAccountsPage", () => {
     disconnectGithubState = { isPending: false, error: null };
     disconnectCredentialState = { isPending: false, error: null };
     // Still stubbed so the tests below can assert the page NEVER reaches for
-    // the native dialog: browser automation accepts that one for free, which
-    // is why every guard here is an in-page dialog instead.
+    // the native dialog, which browser automation accepts for free.
     vi.stubGlobal("confirm", vi.fn(() => true));
     // jsdom logs "Not implemented: navigation" when a real redirect happens;
     // route it through a plain assignable stub instead.
@@ -326,8 +335,6 @@ describe("ConnectedAccountsPage", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
 
-      // The guard is the whole point: an automated client that accepts the
-      // native dialog for free must not reach the connect flow here.
       expect(connectGithubMutateAsync).not.toHaveBeenCalled();
       expect(confirm).not.toHaveBeenCalled();
       const dialog = await screen.findByRole("dialog");
@@ -358,25 +365,7 @@ describe("ConnectedAccountsPage", () => {
       expect(window.location.href).toBe("");
     });
 
-    it("REPLACE-WARNING: a failed start keeps the dialog open and names the failure", async () => {
-      renderRepoCapable();
-      connectGithubMutateAsync.mockRejectedValue(
-        new Error("GitHub App is not configured. Ask an admin to add it under Integrations."),
-      );
-
-      fireEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
-      const dialog = await screen.findByRole("dialog");
-      fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect GitHub" }));
-
-      expect(
-        await within(dialog).findByText(
-          "GitHub App is not configured. Ask an admin to add it under Integrations.",
-        ),
-      ).toBeTruthy();
-      expect(screen.getByRole("dialog")).toBeTruthy();
-    });
-
-    it("REPLACE-WARNING: reopening after a refusal starts with no error", async () => {
+    it("REPLACE-WARNING: a failed start names the failure, and reopening starts clean", async () => {
       const refusal = "GitHub App is not configured. Ask an admin to add it under Integrations.";
       renderRepoCapable();
       connectGithubMutateAsync.mockRejectedValue(new Error(refusal));
@@ -385,6 +374,9 @@ describe("ConnectedAccountsPage", () => {
       const dialog = await screen.findByRole("dialog");
       fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect GitHub" }));
       expect(await within(dialog).findByText(refusal)).toBeTruthy();
+      // A start that never began leaves the dialog open, on screen, so the
+      // reason sits beside the button that produced it.
+      expect(screen.getByRole("dialog")).toBeTruthy();
 
       // Closing the dialog hands the failure to the row below, which is the
       // only place left to read it.
@@ -392,14 +384,13 @@ describe("ConnectedAccountsPage", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       expect(screen.getByText(refusal)).toBeTruthy();
 
-      // Reopening is a fresh attempt. The previous refusal must not read as
-      // this attempt's, so it is gone until the user presses Reconnect again.
+      // Reopening is a fresh attempt, so the previous refusal must not read
+      // as this attempt's until the user presses Reconnect again.
       fireEvent.click(screen.getByRole("button", { name: "Reconnect GitHub" }));
       const reopened = await screen.findByRole("dialog");
       expect(within(reopened).queryByText(refusal)).toBeNull();
       expect(screen.queryByText(refusal)).toBeNull();
 
-      // Pressing Reconnect again is what brings a failure back.
       fireEvent.click(within(reopened).getByRole("button", { name: "Reconnect GitHub" }));
       expect(await within(reopened).findByText(refusal)).toBeTruthy();
     });
@@ -424,7 +415,6 @@ describe("ConnectedAccountsPage", () => {
       fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
 
       expect(disconnectGithubMutate).toHaveBeenCalledTimes(1);
-      // The mutation takes no variables, exactly as the old confirm() path.
       expect(disconnectGithubMutate.mock.calls[0]?.[0]).toBeUndefined();
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     });
@@ -440,29 +430,7 @@ describe("ConnectedAccountsPage", () => {
       expect(disconnectGithubMutate).not.toHaveBeenCalled();
     });
 
-    it("Disconnect GitHub shows the server's refusal in the dialog", async () => {
-      const refusal = "A running session holds this token. Stop the session, then disconnect.";
-      const { rerender } = renderRepoCapable();
-
-      fireEvent.click(screen.getByRole("button", { name: "Disconnect GitHub" }));
-      const dialog = await screen.findByRole("dialog");
-      // A refused disconnect never reaches `onSuccess`, so the dialog stays
-      // open to carry the failure.
-      disconnectGithubMutate.mockImplementationOnce(() => {});
-      fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
-
-      // The failure arrives the way production produces it: the mutation
-      // settles with an error only after the user pressed Disconnect.
-      disconnectGithubState = {
-        isPending: false,
-        error: new ApiError(409, "DELETE /me/github → 409", { error: refusal }),
-      };
-      rerender(<ConnectedAccountsPage />);
-
-      expect(within(await screen.findByRole("dialog")).getByText(refusal)).toBeTruthy();
-    });
-
-    it("Disconnect GitHub: reopening after a refusal starts with no error", async () => {
+    it("Disconnect GitHub: a refusal shows in the dialog, and reopening starts clean", async () => {
       const refusal = "A running session holds this token. Stop the session, then disconnect.";
       // The state React Query leaves behind after a refused disconnect: the
       // error stays on the mutation until the next mutate.
@@ -479,7 +447,8 @@ describe("ConnectedAccountsPage", () => {
       expect(within(dialog).queryByText(refusal)).toBeNull();
       expect(screen.queryByText(refusal)).toBeNull();
 
-      // Pressing Disconnect again is what brings a failure back.
+      // A refused disconnect never reaches `onSuccess`, so the dialog stays
+      // open to carry the failure the mutation settles with.
       disconnectGithubMutate.mockImplementationOnce(() => {});
       fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
       disconnectGithubState = {
@@ -539,7 +508,7 @@ describe("ConnectedAccountsPage", () => {
     });
 
     it("revoke asks in-page and calls nothing until confirmed", async () => {
-      renderCredentials([{ service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" }]);
+      renderCredentials([linearCred]);
 
       fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
 
@@ -551,7 +520,7 @@ describe("ConnectedAccountsPage", () => {
     });
 
     it("revoke calls the delete-credential mutation once confirmed", async () => {
-      renderCredentials([{ service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" }]);
+      renderCredentials([linearCred]);
 
       fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
       const dialog = await screen.findByRole("dialog");
@@ -563,7 +532,7 @@ describe("ConnectedAccountsPage", () => {
     });
 
     it("revoke calls nothing when cancelled", async () => {
-      renderCredentials([{ service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" }]);
+      renderCredentials([linearCred]);
 
       fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
       const dialog = await screen.findByRole("dialog");
@@ -574,10 +543,7 @@ describe("ConnectedAccountsPage", () => {
     });
 
     it("one row's revoke opens one dialog, for that row only", async () => {
-      renderCredentials([
-        { service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" },
-        { service: "notion", type: "api_key", connectedAt: "2026-01-03T00:00:00Z" },
-      ]);
+      renderCredentials([linearCred, notionCred]);
 
       fireEvent.click(screen.getByRole("button", { name: "Revoke notion" }));
 
@@ -591,14 +557,7 @@ describe("ConnectedAccountsPage", () => {
     });
 
     it("revoke says the 1Password item survives on a reference-backed row", async () => {
-      renderCredentials([
-        {
-          service: "linear",
-          type: "api_key",
-          connectedAt: "2026-01-02T00:00:00Z",
-          onepasswordRef: "op://Vault One/Item One/credential",
-        },
-      ]);
+      renderCredentials([{ ...linearCred, onepasswordRef: "op://Vault One/Item One/credential" }]);
 
       fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
 
@@ -614,10 +573,7 @@ describe("ConnectedAccountsPage", () => {
         }),
         variables: { service: "linear" },
       };
-      renderCredentials([
-        { service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" },
-        { service: "notion", type: "api_key", connectedAt: "2026-01-03T00:00:00Z" },
-      ]);
+      renderCredentials([linearCred, notionCred]);
 
       fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
 

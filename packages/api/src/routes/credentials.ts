@@ -63,6 +63,7 @@ import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../s
 import { deleteDelegationsFrom, listDelegationsFrom } from "../services/credential-delegations.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
+import { serviceDisplayName } from "../lib/service-display-name.js";
 import type {
   CredentialSummary,
   DelegateCredentialRequest,
@@ -112,43 +113,6 @@ function rowHasSecret(stored: StoredCredential): boolean {
  * with org scopes only). */
 function usableByTeamRead(stored: StoredCredential): boolean {
   return onePasswordMeta(stored)?.tokenScope === "org";
-}
-
-/**
- * Product names for the service keys these refusals name. The connect UI
- * derives the same labels from the same ids
- * (`packages/web/src/components/integrations/display-name.ts`), and the
- * refusals below spell "GitHub" and "1Password" by hand, so a derived
- * label has to agree with both rather than title-case the id blindly.
- */
-const SERVICE_DISPLAY_NAMES: Record<string, string> = {
-  github: "GitHub",
-  gmail: "Gmail",
-  "google-calendar": "Google Calendar",
-  google_calendar: "Google Calendar",
-  "google-workspace": "Google Workspace",
-  google_workspace: "Google Workspace",
-  deepwiki: "DeepWiki",
-  onepassword: "1Password",
-  github_app: "GitHub App",
-};
-
-/** The service key as a sentence subject (`slack` → `Slack`, `github` →
- * `GitHub`). An unlisted key falls back the way the connect UI does, so a
- * dropped-in service still reads like a name and not an identifier. */
-function displayName(service: string): string {
-  const known = SERVICE_DISPLAY_NAMES[service];
-  if (known) return known;
-  // A namespaced key (`llm:prov_1`) is an internal service id the caller
-  // sent, not a product. Echo it, so the refusal names the same string the
-  // caller can search for. Config-declared MCP services are stored under
-  // the bare entry name (`plugins/config-mcp.ts`), so they never land here.
-  if (service.includes(":")) return service;
-  return service
-    .split(/[-_]/)
-    .filter(Boolean)
-    .map((word, i) => (i === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word))
-    .join(" ");
 }
 
 /**
@@ -415,7 +379,7 @@ credentialsRouter.put("/:service", async (c) => {
       });
       if (mode === "unconfigured") {
         return c.json(
-          { error: `${displayName(service)} is not configured for this organization. An admin can set it up in Settings → Organization.` },
+          { error: `${serviceDisplayName(service)} is not configured for this organization. An admin can set it up in Settings → Organization.` },
           403,
         );
       }
@@ -425,7 +389,7 @@ credentialsRouter.put("/:service", async (c) => {
       // declaration (e.g. slack-user OAuth).
       if (mode === "org") {
         return c.json(
-          { error: `${displayName(service)} is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.` },
+          { error: `${serviceDisplayName(service)} is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.` },
           403,
         );
       }
@@ -483,7 +447,7 @@ credentialsRouter.put("/:service", async (c) => {
     // shipping a credential nothing reads.
     if (service === "github") {
       return c.json(
-        { error: `${displayName(service)} credentials cannot be 1Password references; use the GitHub connect flow` },
+        { error: `${serviceDisplayName(service)} credentials cannot be 1Password references; use the GitHub connect flow` },
         400,
       );
     }
@@ -496,7 +460,7 @@ credentialsRouter.put("/:service", async (c) => {
     // code path. Refuse the write rather than ship a row nothing resolves.
     if (isDeniedCredentialService(service)) {
       return c.json(
-        { error: `${displayName(service)} credentials cannot be 1Password references; set them in their own settings page` },
+        { error: `${serviceDisplayName(service)} credentials cannot be 1Password references; set them in their own settings page` },
         400,
       );
     }
@@ -519,7 +483,7 @@ credentialsRouter.put("/:service", async (c) => {
     const declared = findCredentialDeclaration(plugins, service);
     if (declared && declared.type !== body.type) {
       return c.json(
-        { error: `${displayName(service)} credentials are ${declared.type}. Set type to ${declared.type} for this reference.` },
+        { error: `${serviceDisplayName(service)} credentials are ${declared.type}. Set type to ${declared.type} for this reference.` },
         400,
       );
     }
@@ -640,7 +604,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   // Every refusal below names the service the way the product does. The
   // route param is an id (`github`), not a name, and reads as neither
   // when it is dropped into a sentence.
-  const label = displayName(service);
+  const label = serviceDisplayName(service);
   if (service === ONEPASSWORD_SERVICE) {
     return c.json(
       {

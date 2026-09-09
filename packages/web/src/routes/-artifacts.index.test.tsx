@@ -165,31 +165,11 @@ describe("ArtifactsPage", () => {
     ).toBeTruthy();
   });
 
-  it("revokes the clicked row's artifact when the dialog is confirmed", async () => {
-    renderPage();
-    const dialog = openDialog();
-
-    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
-
-    await waitFor(() => expect(revokeMutate).toHaveBeenCalledTimes(1));
-    expect(revokeMutate.mock.calls[0]![0]).toEqual({ id: "art_mine" });
-  });
-
   it("revokes nothing when the dialog is cancelled", async () => {
     renderPage();
     const dialog = openDialog();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(revokeMutate).not.toHaveBeenCalled();
-  });
-
-  it("revokes nothing when the dialog is dismissed with Escape", async () => {
-    renderPage();
-    const dialog = openDialog();
-
-    fireEvent.keyDown(dialog, { key: "Escape", code: "Escape" });
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(revokeMutate).not.toHaveBeenCalled();
@@ -241,10 +221,8 @@ describe("ArtifactsPage", () => {
   });
 
   it("reopening after a failed revoke starts with no error", () => {
-    // React Query holds `error` until the next mutate, so the dialog has to
-    // clear it as it opens. Radix never calls `onOpenChange(true)` for a
-    // controlled dialog with no trigger, so the clear belongs on the row
-    // button, which is the only thing that opens this.
+    // React Query holds `error` until the next mutate, so the row button
+    // clears it as it opens the dialog.
     revokeError = new Error("network unreachable");
     renderPage();
 

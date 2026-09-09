@@ -31,18 +31,15 @@ WEB = REPO / "packages" / "web" / "src"
 PRIMITIVE = ("components", "primitives", "confirm-dialog.tsx")
 SOURCE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx")
 TEST_SUFFIXES = (".test.ts", ".test.tsx", ".test.js", ".test.jsx")
-# `confirm(`, or the same call through a global object. The lookbehind keeps
-# an identifier that merely ends in the word out of the match: `setConfirm(`
-# differs in case, and `dialog.confirm(` is a method on something else.
-# `alert` and `prompt` are in the same class and carry the same three faults,
-# so the guard names all three rather than waiting for the next one to land.
-# Prose is skipped before the match runs. This product's own vocabulary is
-# full of the word "prompt", and a doc comment reading "the refute-reason
-# prompt (r)" satisfies `prompt\s*\(` exactly. A guard that cries wolf on
-# a comment gets switched off, so comment-only lines never reach CALL.
+# `confirm(`, or the same call through a global object. `alert` and `prompt`
+# are in the same class and carry the same three faults, so the guard names
+# all three rather than waiting for the next one to land.
 CALL = re.compile(r"(?<![\w$.])(?:(?:window|globalThis|self)\s*\.\s*)?(?:confirm|alert|prompt)\s*\(")
 
-# A line whose first non-space character opens or continues a comment. A
+# A line whose first non-space character opens or continues a comment, skipped
+# before the match runs. This product's own vocabulary is full of the word
+# "prompt", and a doc comment reading "the refute-reason prompt (r)" satisfies
+# `prompt\s*\(` exactly; a guard that cries wolf on prose gets switched off. A
 # trailing comment after code is deliberately NOT skipped: erring toward a
 # report is safe there, erring toward silence is not.
 COMMENT_LINE = re.compile(r"\s*(?://|/\*|\*)")
