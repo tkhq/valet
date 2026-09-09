@@ -32,8 +32,9 @@
  */
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
-import { Badge, Button } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
+import { errorText } from "~/lib/error-text";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
@@ -244,6 +245,10 @@ function ServiceBlock({
   orgNote?: React.ReactNode;
 }) {
   const [connecting, setConnecting] = useState(false);
+  // Each service owns its own confirm state: a plugin can render one
+  // ServiceBlock per credential service, and a shared flag would open every
+  // one of their dialogs at once.
+  const [disconnecting, setDisconnecting] = useState(false);
   const disconnect = useDisconnectCredential();
   const health = serviceHealth(service);
   const badge = healthBadge(health);
@@ -286,8 +291,9 @@ function ServiceBlock({
       size="sm"
       aria-label={`Disconnect ${title}`}
       onClick={() => {
-        if (!confirm(`Disconnect ${title}?`)) return;
-        void disconnect.mutateAsync({ service: service.service });
+        // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
+        disconnect.reset();
+        setDisconnecting(true);
       }}
       disabled={disconnect.isPending}
     >
@@ -390,6 +396,25 @@ function ServiceBlock({
         slug={slug}
         open={connecting}
         onOpenChange={setConnecting}
+      />
+      {/* The description names the team shares too: DELETE
+          /api/credentials/:service revokes every delegation that rode on the
+          credential, which the button alone does not suggest. */}
+      <ConfirmDialog
+        open={disconnecting}
+        onOpenChange={setDisconnecting}
+        title={`Disconnect ${title}?`}
+        description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
+        confirmLabel="Disconnect"
+        pendingLabel="Disconnecting…"
+        pending={disconnect.isPending}
+        error={disconnect.error != null ? errorText(disconnect.error) : undefined}
+        onConfirm={() =>
+          disconnect.mutate(
+            { service: service.service },
+            { onSuccess: () => setDisconnecting(false) },
+          )
+        }
       />
     </>
   );

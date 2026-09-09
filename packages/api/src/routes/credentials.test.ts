@@ -444,6 +444,49 @@ describe("PUT /api/credentials/:service — unconfigured services", () => {
     });
     expect(res.status).toBe(200);
   });
+
+  // Both availability refusals name the service the way the product does,
+  // not the way the route param spells it, and `github` is the case a
+  // title-cased id gets wrong. The corrective sentence is asserted with the
+  // label, because a rewrite that swallowed it would be the worse
+  // regression.
+  it("names the service by its product name in both availability refusals, and keeps the corrective action", async () => {
+    const gatedGithub: ValetPlugin = {
+      name: "gated-github",
+      version: "0.1.0",
+      credentials: [
+        { service: "github", type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } },
+      ],
+    };
+    api = await bootTestApi({ plugins: [gatedGithub] });
+
+    const unconfigured = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "bot_token", accessToken: "user-tok" }),
+    });
+    expect(unconfigured.status).toBe(403);
+    expect(((await unconfigured.json()) as { error: string }).error).toBe(
+      "GitHub is not configured for this organization. An admin can set it up in Settings → Organization.",
+    );
+
+    const orgPut = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "bot_token", accessToken: "org-tok", scope: "org" }),
+    });
+    expect(orgPut.status).toBe(200);
+
+    const provided = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "bot_token", accessToken: "user-tok" }),
+    });
+    expect(provided.status).toBe(403);
+    expect(((await provided.json()) as { error: string }).error).toBe(
+      "GitHub is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.",
+    );
+  });
 });
 
 describe("PUT /api/credentials/:service — onepassword reference extension", () => {
@@ -536,7 +579,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     });
     expect(put.status).toBe(400);
     expect(await put.json()).toEqual({
-      error: "github credentials cannot be 1Password references; use the GitHub connect flow",
+      error: "GitHub credentials cannot be 1Password references; use the GitHub connect flow",
     });
 
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
@@ -754,6 +797,70 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     });
     expect(put.status).toBe(400);
     expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, service)).toBeNull();
+  });
+
+  // Every refusal in this route spells the service the way the product
+  // does. `github_app` is the internal id for the GitHub App, so it is
+  // spelled, while `llm:prov_1` is a namespaced id the caller sent rather
+  // than a product name, so it is echoed as it was sent.
+  it("names the product in the 1Password refusals, and echoes a namespaced internal id unchanged", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+    const onepassword = { reference: "op://vault/item/field", tokenScope: "org" };
+
+    const github = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", onepassword }),
+    });
+    expect(github.status).toBe(400);
+    expect(await github.json()).toEqual({
+      error: "GitHub credentials cannot be 1Password references; use the GitHub connect flow",
+    });
+
+    const githubApp = await fetch(`${api.baseUrl}/api/credentials/github_app`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", scope: "org", onepassword }),
+    });
+    expect(githubApp.status).toBe(400);
+    expect(await githubApp.json()).toEqual({
+      error: "GitHub App credentials cannot be 1Password references; set them in their own settings page",
+    });
+
+    const llmKey = await fetch(`${api.baseUrl}/api/credentials/llm:prov_1`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", scope: "org", onepassword }),
+    });
+    expect(llmKey.status).toBe(400);
+    expect(await llmKey.json()).toEqual({
+      error: "llm:prov_1 credentials cannot be 1Password references; set them in their own settings page",
+    });
+  });
+
+  it("names the product in the declared-type refusal, and keeps the corrective action", async () => {
+    const calendarPlugin: ValetPlugin = {
+      name: "google-calendar",
+      version: "0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    api = await bootTestApi({ plugins: [calendarPlugin] });
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const put = await fetch(`${api.baseUrl}/api/credentials/google-calendar`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({
+        type: "api_key",
+        scope: "org",
+        onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "Google Calendar credentials are bot_token. Set type to bot_token for this reference.",
+    });
   });
 
   it("accepts a bot_token reference for a plugin that declares bot_token", async () => {
@@ -1085,7 +1192,7 @@ describe("team credential scope (TKAI-205)", () => {
       body: JSON.stringify({ teamId: team.id }),
     });
     expect(unconnected.status).toBe(400);
-    expect(((await unconnected.json()) as { error: string }).error).toContain("Connect linear in Integrations first");
+    expect(((await unconnected.json()) as { error: string }).error).toContain("Connect Linear in Integrations first");
 
     await fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT",
@@ -1098,7 +1205,9 @@ describe("team credential scope (TKAI-205)", () => {
       body: JSON.stringify({ teamId: team.id }),
     });
     expect(occupied.status).toBe(409);
-    expect(((await occupied.json()) as { error: string }).error).toContain("Ask a team admin to disconnect it first.");
+    expect(((await occupied.json()) as { error: string }).error).toContain(
+      "Ask a team admin to change it in Settings → Organization → Teams.",
+    );
 
     const revoke = await fetch(
       `${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`,
@@ -1109,6 +1218,68 @@ describe("team credential scope (TKAI-205)", () => {
       await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
     ).json()) as ListCredentialsResponse;
     expect(after.credentials).toEqual([]);
+  });
+
+  // The refusals name the service the way the product does, not the way
+  // the route param spells it: the caller reads "Linear"/"GitHub", the
+  // same spelling the connect UI and this file's own GitHub copy use.
+  // Both halves are asserted together, because a label that swallowed the
+  // corrective sentence would be the worse regression.
+  //
+  // The slot can hold either kind of team row, and the two are removed
+  // under different labels ("Stop sharing" a delegated row, "Disconnect" a
+  // direct one), so the refusal names neither verb. It sends the caller to
+  // the page that shows which row is there, the same place the web
+  // client's own 409 copy names.
+  it("names the service by its product name in the occupied-slot refusal, and sends the caller to the page instead of one row kind's verb", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
+      type: "api_key",
+      apiKey: "member-lin",
+    });
+    const shared = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(shared.status).toBe(201);
+    const occupied = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(occupied.status).toBe(409);
+    const occupiedError = ((await occupied.json()) as { error: string }).error;
+    expect(occupiedError).toBe(
+      "This team already has Linear. Ask a team admin to change it in Settings → Organization → Teams.",
+    );
+    // Neither removal verb: one of them is always wrong for the row that
+    // holds the slot, and a caller outside the browser would hunt for a
+    // control that row does not have.
+    expect(occupiedError).not.toMatch(/disconnect/i);
+    expect(occupiedError).not.toMatch(/stop sharing/i);
+
+    // `github` is the case a first-letter capitalization gets wrong, and
+    // the one this file already spells "GitHub" by hand two refusals up.
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "api_key",
+      apiKey: "ghp_pat",
+    });
+    const sharedGithub = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(sharedGithub.status).toBe(201);
+    const occupiedGithub = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(occupiedGithub.status).toBe(409);
+    expect(((await occupiedGithub.json()) as { error: string }).error).toBe(
+      "This team already has GitHub. Ask a team admin to change it in Settings → Organization → Teams.",
+    );
   });
 
   // A team row is read with org-scoped 1Password tokens only, so a
@@ -1214,7 +1385,7 @@ describe("team credential scope (TKAI-205)", () => {
     expect(share.status).toBe(400);
     const { error } = (await share.json()) as { error: string };
     expect(error).toBe(
-      "linear is stored as a personal 1Password reference, which a team cannot read. " +
+      "Linear is stored as a personal 1Password reference, which a team cannot read. " +
         "Store it again with tokenScope org, or store the secret directly, then share it.",
     );
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
@@ -1514,7 +1685,7 @@ describe("team credential scope (TKAI-205)", () => {
       body: JSON.stringify({ teamId: team.id }),
     });
     expect(unshareable.status).toBe(400);
-    expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect github for the team instead.");
+    expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect GitHub for the team instead.");
   });
 
   it("refuses to overwrite a direct team credential, even when a pre-read saw the slot empty", async () => {

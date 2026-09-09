@@ -8,8 +8,9 @@
  * mocked to record what its mutations receive.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import type {
+  AssistantSummary,
   CreateEventSubscriptionRequest,
   CreateWorkflowScheduleRequest,
 } from "@valet/api/wire";
@@ -101,6 +102,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   };
 });
 
+import { assistantLabel } from "~/components/session/assistant-rail";
 import { AutomationWizard } from "./automation-wizard";
 import { ApiError } from "~/api/client";
 
@@ -482,6 +484,45 @@ describe("AutomationWizard", () => {
         ],
       };
     }
+
+    // A team's seeded default assistant carries no name. Every other surface
+    // (the rail, the chat header, the teams list, the team dashboard) calls it
+    // "Default assistant" through the shared `assistantLabel`; this wizard used
+    // to call the same assistant "Untitled assistant". One name for one thing.
+    const teamDefault: AssistantSummary = {
+      id: "a-team-default",
+      owner: { type: "team", id: "t_platform" },
+      sessionId: "assistant:a-team-default",
+      isDefault: true,
+      createdAt: 0,
+    };
+    const teamOps: AssistantSummary = {
+      id: "a-team-ops",
+      name: "Ops",
+      owner: { type: "team", id: "t_platform" },
+      sessionId: "assistant:a-team-ops",
+      isDefault: false,
+      createdAt: 0,
+    };
+
+    it("labels an unnamed team default assistant the way the shared helper does", () => {
+      scopeTeamId = "t_platform";
+      assistantsData = { assistants: [teamDefault, teamOps] };
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+
+      pickOutcome(/On a schedule/);
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * 1-5" } });
+      clickNext(); // Then — the team radio is the workspace seed.
+
+      // Read each option by its value, not its text: the empty "owner's
+      // default" option reads the same words as the unnamed default's own row.
+      const options = within(screen.getByLabelText("Assistant")).getAllByRole("option");
+      const labelFor = (id: string) =>
+        options.find((o) => o.getAttribute("value") === id)?.textContent;
+      expect(labelFor("a-team-default")).toBe(assistantLabel(teamDefault));
+      expect(labelFor("a-team-ops")).toBe("Ops");
+    });
 
     it("stays hidden for an owner with one assistant", () => {
       render(<AutomationWizard open onOpenChange={() => {}} />);

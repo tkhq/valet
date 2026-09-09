@@ -40,7 +40,7 @@ import type {
   LinkMemberEntry,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
-import { Button, Input } from "~/components/primitives";
+import { Button, ConfirmDialog, Input } from "~/components/primitives";
 import { CopyButton } from "~/components/session/tool-renderers/tool-shell";
 import {
   useDeliverIdentityLink,
@@ -50,6 +50,7 @@ import {
   useUnlinkIdentity,
 } from "~/api/queries";
 import { ApiError } from "~/api/client";
+import { errorText } from "~/lib/error-text";
 
 /** The identity-link entry for `provider` — null on error and for providers
  * that declare no `identityLink`. `isLoading` is surfaced so the tile can
@@ -189,6 +190,7 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
   const [searching, setSearching] = useState(false);
   const [fallbackNote, setFallbackNote] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
+  const [confirmUnlink, setConfirmUnlink] = useState(false);
   const startLink = useStartIdentityLink();
   const deliver = useDeliverIdentityLink();
   const unlink = useUnlinkIdentity(link.provider);
@@ -213,6 +215,13 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
   }, [expiresInSeconds, delivery, pendingLink]);
 
   if (link.linked) {
+    // Deleting the pairing row costs two things a person would not guess from
+    // "Unlink": inbound messages stop resolving to this user, and attention
+    // pings on the provider stop with them.
+    const unlinkDescription =
+      `Messages from this ${title} account stop reaching your assistant, and it stops ` +
+      `pinging you there when a session needs you. To undo this, link the account ` +
+      `again with a new code.`;
     return (
       <div className="space-y-1">
         <p className="text-xs leading-relaxed text-muted">
@@ -224,12 +233,24 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
           aria-label={`Unlink ${title}`}
           disabled={unlink.isPending}
           onClick={() => {
-            if (!confirm(`Unlink ${title}?`)) return;
-            unlink.mutate();
+            // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
+            unlink.reset();
+            setConfirmUnlink(true);
           }}
         >
           {unlink.isPending ? "Unlinking…" : "Unlink"}
         </Button>
+        <ConfirmDialog
+          open={confirmUnlink}
+          onOpenChange={setConfirmUnlink}
+          title={`Unlink ${title}?`}
+          description={unlinkDescription}
+          confirmLabel="Unlink"
+          pendingLabel="Unlinking…"
+          pending={unlink.isPending}
+          error={unlink.error != null ? errorText(unlink.error) : undefined}
+          onConfirm={() => unlink.mutate(undefined, { onSuccess: () => setConfirmUnlink(false) })}
+        />
       </div>
     );
   }

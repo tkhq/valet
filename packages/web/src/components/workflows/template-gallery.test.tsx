@@ -34,6 +34,13 @@ vi.mock("~/api/templates", () => ({
   useInstallTemplate: () => ({ mutateAsync: installMutateAsync, isPending: false }),
 }));
 
+/** The active workspace, rewritten per test before the gallery renders. */
+let teamId: string | undefined;
+
+vi.mock("~/lib/workspace-scope", () => ({
+  useWorkspaceScope: () => ({ teamId }),
+}));
+
 import { TemplateGallery } from "./template-gallery";
 
 const memorySweep: WorkflowTemplateSummary = {
@@ -81,30 +88,6 @@ const batchAction: WorkflowTemplateSummary = {
   caveats: ["Runs over at most 100 rows. The report names anything past the cap."],
 };
 
-/**
- * The same shape, but on a timer. A scheduled run arrives with no form to
- * answer, so its required value must be supplied before the install — this
- * is the one case where the dialog holds the button.
- */
-const nightlySweep: WorkflowTemplateSummary = {
-  id: "nightly-sweep",
-  name: "Nightly sweep",
-  description: "Sweeps every night.",
-  steps: ["Sweep"],
-  schedule: { cron: "0 6 * * *", timezone: "UTC" },
-  requires: [],
-  inputs: [
-    {
-      name: "instruction",
-      type: "string",
-      label: "What to do with each row",
-      placeholder: "Tier this account as enterprise, mid-market or SMB",
-      required: true,
-    },
-  ],
-  caveats: [],
-};
-
 beforeEach(() => {
   navigate.mockReset();
   installMutateAsync.mockReset();
@@ -112,6 +95,7 @@ beforeEach(() => {
   templatesQuery.data = undefined;
   templatesQuery.isLoading = false;
   templatesQuery.error = null;
+  teamId = undefined;
 });
 
 describe("TemplateGallery", () => {
@@ -148,8 +132,6 @@ describe("TemplateGallery", () => {
     templatesQuery.data = { templates: [triageDigest] };
     render(<TemplateGallery />);
 
-    // The prose that repeated this is gone; the control still names the work.
-    expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
 
     const connect = screen.getByText("Connect integrations").closest("a");
@@ -170,8 +152,6 @@ describe("TemplateGallery", () => {
     };
     render(<TemplateGallery />);
 
-    // One missing service names itself on the button rather than in a
-    // sentence above it.
     expect(screen.getByText("Connect Slack")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
   });
@@ -250,46 +230,6 @@ describe("TemplateGallery", () => {
     expect(dialog.getByText("Runs when you start it")).toBeTruthy();
   });
 
-  it("installs a template that runs on demand without answering its fields first", async () => {
-    // The field is declared `required`, but this template runs when a person
-    // starts it, so the run form asks for it. Holding the install button
-    // would stop somebody installing a template to read it and edit it.
-    templatesQuery.data = { templates: [batchAction] };
-    render(<TemplateGallery />);
-    fireEvent.click(screen.getByRole("button", { name: "Use template" }));
-
-    expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
-      false,
-    );
-    // No asterisk either: nothing here is required to install.
-    const field = screen.getByLabelText("What to do with each row") as HTMLInputElement;
-    expect(field.placeholder).toBe("Tier this account as enterprise, mid-market or SMB");
-
-    fireEvent.click(screen.getByRole("button", { name: "Install" }));
-    await waitFor(() => expect(installMutateAsync).toHaveBeenCalledTimes(1));
-    expect(installMutateAsync.mock.calls[0]![0]).toEqual({
-      templateId: "batch-action-over-inputs",
-      body: { inputs: {} },
-    });
-  });
-
-  it("holds the install of a SCHEDULED template until its required field is answered", async () => {
-    // A timer brings no form, so this value has nowhere else to come from.
-    templatesQuery.data = { templates: [nightlySweep] };
-    render(<TemplateGallery />);
-    fireEvent.click(screen.getByRole("button", { name: "Use template" }));
-
-    expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
-    fireEvent.change(screen.getByLabelText("What to do with each row *"), {
-      target: { value: "Tier each account" },
-    });
-    expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
-      false,
-    );
-  });
-
   it("sends the values a person did supply, and opens the installed workflow", async () => {
     templatesQuery.data = { templates: [batchAction] };
     render(<TemplateGallery />);
@@ -315,11 +255,6 @@ describe("TemplateGallery", () => {
 
   describe("what install takes now, and what the run form keeps", () => {
     /**
-     * Install BAKES every value it is given: the server writes it into the
-     * definition and drops the field from the trigger schema, so the
-     * installed workflow never asks for it again. A workflow left with no
-     * trigger schema gets no run form at all.
-     *
      * The server only REFUSES a missing required field for a scheduled
      * template (`resolveInstallValues`), because a scheduled run applies no
      * defaults and has nobody to ask. The dialog used to refuse for every
@@ -337,6 +272,10 @@ describe("TemplateGallery", () => {
       templatesQuery.data = { templates: [batchAction] };
       render(<TemplateGallery />);
       fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+
+      // No asterisk on the label: nothing here is required to install.
+      const field = screen.getByLabelText("What to do with each row") as HTMLInputElement;
+      expect(field.placeholder).toBe("Tier this account as enterprise, mid-market or SMB");
 
       const install = screen.getByRole("button", { name: "Install" }) as HTMLButtonElement;
       expect(install.disabled).toBe(false);
@@ -393,12 +332,10 @@ describe("TemplateGallery", () => {
 
   describe("a card the caller cannot install", () => {
     /**
-     * The steps and the caveats live ONLY in the install dialog. A card
-     * that offered no way into that dialog left its reader with two clamped
-     * lines of description — and that reader is the one deciding whether to
-     * connect a service, or to ask an admin for one. The first card in the
-     * gallery is exactly such a card wherever the org Slack app is not set
-     * up.
+     * The steps and the caveats live ONLY in the install dialog, so a card
+     * that offered no way in left its reader with two clamped lines of
+     * description — and that reader is the one deciding whether to connect a
+     * service, or to ask an admin for one.
      */
     const blocked: WorkflowTemplateSummary = {
       ...triageDigest,
@@ -446,6 +383,70 @@ describe("TemplateGallery", () => {
       render(<TemplateGallery />);
       expect(screen.getByRole("button", { name: "Use template" })).toBeTruthy();
       expect(screen.queryByRole("button", { name: "What it does" })).toBeNull();
+    });
+  });
+
+  /**
+   * The listing is taken in the workspace the switcher names, so in a team
+   * workspace every `connected` flag is the TEAM's answer. A card that read
+   * it as the reader's own was a dead end: a team holding Slack still got
+   * Install withheld, and connecting Slack personally never changed it.
+   */
+  describe("a team workspace", () => {
+    it("offers the install of a template whose service only the team holds", () => {
+      teamId = "team_ops";
+      templatesQuery.data = {
+        templates: [
+          {
+            ...triageDigest,
+            requires: [
+              { service: "github", connected: true },
+              { service: "slack", connected: true },
+            ],
+          },
+        ],
+      };
+      render(<TemplateGallery />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+      const dialog = within(screen.getByRole("dialog"));
+      expect((dialog.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+    });
+
+    it("sends a team gap to the sharing control, not to the reader's own connections", () => {
+      teamId = "team_ops";
+      templatesQuery.data = {
+        templates: [
+          {
+            ...triageDigest,
+            requires: [
+              { service: "github", connected: true },
+              { service: "slack", connected: false },
+            ],
+          },
+        ],
+      };
+      render(<TemplateGallery />);
+
+      expect(screen.queryByText("Connect Slack")).toBeNull();
+      const share = screen.getByText("Share Slack with the team").closest("a");
+      expect(share?.getAttribute("to") ?? share?.getAttribute("href")).toBe("/integrations");
+
+      fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+      expect(
+        within(screen.getByRole("dialog")).getByText(
+          "Slack is not connected for this team. Connect Slack on the Integrations page and share it with the team, then install this template.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("names the page when a team is missing more than one service", () => {
+      teamId = "team_ops";
+      templatesQuery.data = { templates: [triageDigest] };
+      render(<TemplateGallery />);
+      expect(screen.getByText("Share integrations with the team")).toBeTruthy();
     });
   });
 

@@ -14,6 +14,7 @@ import type { Message, SessionDetail } from "@valet/api/wire";
 import {
   Badge,
   Button,
+  ConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -140,9 +141,20 @@ export function SessionHeader({
   const orchInfo = useOrchestratorInfo();
   const teams = useTeams();
   const assistants = useAssistants();
-  // One error slot for every header action: pause, replace, rename, and the
-  // Terminal/VS Code switch.
+  // One error slot for the header actions that fire straight from their
+  // control: pause, replace, and rename. Delete and the Terminal/VS Code
+  // switch confirm first, and their modal covers this row, so each reports
+  // its own failure inside its dialog.
   const [actionError, setActionError] = useState<string | null>(null);
+  // Delete and the Terminal/VS Code switch confirm in a `ConfirmDialog`, not
+  // in `window.confirm`: the native prompt shows no pending state, drops the
+  // server's refusal, and browser automation accepts it before a person sees
+  // it. A header describes ONE session, so one boolean each is enough — no
+  // second row can open the same dialog.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [confirmServices, setConfirmServices] = useState(false);
+  const [servicesError, setServicesError] = useState<string | null>(null);
   // Durable busy fallback for the status badge — same signal the composer's
   // Stop/Escape affordance uses. Without it, a page that connects mid-turn
   // shows "idle" next to a visible Stop button until the next status event.
@@ -156,27 +168,17 @@ export function SessionHeader({
   // one edit sends one PATCH.
   const editOpen = useRef(false);
 
+  // Runs from the delete dialog's confirm button, never from the menu item:
+  // the menu only opens the dialog. On success the dialog closes before the
+  // route changes; on failure it stays open and shows why.
   async function destroy() {
-    // Three prompts for three losses. A team ASSISTANT is a shared
-    // conversation, so the prompt names what the team loses. A team-owned
-    // STANDALONE session (reachable since "Move to workspace…") is still a
-    // session — its prompt keeps the sandbox/child-session warning and adds
-    // who else loses it. A personal session keeps the original warning.
-    // The user's own assistant never reaches here: `canDelete` hides the
-    // menu item (TKAI-253).
-    const teamNote = `Everyone on ${team?.name ?? "the team"} loses`;
-    const prompt = isTeamAssistant
-      ? `Delete ${title}? ${teamNote} this conversation and its threads.`
-      : teamId !== null
-        ? `Delete this session permanently? ${teamNote} it. This deletes all threads, history, and child sessions, and tears down the sandbox.`
-        : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
-    if (!confirm(prompt)) return;
-    setActionError(null);
+    setDeleteError(null);
     try {
       await del.mutateAsync(session.id);
+      setConfirmDelete(false);
       navigate({ to: "/" });
     } catch (err) {
-      setActionError(extractActionError(err, "Failed to delete the session. Try again."));
+      setDeleteError(extractActionError(err, "Failed to delete the session. Try again."));
     }
   }
 
@@ -202,17 +204,15 @@ export function SessionHeader({
   // VS Code server. It is baked into the container at create time, so the
   // switch restarts the sandbox. Name that cost before doing it — the
   // workspace files survive, an open terminal does not.
-  async function toggleInteractiveServices() {
-    const turningOn = session.profile !== "full";
-    const prompt = turningOn
-      ? "Turn on Terminal and VS Code? The workspace sandbox restarts now. Your files are kept. Anything open in a terminal is lost."
-      : "Turn off Terminal and VS Code? The workspace sandbox restarts now. Your files are kept. Anything open in a terminal is lost.";
-    if (!confirm(prompt)) return;
-    setActionError(null);
+  const turningOnServices = session.profile !== "full";
+
+  async function applyInteractiveServices() {
+    setServicesError(null);
     try {
-      await setProfile.mutateAsync(turningOn ? "full" : "headless");
+      await setProfile.mutateAsync(turningOnServices ? "full" : "headless");
+      setConfirmServices(false);
     } catch (err) {
-      setActionError(
+      setServicesError(
         extractActionError(err, "Failed to change the session's services. Try again."),
       );
     }
@@ -336,6 +336,20 @@ export function SessionHeader({
   // one name for the predicate the gate, the item label, and destroy()'s
   // prompt all share.
   const isTeamAssistant = isAssistantSession && teamId !== null;
+  // Three descriptions for three losses. A team ASSISTANT is a shared
+  // conversation, so the copy names what the team loses. A team-owned
+  // STANDALONE session (reachable since "Move to workspace…") is still a
+  // session — it keeps the sandbox/child-session warning and adds who else
+  // loses it. A personal session keeps the original warning. The user's own
+  // assistant never reaches here: `canDelete` hides the menu item
+  // (TKAI-253).
+  const teamNote = `Everyone on ${team?.name ?? "the team"} loses`;
+  const deleteTitle = isTeamAssistant ? `Delete ${title}?` : "Delete this session permanently?";
+  const deleteDescription = isTeamAssistant
+    ? `${teamNote} this conversation and its threads.`
+    : teamId !== null
+      ? `${teamNote} it. This deletes all threads, history, and child sessions, and tears down the sandbox.`
+      : "This deletes all threads, history, and child sessions, and tears down the sandbox.";
   // Delete never renders on the user's own assistant page (TKAI-253): the
   // v1 holdover deleted the orchestrator and every thread with it, and
   // Replace sandbox covers the reset. Fail closed while the assistants
@@ -534,7 +548,7 @@ export function SessionHeader({
               <DropdownMenuContent align="end">
                 <DropdownMenuItem
                   disabled={setProfile.isPending}
-                  onSelect={() => void toggleInteractiveServices()}
+                  onSelect={() => setConfirmServices(true)}
                 >
                   <SquareTerminal className="h-3.5 w-3.5 mr-2" aria-hidden />
                   {session.profile === "full"
@@ -569,7 +583,7 @@ export function SessionHeader({
                   <DropdownMenuItem
                     className="text-danger-500"
                     disabled={del.isPending}
-                    onSelect={() => void destroy()}
+                    onSelect={() => setConfirmDelete(true)}
                   >
                     <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
                     {/* Only an assistant session IS the team's assistant. A
@@ -591,6 +605,39 @@ export function SessionHeader({
           onOpenChange={setMoving}
         />
       )}
+      {/* Both dialogs stay mounted so a failure can report inside the one
+          the person is looking at. Closing either clears its stale error, so
+          a second attempt does not open on the last refusal. */}
+      <ConfirmDialog
+        open={confirmServices}
+        onOpenChange={(open) => {
+          setConfirmServices(open);
+          if (!open) setServicesError(null);
+        }}
+        title={
+          turningOnServices ? "Turn on Terminal and VS Code?" : "Turn off Terminal and VS Code?"
+        }
+        description="The workspace sandbox restarts now. Your files are kept. Anything open in a terminal is lost."
+        confirmLabel={turningOnServices ? "Turn on" : "Turn off"}
+        pendingLabel={turningOnServices ? "Turning on…" : "Turning off…"}
+        pending={setProfile.isPending}
+        error={servicesError ?? undefined}
+        onConfirm={() => void applyInteractiveServices()}
+      />
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={(open) => {
+          setConfirmDelete(open);
+          if (!open) setDeleteError(null);
+        }}
+        title={deleteTitle}
+        description={deleteDescription}
+        confirmLabel={isTeamAssistant ? "Delete assistant" : "Delete session"}
+        pendingLabel="Deleting…"
+        pending={del.isPending}
+        error={deleteError ?? undefined}
+        onConfirm={() => void destroy()}
+      />
     </header>
   );
 }

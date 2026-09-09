@@ -5,7 +5,7 @@
  * panel renders and which mutation it fires.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OnePasswordSettingsResponse } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
@@ -14,7 +14,15 @@ const putSettingsMutate = vi.fn();
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const connectMutate = vi.fn();
 const disconnectMutate = vi.fn();
+let disconnectError: Error | null = null;
+// Clears like the real `reset()`: a stub that only counts calls cannot tell a
+// component that drops the refusal from one that does not, and the whole suite
+// would stay green over the bug.
+const disconnectReset = vi.fn(() => {
+  disconnectError = null;
+});
 
+let confirmSpy = vi.fn(() => true);
 let orgData: { callerRole: "admin" | "member" } = { callerRole: "admin" };
 let settingsData: OnePasswordSettingsResponse | undefined = {
   allowPersonal: false,
@@ -38,7 +46,12 @@ vi.mock("~/api/integrations", () => ({
     isPending: false,
     error: null,
   }),
-  useDisconnectCredential: () => ({ mutate: disconnectMutate, isPending: false }),
+  useDisconnectCredential: () => ({
+    mutate: disconnectMutate,
+    isPending: false,
+    error: disconnectError,
+    reset: disconnectReset,
+  }),
 }));
 
 import { OnePasswordPanel } from "./onepassword-panel";
@@ -49,7 +62,11 @@ describe("OnePasswordPanel", () => {
     connectMutateAsync.mockResolvedValue({ ok: true });
     orgData = { callerRole: "admin" };
     settingsData = { allowPersonal: false, orgTokenConnected: false, personalTokenConnected: false };
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    disconnectError = null;
+    // Answers "yes" so a reintroduced `window.confirm` fires the mutation and
+    // fails the dialog tests loudly instead of hanging.
+    confirmSpy = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirmSpy);
   });
 
   it("member with no tokens sees the empty copy, not the org token card or toggle", () => {
@@ -173,5 +190,122 @@ describe("OnePasswordPanel", () => {
         body: { type: "service_account", apiKey: "op-personal-token" },
       }),
     );
+  });
+  // ── Removing a token ──────────────────────────────────────────────────
+  // Both rows guarded the disconnect with `window.confirm`, which browser
+  // automation auto-accepts. The dialog is the real gate: the row button only
+  // opens it. The org row carries the full cycle below; the personal row is a
+  // separate control with its own state, so it keeps the two cases that differ
+  // from the org row's (the arguments it sends, and its own clear).
+
+  /** Admin, org token connected, personal row hidden: one Remove button. */
+  function renderConnectedOrgToken() {
+    settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
+    return render(<OnePasswordPanel />);
+  }
+
+  /** Member, personal token connected, org row hidden: one Remove button. */
+  function renderConnectedPersonalToken() {
+    orgData = { callerRole: "member" };
+    settingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: true };
+    return render(<OnePasswordPanel />);
+  }
+
+  /** A refusal the server answers a removal with. */
+  const refusal = (status: number, message: string) =>
+    new ApiError(status, `DELETE /credentials/onepassword → ${status}`, { error: message });
+  const ORG_REFUSAL = "Only an admin can remove the organization token. Ask an admin.";
+  const PERSONAL_REFUSAL = "The token store is unavailable. Try again in a moment.";
+
+  it("org token: Remove opens the confirm dialog and disconnects nothing", async () => {
+    renderConnectedOrgToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Remove the organization 1Password token?")).toBeTruthy();
+    expect(disconnectMutate).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("org token: confirming disconnects with scope org", async () => {
+    renderConnectedOrgToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove token" }));
+
+    expect(disconnectMutate).toHaveBeenCalledTimes(1);
+    expect(disconnectMutate).toHaveBeenCalledWith(
+      { service: "onepassword", scope: "org" },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+
+  it("org token: cancelling the dialog disconnects nothing", async () => {
+    renderConnectedOrgToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(disconnectMutate).not.toHaveBeenCalled();
+    expect(screen.getByText("Connected")).toBeTruthy();
+  });
+
+  // The refusal is set AFTER the confirm click: the server cannot answer a
+  // request the user has not sent. Setting it before the open would assert the
+  // stale-error path instead, which is the next test.
+  it("org token: the dialog shows the server's reason for a failed removal", async () => {
+    const { rerender } = renderConnectedOrgToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+    const opened = await screen.findByRole("dialog");
+    fireEvent.click(within(opened).getByRole("button", { name: "Remove token" }));
+
+    disconnectError = refusal(403, ORG_REFUSAL);
+    rerender(<OnePasswordPanel />);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(ORG_REFUSAL)).toBeTruthy();
+  });
+
+  // React Query holds the refusal until the next mutate, so the opening
+  // control clears it. Radix fires no `onOpenChange(true)` on these
+  // controlled, trigger-less dialogs, so a clear placed there never runs.
+  it("org token: reopening after a refusal starts with no error", async () => {
+    disconnectError = refusal(403, ORG_REFUSAL);
+    renderConnectedOrgToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Remove the organization 1Password token?")).toBeTruthy();
+    expect(within(dialog).queryByText(ORG_REFUSAL)).toBeNull();
+  });
+
+  it("personal token: confirming disconnects with no scope field", async () => {
+    renderConnectedPersonalToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove token" }));
+
+    expect(disconnectMutate).toHaveBeenCalledTimes(1);
+    expect(disconnectMutate).toHaveBeenCalledWith(
+      { service: "onepassword" },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+
+  // The personal row carries its own copy of the clear, on its own Remove
+  // control, so covering only the org row would let a regression ship in half
+  // the panel with the suite green.
+  it("personal token: reopening after a refusal starts with no error", async () => {
+    disconnectError = refusal(503, PERSONAL_REFUSAL);
+    renderConnectedPersonalToken();
+    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Remove your personal 1Password token?")).toBeTruthy();
+    expect(within(dialog).queryByText(PERSONAL_REFUSAL)).toBeNull();
+    // The open alone sends nothing, and never reaches `window.confirm`.
+    expect(disconnectMutate).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 });

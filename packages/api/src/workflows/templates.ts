@@ -11,11 +11,13 @@
  *      straight off `providers.plugins`, the same way `/api/plugins` reads
  *      services and the event catalog reads `plugin.triggers`.
  *   2. Derives the summary the gallery renders: the services a template
- *      needs and whether the caller connected them, the run-form inputs,
- *      and the caveats. Most caveats are read out of the definition rather
- *      than written by an author, because derived copy cannot drift away
- *      from what the workflow actually does. An author's own caveats are
- *      kept, for the limits a definition cannot show.
+ *      needs and whether the principal the install would act as has
+ *      connected them (the caller, or the team the gallery is scoped to),
+ *      the run-form inputs, and the caveats. Most caveats are read out of
+ *      the definition rather than written by an author, because derived
+ *      copy cannot drift away from what the workflow actually does. An
+ *      author's own caveats are kept, for the limits a definition cannot
+ *      show.
  *   3. Installs a template as a real, owned workflow.
  *
  * Install writes the definition, its version-1 snapshot, and the cron
@@ -38,7 +40,6 @@ import {
   normalizeInputType,
   triggerDataSchema,
   type ForeachNode,
-  type ToolNode,
   type WorkflowDefinition,
   type WorkflowInputDefinition,
 } from "@valet/workflow";
@@ -54,7 +55,7 @@ import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { teamServiceReadiness } from "./team-service-readiness.js";
+import { teamServiceReadiness, type TeamServiceReadiness } from "./team-service-readiness.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
 import { toolNodesOf } from "./tool-nodes.js";
@@ -523,10 +524,11 @@ export function summarizeTemplate(
  * condition, so a broken template never reaches a deployment silently.
  *
  * The caller is named by user AND organization, because a card reports two
- * different states. `connected` is the person's own credential set. A
+ * different states. `connected` is the credential set of the principal the
+ * install would act as: the person, or the team named by `opts.teamId`. A
  * service this organization has not configured is reported separately
- * (`WorkflowTemplateRequirement.unconfigured`): the person cannot connect
- * it, and the card must say who can.
+ * (`WorkflowTemplateRequirement.unconfigured`): nobody but an admin can
+ * connect it, and the card must say who can.
  */
 /**
  * Services a template may name but that a person cannot use yet.
@@ -547,9 +549,78 @@ function requiredServices(summary: WorkflowTemplateSummary): string[] {
   return summary.requires.map((r) => r.service);
 }
 
+// ─── Team-scoped requirements ────────────────────────────────────────────
+//
+// A listing taken in a team workspace must answer the question the INSTALL
+// answers, and a team install is judged by `teamServiceReadiness` — the
+// team's credentials, the org-provided services, and the GitHub App — not
+// by the caller's own Integrations list. Judged by the caller, a team that
+// holds Linear reads as unconnected, the card withholds Install, and
+// connecting Linear personally never changes the answer. So the same
+// predicate answers both, and the two agree by construction.
+
+/**
+ * What a definition contributes to its readiness answer: for each tool
+ * node, the service, the credential pin, and the repository the github
+ * branch looks an App installation up under (`installationResolvesFor`
+ * reads `owner` and `repo`). Two definitions with the same signature get
+ * the same answer, so one call stands in for both.
+ *
+ * The signature covers every tool node rather than one per service because
+ * `teamServiceReadiness` reads a service's nodes TOGETHER: every node
+ * pinned `app` takes the App branch, and one node pinned `user` keeps the
+ * service on the credential-row path. A template that pins the App and a
+ * template that pins the owner's own token therefore get separate answers.
+ * Merging them would hide the ready one behind the blocked one.
+ */
+function readinessSignature(definition: WorkflowDefinition): string {
+  const nodes = toolNodesOf(definition).map((node) => {
+    const owner = typeof node.params.owner === "string" ? node.params.owner : "";
+    const repo = typeof node.params.repo === "string" ? node.params.repo : "";
+    // JSON, not a joined string: an `owner` holding the separator would
+    // otherwise read as a different node's signature.
+    return JSON.stringify([node.service, node.credential ?? "auto", owner, repo]);
+  });
+  return JSON.stringify([...new Set(nodes)].sort());
+}
+
+/**
+ * The credential services a team install of this definition could act as.
+ *
+ * `templateRequirements` keys a requirement by CREDENTIAL service
+ * (`credentialService ?? service`, `credentialServiceFor`) while readiness
+ * answers per TOOL service, so the mapping is made here. When two tool
+ * services share one credential service, the requirement counts as
+ * connected only while every one of them is ready: the requirement is a
+ * single flag, and the install refuses on the first tool the team cannot
+ * act as.
+ */
+function teamConnectedServices(
+  definition: WorkflowDefinition,
+  actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
+  readiness: TeamServiceReadiness,
+): Set<string> {
+  const ready = new Set(readiness.ready);
+  const connected = new Set<string>();
+  const blocked = new Set<string>();
+  for (const node of toolNodesOf(definition)) {
+    const entry = actionPluginByService.get(node.service);
+    if (!entry) continue;
+    const { service } = credentialServiceFor(entry);
+    if (ready.has(node.service)) connected.add(service);
+    else blocked.add(service);
+  }
+  for (const service of blocked) connected.delete(service);
+  return connected;
+}
+
 export async function listWorkflowTemplateSummaries(
   deps: TemplateServiceDeps,
   caller: { userId: string; orgId: string },
+  /** The team workspace the gallery is showing, when it is showing one.
+   * The requirements are then stamped against that team, because that is
+   * the principal its Install button would install as. */
+  opts: { teamId?: string } = {},
 ): Promise<WorkflowTemplateSummary[]> {
   const owner: CredentialOwner = { type: "user", id: caller.userId };
   const availability = {
@@ -574,7 +645,7 @@ export async function listWorkflowTemplateSummaries(
   // set it up.
   const connected = new Set([...personal.map((cred) => cred.service), ...orgProvided]);
 
-  const summaries: WorkflowTemplateSummary[] = [];
+  const listed: SummarizeResult[] = [];
   for (const owned of await listCatalogTemplatesForOwner(deps, caller)) {
     const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
     if (!result.ok) {
@@ -596,7 +667,40 @@ export async function listWorkflowTemplateSummaries(
       );
       continue;
     }
-    summaries.push(result.value.summary);
+    listed.push(result.value);
+  }
+
+  const teamId = opts.teamId;
+  if (teamId === undefined) return listed.map((entry) => entry.summary);
+
+  // A team workspace restamps `connected` against the team, over the
+  // definitions that survived validation. `unconfigured` is unchanged: it
+  // is the organization's answer, the same for every member and team.
+  //
+  // Readiness is a database read per service plus, for github, an App
+  // lookup, so it is memoized per signature. Each call still gets the
+  // template's REAL definition, so a predicate that grows to read more of
+  // it than the tool nodes stays correct here.
+  const readinessBySignature = new Map<string, Promise<TeamServiceReadiness>>();
+  const summaries: WorkflowTemplateSummary[] = [];
+  for (const { summary, definition } of listed) {
+    const signature = readinessSignature(definition);
+    const pending =
+      readinessBySignature.get(signature) ??
+      teamServiceReadiness(
+        { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
+        { orgId: caller.orgId, teamId, definition },
+      );
+    readinessBySignature.set(signature, pending);
+    summaries.push({
+      ...summary,
+      requires: templateRequirements(
+        definition,
+        deps.actionPluginByService,
+        teamConnectedServices(definition, deps.actionPluginByService, await pending),
+        unavailable,
+      ),
+    });
   }
   return summaries;
 }

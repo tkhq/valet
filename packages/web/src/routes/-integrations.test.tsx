@@ -172,6 +172,7 @@ const navigate = vi.fn();
 
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const disconnectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+const disconnectMutate = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
@@ -205,7 +206,13 @@ vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: currentPluginsData, isLoading: false, error: null }),
   useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
   useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
-  useDisconnectCredential: () => ({ mutateAsync: disconnectMutateAsync, isPending: false, error: null }),
+  useDisconnectCredential: () => ({
+    mutate: disconnectMutate,
+    mutateAsync: disconnectMutateAsync,
+    isPending: false,
+    error: null,
+    reset: vi.fn(),
+  }),
   useDelegateCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
@@ -246,7 +253,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
       isError: false,
       error: null,
     }),
-    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false }),
+    useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false , reset: vi.fn() }),
   };
 });
 
@@ -279,10 +286,10 @@ describe("IntegrationsPage", () => {
     currentOrg = org("member");
     connectMutateAsync.mockClear();
     disconnectMutateAsync.mockClear();
+    disconnectMutate.mockClear();
     identityLinksData = undefined;
     startLinkMutateAsync.mockReset();
     unlinkIdentityMutate.mockClear();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   it("lists connectable services only, with friendly names and honest reach meta", () => {
@@ -397,10 +404,30 @@ describe("IntegrationsPage", () => {
   it("confirms then disconnects a connected service", async () => {
     render(<IntegrationsPage />);
 
+    // The row's button only OPENS the dialog. Nothing is disconnected yet —
+    // this is the assertion that a native confirm() could not carry, because
+    // browser automation auto-accepts one.
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Slack" }));
+    expect(disconnectMutate).not.toHaveBeenCalled();
+    expect(screen.getByText("Disconnect Slack?")).toBeTruthy();
 
-    expect(window.confirm).toHaveBeenCalled();
-    await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith({ service: "slack" }));
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() =>
+      expect(disconnectMutate).toHaveBeenCalledWith(
+        { service: "slack" },
+        expect.objectContaining({ onSuccess: expect.any(Function) }),
+      ),
+    );
+  });
+
+  it("cancelling the disconnect dialog disconnects nothing", () => {
+    render(<IntegrationsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect Slack" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(disconnectMutate).not.toHaveBeenCalled();
+    expect(disconnectMutateAsync).not.toHaveBeenCalled();
   });
 
   it("offers Share with a team on a connected personal service", () => {
@@ -792,7 +819,6 @@ describe("unconfigured services", () => {
     currentPluginsData = unconfiguredPluginsData;
     currentOrgStatus = { configured: true, installationCount: 1, suspendedCount: 0 };
     currentOrg = org("member");
-    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   it("hides an unconfigured, unconnected service from the grid", () => {
@@ -1022,7 +1048,6 @@ describe("IntegrationsPage — org-provided pairing", () => {
     startLinkMutateAsync.mockReset();
     deliverLinkMutateAsync.mockReset();
     unlinkIdentityMutate.mockClear();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   it("offers pairing instead of token entry when the provider declares an identity link", () => {
@@ -1059,6 +1084,9 @@ describe("IntegrationsPage — org-provided pairing", () => {
     expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
+    expect(unlinkIdentityMutate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
     expect(unlinkIdentityMutate).toHaveBeenCalled();
   });
 

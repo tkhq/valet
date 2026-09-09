@@ -63,6 +63,7 @@ import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../s
 import { deleteDelegationsFrom, listDelegationsFrom } from "../services/credential-delegations.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
+import { serviceDisplayName } from "../lib/service-display-name.js";
 import type {
   CredentialSummary,
   DelegateCredentialRequest,
@@ -112,11 +113,6 @@ function rowHasSecret(stored: StoredCredential): boolean {
  * with org scopes only). */
 function usableByTeamRead(stored: StoredCredential): boolean {
   return onePasswordMeta(stored)?.tokenScope === "org";
-}
-
-/** The service key as a sentence subject (`slack` → `Slack`). */
-function displayName(service: string): string {
-  return service.charAt(0).toUpperCase() + service.slice(1);
 }
 
 /**
@@ -383,7 +379,7 @@ credentialsRouter.put("/:service", async (c) => {
       });
       if (mode === "unconfigured") {
         return c.json(
-          { error: `${service} is not configured for this organization. An admin can set it up in Settings → Organization.` },
+          { error: `${serviceDisplayName(service)} is not configured for this organization. An admin can set it up in Settings → Organization.` },
           403,
         );
       }
@@ -393,7 +389,7 @@ credentialsRouter.put("/:service", async (c) => {
       // declaration (e.g. slack-user OAuth).
       if (mode === "org") {
         return c.json(
-          { error: `${service} is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.` },
+          { error: `${serviceDisplayName(service)} is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.` },
           403,
         );
       }
@@ -450,7 +446,10 @@ credentialsRouter.put("/:service", async (c) => {
     // silently ignored, never resolved. Reject at write time instead of
     // shipping a credential nothing reads.
     if (service === "github") {
-      return c.json({ error: "github credentials cannot be 1Password references; use the GitHub connect flow" }, 400);
+      return c.json(
+        { error: `${serviceDisplayName(service)} credentials cannot be 1Password references; use the GitHub connect flow` },
+        400,
+      );
     }
     // The services the read path denies outright are read RAW by the code
     // that owns them: an `llm:*` key through `services/model-resolution.ts`,
@@ -461,7 +460,7 @@ credentialsRouter.put("/:service", async (c) => {
     // code path. Refuse the write rather than ship a row nothing resolves.
     if (isDeniedCredentialService(service)) {
       return c.json(
-        { error: `${service} credentials cannot be 1Password references; set them in their own settings page` },
+        { error: `${serviceDisplayName(service)} credentials cannot be 1Password references; set them in their own settings page` },
         400,
       );
     }
@@ -484,7 +483,7 @@ credentialsRouter.put("/:service", async (c) => {
     const declared = findCredentialDeclaration(plugins, service);
     if (declared && declared.type !== body.type) {
       return c.json(
-        { error: `${service} credentials are ${declared.type}. Set type to ${declared.type} for this reference.` },
+        { error: `${serviceDisplayName(service)} credentials are ${declared.type}. Set type to ${declared.type} for this reference.` },
         400,
       );
     }
@@ -602,6 +601,10 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   const { engineCredentials, db, plugins } = c.var.providers;
   const user = c.var.user;
   const service = c.req.param("service");
+  // Every refusal below names the service the way the product does. The
+  // route param is an id (`github`), not a name, and reads as neither
+  // when it is dropped into a sentence.
+  const label = serviceDisplayName(service);
   if (service === ONEPASSWORD_SERVICE) {
     return c.json(
       {
@@ -632,7 +635,6 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   // not change the answer.
   const declared = findCredentialDeclaration(plugins, service);
   if (declared?.requires?.orgCredential) {
-    const label = displayName(service);
     return c.json(
       {
         error:
@@ -649,7 +651,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   const source = await engineCredentials.get({ type: "user", id: user.id }, service);
   if (!source || (!rowHasSecret(source) && !onePasswordMeta(source))) {
     return c.json(
-      { error: `Connect ${service} in Integrations first, then share it with the team.` },
+      { error: `Connect ${label} in Integrations first, then share it with the team.` },
       400,
     );
   }
@@ -661,7 +663,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     return c.json(
       {
         error:
-          `${service} is stored as a personal 1Password reference, which a team cannot read. ` +
+          `${label} is stored as a personal 1Password reference, which a team cannot read. ` +
           "Store it again with tokenScope org, or store the secret directly, then share it.",
       },
       400,
@@ -669,7 +671,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   }
   if (!isCredentialKind(source.type)) {
     return c.json(
-      { error: `${service} cannot be shared with a team. Ask a team admin to connect ${service} for the team instead.` },
+      { error: `${label} cannot be shared with a team. Ask a team admin to connect ${label} for the team instead.` },
       400,
     );
   }
@@ -716,8 +718,14 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     .onConflictDoNothing()
     .returning({ service: credentials.service });
   if (inserted.length === 0) {
+    // The slot holds either another member's share or a secret the team
+    // stores, and the two are removed under different labels ("Stop
+    // sharing" and "Disconnect"). This answer cannot tell them apart, so it
+    // names the page that shows which one is there rather than a verb that
+    // fits only one of them. The web client's own 409 copy
+    // (`components/integrations/share-with-team.tsx`) says the same thing.
     return c.json(
-      { error: `This team already has a ${service} credential. Ask a team admin to disconnect it first.` },
+      { error: `This team already has ${label}. Ask a team admin to change it in Settings → Organization → Teams.` },
       409,
     );
   }

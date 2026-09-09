@@ -9,9 +9,14 @@
  * filtering and per-row revoke right. Mocked the same way
  * `-workflows.index.test.tsx` mocks `@tanstack/react-router` and its data
  * hooks.
+ *
+ * Revoke confirms in a `ConfirmDialog`, not `window.confirm`: a native
+ * confirm is auto-accepted by browser automation, so an agent driving this
+ * page revoked a link with one click and no confirm step at all. The tests
+ * below hold that line — the click must only OPEN the dialog.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { ArtifactListItem } from "@valet/api/wire";
 
@@ -30,6 +35,14 @@ const mine: ArtifactListItem = {
   revoked: false,
   createdAt: 1,
   updatedAt: 2,
+};
+
+const second: ArtifactListItem = {
+  ...mine,
+  id: "art_second",
+  title: "Launch notes",
+  token: "tok-second",
+  url: "https://valet.example/a/tok-second",
 };
 
 const revoked: ArtifactListItem = {
@@ -73,7 +86,16 @@ vi.mock("~/api/artifacts", () => ({
     useArtifactsMock(...args);
     return { data: artifactsData, isLoading: false, error: null };
   },
-  useRevokeArtifact: () => ({ mutate: revokeMutate, isPending: revokePending, error: revokeError }),
+  useRevokeArtifact: () => ({
+    mutate: revokeMutate,
+    isPending: revokePending,
+    error: revokeError,
+    // A real reset CLEARS the error. A bare vi.fn() would let a reset that is
+    // never called pass this suite.
+    reset: () => {
+      revokeError = null;
+    },
+  }),
 }));
 
 import { ArtifactsPage } from "./artifacts.index";
@@ -82,11 +104,22 @@ function renderPage() {
   return render(<ArtifactsPage />);
 }
 
+/** The row controls, in list order. The dialog's confirm button carries the
+ * same label, so grab these before opening anything. */
+function rowRevokeButtons() {
+  return screen.getAllByRole("button", { name: "Revoke" });
+}
+
+function openDialog(index = 0) {
+  fireEvent.click(rowRevokeButtons()[index]!);
+  return screen.getByRole("dialog");
+}
+
 beforeEach(() => {
   artifactsData = { artifacts: [mine, revoked] };
   revokePending = false;
   revokeError = null;
-  revokeMutate.mockClear();
+  revokeMutate.mockReset();
   useArtifactsMock.mockClear();
 });
 
@@ -117,24 +150,91 @@ describe("ArtifactsPage", () => {
     expect(link?.getAttribute("data-token")).toBe("tok-mine");
   });
 
-  it("does not revoke when the confirm dialog is dismissed", () => {
-    vi.spyOn(window, "confirm").mockReturnValue(false);
+  it("only opens the confirm dialog on the revoke click — it revokes nothing", () => {
     renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    const dialog = openDialog();
+
+    expect(revokeMutate).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("Revoke the link to Deploy report?")).toBeTruthy();
+    expect(
+      within(dialog).getByText(
+        "Anyone who opens the link gets a 404, and the page leaves this gallery. Publish it again to get a new link.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("revokes nothing when the dialog is cancelled", async () => {
+    renderPage();
+    const dialog = openDialog();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(revokeMutate).not.toHaveBeenCalled();
   });
 
-  it("revokes the clicked row's artifact once the confirm dialog is accepted", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("confirms per row: one row's dialog carries that row's artifact", async () => {
+    artifactsData = { artifacts: [mine, second] };
     renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(revokeMutate).toHaveBeenCalledWith({ id: "art_mine" }));
+    expect(rowRevokeButtons()).toHaveLength(2);
+
+    const dialog = openDialog(1);
+
+    expect(within(dialog).getByText("Revoke the link to Launch notes?")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
+
+    await waitFor(() => expect(revokeMutate).toHaveBeenCalledTimes(1));
+    expect(revokeMutate.mock.calls[0]![0]).toEqual({ id: "art_second" });
   });
 
-  it("shows a corrective error and keeps the row when revoke fails", () => {
+  it("closes the dialog once the revoke succeeds", async () => {
+    revokeMutate.mockImplementation(
+      (_vars: { id: string }, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.(),
+    );
+    renderPage();
+    const dialog = openDialog();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("shows a corrective error in the dialog and keeps the row when revoke fails", () => {
+    // The failure has to ARRIVE while the dialog is open, the way production
+    // produces it. Setting it before the open would test the stale-error path
+    // the reopen case below forbids.
+    const view = renderPage();
+    const dialog = openDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
+
+    revokeError = new Error("network unreachable");
+    view.rerender(<ArtifactsPage />);
+
+    expect(
+      within(screen.getByRole("dialog")).getByText(
+        "network unreachable. Check the server is running, then try again.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("Deploy report")).toBeTruthy();
+  });
+
+  it("reopening after a failed revoke starts with no error", () => {
+    // React Query holds `error` until the next mutate, so the row button
+    // clears it as it opens the dialog.
     revokeError = new Error("network unreachable");
     renderPage();
-    expect(screen.getByText("Revoke failed: network unreachable. Retry, or refresh the page.")).toBeTruthy();
-    expect(screen.getByText("Deploy report")).toBeTruthy();
+
+    const dialog = openDialog();
+
+    expect(within(dialog).queryByText(/network unreachable/)).toBeNull();
+  });
+
+  it("disables the row control and names the pending state while revoking", () => {
+    revokePending = true;
+    renderPage();
+    const button = screen.getByRole("button", { name: "Revoking…" });
+    expect(button.hasAttribute("disabled")).toBe(true);
   });
 });

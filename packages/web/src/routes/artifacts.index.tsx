@@ -1,7 +1,9 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ArtifactListItem } from "@valet/api/wire";
+import { useState } from "react";
 import { useArtifacts, useRevokeArtifact } from "~/api/artifacts";
-import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
@@ -69,6 +71,7 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
   // shared mutation would disable and error every row in the list for one
   // revoke, instead of just the row the caller acted on.
   const revoke = useRevokeArtifact();
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
 
   return (
     <div className="py-2.5">
@@ -108,7 +111,11 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
             type="button"
             disabled={revoke.isPending}
             onClick={() => {
-              if (window.confirm("Revoke this link? Viewers get a 404.")) revoke.mutate({ id: artifact.id });
+              // React Query holds `error` until the next mutate, and Radix
+              // never calls `onOpenChange(true)` for a controlled dialog with
+              // no trigger, so the previous refusal is cleared here instead.
+              revoke.reset();
+              setConfirmRevoke(true);
             }}
             className="text-xs text-danger-500 hover:underline disabled:pointer-events-none disabled:opacity-50"
           >
@@ -116,11 +123,27 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
           </button>
         </div>
       </div>
-      {revoke.error && (
-        <p className="mt-1 text-xs text-danger-500">
-          Revoke failed: {revoke.error.message}. Retry, or refresh the page.
-        </p>
+      {/* A failed revoke reports in BOTH places on purpose. The dialog
+          stays open so the caller reads the reason beside the button that
+          produced it; the row keeps the message after the dialog is
+          dismissed, because a link the caller believes is revoked and is
+          not is a disclosure they must still be able to see. */}
+      {revoke.error != null && !confirmRevoke && (
+        <p className="mt-1 text-xs text-danger-500">{errorText(revoke.error)}</p>
       )}
+      <ConfirmDialog
+        open={confirmRevoke}
+        onOpenChange={setConfirmRevoke}
+        title={`Revoke the link to ${artifact.title}?`}
+        description="Anyone who opens the link gets a 404, and the page leaves this gallery. Publish it again to get a new link."
+        confirmLabel="Revoke"
+        pendingLabel="Revoking…"
+        pending={revoke.isPending}
+        error={revoke.error != null ? errorText(revoke.error) : undefined}
+        onConfirm={() =>
+          revoke.mutate({ id: artifact.id }, { onSuccess: () => setConfirmRevoke(false) })
+        }
+      />
     </div>
   );
 }

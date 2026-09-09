@@ -3,10 +3,26 @@ import { errorText } from "~/lib/error-text";
 import { useConnectCredential, useDisconnectCredential } from "~/api/integrations";
 import { useOnePasswordSettings, usePutOnePasswordSettings } from "~/api/onepassword";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Input, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Spinner, Switch } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
+
+/**
+ * The two removals differ in blast radius, so they get separate copy. A
+ * credential whose secret is a 1Password reference resolves through the token
+ * its `tokenScope` names, so removing a token breaks exactly those
+ * references: org-wide for `scope: "org"`, caller-only when `scope` is
+ * omitted and the server resolves the owner to the session user.
+ */
+const REMOVE_ORG_TOKEN_NOTE =
+  "This token is shared across the organization. Credentials that read their secret through it " +
+  "stop resolving for every member. An admin can connect a new token here.";
+
+const REMOVE_PERSONAL_TOKEN_NOTE =
+  "This token is yours alone. Credentials that read their secret through it stop resolving for " +
+  "you, and other members and the organization token are not affected. You can connect a new " +
+  "token here.";
 
 /**
  * Organization · 1Password: the org service-account token (admin), the
@@ -92,6 +108,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
   const [token, setToken] = useState("");
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [savedTick, setSavedTick] = useState(0);
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   async function saveToken() {
     const trimmed = token.trim();
@@ -110,27 +127,47 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
   }
 
   return (
-    <FieldRow
-      label="Organization token"
-      hint="A 1Password service account token shared across the organization."
-    >
-      <TokenFields
-        connected={connected}
-        token={token}
-        onTokenChange={setToken}
-        inputLabel="Organization 1Password token"
-        error={tokenError}
-        saving={connect.isPending}
-        removing={disconnect.isPending}
-        onSave={() => void saveToken()}
-        onRemove={() => {
-          if (!confirm("Remove the organization 1Password token?")) return;
-          disconnect.mutate({ service: "onepassword", scope: "org" });
-        }}
-        removeLabel="Remove token"
-        savedTick={savedTick}
+    <>
+      <FieldRow
+        label="Organization token"
+        hint="A 1Password service account token shared across the organization."
+      >
+        <TokenFields
+          connected={connected}
+          token={token}
+          onTokenChange={setToken}
+          inputLabel="Organization 1Password token"
+          error={tokenError}
+          saving={connect.isPending}
+          removing={disconnect.isPending}
+          onSave={() => void saveToken()}
+          onRemove={() => {
+            // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
+            disconnect.reset();
+            setConfirmRemove(true);
+          }}
+          removeLabel="Remove token"
+          savedTick={savedTick}
+        />
+      </FieldRow>
+
+      <ConfirmDialog
+        open={confirmRemove}
+        onOpenChange={setConfirmRemove}
+        title="Remove the organization 1Password token?"
+        description={REMOVE_ORG_TOKEN_NOTE}
+        confirmLabel="Remove token"
+        pendingLabel="Removing…"
+        pending={disconnect.isPending}
+        error={disconnect.error != null ? errorText(disconnect.error) : undefined}
+        onConfirm={() =>
+          disconnect.mutate(
+            { service: "onepassword", scope: "org" },
+            { onSuccess: () => setConfirmRemove(false) },
+          )
+        }
       />
-    </FieldRow>
+    </>
   );
 }
 
@@ -140,6 +177,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
   const [token, setToken] = useState("");
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [savedTick, setSavedTick] = useState(0);
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   async function saveToken() {
     const trimmed = token.trim();
@@ -158,27 +196,47 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
   }
 
   return (
-    <FieldRow
-      label="1Password personal token"
-      hint="Lets you reference items from your own 1Password vaults."
-    >
-      <TokenFields
-        connected={connected}
-        token={token}
-        onTokenChange={setToken}
-        inputLabel="1Password personal token"
-        error={tokenError}
-        saving={connect.isPending}
-        removing={disconnect.isPending}
-        onSave={() => void saveToken()}
-        onRemove={() => {
-          if (!confirm("Remove your personal 1Password token?")) return;
-          disconnect.mutate({ service: "onepassword" });
-        }}
-        removeLabel="Remove token"
-        savedTick={savedTick}
+    <>
+      <FieldRow
+        label="1Password personal token"
+        hint="Lets you reference items from your own 1Password vaults."
+      >
+        <TokenFields
+          connected={connected}
+          token={token}
+          onTokenChange={setToken}
+          inputLabel="1Password personal token"
+          error={tokenError}
+          saving={connect.isPending}
+          removing={disconnect.isPending}
+          onSave={() => void saveToken()}
+          onRemove={() => {
+            // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
+            disconnect.reset();
+            setConfirmRemove(true);
+          }}
+          removeLabel="Remove token"
+          savedTick={savedTick}
+        />
+      </FieldRow>
+
+      <ConfirmDialog
+        open={confirmRemove}
+        onOpenChange={setConfirmRemove}
+        title="Remove your personal 1Password token?"
+        description={REMOVE_PERSONAL_TOKEN_NOTE}
+        confirmLabel="Remove token"
+        pendingLabel="Removing…"
+        pending={disconnect.isPending}
+        error={disconnect.error != null ? errorText(disconnect.error) : undefined}
+        onConfirm={() =>
+          disconnect.mutate(
+            { service: "onepassword" },
+            { onSuccess: () => setConfirmRemove(false) },
+          )
+        }
       />
-    </FieldRow>
+    </>
   );
 }
 

@@ -21,6 +21,7 @@ import { useRuns, useWorkflows } from "~/api/workflows";
 import { useUsageBreakdown } from "~/api/usage";
 import { memoryStats } from "~/components/assistant/memory-card";
 import { Badge, Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { assistantLabel } from "~/components/session/assistant-rail";
 import { errorText } from "~/lib/error-text";
 import { formatTokens, formatUsd } from "~/lib/format-usage";
 import { relativeTime } from "~/lib/relative-time";
@@ -155,7 +156,7 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
                     params={{ assistantId: a.id }}
                     className="underline-offset-2 hover:text-ink hover:underline"
                   >
-                    {a.name ?? "Untitled assistant"}
+                    {assistantLabel(a)}
                   </Link>
                   {workingAssistantIds.has(a.id) && <span className="text-amber">(working)</span>}
                 </span>

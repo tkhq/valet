@@ -13,7 +13,8 @@ import { useGithubApp } from "~/api/settings";
 import { ApiError } from "~/api/client";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
-import { Badge, Button, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Spinner, Switch } from "~/components/primitives";
+import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { displayName } from "~/components/integrations/display-name";
 
@@ -191,6 +192,8 @@ function GithubRow() {
   const connectGithub = useConnectGithub();
   const disconnectGithub = useDisconnectGithub();
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [confirmReplace, setConfirmReplace] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   if (credentialsQ.isLoading) {
     return (
@@ -214,14 +217,17 @@ function GithubRow() {
   const installUrl =
     githubAppQ.data?.configured && githubAppQ.data.app ? githubAppQ.data.app.installUrl : undefined;
 
-  async function connect() {
-    if (repoCapable && !confirm("This will replace your existing GitHub token.")) return;
+  /** Answers whether the OAuth flow started, so the replace dialog can stay
+   * open carrying the reason when it did not. */
+  async function connect(): Promise<boolean> {
     setConnectError(null);
     try {
       const res = await connectGithub.mutateAsync();
       window.location.href = res.url;
+      return true;
     } catch (err) {
       setConnectError(err instanceof Error ? err.message : "Couldn't start the GitHub connect flow.");
+      return false;
     }
   }
 
@@ -249,7 +255,15 @@ function GithubRow() {
             variant={repoCapable ? "secondary" : "primary"}
             size="sm"
             disabled={connectGithub.isPending}
-            onClick={() => void connect()}
+            onClick={() => {
+              // Reconnecting over a repo-capable token overwrites it, so it
+              // asks first; a first connect has nothing to overwrite. And
+              // `connectError` outlives the dialog, so clear it here.
+              if (repoCapable) {
+                setConnectError(null);
+                setConfirmReplace(true);
+              } else void connect();
+            }}
           >
             {connectGithub.isPending
               ? "Connecting…"
@@ -264,8 +278,11 @@ function GithubRow() {
               size="sm"
               disabled={disconnectGithub.isPending}
               onClick={() => {
-                if (!confirm("Disconnect GitHub?")) return;
-                disconnectGithub.mutate();
+                // React Query holds `error` until the next mutate, and Radix
+                // never calls `onOpenChange(true)` for a controlled dialog
+                // with no trigger, so the previous refusal is cleared here.
+                disconnectGithub.reset();
+                setConfirmDisconnect(true);
               }}
             >
               {disconnectGithub.isPending ? "Disconnecting…" : "Disconnect GitHub"}
@@ -273,15 +290,60 @@ function GithubRow() {
           )}
         </div>
 
-        {connectError && <p className="text-xs text-danger-500">{connectError}</p>}
+        {/* The open replace dialog carries the failure itself, so the same
+            text does not render twice. */}
+        {connectError && !confirmReplace && (
+          <p className="text-xs text-danger-500">{connectError}</p>
+        )}
 
         {installUrl && (
           <a href={installUrl} target="_blank" rel="noreferrer" className="block text-xs text-moss underline">
             Install on your personal account
           </a>
         )}
+
+        <ConfirmDialog
+          open={confirmReplace}
+          onOpenChange={setConfirmReplace}
+          title="Replace your GitHub token?"
+          description="Valet keeps one GitHub token for you. When you finish the sign-in on GitHub, the new token replaces the one stored now. Cancel to keep the token you have."
+          confirmLabel="Reconnect GitHub"
+          pendingLabel="Connecting…"
+          pending={connectGithub.isPending}
+          error={connectError ?? undefined}
+          onConfirm={() => {
+            void connect().then((started) => {
+              if (started) setConfirmReplace(false);
+            });
+          }}
+        />
+        <ConfirmDialog
+          open={confirmDisconnect}
+          onOpenChange={setConfirmDisconnect}
+          title="Disconnect GitHub?"
+          description="Valet deletes your stored GitHub token, so the assistant can no longer clone or push to your repos. Teams you shared it with lose access too. Connect GitHub again to restore it."
+          confirmLabel="Disconnect"
+          pendingLabel="Disconnecting…"
+          pending={disconnectGithub.isPending}
+          error={disconnectGithub.error != null ? errorText(disconnectGithub.error) : undefined}
+          onConfirm={() =>
+            disconnectGithub.mutate(undefined, { onSuccess: () => setConfirmDisconnect(false) })
+          }
+        />
       </div>
     </FieldRow>
+  );
+}
+
+/** A reference-backed row stores only the `op://` reference, so revoking it
+ * leaves the 1Password item itself in place. */
+function revokeDescription(cred: CredentialSummary): string {
+  const removed = cred.onepasswordRef
+    ? `Valet deletes its stored ${cred.service} reference. The item in 1Password is not deleted.`
+    : `Valet deletes the stored ${cred.service} credential.`;
+  return (
+    `${removed} The assistant can no longer act on ${cred.service}, and teams you shared it ` +
+    `with lose it too. Connect ${cred.service} again to restore access.`
   );
 }
 
@@ -290,6 +352,9 @@ function GithubRow() {
 function CredentialsListSection() {
   const credentialsQ = useCredentials();
   const disconnect = useDisconnectCredential();
+  // The row being confirmed, not a bare boolean: the rows share one dialog,
+  // which a boolean would open for every row at once.
+  const [confirmRevoke, setConfirmRevoke] = useState<CredentialSummary | null>(null);
 
   // `github` gets its own richer row above; `onepassword` (the reserved
   // service holding the personal service-account token itself) is surfaced
@@ -329,8 +394,9 @@ function CredentialsListSection() {
               size="sm"
               disabled={disconnect.isPending}
               onClick={() => {
-                if (!confirm(`Revoke ${cred.service}?`)) return;
-                disconnect.mutate({ service: cred.service });
+                // Clear the previous row's refusal as this dialog opens.
+                disconnect.reset();
+                setConfirmRevoke(cred);
               }}
             >
               {disconnect.isPending ? "Revoking…" : `Revoke ${cred.service}`}
@@ -338,6 +404,32 @@ function CredentialsListSection() {
           </div>
         </FieldRow>
       ))}
+      {confirmRevoke && (
+        <ConfirmDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setConfirmRevoke(null);
+          }}
+          title={`Revoke ${confirmRevoke.service}?`}
+          description={revokeDescription(confirmRevoke)}
+          confirmLabel="Revoke"
+          pendingLabel="Revoking…"
+          pending={disconnect.isPending}
+          // The list shares one mutation, so a failure belongs to the row it
+          // was fired for — never to the next row somebody opens.
+          error={
+            disconnect.error != null && disconnect.variables?.service === confirmRevoke.service
+              ? errorText(disconnect.error)
+              : undefined
+          }
+          onConfirm={() =>
+            disconnect.mutate(
+              { service: confirmRevoke.service },
+              { onSuccess: () => setConfirmRevoke(null) },
+            )
+          }
+        />
+      )}
     </Section>
   );
 }

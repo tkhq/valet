@@ -358,7 +358,7 @@ code as of the implementing commits:
   credential row are unaffected — those stay admin-only.
 - **`github` rejects `body.onepassword` unconditionally.**
   `packages/api/src/routes/credentials.ts`'s `PUT /api/credentials/github`
-  now 400s with `"github credentials cannot be 1Password references; use the
+  now 400s with `"GitHub credentials cannot be 1Password references; use the
   GitHub connect flow"` whenever `body.onepassword` is present, checked
   alongside the reserved-service-name structural check. `host.ts`'s
   `buildCredentialResolver` routes `service === "github"` through
