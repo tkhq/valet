@@ -82,7 +82,7 @@ A checkpoint with no included changes has an empty entry list. The generator pri
 
 The `/changelog` page defaults to newest-first checkpoint order. Users can reverse this order, filter entries by change type, and search entry text or source identifiers. The page omits checkpoints with no matching entries while a filter or search is active. It shows a clear empty state when no entries match.
 
-Each checkpoint groups entries by change type. Features appear first. Improvements, fixes, and security changes follow in that order. The page paginates whole checkpoints and does not split one checkpoint across pages. A filter, search, or sort change resets the page to the first valid page.
+Each checkpoint groups entries by change type. Features appear first. Improvements, fixes, and security changes follow in that order. The page paginates whole checkpoints and does not split one checkpoint across pages. The URL stores the type, search, sort, and page state. A filter, search, or sort change resets the page to the first valid page.
 
 The page labels an unreleased checkpoint `Unreleased`. It keeps the build time, build SHA, build link, pull request links, and commit links available. Entry rows use a compact horizontal layout on wide screens and stack source links on narrow screens.
 

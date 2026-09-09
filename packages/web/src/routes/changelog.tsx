@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { ExternalLink } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
 import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
-import { Badge, Button, Input, Spinner } from "~/components/primitives";
+import { Pager } from "~/components/pager";
+import { Badge, Spinner } from "~/components/primitives";
+import { SearchInput } from "~/components/search-input";
 import {
   CHANGELOG_CATEGORIES,
   clampPage,
@@ -20,8 +22,37 @@ import {
   markChangelogSeen,
   unreadCheckpointIds,
 } from "~/lib/changelog-read-state";
+import { textParam } from "~/lib/search-params";
 
-export const Route = createFileRoute("/changelog")({ component: ChangelogPage });
+export interface ChangelogSearch {
+  category?: ChangelogCategory;
+  sort?: ChangelogSort;
+  q?: string;
+  page?: number;
+}
+
+export function readChangelogSearch(raw: unknown): ChangelogSearch {
+  const category = textParam(raw, "category");
+  const sort = textParam(raw, "sort");
+  let rawPage: unknown;
+  if (typeof raw === "object" && raw !== null) {
+    // The guard establishes an object. The cast only makes its keys readable.
+    rawPage = (raw as Record<string, unknown>).page;
+  }
+  const parsedPage = typeof rawPage === "number" ? rawPage : Number(rawPage);
+
+  return {
+    category: CHANGELOG_CATEGORIES.find((value) => value === category),
+    sort: sort === "oldest" ? "oldest" : undefined,
+    q: textParam(raw, "q"),
+    page: Number.isInteger(parsedPage) && parsedPage > 1 ? parsedPage : undefined,
+  };
+}
+
+export const Route = createFileRoute("/changelog")({
+  component: ChangelogPage,
+  validateSearch: readChangelogSearch,
+});
 
 const CATEGORY: Record<ChangelogCategory, { label: string }> = {
   feature: { label: "Features" },
@@ -53,18 +84,24 @@ export function ChangelogPage() {
   const me = useMe();
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
   const [seenWhenOpened, setSeenWhenOpened] = useState<string | null>();
-  const [category, setCategory] = useState<ChangelogCategoryFilter>("all");
-  const [sort, setSort] = useState<ChangelogSort>("newest");
-  const [query, setQuery] = useState("");
-  const [page, setPage] = useState(1);
+  const search = readChangelogSearch(useSearch({ strict: false }));
+  const navigate = useNavigate();
+  const category: ChangelogCategoryFilter = search.category ?? "all";
+  const sort: ChangelogSort = search.sort ?? "newest";
+  const query = search.q ?? "";
+  const requestedPage = search.page ?? 1;
   const unread = seenWhenOpened === undefined
     ? new Set<string>()
     : unreadCheckpointIds(checkpoints, seenWhenOpened);
   const newestId = checkpoints[0]?.id;
   const visibleCheckpoints = filterAndSortCheckpoints(checkpoints, category, query, sort);
   const totalPages = pageCount(visibleCheckpoints.length);
-  const currentPage = clampPage(page, totalPages);
+  const currentPage = clampPage(requestedPage, totalPages);
   const pageCheckpoints = paginateCheckpoints(visibleCheckpoints, currentPage);
+
+  function go(next: Partial<ChangelogSearch>): void {
+    void navigate({ to: "/changelog", search: { ...search, ...next } });
+  }
 
   useEffect(() => {
     if (!me.data || !newestId || seenWhenOpened !== undefined) return;
@@ -73,8 +110,16 @@ export function ChangelogPage() {
   }, [me.data, newestId, seenWhenOpened]);
 
   useEffect(() => {
-    if (page !== currentPage) setPage(currentPage);
-  }, [currentPage, page]);
+    if (changelog.isPending || requestedPage === currentPage) return;
+    void navigate({
+      to: "/changelog",
+      search: { ...search, page: currentPage === 1 ? undefined : currentPage },
+      replace: true,
+    });
+    // The page bounds are the trigger. Router hook identities do not change
+    // which invalid page must be replaced.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [changelog.isPending, currentPage, requestedPage]);
 
   if (changelog.isPending) {
     return (
@@ -105,13 +150,11 @@ export function ChangelogPage() {
 
         {checkpoints.length > 0 && (
           <div className="mt-6 grid gap-3 rounded border border-line bg-ink-wash p-3 sm:grid-cols-[minmax(12rem,1fr)_auto_auto] sm:items-center">
-            <Input
-              type="search"
+            <SearchInput
               value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setPage(1);
-              }}
+              onSettled={(value) =>
+                go({ q: value.trim().length === 0 ? undefined : value, page: undefined })
+              }
               placeholder="Search changes…"
               aria-label="Search changes"
               className="bg-paper"
@@ -120,9 +163,8 @@ export function ChangelogPage() {
               aria-label="Filter by change type"
               value={category}
               onChange={(event) => {
-                const next = event.target.value;
-                setCategory(next === "all" || CHANGELOG_CATEGORIES.some((value) => value === next) ? next : "all");
-                setPage(1);
+                const next = CHANGELOG_CATEGORIES.find((value) => value === event.target.value);
+                go({ category: next, page: undefined });
               }}
               className="h-9 rounded border border-line bg-paper px-3 text-sm text-ink"
             >
@@ -134,10 +176,9 @@ export function ChangelogPage() {
             <select
               aria-label="Sort releases"
               value={sort}
-              onChange={(event) => {
-                setSort(event.target.value === "oldest" ? "oldest" : "newest");
-                setPage(1);
-              }}
+              onChange={(event) =>
+                go({ sort: event.target.value === "oldest" ? "oldest" : undefined, page: undefined })
+              }
               className="h-9 rounded border border-line bg-paper px-3 text-sm text-ink"
             >
               <option value="newest">Newest first</option>
@@ -259,25 +300,17 @@ export function ChangelogPage() {
             </div>
 
             {totalPages > 1 && (
-              <nav aria-label="Changelog pages" className="mt-8 flex items-center justify-between border-t border-line pt-4">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={currentPage === 1}
-                  onClick={() => setPage((value) => Math.max(1, value - 1))}
-                >
-                  Previous
-                </Button>
-                <span className="text-xs text-muted">Page {currentPage} of {totalPages}</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={currentPage === totalPages}
-                  onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
-                >
-                  Next
-                </Button>
-              </nav>
+              <div className="mt-8 border-t border-line">
+                <Pager
+                  label="changelog"
+                  page={currentPage}
+                  totalPages={totalPages}
+                  hasPrevious={currentPage > 1}
+                  hasNext={currentPage < totalPages}
+                  onPrevious={() => go({ page: currentPage === 2 ? undefined : currentPage - 1 })}
+                  onNext={() => go({ page: currentPage + 1 })}
+                />
+              </div>
             )}
           </>
         )}

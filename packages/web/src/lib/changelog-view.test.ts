@@ -22,6 +22,10 @@ function entry(
   };
 }
 
+function checkpointLabel(checkpoint: ChangelogCheckpoint): string {
+  return checkpoint.kind === "released" ? checkpoint.version : "Unreleased";
+}
+
 function release(
   version: string,
   releasedAt: string,
@@ -79,12 +83,12 @@ describe("changelog view logic", () => {
       release("2.0.0", "2026-02-01T00:00:00Z", []),
     ];
 
-    expect(filterAndSortCheckpoints(checkpoints, "all", "", "newest").map((item) => item.version)).toEqual([
+    expect(filterAndSortCheckpoints(checkpoints, "all", "", "newest").map(checkpointLabel)).toEqual([
       "3.0.0",
       "2.0.0",
       "1.0.0",
     ]);
-    expect(filterAndSortCheckpoints(checkpoints, "all", "", "oldest").map((item) => item.version)).toEqual([
+    expect(filterAndSortCheckpoints(checkpoints, "all", "", "oldest").map(checkpointLabel)).toEqual([
       "1.0.0",
       "2.0.0",
       "3.0.0",
@@ -97,12 +101,12 @@ describe("changelog view logic", () => {
     );
 
     expect(pageCount(checkpoints.length, 3)).toBe(3);
-    expect(paginateCheckpoints(checkpoints, 2, 3).map((item) => item.version)).toEqual([
+    expect(paginateCheckpoints(checkpoints, 2, 3).map(checkpointLabel)).toEqual([
       "4.0.0",
       "5.0.0",
       "6.0.0",
     ]);
-    expect(paginateCheckpoints(checkpoints, 99, 3).map((item) => item.version)).toEqual(["7.0.0"]);
+    expect(paginateCheckpoints(checkpoints, 99, 3).map(checkpointLabel)).toEqual(["7.0.0"]);
     expect(clampPage(4, pageCount(1, 3))).toBe(1);
   });
 });
