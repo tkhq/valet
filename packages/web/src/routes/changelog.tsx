@@ -4,7 +4,17 @@ import { ExternalLink } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
 import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
-import { Badge, Spinner } from "~/components/primitives";
+import { Badge, Button, Input, Spinner } from "~/components/primitives";
+import {
+  CHANGELOG_CATEGORIES,
+  clampPage,
+  filterAndSortCheckpoints,
+  groupChangelogEntries,
+  pageCount,
+  paginateCheckpoints,
+  type ChangelogCategoryFilter,
+  type ChangelogSort,
+} from "~/lib/changelog-view";
 import {
   lastSeenCheckpoint,
   markChangelogSeen,
@@ -13,11 +23,11 @@ import {
 
 export const Route = createFileRoute("/changelog")({ component: ChangelogPage });
 
-const CATEGORY: Record<ChangelogCategory, { label: string; variant: "accent" | "neutral" | "success" | "warning" }> = {
-  feature: { label: "Feature", variant: "accent" },
-  improvement: { label: "Improvement", variant: "neutral" },
-  fix: { label: "Fix", variant: "success" },
-  security: { label: "Security", variant: "warning" },
+const CATEGORY: Record<ChangelogCategory, { label: string }> = {
+  feature: { label: "Features" },
+  improvement: { label: "Improvements" },
+  fix: { label: "Fixes" },
+  security: { label: "Security" },
 };
 
 function releaseDate(value: string): string {
@@ -43,16 +53,28 @@ export function ChangelogPage() {
   const me = useMe();
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
   const [seenWhenOpened, setSeenWhenOpened] = useState<string | null>();
+  const [category, setCategory] = useState<ChangelogCategoryFilter>("all");
+  const [sort, setSort] = useState<ChangelogSort>("newest");
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
   const unread = seenWhenOpened === undefined
     ? new Set<string>()
     : unreadCheckpointIds(checkpoints, seenWhenOpened);
   const newestId = checkpoints[0]?.id;
+  const visibleCheckpoints = filterAndSortCheckpoints(checkpoints, category, query, sort);
+  const totalPages = pageCount(visibleCheckpoints.length);
+  const currentPage = clampPage(page, totalPages);
+  const pageCheckpoints = paginateCheckpoints(visibleCheckpoints, currentPage);
 
   useEffect(() => {
     if (!me.data || !newestId || seenWhenOpened !== undefined) return;
     setSeenWhenOpened(lastSeenCheckpoint(me.data.id));
     markChangelogSeen(me.data.id, newestId);
   }, [me.data, newestId, seenWhenOpened]);
+
+  useEffect(() => {
+    if (page !== currentPage) setPage(currentPage);
+  }, [currentPage, page]);
 
   if (changelog.isPending) {
     return (
@@ -71,104 +93,193 @@ export function ChangelogPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl px-6 py-10">
+      <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
         <h1 className="font-display text-2xl text-ink">Changelog</h1>
         <p className="mt-2 text-sm text-muted">Changes in rolling builds and released versions.</p>
 
         {changelog.data.artifact.status === "latest-known" && (
-          <div className="mt-6 rounded border border-line bg-ink-wash px-3 py-2 text-sm text-muted">
+          <div className="mt-6 rounded border border-line bg-ink-wash px-3 py-2 text-sm text-ink">
             This build has no release checkpoint. The latest known checkpoint is shown.
+          </div>
+        )}
+
+        {checkpoints.length > 0 && (
+          <div className="mt-6 grid gap-3 rounded border border-line bg-ink-wash p-3 sm:grid-cols-[minmax(12rem,1fr)_auto_auto] sm:items-center">
+            <Input
+              type="search"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setPage(1);
+              }}
+              placeholder="Search changes…"
+              aria-label="Search changes"
+              className="bg-paper"
+            />
+            <select
+              aria-label="Filter by change type"
+              value={category}
+              onChange={(event) => {
+                const next = event.target.value;
+                setCategory(next === "all" || CHANGELOG_CATEGORIES.some((value) => value === next) ? next : "all");
+                setPage(1);
+              }}
+              className="h-9 rounded border border-line bg-paper px-3 text-sm text-ink"
+            >
+              <option value="all">All change types</option>
+              {CHANGELOG_CATEGORIES.map((value) => (
+                <option key={value} value={value}>{CATEGORY[value].label}</option>
+              ))}
+            </select>
+            <select
+              aria-label="Sort releases"
+              value={sort}
+              onChange={(event) => {
+                setSort(event.target.value === "oldest" ? "oldest" : "newest");
+                setPage(1);
+              }}
+              className="h-9 rounded border border-line bg-paper px-3 text-sm text-ink"
+            >
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+            </select>
           </div>
         )}
 
         {checkpoints.length === 0 ? (
           <p className="mt-10 text-sm text-muted">No release checkpoints are available for this build.</p>
-        ) : (
-          <div className="mt-10 space-y-12">
-            {checkpoints.map((checkpoint) => {
-              const unreleased = checkpoint.kind === "unreleased";
-              const checkpointSha = unreleased ? checkpoint.buildSha : checkpoint.releasedSha;
-              const checkpointUrl = unreleased ? checkpoint.buildUrl : checkpoint.releaseUrl;
-              return (
-                <section key={checkpoint.id} aria-labelledby={`release-${checkpoint.id}`}>
-                  <div className="flex flex-wrap items-center gap-2 border-b border-line pb-3">
-                    <h2 id={`release-${checkpoint.id}`} className="font-display text-xl text-ink">
-                      {unreleased ? "Unreleased" : checkpoint.version}
-                    </h2>
-                    <span className="text-sm text-muted">
-                      {unreleased ? buildDate(checkpoint.builtAt) : releaseDate(checkpoint.releasedAt)}
-                    </span>
-                    {unread.has(checkpoint.id) && <Badge variant="accent">New</Badge>}
-                    {checkpointUrl && (
-                      <a
-                        href={checkpointUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="ml-auto inline-flex items-center gap-1 text-xs text-moss hover:underline"
-                      >
-                        {unreleased ? "Build" : "Release"} <ExternalLink className="h-3 w-3" aria-hidden />
-                      </a>
-                    )}
-                  </div>
-
-                  {unreleased && (
-                    <a
-                      href={`https://github.com/tkhq/valet/commit/${checkpointSha}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-3 inline-block font-mono text-xs text-muted hover:text-moss hover:underline"
-                    >
-                      Build {checkpointSha.slice(0, 9)}
-                    </a>
-                  )}
-
-                  {checkpoint.entries.length === 0 ? (
-                    <p className="py-5 text-sm text-muted">
-                      {unreleased
-                        ? "No user-facing changes are pending in this build."
-                        : "No user-facing changes shipped in this release."}
-                    </p>
-                  ) : (
-                    <ul className="divide-y divide-line">
-                      {checkpoint.entries.map((entry) => {
-                        const category = CATEGORY[entry.category];
-                        const commit = entry.sources.commitSha;
-                        return (
-                          <li key={`${checkpoint.id}-${commit}`} className="py-5">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <h3 className="font-medium text-ink">{entry.title}</h3>
-                              <Badge variant={category.variant}>{category.label}</Badge>
-                            </div>
-                            <p className="mt-1 text-sm leading-6 text-muted">{entry.description}</p>
-                            <div className="mt-2 flex gap-3 text-xs text-muted">
-                              {entry.sources.pullRequest && (
-                                <a
-                                  href={`https://github.com/tkhq/valet/pull/${entry.sources.pullRequest}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="hover:text-moss hover:underline"
-                                >
-                                  PR #{entry.sources.pullRequest}
-                                </a>
-                              )}
-                              <a
-                                href={`https://github.com/tkhq/valet/commit/${commit}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="font-mono hover:text-moss hover:underline"
-                              >
-                                {commit.slice(0, 9)}
-                              </a>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </section>
-              );
-            })}
+        ) : visibleCheckpoints.length === 0 ? (
+          <div className="mt-10 rounded border border-line px-4 py-8 text-center">
+            <p className="text-sm font-medium text-ink">No changes match these filters.</p>
+            <p className="mt-1 text-sm text-muted">Change the type filter or search terms.</p>
           </div>
+        ) : (
+          <>
+            <div className="mt-8 space-y-10">
+              {pageCheckpoints.map((checkpoint) => {
+                const unreleased = checkpoint.kind === "unreleased";
+                const checkpointSha = unreleased ? checkpoint.buildSha : checkpoint.releasedSha;
+                const checkpointUrl = unreleased ? checkpoint.buildUrl : checkpoint.releaseUrl;
+                const groups = groupChangelogEntries(checkpoint.entries);
+                return (
+                  <section key={checkpoint.id} aria-labelledby={`release-${checkpoint.id}`}>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line pb-2">
+                      <h2 id={`release-${checkpoint.id}`} className="font-display text-xl text-ink">
+                        {unreleased ? "Unreleased" : checkpoint.version}
+                      </h2>
+                      <span className="text-sm text-muted">
+                        {unreleased ? buildDate(checkpoint.builtAt) : releaseDate(checkpoint.releasedAt)}
+                      </span>
+                      {unread.has(checkpoint.id) && <Badge variant="accent">New</Badge>}
+                      <div className="ml-auto flex items-center gap-3 text-xs text-muted">
+                        {unreleased && (
+                          <a
+                            href={`https://github.com/tkhq/valet/commit/${checkpointSha}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono hover:text-moss hover:underline"
+                          >
+                            Build {checkpointSha.slice(0, 9)}
+                          </a>
+                        )}
+                        {checkpointUrl && (
+                          <a
+                            href={checkpointUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-moss hover:underline"
+                          >
+                            {unreleased ? "Build" : "Release"} <ExternalLink className="h-3 w-3" aria-hidden />
+                          </a>
+                        )}
+                      </div>
+                    </div>
+
+                    {checkpoint.entries.length === 0 ? (
+                      <p className="py-4 text-sm text-muted">
+                        {unreleased
+                          ? "No user-facing changes are pending in this build."
+                          : "No user-facing changes shipped in this release."}
+                      </p>
+                    ) : (
+                      <div className="divide-y divide-line">
+                        {groups.map((group) => {
+                          const presentation = CATEGORY[group.category];
+                          return (
+                            <div key={group.category} className="grid py-3 md:grid-cols-[8rem_minmax(0,1fr)] md:gap-4">
+                              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted md:mb-0 md:pt-0.5">
+                                {presentation.label}
+                              </h3>
+                              <ul className="divide-y divide-line">
+                                {group.entries.map((entry) => {
+                                  const commit = entry.sources.commitSha;
+                                  return (
+                                    <li key={`${checkpoint.id}-${commit}`} className="py-2 first:pt-0 last:pb-0">
+                                      <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-x-4">
+                                        <div className="min-w-0">
+                                          <h4 className="font-medium leading-5 text-ink">{entry.title}</h4>
+                                          {entry.description && (
+                                            <p className="mt-0.5 text-sm leading-5 text-muted">{entry.description}</p>
+                                          )}
+                                        </div>
+                                        <div className="flex items-start gap-3 text-xs text-muted sm:pt-0.5">
+                                          {entry.sources.pullRequest && (
+                                            <a
+                                              href={`https://github.com/tkhq/valet/pull/${entry.sources.pullRequest}`}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="whitespace-nowrap hover:text-moss hover:underline"
+                                            >
+                                              PR #{entry.sources.pullRequest}
+                                            </a>
+                                          )}
+                                          <a
+                                            href={`https://github.com/tkhq/valet/commit/${commit}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            aria-label={`Commit ${commit}`}
+                                            className="font-mono hover:text-moss hover:underline"
+                                          >
+                                            {commit.slice(0, 9)}
+                                          </a>
+                                        </div>
+                                      </div>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
+
+            {totalPages > 1 && (
+              <nav aria-label="Changelog pages" className="mt-8 flex items-center justify-between border-t border-line pt-4">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={currentPage === 1}
+                  onClick={() => setPage((value) => Math.max(1, value - 1))}
+                >
+                  Previous
+                </Button>
+                <span className="text-xs text-muted">Page {currentPage} of {totalPages}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={currentPage === totalPages}
+                  onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                >
+                  Next
+                </Button>
+              </nav>
+            )}
+          </>
         )}
       </div>
     </div>
