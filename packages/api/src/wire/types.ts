@@ -3509,12 +3509,7 @@ export interface UsageBucket {
  * org (org-admin only), or one team (team-member only, needs `teamId=`). */
 export type UsageScopeName = "me" | "org" | "team";
 
-/** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
- * across ALL use cases (engine sessions + workflows + proxy), from the single
- * `cost_entries` definition. `scope=org` (org-admin only) covers every member.
- * `scope=team` covers one team's owned spend; `byUser` is present for the org
- * scope, and for a team scope when the caller ADMINISTERS the team — a plain
- * member reads the team's aggregate without colleagues' individual spend. */
+/** Aggregated usage for one stable skill identity across all revisions. */
 export interface SkillUsageBreakdown {
   skillKey: string;
   name: string;
@@ -3528,6 +3523,12 @@ export interface SkillUsageBreakdown {
   carryingCalls: number;
 }
 
+/** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
+ * across ALL use cases (engine sessions + workflows + proxy), from the single
+ * `cost_entries` definition. `scope=org` (org-admin only) covers every member.
+ * `scope=team` covers one team's owned spend; `byUser` is present for the org
+ * scope, and for a team scope when the caller ADMINISTERS the team — a plain
+ * member reads the team's aggregate without colleagues' individual spend. */
 export interface UsageBreakdownResponse {
   windowMs: number;
   scope: UsageScopeName;

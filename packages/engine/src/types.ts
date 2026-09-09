@@ -690,6 +690,13 @@ export interface ToolContext {
     path: "model_tool",
     injectedText: string,
   ) => Promise<SkillInvocationFact>;
+  /**
+   * Per-thread record of the model's file reads, backing the
+   * read-before-write staleness gate (TKAI-318). `get` returns the content
+   * hash stored at the newest read of the path; `record` stores a hash
+   * after a read or a successful write. Absent in hosts and tests that do
+   * not wire it — the gate is inert then.
+   */
   fileReads?: {
     get(path: string): string | undefined;
     record(path: string, contentHash: string): void;
