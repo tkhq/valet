@@ -63,6 +63,8 @@ export const orgs = pgTable("orgs", {
   allowPublicArtifacts: boolean("allow_public_artifacts").notNull().default(false),
   /** Allow repository bakes without an org Git credential. Admin opt-in. */
   allowAnonymousImageBakes: boolean("allow_anonymous_image_bakes").notNull().default(false),
+  /** Allow members to install the GitHub App on personal accounts. */
+  allowPersonalInstallations: boolean("allow_personal_installations").notNull().default(true),
   // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
   // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
   modelTiers: jsonb("model_tiers"),

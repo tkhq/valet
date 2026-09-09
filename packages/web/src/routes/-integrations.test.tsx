@@ -292,6 +292,25 @@ describe("IntegrationsPage", () => {
     unlinkIdentityMutate.mockClear();
   });
 
+  it("links to the personal GitHub installation page when the API permits it", () => {
+    currentOrgStatus = {
+      configured: true,
+      installationCount: 1,
+      suspendedCount: 0,
+      personalInstallUrl: "https://github.example/apps/valet/installations/new",
+    };
+    render(<IntegrationsPage />);
+    const link = screen.getByRole("link", { name: "Install on personal account" });
+    expect(link.getAttribute("href")).toBe("https://github.example/apps/valet/installations/new");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noreferrer");
+  });
+
+  it("does not link to the personal GitHub installation page when the API omits it", () => {
+    render(<IntegrationsPage />);
+    expect(screen.queryByRole("link", { name: "Install on personal account" })).toBeNull();
+  });
+
   it("lists connectable services only, with friendly names and honest reach meta", () => {
     render(<IntegrationsPage />);
 

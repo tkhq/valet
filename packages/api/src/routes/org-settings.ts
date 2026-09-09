@@ -15,7 +15,7 @@ import type { OrgSettingsResponse } from "../wire/types.js";
 
 export const orgSettingsRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes"]);
+const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations"]);
 
 orgSettingsRouter.patch("/", async (c) => {
   const gate = await requireOrgAdmin(c);
@@ -36,7 +36,7 @@ orgSettingsRouter.patch("/", async (c) => {
     return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
   }
 
-  const update: { bareSkillCommands?: boolean; allowPublicArtifacts?: boolean; allowAnonymousImageBakes?: boolean } = {};
+  const update: { bareSkillCommands?: boolean; allowPublicArtifacts?: boolean; allowAnonymousImageBakes?: boolean; allowPersonalInstallations?: boolean } = {};
 
   if ("bareSkillCommands" in raw) {
     if (typeof raw.bareSkillCommands !== "boolean") {
@@ -59,6 +59,13 @@ orgSettingsRouter.patch("/", async (c) => {
     update.allowAnonymousImageBakes = raw.allowAnonymousImageBakes;
   }
 
+  if ("allowPersonalInstallations" in raw) {
+    if (typeof raw.allowPersonalInstallations !== "boolean") {
+      return c.json({ error: "allowPersonalInstallations must be a boolean. Send true or false." }, 400);
+    }
+    update.allowPersonalInstallations = raw.allowPersonalInstallations;
+  }
+
   if (Object.keys(update).length === 0) {
     return c.json({ error: "no recognized fields" }, 400);
   }
@@ -73,6 +80,7 @@ orgSettingsRouter.patch("/", async (c) => {
     bareSkillCommands: row.bareSkillCommands,
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
+    allowPersonalInstallations: row.allowPersonalInstallations,
   };
   return c.json(resp);
 });

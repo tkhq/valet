@@ -2,8 +2,8 @@
  * The organisation's half of GitHub, on the GitHub card in `/integrations`.
  *
  * One line: a badge naming the App's state, the state in words, and either
- * a link to the page that owns the App or the sentence for somebody who
- * cannot open that page. `github-org-app.ts` holds the copy and the reason
+ * a personal-install link, a link to the page that owns the App, or the
+ * sentence for somebody who cannot open that page. `github-org-app.ts` holds the copy and the reason
  * the two halves are described as separate connections.
  *
  * The line renders nothing until the status arrives. A card that guesses at
@@ -35,7 +35,16 @@ export function GithubOrgAppLine() {
         {summary.badge.label}
       </Badge>
       {summary.note}{" "}
-      {canOpenAppPage ? (
+      {statusQ.data.personalInstallUrl ? (
+        <a
+          href={statusQ.data.personalInstallUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="whitespace-nowrap text-ink underline underline-offset-2"
+        >
+          Install on personal account
+        </a>
+      ) : canOpenAppPage ? (
         <a
           href="/settings/organization/github"
           className="whitespace-nowrap text-ink underline underline-offset-2"

@@ -35,9 +35,9 @@ import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { resolveReturnOrigin } from "./credential-connect.js";
-import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
+import { githubAppInstallUrl, resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import { loadAppConfig, relinkInstallations, type GithubAppDeps } from "../services/github-app.js";
-import { githubInstallations } from "../schema/index.js";
+import { githubInstallations, orgs } from "../schema/index.js";
 import { deleteDelegationsFrom } from "../services/credential-delegations.js";
 import type { GetGithubOrgStatusResponse, PostGithubConnectResponse } from "../wire/types.js";
 
@@ -145,10 +145,20 @@ githubConnectRouter.get("/org-status", async (c) => {
     .from(githubInstallations)
     .where(eq(githubInstallations.orgId, user.orgId));
 
+  const orgRows = await db
+    .select({ allowPersonalInstallations: orgs.allowPersonalInstallations })
+    .from(orgs)
+    .where(eq(orgs.id, user.orgId))
+    .limit(1);
+  const allowPersonalInstallations = orgRows[0]?.allowPersonalInstallations === true;
+
   const body: GetGithubOrgStatusResponse = {
     configured: config !== null,
     installationCount: rows.length,
     suspendedCount: rows.filter((row) => row.suspended).length,
+    ...(config !== null && allowPersonalInstallations
+      ? { personalInstallUrl: githubAppInstallUrl(process.env, config.appSlug) }
+      : {}),
   };
   return c.json(body);
 });

@@ -13,6 +13,8 @@ const createManifestMutateAsync = vi.fn();
 const saveCredentialMutateAsync = vi.fn();
 const refreshMutate = vi.fn();
 const deleteAppMutate = vi.fn();
+const patchOrgSettingsMutate = vi.fn();
+let orgData = { allowPersonalInstallations: true };
 /** Clears like the real `reset()`: a stub that only records the call cannot
  * tell a working clear from a dead one. */
 const deleteAppReset = vi.fn(() => {
@@ -35,6 +37,8 @@ vi.mock("~/api/settings", async (importOriginal) => {
   return {
     ...actual,
     useGithubApp: () => ({ data: githubAppData, isLoading, error: isError ? new Error("boom") : null }),
+    useOrg: () => ({ data: orgData }),
+    usePatchOrgSettings: () => ({ mutate: patchOrgSettingsMutate, isPending: false }),
     useCreateGithubAppManifest: () => ({
       mutateAsync: createManifestMutateAsync,
       isPending: false,
@@ -66,6 +70,7 @@ describe("GithubAppSection", () => {
     isError = false;
     saveCredentialError = null;
     deleteAppError = null;
+    orgData = { allowPersonalInstallations: true };
     vi.stubGlobal("confirm", confirmSpy);
   });
 
@@ -304,6 +309,22 @@ describe("GithubAppSection", () => {
     };
     render(<GithubAppSection />);
     expect(screen.queryByRole("button", { name: "I already have a GitHub App" })).toBeNull();
+  });
+
+  it("configured: reads and writes the personal installation setting", () => {
+    githubAppData = {
+      configured: true,
+      app: { appId: "42", appSlug: "valet", htmlUrl: "https://github.example/apps/valet", installUrl: "https://github.example/apps/valet/installations/new" },
+      installations: [],
+      webhook: { mode: "manual" },
+      installationsCheckedAt: null,
+    };
+    orgData = { allowPersonalInstallations: false };
+    render(<GithubAppSection />);
+    const toggle = screen.getByRole("switch", { name: "Allow personal installations" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(toggle);
+    expect(patchOrgSettingsMutate).toHaveBeenCalledWith({ allowPersonalInstallations: true });
   });
 
   it("configured: renders the app card, installations table, and webhook badge", () => {

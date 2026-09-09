@@ -3194,6 +3194,8 @@ export interface OrgSettingsResponse {
   allowPublicArtifacts: boolean;
   /** Absent on older APIs. Defaults to false. */
   allowAnonymousImageBakes?: boolean;
+  /** Whether members can install the GitHub App on personal accounts. */
+  allowPersonalInstallations: boolean;
 }
 
 /** Org-level settings request for `PATCH /api/org/settings`. */
@@ -3201,6 +3203,7 @@ export interface PatchOrgSettingsRequest {
   bareSkillCommands?: boolean;
   allowPublicArtifacts?: boolean;
   allowAnonymousImageBakes?: boolean;
+  allowPersonalInstallations?: boolean;
 }
 
 // ─── Artifacts (2026-08-22 artifacts design; 2026-09-02 artifact-pages) ──
@@ -3617,6 +3620,8 @@ export interface OrgResponse {
   allowPublicArtifacts: boolean;
   /** Absent on older APIs. Defaults to false. */
   allowAnonymousImageBakes?: boolean;
+  /** Absent on older APIs. Defaults to true. */
+  allowPersonalInstallations?: boolean;
   /**
    * The gateable plugins on this deployment, with this org's entitlement and
    * this caller's effective access (plugin-entitlements design). A plugin's
@@ -4084,6 +4089,9 @@ export interface GetGithubOrgStatusResponse {
    * installation reaches no repository, so a count equal to
    * `installationCount` means the App reaches nothing. */
   suspendedCount: number;
+  /** Full GitHub installation URL. Present only when this org allows
+   * personal installations. */
+  personalInstallUrl?: string;
 }
 
 // ── REST: repo listing (GitHub/repo integration plan, Task 7)
