@@ -4526,19 +4526,35 @@ export interface ChangelogEntry {
   followUp: boolean;
 }
 
-export interface ChangelogCheckpoint {
+interface ChangelogCheckpointBase {
+  id: string;
+  previousSha: string | null;
+  entries: ChangelogEntry[];
+}
+
+export interface ReleasedChangelogCheckpoint extends ChangelogCheckpointBase {
+  kind: "released";
   /** Idempotency key: `<version>@<releasedSha>`. */
   id: string;
   version: string;
   releasedAt: string;
   releasedSha: string;
-  previousSha: string | null;
   releaseUrl?: string;
-  entries: ChangelogEntry[];
 }
 
+export interface UnreleasedChangelogCheckpoint extends ChangelogCheckpointBase {
+  kind: "unreleased";
+  /** Replaceable build key: `unreleased@<buildSha>`. */
+  id: string;
+  buildSha: string;
+  builtAt: string;
+  buildUrl?: string;
+}
+
+export type ChangelogCheckpoint = ReleasedChangelogCheckpoint | UnreleasedChangelogCheckpoint;
+
 export interface ChangelogManifest {
-  schema: "valet-changelog/v1";
+  schema: "valet-changelog/v2";
   generatedAt: string;
   checkpoints: ChangelogCheckpoint[];
 }
@@ -4549,8 +4565,8 @@ export interface GetChangelogResponse {
     version: string;
     sha: string | null;
     checkpointId: string | null;
-    /** `exact` means the manifest has this artifact SHA. */
-    status: "exact" | "latest-known" | "empty";
+    /** `unreleased` identifies a rolling build checkpoint for this SHA. */
+    status: "exact" | "unreleased" | "latest-known" | "empty";
   };
 }
 

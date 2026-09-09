@@ -49,7 +49,14 @@ export function unreadCheckpointIds(
   seenId: string | null,
 ): Set<string> {
   if (checkpoints.length === 0 || seenId === checkpoints[0].id) return new Set();
-  const seenIndex = seenId ? checkpoints.findIndex((checkpoint) => checkpoint.id === seenId) : -1;
+  let seenIndex = seenId ? checkpoints.findIndex((checkpoint) => checkpoint.id === seenId) : -1;
+  if (seenIndex === -1 && seenId?.startsWith("unreleased@")) {
+    const seenSha = seenId.slice("unreleased@".length);
+    seenIndex = checkpoints.findIndex(
+      (checkpoint) => checkpoint.kind === "released" && checkpoint.releasedSha === seenSha,
+    );
+    if (seenIndex === -1 && checkpoints[0]?.kind === "unreleased") return new Set([checkpoints[0].id]);
+  }
   const unread = seenIndex === -1 ? checkpoints : checkpoints.slice(0, seenIndex);
   return new Set(unread.map((checkpoint) => checkpoint.id));
 }

@@ -5,10 +5,11 @@ import type { GetChangelogResponse } from "@valet/api/wire";
 
 const data: GetChangelogResponse = {
   manifest: {
-    schema: "valet-changelog/v1",
+    schema: "valet-changelog/v2",
     generatedAt: "2026-09-09T12:00:00Z",
     checkpoints: [
       {
+        kind: "released",
         id: "1.0.0@abc",
         version: "1.0.0",
         releasedAt: "2026-09-09T12:00:00Z",
@@ -55,6 +56,35 @@ describe("ChangelogPage", () => {
       expect(window.localStorage.getItem("valet:changelog-seen:user-1")).toBe("1.0.0@abc");
     });
     expect(await screen.findByText("New")).toBeTruthy();
+  });
+
+  it("shows an unreleased build first with its timestamp, SHA, link, and empty state", () => {
+    const released = data.manifest.checkpoints[0];
+    data.manifest.checkpoints.unshift({
+      kind: "unreleased",
+      id: "unreleased@def123456789",
+      buildSha: "def123456789",
+      builtAt: "2026-09-10T12:00:00Z",
+      previousSha: "abc",
+      buildUrl: "https://github.com/tkhq/valet/actions/runs/1",
+      entries: [],
+    });
+    data.artifact = {
+      version: "Unreleased",
+      sha: "def123456789",
+      checkpointId: "unreleased@def123456789",
+      status: "unreleased",
+    };
+    render(<ChangelogPage />);
+    const sections = screen.getAllByRole("heading", { level: 2 });
+    expect(sections.map((heading) => heading.textContent)).toEqual(["Unreleased", "1.0.0"]);
+    expect(screen.getByRole("link", { name: "Build def123456" }).getAttribute("href")).toContain(
+      "/commit/def123456789",
+    );
+    expect(screen.getByRole("link", { name: "Build" }).getAttribute("href")).toContain("/actions/runs/1");
+    expect(screen.getByText("No user-facing changes are pending in this build.")).toBeTruthy();
+    data.manifest.checkpoints = [released];
+    data.artifact = { version: "1.0.0", sha: "abc", checkpointId: "1.0.0@abc", status: "exact" };
   });
 
   it("shows releases that contain no user-facing changes", () => {

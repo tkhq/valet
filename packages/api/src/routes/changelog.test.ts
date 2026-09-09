@@ -14,7 +14,7 @@ describe("GET /api/changelog", () => {
     const response = await fetch(`${api.baseUrl}/api/changelog`);
     expect(response.status).toBe(200);
     const body = (await response.json()) as GetChangelogResponse;
-    expect(body.manifest.schema).toBe("valet-changelog/v1");
+    expect(body.manifest.schema).toBe("valet-changelog/v2");
     expect(body.manifest.checkpoints[0]?.entries.length).toBeGreaterThan(0);
     expect(body.artifact.checkpointId).toBe(body.manifest.checkpoints[0]?.id);
   });

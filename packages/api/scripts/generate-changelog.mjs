@@ -6,6 +6,8 @@ import {
   CHANGELOG_SCHEMA,
   backfillTags,
   generateCheckpoint,
+  generateUnreleasedCheckpoint,
+  replaceUnreleasedCheckpoint,
   upsertCheckpoint,
 } from "../src/changelog/generator.mjs";
 
@@ -37,19 +39,39 @@ if (version && releaseSha) {
       repo,
       version,
       releaseSha,
-      previousSha: option("--previous-sha") ?? manifest.checkpoints[0]?.releasedSha ?? null,
+      previousSha:
+        option("--previous-sha") ??
+        manifest.checkpoints.find((checkpoint) => checkpoint.kind === "released")?.releasedSha ??
+        null,
       releasedAt: option("--released-at"),
       releaseUrl: option("--release-url"),
     }),
   );
 }
-if (!patterns.length && !version) {
-  throw new Error("Set --backfill-tags or a release version and SHA.");
+const unreleasedSha = option("--unreleased-sha");
+if (unreleasedSha) {
+  const previousSha =
+    option("--previous-sha") ??
+    manifest.checkpoints.find((checkpoint) => checkpoint.kind === "released")?.releasedSha ??
+    null;
+  manifest = replaceUnreleasedCheckpoint(
+    manifest,
+    generateUnreleasedCheckpoint({
+      repo,
+      buildSha: unreleasedSha,
+      previousSha,
+      builtAt: option("--built-at"),
+      buildUrl: option("--build-url"),
+    }),
+  );
+}
+if (!patterns.length && !version && !unreleasedSha) {
+  throw new Error("Set --backfill-tags, a release version and SHA, or --unreleased-sha.");
 }
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 const empty = manifest.checkpoints.filter((checkpoint) => checkpoint.entries.length === 0);
 if (empty.length) {
-  console.warn(`Warning: ${empty.length} release checkpoint(s) contain no user-facing changes.`);
+  console.warn(`Warning: ${empty.length} changelog checkpoint(s) contain no user-facing changes.`);
 }
 
 const metadataPath = option("--metadata");

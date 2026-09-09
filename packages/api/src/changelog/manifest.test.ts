@@ -4,10 +4,11 @@ import type { ChangelogManifest } from "../wire/types.js";
 import { changelogResponse, parseChangelogManifest, safeChangelogResponse } from "./manifest.js";
 
 const manifest: ChangelogManifest = {
-  schema: "valet-changelog/v1",
+  schema: "valet-changelog/v2",
   generatedAt: "2026-09-09T12:00:00Z",
   checkpoints: [
     {
+      kind: "released",
       id: "1.0.0@abc",
       version: "1.0.0",
       releasedAt: "2026-09-09T12:00:00Z",
@@ -51,6 +52,33 @@ describe("changelog manifest", () => {
     });
   });
 
+  it("matches an unreleased artifact and requires its checkpoint first", () => {
+    const rolling: ChangelogManifest = {
+      ...manifest,
+      checkpoints: [
+        {
+          kind: "unreleased",
+          id: "unreleased@def",
+          buildSha: "def",
+          builtAt: "2026-09-10T12:00:00Z",
+          previousSha: "abc",
+          entries: [],
+        },
+        ...manifest.checkpoints,
+      ],
+    };
+    expect(changelogResponse(rolling, "development", "def").artifact).toEqual({
+      version: "development",
+      sha: "def",
+      checkpointId: "unreleased@def",
+      status: "unreleased",
+    });
+    expect(parseChangelogManifest(rolling)).toEqual(rolling);
+    expect(() => parseChangelogManifest({ ...rolling, checkpoints: rolling.checkpoints.reverse() })).toThrow(
+      "unique and first",
+    );
+  });
+
   it("reports the latest known checkpoint when this commit has none", () => {
     expect(changelogResponse(manifest, "development", "def").artifact).toEqual({
       version: "development",
@@ -86,6 +114,6 @@ describe("changelog manifest", () => {
   it("rejects a checkpoint whose id does not match its version and SHA", () => {
     const invalid = structuredClone(manifest);
     invalid.checkpoints[0].id = "wrong";
-    expect(() => parseChangelogManifest(invalid)).toThrow("checkpoint id");
+    expect(() => parseChangelogManifest(invalid)).toThrow("released changelog checkpoint");
   });
 });

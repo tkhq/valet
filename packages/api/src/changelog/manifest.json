@@ -1,8 +1,9 @@
 {
-  "schema": "valet-changelog/v1",
+  "schema": "valet-changelog/v2",
   "generatedAt": "2026-09-05T21:25:29.000Z",
   "checkpoints": [
     {
+      "kind": "released",
       "id": "0.10.7@ec05505e2505cbd83aa5664574a9a1b8f0003b8e",
       "version": "0.10.7",
       "releasedAt": "2026-09-05T21:25:29.000Z",
@@ -61,6 +62,7 @@
       ]
     },
     {
+      "kind": "released",
       "id": "0.10.6@88f997197d1312f57885bc1811ae547d22f2b9e1",
       "version": "0.10.6",
       "releasedAt": "2026-09-05T00:40:29.000Z",
@@ -247,6 +249,7 @@
       ]
     },
     {
+      "kind": "released",
       "id": "0.10.5@d18458ae0f1d375fe7fd8f4566f4bdfef3f9d9a7",
       "version": "0.10.5",
       "releasedAt": "2026-09-03T23:36:38.000Z",
@@ -337,6 +340,7 @@
       ]
     },
     {
+      "kind": "released",
       "id": "0.10.4@093eec6b033192e702e96b3d81cf7d36ea97fbea",
       "version": "0.10.4",
       "releasedAt": "2026-09-03T02:56:38.000Z",
@@ -395,6 +399,7 @@
       ]
     },
     {
+      "kind": "released",
       "id": "0.10.3@d7050f6f184253c220371c22748a8b7d8d2baccb",
       "version": "0.10.3",
       "releasedAt": "2026-09-03T01:18:08.000Z",
@@ -1509,6 +1514,7 @@
       ]
     },
     {
+      "kind": "released",
       "id": "0.10.2@b861063263042c3ab08c5729ad38f65c867e0fa0",
       "version": "0.10.2",
       "releasedAt": "2026-08-26T20:14:37.000Z",
@@ -1631,6 +1637,7 @@
       ]
     },
     {
+      "kind": "released",
       "id": "0.10.1@e33701dc8efe22aa61a6afaa7e51e64136271013",
       "version": "0.10.1",
       "releasedAt": "2026-08-23T02:53:28.000Z",
@@ -1657,6 +1664,7 @@
       ]
     },
     {
+      "kind": "released",
       "id": "0.10.0@8420d06e610166bb473cfc9e192d5d6325eff8b4",
       "version": "0.10.0",
       "releasedAt": "2026-08-21T21:23:40.000Z",

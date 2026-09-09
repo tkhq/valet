@@ -1,0 +1,25 @@
+name: Changelog commit guard
+
+# Validate only commits that a pull request introduces to dev-v2.
+# Existing history and pull requests for other branches remain exempt.
+on:
+  pull_request:
+    branches: [dev-v2]
+
+jobs:
+  changelog-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate changelog commit format
+        run: >-
+          node scripts/ci/changelog_commit_guard.mjs
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"

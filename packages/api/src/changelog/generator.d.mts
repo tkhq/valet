@@ -1,4 +1,4 @@
-export const CHANGELOG_SCHEMA: "valet-changelog/v1";
+export const CHANGELOG_SCHEMA: "valet-changelog/v2";
 
 export interface GeneratedChange {
   commitSha: string;
@@ -17,7 +17,8 @@ export interface GeneratedEntry {
   followUp: boolean;
 }
 
-export interface GeneratedCheckpoint {
+export interface GeneratedReleasedCheckpoint {
+  kind: "released";
   id: string;
   version: string;
   releasedAt: string;
@@ -26,6 +27,18 @@ export interface GeneratedCheckpoint {
   releaseUrl?: string;
   entries: GeneratedEntry[];
 }
+
+export interface GeneratedUnreleasedCheckpoint {
+  kind: "unreleased";
+  id: string;
+  buildSha: string;
+  builtAt: string;
+  previousSha: string | null;
+  buildUrl?: string;
+  entries: GeneratedEntry[];
+}
+
+export type GeneratedCheckpoint = GeneratedReleasedCheckpoint | GeneratedUnreleasedCheckpoint;
 
 export interface GeneratedManifest {
   schema: typeof CHANGELOG_SCHEMA;
@@ -43,10 +56,21 @@ export function generateCheckpoint(options: {
   previousSha?: string | null;
   releasedAt: string;
   releaseUrl?: string;
-}): GeneratedCheckpoint;
+}): GeneratedReleasedCheckpoint;
+export function generateUnreleasedCheckpoint(options: {
+  repo: string;
+  buildSha: string;
+  previousSha?: string | null;
+  builtAt: string;
+  buildUrl?: string;
+}): GeneratedUnreleasedCheckpoint;
 export function upsertCheckpoint(
   manifest: GeneratedManifest,
-  checkpoint: GeneratedCheckpoint,
+  checkpoint: GeneratedReleasedCheckpoint,
+): GeneratedManifest;
+export function replaceUnreleasedCheckpoint(
+  manifest: GeneratedManifest,
+  checkpoint: GeneratedUnreleasedCheckpoint,
 ): GeneratedManifest;
 export function backfillTags(options: {
   repo: string;

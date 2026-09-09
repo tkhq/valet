@@ -5,63 +5,79 @@
 
 ## Goal
 
-Valet shows release changes inside the app. The view uses data from the running release artifact. Runtime reads do not call GitHub.
+Valet shows released and pending changes inside the app. The view uses data from the running artifact. Runtime does not call GitHub.
 
-## Release artifact
+## Changelog artifact
 
-`packages/api/src/changelog/manifest.json` uses schema `valet-changelog/v1`. It contains immutable checkpoints in newest-first order.
+`packages/api/src/changelog/manifest.json` uses schema `valet-changelog/v2`. It contains one optional `unreleased` checkpoint and immutable `released` checkpoints.
 
-A checkpoint contains:
+A released checkpoint contains:
 
-- The release version and date.
+- The release version and time.
 - The released commit SHA.
-- The previous checkpoint SHA.
+- The previous released checkpoint SHA.
 - User-facing entries for that commit range.
 - Optional release and source links.
 
-The checkpoint ID is `<version>@<releasedSha>`. A retry with the same ID and data is a no-op. A retry with different data fails.
+The released checkpoint ID is `<version>@<releasedSha>`. A retry with the same ID and data is a no-op. A retry with different data fails.
 
-`release.json` identifies the commit that produced the artifact. The Docker and CLI workflows rebuild cumulative history from all release tags. This avoids a dependency on workflow commits. Each release artifact contains its checkpoint and all prior checkpoints. Rolling `dev-v2` builds do not create checkpoints.
+An unreleased checkpoint contains:
 
-The generator uses the tag creation time as the release time. It converts each time to UTC before comparison and storage. Commit author dates do not control release order.
+- The `unreleased` kind and `Unreleased` UI label.
+- The rolling build SHA and build time.
+- The previous released checkpoint SHA.
+- User-facing entries for that commit range.
+- Optional build and source links.
 
-If the artifact SHA has no checkpoint, the API returns `latest-known`. The UI explains that it shows the latest known checkpoint. If manifest validation fails, the API logs the failure and serves a safe empty changelog response.
+The unreleased checkpoint ID is `unreleased@<buildSha>`. Each rolling build replaces the prior unreleased checkpoint. A retry for one build SHA produces the same checkpoint.
+
+`release.json` identifies the commit that produced the artifact. Docker and CLI workflows rebuild cumulative released history from local release tags. A `dev-v2` build then adds or replaces the unreleased checkpoint. A version tag creates the released checkpoint and removes the unreleased checkpoint. The released checkpoint absorbs the same commit range, so one artifact does not show both copies.
+
+The generator uses tag creation time for released checkpoints. It uses the commit time as the stable rolling build time. It converts all times to UTC. Commit author dates do not control checkpoint order.
+
+If the artifact SHA has no checkpoint, the API returns `latest-known`. If manifest validation fails, the API logs the failure and serves an empty changelog response.
 
 ## Generation
 
-Run this command from the repository root:
+Use this command to generate a rolling checkpoint:
 
 ```bash
 pnpm changelog:generate -- \
-  --version 0.10.8 \
-  --release-sha HEAD \
-  --released-at 2026-09-09T12:00:00Z \
-  --metadata packages/api/src/changelog/release.json \
-  --release-url https://github.com/tkhq/valet/commit/$(git rev-parse HEAD)
+  --backfill-tags 'chart/valet-v*' \
+  --backfill-tags 'v*' \
+  --unreleased-sha HEAD \
+  --built-at "$(git show -s --format=%cI HEAD)" \
+  --artifact-version Unreleased \
+  --artifact-sha HEAD \
+  --metadata packages/api/src/changelog/release.json
 ```
 
-The release workflows use all `chart/valet-v*` and `v*` tags as the source of cumulative checkpoint history. The previous release tag defines each comparison range. A two-release test verifies that the second artifact includes both checkpoints.
+The release workflows use `chart/valet-v*` and `v*` tags as cumulative released history. The previous released tag defines each comparison range. Tests cover two rolling builds, reruns, empty rolling builds, and promotion to a release.
 
-The generator reads first-parent commit ranges. It uses commit subjects, explicit user-impact text, changed paths, and PR numbers already present in Git history.
+The generator reads first-parent commit ranges. It uses commit subjects, explicit user-impact text, changed paths, and PR numbers from local Git history.
 
-The generator excludes these changes unless the commit contains `[user-visible]` or `[changelog]`:
+The shared commit parser accepts these user-facing types:
 
-- Merge commits.
-- Dependency-only updates.
-- Subjects without a `feat`, `fix`, or `security` prefix.
-- `build`, `chore`, `ci`, `docs`, `refactor`, and `test` commits.
-- Changes limited to docs, scripts, CI files, or test files.
+- `feat`
+- `fix`
+- `improvement`
+- `perf`
+- `security`
 
-An explicit `User impact:` or `Changelog:` body line becomes the entry description. If that line is absent, the generator creates category-specific copy from the cleaned user-facing title and flags the entry for follow-up. The fallback preserves the commit and PR identifiers.
+Each new user-facing commit must have a `Changelog: <user impact>` body trailer or a `[user-visible]` subject marker. The marker can override an internal type when the change affects users.
 
-A release with no included changes still gets a checkpoint with an empty entry list. The generator prints a warning, and the UI states that no user-facing changes shipped. This behavior keeps publication available without silently hiding the empty checkpoint.
+The parser accepts `build`, `chore`, `ci`, `docs`, `refactor`, `test`, and `deps` as internal types. The generator excludes these commits unless the subject has `[user-visible]`.
 
-Use repeated `--backfill-tags '<pattern>'` arguments to rebuild checkpoints from release tags. The checked-in manifest backfills chart releases 0.10.0 through 0.10.7.
+The pull request guard validates `base.sha..head.sha` for pull requests into `dev-v2`. It does not validate the base commit or old history. Each failure names the commit SHA and the required correction. The generator uses the same parser. Thus, it includes all commits that pass as user-facing.
+
+A `Changelog:` body trailer becomes the entry description. Historical entries can use their existing `User impact:` line. If metadata is absent, the generator creates category-specific copy and flags the entry for follow-up. Each entry retains commit and PR identifiers.
+
+A checkpoint with no included changes has an empty entry list. The generator prints a warning. The UI shows an explicit zero-entry message. This behavior does not block rolling or versioned builds.
 
 ## API and UI
 
 `GET /api/changelog` returns the bundled manifest and its match to the running artifact. The route uses normal app authentication.
 
-The `/changelog` page shows checkpoints newest first. Each entry shows its category, user impact, commit, and PR when available.
+The `/changelog` page shows the unreleased checkpoint first when present. It labels that checkpoint `Unreleased` and shows its build time, build SHA, build link, entries, and source links. Released checkpoints follow in newest-first order.
 
-The client stores the newest displayed checkpoint ID in local storage. The key includes the user ID. The page snapshots unread checkpoints before it updates storage. New badges therefore remain visible for that visit while the top navigation indicator clears.
+The client stores the newest displayed checkpoint ID in local storage. The key includes the user ID. The page snapshots unread checkpoints before it updates storage. A replaced unreleased ID marks only the new unreleased checkpoint unread. Promotion recognizes a released checkpoint with the same SHA as already seen.

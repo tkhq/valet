@@ -10,7 +10,7 @@ import type {
 
 const CATEGORIES: ReadonlySet<string> = new Set(["feature", "improvement", "fix", "security"]);
 const EMPTY_MANIFEST: ChangelogManifest = {
-  schema: "valet-changelog/v1",
+  schema: "valet-changelog/v2",
   generatedAt: new Date(0).toISOString(),
   checkpoints: [],
 };
@@ -76,26 +76,50 @@ function checkpoint(value: unknown): ChangelogCheckpoint {
   if (
     !row ||
     typeof row.id !== "string" ||
-    typeof row.version !== "string" ||
-    typeof row.releasedAt !== "string" ||
-    typeof row.releasedSha !== "string" ||
     (row.previousSha !== null && typeof row.previousSha !== "string") ||
-    (row.releaseUrl !== undefined && typeof row.releaseUrl !== "string") ||
     !Array.isArray(row.entries)
   ) {
     throw new Error("Invalid changelog checkpoint. Regenerate the release manifest.");
   }
-  if (row.id !== `${row.version}@${row.releasedSha}`) {
-    throw new Error("Invalid changelog checkpoint id. Regenerate the release manifest.");
+  const entries = row.entries.map(entry);
+  if (row.kind === "released") {
+    if (
+      typeof row.version !== "string" ||
+      typeof row.releasedAt !== "string" ||
+      typeof row.releasedSha !== "string" ||
+      (row.releaseUrl !== undefined && typeof row.releaseUrl !== "string") ||
+      row.id !== `${row.version}@${row.releasedSha}`
+    ) {
+      throw new Error("Invalid released changelog checkpoint. Regenerate the release manifest.");
+    }
+    return {
+      kind: "released",
+      id: row.id,
+      version: row.version,
+      releasedAt: row.releasedAt,
+      releasedSha: row.releasedSha,
+      previousSha: row.previousSha,
+      ...(typeof row.releaseUrl === "string" ? { releaseUrl: row.releaseUrl } : {}),
+      entries,
+    };
+  }
+  if (
+    row.kind !== "unreleased" ||
+    typeof row.buildSha !== "string" ||
+    typeof row.builtAt !== "string" ||
+    (row.buildUrl !== undefined && typeof row.buildUrl !== "string") ||
+    row.id !== `unreleased@${row.buildSha}`
+  ) {
+    throw new Error("Invalid unreleased changelog checkpoint. Regenerate the release manifest.");
   }
   return {
+    kind: "unreleased",
     id: row.id,
-    version: row.version,
-    releasedAt: row.releasedAt,
-    releasedSha: row.releasedSha,
+    buildSha: row.buildSha,
+    builtAt: row.builtAt,
     previousSha: row.previousSha,
-    ...(typeof row.releaseUrl === "string" ? { releaseUrl: row.releaseUrl } : {}),
-    entries: row.entries.map(entry),
+    ...(typeof row.buildUrl === "string" ? { buildUrl: row.buildUrl } : {}),
+    entries,
   };
 }
 
@@ -103,7 +127,7 @@ export function parseChangelogManifest(value: unknown): ChangelogManifest {
   const row = object(value);
   if (
     !row ||
-    row.schema !== "valet-changelog/v1" ||
+    row.schema !== "valet-changelog/v2" ||
     typeof row.generatedAt !== "string" ||
     !Array.isArray(row.checkpoints)
   ) {
@@ -114,7 +138,15 @@ export function parseChangelogManifest(value: unknown): ChangelogManifest {
   if (ids.size !== checkpoints.length) {
     throw new Error("Duplicate changelog checkpoint. Regenerate the release manifest.");
   }
-  return { schema: "valet-changelog/v1", generatedAt: row.generatedAt, checkpoints };
+  const unreleased = checkpoints.filter((item) => item.kind === "unreleased");
+  if (unreleased.length > 1 || (unreleased.length === 1 && checkpoints[0].kind !== "unreleased")) {
+    throw new Error("The unreleased changelog checkpoint must be unique and first.");
+  }
+  return { schema: "valet-changelog/v2", generatedAt: row.generatedAt, checkpoints };
+}
+
+function checkpointSha(checkpoint: ChangelogCheckpoint): string {
+  return checkpoint.kind === "released" ? checkpoint.releasedSha : checkpoint.buildSha;
 }
 
 export function changelogResponse(
@@ -122,7 +154,7 @@ export function changelogResponse(
   version = process.env.VALET_RELEASE_VERSION || bundledRelease.version,
   sha = process.env.VALET_RELEASE_SHA || bundledRelease.sha,
 ): GetChangelogResponse {
-  const exact = sha ? manifest.checkpoints.find((item) => item.releasedSha === sha) : undefined;
+  const exact = sha ? manifest.checkpoints.find((item) => checkpointSha(item) === sha) : undefined;
   const latest = manifest.checkpoints[0];
   return {
     manifest,
@@ -130,7 +162,7 @@ export function changelogResponse(
       version,
       sha,
       checkpointId: exact?.id ?? latest?.id ?? null,
-      status: exact ? "exact" : latest ? "latest-known" : "empty",
+      status: exact?.kind === "unreleased" ? "unreleased" : exact ? "exact" : latest ? "latest-known" : "empty",
     },
   };
 }
