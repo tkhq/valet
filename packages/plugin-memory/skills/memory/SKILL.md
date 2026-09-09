@@ -19,7 +19,7 @@ Load this skill when the task is *about the memory store itself*: writing new me
 ## Creating memories well
 
 - **One concept per file**, hub-and-spoke over mega-files. Small files link better, search better, and merge more cleanly later.
-- **Update over create.** Run `mem_search` for the subject before every `mem_write`. A near-duplicate file splits the link graph and the search signal. `resource` is the identity primitive: when a file is about one external thing (a repo, a URL, a doc), set `resource` so future searches find it by that handle.
+- **Update over create.** Run `mem_search` for the subject before every `mem_write`. Unquoted whitespace-separated terms are alternatives (OR), so one broad query can cover synonyms; quote text that must match as one phrase. Explicit `OR` and `-term` syntax keeps its PostgreSQL web-search meaning. A near-duplicate file splits the link graph and the search signal. `resource` is the identity primitive: when a file is about one external thing (a repo, a URL, a doc), set `resource` so future searches find it by that handle.
 - **Titles and descriptions do real work** — search matches on path, title, description, tags, and content. A description should say what the file *answers*, not restate the title.
 - Set `origin: 'user-stated'` when the user told you the fact directly; it outranks anything you inferred. Set `sensitivity: 'shareable'` only for content safe outside your own scope.
 - Give time-bound facts an `expires` timestamp (event notes, temporary preferences, short-lived credentials context). Expired files drop out of search; nothing deletes them, and `mem_write` with `expires: null` revives one.

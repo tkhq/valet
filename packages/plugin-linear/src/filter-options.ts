@@ -16,6 +16,7 @@
  */
 import type { FilterOption, FilterOptionResolver } from "@valet/engine";
 import { credentialSecret } from "@valet/engine";
+import { matchesSearchQuery } from "@valet/shared";
 
 /** API host — GraphQL endpoint. Tests point `LINEAR_API_URL` at a fixture. */
 function resolveLinearApiUrl(env: NodeJS.ProcessEnv): string {
@@ -90,11 +91,8 @@ export function makeLinearTeamsResolver(
     if (!isRecord(payload)) return [];
     const teams = parseTeams(payload.data);
 
-    // The `q` typeahead matches team key OR name, case-insensitive.
-    const q = ctx.q?.trim().toLowerCase();
-    const filtered = q
-      ? teams.filter((t) => t.key.toLowerCase().includes(q) || t.name.toLowerCase().includes(q))
-      : teams;
+    // The local `q` typeahead uses shared OR matching over team key and name.
+    const filtered = teams.filter((team) => matchesSearchQuery(ctx.q ?? "", [team.key, team.name]));
 
     // id = team KEY (the value `data.team.key` compares against), not the uuid.
     return filtered.map((t) => ({ id: t.key, label: t.name, hint: t.key }));

@@ -11,6 +11,7 @@
  */
 import { Type } from "typebox";
 import type { ToolDef } from "@valet/engine";
+import { rankSearchResults } from "@valet/shared";
 
 interface MemoryFile {
   content: string;
@@ -70,15 +71,11 @@ export function buildEvalMemoryTools(store: EvalMemoryStore): ToolDef[] {
     }),
     execute: async (args) => {
       const { query } = args as { query: string };
-      const q = query.toLowerCase();
-      const hits = [...store.files.entries()]
-        .filter(
-          ([path, f]) =>
-            path.toLowerCase().includes(q) ||
-            f.content.toLowerCase().includes(q) ||
-            (f.description?.toLowerCase().includes(q) ?? false),
-        )
-        .map(([path, f]) => `${path}${f.description ? ` — ${f.description}` : ""}`);
+      const hits = rankSearchResults(query, [...store.files.entries()], ([path, file]) => [
+        path,
+        file.content,
+        file.description,
+      ]).map(([path, file]) => `${path}${file.description ? ` — ${file.description}` : ""}`);
       return { text: hits.length > 0 ? hits.join("\n") : "No results." };
     },
   };

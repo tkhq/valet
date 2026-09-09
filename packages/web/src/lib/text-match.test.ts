@@ -22,6 +22,12 @@ describe("matchesNeedle", () => {
     expect(matchesNeedle("x", [undefined, null])).toBe(false);
   });
 
+  it("OR-matches whitespace terms and preserves quoted phrases", () => {
+    expect(matchesNeedle("github slack", ["Slack"])).toBe(true);
+    expect(matchesNeedle('missing "code host"', ["GitHub", "Code Host"])).toBe(true);
+    expect(matchesNeedle('missing "code host"', ["GitHub", "Code and host"])).toBe(false);
+  });
+
   it("reports no match honestly", () => {
     expect(matchesNeedle("slack", ["GitHub", "github"])).toBe(false);
   });

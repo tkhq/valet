@@ -53,6 +53,9 @@ describe("slack.users resolver", () => {
     ]);
     const options = await resolvers()["slack.users"](ctx({ q: "conner" }));
     expect(options).toEqual([{ id: "U1", label: "Conner Swann", hint: "@conner" }]);
+
+    const broad = await resolvers()["slack.users"](ctx({ q: "conner paul" }));
+    expect(broad.map((option) => option.id)).toEqual(["U1", "U2"]);
   });
 
   it("returns [] for a null credential without calling Slack", async () => {

@@ -74,6 +74,9 @@ describe("github.repos resolver", () => {
     const options = await reposResolver(ctx({ q: "WID" }));
 
     expect(options).toEqual([{ id: "acme/widgets", label: "acme/widgets" }]);
+
+    const broad = await reposResolver(ctx({ q: "widgets gadgets" }));
+    expect(broad.map((option) => option.id)).toEqual(["acme/widgets", "acme/gadgets"]);
   });
 
   it("returns [] for a null credential and sends no request", async () => {

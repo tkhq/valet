@@ -306,7 +306,10 @@ export const memSearchTool = defineTool({
   description:
     "Full-text search over memory (path, title, description, tags, content) within your own scope and any teams you belong to. Search before mem_write when the memory might already exist, especially for anything with a `resource`.",
   parameters: Type.Object({
-    query: Type.String({ description: "FTS5 query string." }),
+    query: Type.String({
+      description:
+        "Search text. Unquoted terms use OR; quote an exact phrase. Explicit OR and -term operators are preserved.",
+    }),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
   }),
   execute: async (args, ctx) => {

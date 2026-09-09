@@ -190,6 +190,9 @@ describe("GET /api/skills — paging and filters", () => {
     // `standup` matches on its description alone.
     const found = await page(api.baseUrl, "?limit=2&q=SHEETS");
     expect(found.skills.map((s) => s.name)).toEqual(["google-sheets", "standup"]);
+
+    const broad = await page(api.baseUrl, "?limit=4&q=SHEETS%20github");
+    expect(broad.skills.map((s) => s.name)).toEqual(["github", "google-sheets", "standup"]);
   });
 
   it("finds a name holding a LIKE wildcard as written", async () => {

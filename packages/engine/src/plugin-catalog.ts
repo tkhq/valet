@@ -1,6 +1,11 @@
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
+import {
+  matchesSearchQuery,
+  rankSearchResults,
+  tokenizeSearchQuery,
+} from "@valet/shared";
 import { builtinTools } from "./builtin-tools/index.js";
 import type {
   CredentialProvider,
@@ -722,17 +727,6 @@ async function resolveDynamic(
 const LIST_LIMIT_DEFAULT = 50;
 const LIST_LIMIT_MAX = 200;
 
-/** Split a catalog query into OR terms while keeping quoted phrases intact. */
-function catalogQueryTerms(query: string | undefined): string[] {
-  if (!query) return [];
-  return [...query.toLowerCase().matchAll(/"([^"]+)"|'([^']+)'|(\S+)/g)].flatMap(
-    (match) => {
-      const term = match[1] ?? match[2] ?? match[3];
-      return term ? [term] : [];
-    },
-  );
-}
-
 /**
  * `pinnedNames` maps a fully-qualified action id to the direct tool that
  * also invokes it. A pinned action stays listed here: `list_tools` is the
@@ -787,14 +781,14 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
     execute: async (args, ctx): Promise<ToolResult> => {
       const a = args as { service?: string; query?: string; limit?: number };
       const limit = clamp(a.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
-      const queryTerms = catalogQueryTerms(a.query);
-
-      const matchesQuery = (action: PluginAction): boolean => {
-        const fields = [action.id, action.name, action.description].map((field) =>
-          field.toLowerCase(),
-        );
-        return queryTerms.some((term) => fields.some((field) => field.includes(term)));
-      };
+      const queryTerms = tokenizeSearchQuery(a.query ?? "");
+      const actionFields = (action: PluginAction): string[] => [
+        action.id,
+        action.name,
+        action.description,
+      ];
+      const matchesQuery = (action: PluginAction): boolean =>
+        matchesSearchQuery(queryTerms, actionFields(action));
 
       let entries = catalog.entries;
       if (a.service) entries = entries.filter((e) => e.service === a.service);
@@ -863,6 +857,10 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
             });
           }
         }
+      }
+
+      if (queryTerms.length > 0) {
+        entries = rankSearchResults(queryTerms, entries, (entry) => actionFields(entry.action));
       }
 
       const tools = entries.slice(0, limit).map((e) => {

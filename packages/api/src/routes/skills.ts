@@ -49,7 +49,7 @@
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import type { Principal, SkillSource, ValetPlugin } from "@valet/engine";
-import { NotFoundError } from "@valet/shared";
+import { matchesSearchQuery, NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { partitionByName } from "../plugins/assemble.js";
@@ -310,12 +310,7 @@ function keepPluginSkill(
   filter: { kind?: "skill" | "prompt"; query?: string },
 ): boolean {
   if (filter.kind === "prompt") return false;
-  if (filter.query === undefined || filter.query.length === 0) return true;
-  const needle = filter.query.toLowerCase();
-  return (
-    summary.name.toLowerCase().includes(needle) ||
-    (summary.description ?? "").toLowerCase().includes(needle)
-  );
+  return matchesSearchQuery(filter.query ?? "", [summary.name, summary.description]);
 }
 
 // ── Catalog ───────────────────────────────────────────────────────────────

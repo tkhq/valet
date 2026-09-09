@@ -15,10 +15,15 @@
  * `moveFile`/`linksForFile` were originally behind this fence too; they
  * are now built (on the derived graph — still no stored links table).
  */
-import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
-import { NotFoundError, ValidationError } from "@valet/shared";
+import {
+  hasExplicitSearchOperator,
+  NotFoundError,
+  tokenizeSearchQuery,
+  ValidationError,
+} from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
 import { memoryFiles, teamMembers, type MemoryFileRow } from "../schema/index.js";
@@ -809,16 +814,33 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Builds an OR query from local search terms while preserving explicit
+ * PostgreSQL web-search operators for callers that already use them. */
+function memoryTsQuery(query: string): SQL | null {
+  if (hasExplicitSearchOperator(query)) {
+    return sql`websearch_to_tsquery('english', ${query})`;
+  }
+  const terms = tokenizeSearchQuery(query);
+  if (terms.length === 0) return null;
+  const parts = terms.map((term) =>
+    term.quoted
+      ? sql`phraseto_tsquery('english', ${term.text})`
+      : sql`plainto_tsquery('english', ${term.text})`,
+  );
+  return sql`(${sql.join(parts, sql` || `)})`;
+}
+
 /**
  * `search_vector` is a `tsvector` GENERATED ALWAYS column (weights: A=title,
  * B=description, C=path+tags, D=content — see the schema's comment on
  * `memoryFiles` and the migration) — Drizzle has no column definition for
  * it, so it's referenced by name through raw `sql` fragments below.
- * `websearch_to_tsquery` parses forgivingly (unlike fts5's `MATCH`, it does
- * not raise a syntax error for something like an unbalanced quote — it
- * degrades to a literal-term search), so the invalid-query catch below is a
- * defensive backstop for genuine Postgres syntax errors, not a reachable
- * path for typical malformed user input the way it was under fts5. Expired
+ * Local query parsing joins unquoted terms with OR and uses
+ * `phraseto_tsquery` for quoted phrases. An unmatched opening quote is
+ * ignored. Explicit web-search operators still use `websearch_to_tsquery`,
+ * so existing structured queries keep their meaning. The invalid-query
+ * catch below is a defensive backstop for genuine Postgres syntax errors.
+ * Expired
  * rows (`expires < now`) are excluded. Read-union applies: results from team
  * scopes carry the virtual `team:{id}/` prefix.
  *
@@ -829,6 +851,8 @@ function errorMessage(err: unknown): string {
  * returned rows only, not for every row that matched.
  */
 export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchFilesParams): Promise<SearchResult[]> {
+  const tsQuery = memoryTsQuery(params.query);
+  if (!tsQuery) return [];
   const owners = await resolveReadableOwners(db, scope);
   const limit = params.limit ?? 20;
   const now = Date.now();
@@ -837,7 +861,6 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     ...owners.map((o) => and(eq(memoryFiles.ownerType, o.ownerType), eq(memoryFiles.ownerId, o.ownerId))),
   );
 
-  const tsQuery = sql`websearch_to_tsquery('english', ${params.query})`;
   const rankExpr = sql<number>`ts_rank_cd(search_vector, ${tsQuery})`;
   // `left(...)` bounds the work per row; `translate(...)` removes any
   // marker character the stored body already holds, so only ts_headline

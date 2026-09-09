@@ -40,6 +40,7 @@ import {
   type TransportContext,
   credentialSecret,
 } from "@valet/engine";
+import { matchesSearchQuery } from "@valet/shared";
 import {
   buildContentBlocks,
   SLACK_HEADER_LIMIT,
@@ -1120,14 +1121,10 @@ export class SlackTransport implements ChannelTransport {
    * keystroke is only affordable because the directory is read once per TTL.
    */
   async listWorkspaceMembers(query: string): Promise<Array<{ id: string; name: string; realName?: string }>> {
-    const q = query.trim().toLowerCase();
     const members = await this.allWorkspaceMembers();
-    const matched =
-      q === ""
-        ? [...members]
-        : members.filter(
-            (m) => m.name.toLowerCase().includes(q) || (m.realName ?? "").toLowerCase().includes(q),
-          );
+    const matched = members.filter((member) =>
+      matchesSearchQuery(query, [member.name, member.realName]),
+    );
     matched.sort((a, b) => a.name.localeCompare(b.name));
     return matched.slice(0, PICKER_RESULT_LIMIT);
   }
@@ -1151,9 +1148,8 @@ export class SlackTransport implements ChannelTransport {
    * arbitrary ones.
    */
   async listWorkspaceChannels(query: string): Promise<Array<{ id: string; name: string }>> {
-    const q = query.trim().toLowerCase();
     const channels = await this.allJoinedChannels();
-    const matched = q === "" ? [...channels] : channels.filter((c) => c.name.toLowerCase().includes(q));
+    const matched = channels.filter((channel) => matchesSearchQuery(query, [channel.name]));
     matched.sort((a, b) => a.name.localeCompare(b.name));
     return matched.slice(0, PICKER_RESULT_LIMIT);
   }
