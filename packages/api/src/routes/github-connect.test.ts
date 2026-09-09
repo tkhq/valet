@@ -177,11 +177,12 @@ describe("GET /api/me/github/org-status", () => {
 
     const res = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });
     const body: unknown = await res.json();
-    const record = body as Record<string, unknown>;
-    expect(record.personalInstallUrl).toBe(`${fixture?.url}/apps/fixture-app/installations/new`);
-    expect(record.appId).toBeUndefined();
-    expect(record.appSlug).toBeUndefined();
-    expect(record.accountLogin).toBeUndefined();
+    expect(body).toEqual({
+      configured: true,
+      installationCount: 0,
+      suspendedCount: 0,
+      personalInstallUrl: `${fixture?.url}/apps/fixture-app/installations/new`,
+    });
   });
 
   it("does not give members a personal install URL when the org disables it", async () => {

@@ -62,7 +62,7 @@
  */
 import { and, eq } from "drizzle-orm";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
-import { githubInstallations } from "../schema/index.js";
+import { githubInstallations, orgs } from "../schema/index.js";
 import { resolveGithubUrl } from "./github-env.js";
 import { discoverInstallations, loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
 
@@ -631,6 +631,16 @@ export async function resolveGitHubToken(
   // different fix ("Install on GitHub") than no GitHub setup at all.
   const config = await loadAppConfig(deps, req.orgId).catch(() => null);
   if (config) {
+    const orgRows = await deps.db
+      .select({ allowPersonalInstallations: orgs.allowPersonalInstallations })
+      .from(orgs)
+      .where(eq(orgs.id, req.orgId))
+      .limit(1);
+    if (orgRows[0]?.allowPersonalInstallations === false) {
+      throw new GitHubAuthError(
+        "the GitHub App has no usable installation. Ask an org admin for GitHub access.",
+      );
+    }
     throw new GitHubAuthError(
       `the GitHub App "${config.appSlug}" is created but not installed on any account — open Settings → Organization → GitHub and click Install on GitHub`,
     );

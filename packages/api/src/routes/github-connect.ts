@@ -132,8 +132,9 @@ githubConnectRouter.post("/connect", async (c) => {
  * exist, and does it reach anything — from the same `loadAppConfig` read
  * `/connect` uses, so the two never disagree.
  *
- * Deliberately no `requireOrgAdmin`: the body carries no app id, no slug,
- * no installation logins and no secret material. Counts only.
+ * Deliberately no `requireOrgAdmin`: the body carries no app id, no app
+ * slug field, no installation logins, and no secret material. It carries
+ * the full installation URL only when the org allows personal installations.
  */
 githubConnectRouter.get("/org-status", async (c) => {
   const user = c.var.user;

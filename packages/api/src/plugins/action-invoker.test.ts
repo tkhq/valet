@@ -22,7 +22,7 @@ import type {
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, runtimeGrants, sessionRepos, githubInstallations } from "../schema/index.js";
+import { actionInvocations, actionPolicies, runtimeGrants, sessionRepos, githubInstallations, orgs } from "../schema/index.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -1409,6 +1409,35 @@ describe("buildActionInvoker: github service resolution", () => {
     );
 
     expect(result).toEqual({ ok: true, result: { token: "inst-111" } });
+  });
+
+  it("does not expose the App slug when personal installations are disabled", async () => {
+    const { appDb, credentials } = await harness();
+    await appDb.insert(orgs).values({
+      id: orgId,
+      name: "GitHub org",
+      createdAt: NOW,
+      allowPersonalInstallations: false,
+    });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:personal-install-disabled" },
+      { userId, orgId, owner: { type: "user", id: userId } },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "the GitHub App has no usable installation. Ask an org admin for GitHub access.",
+    });
+    if (!result.ok && "error" in result) expect(result.error).not.toContain(appConfig.appSlug);
   });
 
   it("unbound session, no user credential, no installation, no org PAT: the connect-hint error surfaces as the action's error result", async () => {
