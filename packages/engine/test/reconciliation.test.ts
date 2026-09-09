@@ -729,6 +729,38 @@ describe("reconciliation executor (integration)", () => {
     },
   );
 
+  it.each([false, true])("loads gate history before claiming recovery (resolved=%s)", async (resolved) => {
+    const store = new InMemorySessionStore();
+    const { itemId } = await seedCrashedRunningTurn(store, { withGate: true });
+    if (resolved) await resolveSeededGate(store);
+    const before = await store.getQueueItem(SESSION, itemId);
+    const faux = registerFauxProvider({ provider: `gate-history-failure-${resolved}` });
+    const engine = new Engine({
+      providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const options = {
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spyTool().def],
+    };
+    const getEntries = store.getEntries.bind(store);
+    const reads = vi.spyOn(store, "getEntries")
+      .mockImplementationOnce(getEntries)
+      .mockRejectedValueOnce(new Error("history unavailable"));
+    try {
+      await expect(engine.restoreSession({ sessionId: SESSION, options })).rejects.toThrow("history unavailable");
+      expect((await store.getQueueItem(SESSION, itemId))?.attemptId).toBe(before?.attemptId);
+      reads.mockRestore();
+      faux.setResponses([fauxAssistantMessage("recovered")]);
+      const recovered = await engine.restoreSession({ sessionId: SESSION, options });
+      if (resolved) {
+        await waitForAsync(async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled");
+      }
+      recovered.suspendTimers();
+    } finally {
+      reads.mockRestore();
+      faux.unregister();
+    }
+  });
+
   it.each(["resume", "replay"] as const)(
     "%s clears active model state after a continuation error",
     async (mode) => {

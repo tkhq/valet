@@ -1,4 +1,4 @@
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "@valet/engine";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError, withSpan } from "@valet/engine";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -646,18 +646,30 @@ export class PgSessionStore implements SessionStore {
   }
 
   async getEntries(sessionId: string, threadId: string, opts?: MessageQuery): Promise<SessionEntry[]> {
-    // created_at (epoch-ms) is the primary sort, but same-millisecond ties are
-    // routine within one turn, so seq — a monotonic insertion counter — breaks
-    // them in insertion order (TKAI-303). Without it Postgres may return a tie
-    // in any order, which surfaced as chat bubbles rendering out of sequence.
-    const result = await this.db.query(
-      "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
-      [sessionId, threadId],
+    return withSpan(
+      "store.entries.read",
+      { "valet.session.id": sessionId, "valet.thread.id": threadId },
+      async (span) => {
+        // created_at (epoch-ms) is the primary sort, but same-millisecond ties are
+        // routine within one turn, so seq — a monotonic insertion counter — breaks
+        // them in insertion order (TKAI-303). Without it Postgres may return a tie
+        // in any order, which surfaced as chat bubbles rendering out of sequence.
+        const result = await this.db.query(
+          "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
+          [sessionId, threadId],
+        );
+        let rows = result.rows.map(rawToEntryRow);
+        if (opts?.includeCompacted === false) rows = rows.filter((r) => r.entryType !== "compaction");
+        if (opts?.limit && opts.limit > 0) rows = rows.slice(-opts.limit);
+        span.setAttribute("valet.entries.loaded", rows.length);
+        if (span.isRecording()) {
+          span.setAttribute("valet.entries.parts_bytes", rows.reduce(
+            (bytes, row) => bytes + (row.parts === null ? 0 : Buffer.byteLength(row.parts, "utf8")), 0,
+          ));
+        }
+        return rows.map(rowToEntry);
+      },
     );
-    let rows = result.rows.map(rawToEntryRow);
-    if (opts?.includeCompacted === false) rows = rows.filter((r) => r.entryType !== "compaction");
-    if (opts?.limit && opts.limit > 0) rows = rows.slice(-opts.limit);
-    return rows.map(rowToEntry);
   }
 
   async listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]> {
