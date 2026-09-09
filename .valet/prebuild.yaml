@@ -15,6 +15,7 @@ docker: true
 resources:
   cpu: 4
   memory: 8Gi
+workspaceStorage: "4Gi"
 setup:
   # Base packages the dev loop and e2e suites expect: make (Makefile
   # targets), python3 (scripts/docs/docs_lint.py), jq, build-essential
