@@ -292,8 +292,8 @@ Two call sites stay opted out, on purpose:
   Leaving the org drops access immediately.
 - Content is a snapshot; a share can never leak later memory edits, other
   files, or team-scope reads.
-- The public page renders through the existing `Markdown` component, which
-  allows no raw HTML.
+- Memory, chat, and artifact markdown use one strict Mermaid renderer for fenced `mermaid` blocks.
+- The renderer filters the generated SVG before it enters the app document or artifact frame.
 - Memory files are text and size-capped by the memory service, so the
   `content` column inherits that bound. Binary artifacts are out of scope
   (no blob store exists in v2).

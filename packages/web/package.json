@@ -32,6 +32,7 @@
     "d3-force": "^3.0.0",
     "diff": "^8.0.3",
     "lucide-react": "^0.460.0",
+    "mermaid": "^11.12.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.1",

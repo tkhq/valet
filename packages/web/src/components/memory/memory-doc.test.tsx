@@ -13,6 +13,10 @@ import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const docMock = vi.fn();
 
+vi.mock("~/lib/mermaid", () => ({
+  renderMermaid: vi.fn().mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg"><text>Memory diagram</text></svg>'),
+}));
+
 vi.mock("~/api/memory", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/api/memory")>();
   return {
@@ -119,6 +123,17 @@ describe("MemoryDoc", () => {
     expect(screen.getByText("Keep it warm and direct.")).toBeTruthy();
     expect(screen.queryByText(/timestamp:/)).toBeNull();
     expect(screen.queryByText(/valet:/)).toBeNull();
+  });
+
+  it("renders a fenced Mermaid block in memory content", async () => {
+    const rendered = '---\ntype: "note"\ntitle: "Flow"\n---\n\n```mermaid\ngraph TD\n  A-->B\n```\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+
+    const { container } = renderWithClient(
+      <MemoryDoc path="notes/flow.md" onNavigateToChat={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(container.querySelector('img[alt="Mermaid diagram"]')).toBeTruthy());
   });
 
   /**

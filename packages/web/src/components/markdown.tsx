@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { resolveLinkTarget } from "@valet/api/memory-links";
 import { cn } from "~/lib/cn";
 import { CodeBlock } from "./code-block";
+import { MermaidDiagram } from "./mermaid-diagram";
 
 /** react-markdown wraps a fenced block's highlighted `code` in `pre`, with
  * the language on the inner element's `className` as `language-xxx`
@@ -171,12 +172,12 @@ export function Markdown({
             const codeEl = isValidElement<{ className?: string; children?: ReactNode }>(children)
               ? children
               : null;
-            return (
-              <CodeBlock
-                code={codeText(codeEl?.props.children ?? children)}
-                language={languageFromClassName(codeEl?.props.className)}
-              />
-            );
+            const source = codeText(codeEl?.props.children ?? children);
+            const language = languageFromClassName(codeEl?.props.className);
+            if (language?.toLowerCase() === "mermaid") {
+              return <MermaidDiagram source={source.replace(/\n$/, "")} />;
+            }
+            return <CodeBlock code={source} language={language} />;
           },
         }}
       >
