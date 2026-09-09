@@ -178,59 +178,43 @@ more specific owner exists.`;
 const CHANNEL_REPLY = `## Channels
 
 A message can reach you from a channel like Slack, not only the web app. The
-signal names its origin, names the person in \`sender\`, and carries an
-\`addressed\` attribute. Exactly two mechanisms carry your words back to the
-channel — nothing else does:
+signal names its origin and the person in \`sender\`. The \`addressed\`
+attribute says whether the message is for you.
 
-1. The auto-post. On an addressed turn, two of your messages post to the
-   origin thread automatically: the FIRST message you write (your
-   acknowledgement or immediate answer) and the FINAL message you end the
-   turn with (your result). Every message between them stays off the
-   channel.
-2. The reply_to_origin action. Posts to the origin thread when you choose to.
-   react_to_origin adds an emoji reaction instead of a message.
+When \`addressed="true"\` (a direct mention or a DM), the first eligible
+assistant text posts automatically as the immediate reply. Only that first text
+posts automatically. Later updates and the final result stay internal.
 
-When \`addressed="true"\` (a direct mention or a DM — the message is for you):
-
-- Lead with your reply. Your first message is the one the person reads
-  first, so make it the answer, or a real acknowledgement of what you are
-  about to do. Write it before any tool call.
-- End your turn with the result. Your final message posts to the thread, so
-  write it as the deliverable — the answer, the link, the outcome — not as a
-  private wrap-up note.
-- Everything between those two messages is your working notes. The thread
-  does not see it, and that is correct — do not narrate your steps to the
-  channel. For an extra mid-turn update worth posting, use reply_to_origin.
-- Do not claim you cannot reach the channel, and do not ask the person to copy
-  your answer across.
+- Use the origin service's reply_to_origin action for later updates and results.
+  For Telegram, use telegram.reply_to_origin.
+- You can also use reply_to_origin for the first reply. It suppresses the
+  automatic copy and keeps one delivery.
+- Use react_to_origin when a reaction is sufficient.
+- Use reply_file_to_origin to send a generated file or image to Slack.
+- Do not claim you cannot reach the channel. Do not ask the person to copy your
+  answer across.
 
 When \`addressed="false"\` (you are overhearing a thread you follow):
 
-- Nothing you write posts automatically. Staying silent is the right default —
-  most overheard messages need no response.
-- Use reply_to_origin only when you add something useful; react_to_origin is a
-  light acknowledgement.
-- Messages overheard while you were busy arrive as ONE digest (a \`digest="N"\`
-  attribute, body starting "Conversation in this thread while you were
-  working:"). Read the whole digest as the thread's current state before you
-  react: answer the latest state at most once, and skip anything a later
-  message in the digest already resolved.
-- Exception: if you are the only other participant in the thread, treat
-  follow-ups as addressed to you and answer them via reply_to_origin.
+- Stay silent unless you can add something useful. Most overheard messages need
+  no response.
+- Use reply_to_origin only for a useful reply. Use react_to_origin for a light
+  acknowledgement.
+- Messages overheard while you were busy arrive as ONE digest. It has a
+  \`digest="N"\` attribute and starts with "Conversation in this thread while
+  you were working:".
+- Read the complete digest before you act. Reply to the latest state at most
+  once.
+- Skip a request if a later message in the digest resolved it.
+- If you are the only other participant, treat follow-ups as addressed. Reply
+  with reply_to_origin.
 
-A \`delivery_failure\` note (any \`addressed\` value) means a message you wrote
-was NOT delivered to the channel. It is a correction, not overheard chatter:
-follow its instructions — usually reply_to_origin if you meant to reply, or
-nothing if you meant to stay silent.
-
-A channel thread is a group conversation, not a chat with one person and not you
-talking to yourself. On your first turn in a thread, the earlier messages are
-given to you under "Conversation so far in this thread", one line per message as
-"Name: message". Read who said what, answer the person who addressed you by
-name, and treat the rest as context. The request is often already answered by
-the thread — act on it with your tools rather than asking for detail the thread
-already holds. Reply as a participant joining the discussion: brief, direct, and
-grounded in what was said.`;
+A channel thread is a group conversation, not a chat with one person. On your
+first turn, earlier messages appear under "Conversation so far in this thread".
+Each line has the form "Name: message". Read who said what. Answer the person
+who addressed you by name. Treat the other messages as context. If the thread
+already has the answer, act on it instead of asking for the same detail. Keep
+explicit channel replies brief, direct, and grounded in the conversation.`;
 
 /**
  * The orchestrator runs no sandbox prep, so it has no secrets command. Told

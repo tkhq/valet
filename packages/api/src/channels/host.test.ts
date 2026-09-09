@@ -4,6 +4,8 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistrati
 import {
   VirtualSandboxProvider,
   type ChannelTransport,
+  type FetchedChannelMedia,
+  type InboundChannelMedia,
   type InboundChannelEvent,
   type OutboundChannelMessage,
   type SignalContent,
@@ -26,6 +28,7 @@ class FakeTransport implements ChannelTransport {
   readonly channelType = "fake";
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   answered: Array<{ callbackId: string; text?: string }> = [];
+  fetchedMedia: FetchedChannelMedia | null = null;
   verifyWebhook(): null {
     return null;
   }
@@ -38,6 +41,9 @@ class FakeTransport implements ChannelTransport {
   }
   async sendMedia(conversationKey: string) {
     return { conversationKey, messageId: "m" };
+  }
+  async fetchMedia(_media: InboundChannelMedia): Promise<FetchedChannelMedia | null> {
+    return this.fetchedMedia;
   }
   async sendGatePrompt(conversationKey: string) {
     return { conversationKey, messageId: "g" };
@@ -262,6 +268,81 @@ describe("ChannelHost.handleUpdate", () => {
     expect(links).toHaveLength(0);
   });
 
+  it("preserves origin, sender, and attachments on direct-message ingress", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    fakeTransport.fetchedMedia = {
+      data: new Uint8Array([1, 2, 3]),
+      mimeType: "image/jpeg",
+      name: "image.jpg",
+    };
+    await host.handleUpdate(
+      "fake",
+      inbound({ media: [{ kind: "photo", fileId: "f1", fileName: "image.jpg" }] }),
+    );
+
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "user", id: USER_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const threadId = session.thread("fake:99").id;
+    let entry: Extract<Awaited<ReturnType<typeof session.providers.store.getEntries>>[number], { type: "message" }> | undefined;
+    for (let i = 0; i < 50; i++) {
+      const entries = await session.providers.store.getEntries(session.id, threadId);
+      const candidate = entries.find((item) => item.type === "message" && item.role === "user");
+      entry = candidate?.type === "message" ? candidate : undefined;
+      if (entry) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    expect(entry?.signal).toMatchObject({
+      signalType: "fake.message",
+      attributes: { sender: "Ada" },
+      origin: { channelType: "fake", threadKey: "fake:99" },
+    });
+    expect(entry?.attachments).toEqual([
+      {
+        type: "image",
+        url: "data:image/jpeg;base64,AQID",
+        mimeType: "image/jpeg",
+        name: "image.jpg",
+      },
+    ]);
+  });
+
+  it("does not send a non-image DM attachment as a provider image block", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    fakeTransport.fetchedMedia = {
+      data: new Uint8Array([1, 2, 3]),
+      mimeType: "application/pdf",
+      name: "report.pdf",
+    };
+    await host.handleUpdate(
+      "fake",
+      inbound({ media: [{ kind: "document", fileId: "f2", fileName: "report.pdf" }] }),
+    );
+
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "user", id: USER_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const threadId = session.thread("fake:99").id;
+    let entries: Awaited<ReturnType<typeof session.providers.store.getEntries>> = [];
+    for (let i = 0; i < 50; i++) {
+      entries = await session.providers.store.getEntries(session.id, threadId);
+      if (entries.some((entry) => entry.type === "message" && entry.role === "assistant")) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const entry = entries.find((candidate) => candidate.type === "message" && candidate.role === "user");
+    expect(entry?.type === "message" ? entry.attachments : undefined).toBeUndefined();
+    expect(entry?.type === "message" ? entry.content : undefined).toContain(
+      "attachment skipped: unsupported media type application/pdf",
+    );
+    expect(entries.some((candidate) => candidate.type === "message" && candidate.role === "assistant")).toBe(true);
+  });
+
   it("linked message is admitted on the orchestrator thread telegram-style key with dispatch dedup", async () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     const ev = inbound({ dispatchId: "fake:1" });
@@ -304,7 +385,7 @@ describe("ChannelHost.handleUpdate", () => {
     expect(drops.some((d) => d.reason === "unsupported_kind" && d.detail.includes("unknown_gate_ref"))).toBe(true);
   });
 
-  it("replies to the channel origin when the turn ran on the shared events thread", async () => {
+  it("posts the first response for an addressed turn", async () => {
     const session = await defaultAssistantSessionFor(
       { db: testDb.appDb, engineHost },
       { type: "org", id: ORG_ID },
@@ -316,21 +397,18 @@ describe("ChannelHost.handleUpdate", () => {
       body: "who are you",
       origin: { channelType: "keyed", threadKey: "keyed:D100" },
     };
-    await session.thread("events").submitPrompt(content, { dispatchId: "evt-1" });
+    const thread = session.thread("events");
+    await thread.submitPrompt(content, { dispatchId: "evt-1" });
 
-    // The turn runs async; the faux assistant replies "ok" and message_end
-    // drives the outbound bridge. The "events" thread key does not decode to a
-    // channel, so the reply must route by the submission's origin.
     for (let i = 0; i < 200; i++) {
-      if (keyedTransport.sent.length > 0) break;
-      await new Promise((r) => setTimeout(r, 20));
+      const entries = await session.providers.store.getEntries(session.id, thread.id);
+      if (entries.some((e) => e.type === "message" && e.role === "assistant" && e.stopReason === "end_turn")) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    expect(keyedTransport.sent).toEqual([
-      { conversationKey: "keyed:R1:D100", message: { markdown: "ok" } },
-    ]);
+    expect(keyedTransport.sent.map((sent) => sent.message.markdown)).toEqual(["ok"]);
   });
 
-  it("does not auto-post an overheard turn (origin.reply = manual)", async () => {
+  it("keeps an overheard turn internal without an explicit channel action", async () => {
     const session = await defaultAssistantSessionFor(
       { db: testDb.appDb, engineHost },
       { type: "org", id: ORG_ID },
@@ -345,8 +423,7 @@ describe("ChannelHost.handleUpdate", () => {
     const thread = session.thread("events");
     await thread.submitPrompt(content, { dispatchId: "evt-manual" });
 
-    // Wait for the assistant turn to finish; its message_end drives the bridge,
-    // which must NOT post because the message was only overheard.
+    // Wait for the assistant turn to finish before checking the channel.
     for (let i = 0; i < 200; i++) {
       const entries = await session.providers.store.getEntries(session.id, thread.id);
       if (entries.some((e) => e.type === "message" && e.role === "assistant" && e.stopReason === "end_turn")) break;

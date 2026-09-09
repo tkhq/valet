@@ -25,6 +25,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import slackPlugin from "@valet/plugin-slack/plugin";
+import telegramPlugin from "@valet/plugin-telegram/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
 import { EngineHost } from "./host.js";
 
@@ -47,7 +48,12 @@ describe("EngineHost session slack credential resolution", () => {
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
-  function makeHost(appDb: AppDb, credentials: PgCredentialStore, fixtureUrl: string): EngineHost {
+  function makeHost(
+    appDb: AppDb,
+    credentials: PgCredentialStore,
+    fixtureUrl: string,
+    plugins = [slackPlugin],
+  ): EngineHost {
     const h = new EngineHost({
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
@@ -58,7 +64,7 @@ describe("EngineHost session slack credential resolution", () => {
       // (`orgFallbackPolicy`), and production always wires the registry
       // (`providers/node.ts`). Without it slack would not escalate here, and
       // the test would be asserting a wiring gap rather than the rule.
-      plugins: [slackPlugin],
+      plugins,
       githubTokenDeps: {
         key: deriveSecretKey("cache-key"),
         apiUrl: fixtureUrl,
@@ -69,6 +75,22 @@ describe("EngineHost session slack credential resolution", () => {
     host = h;
     return h;
   }
+
+  it("resolves the plain organization Telegram bot token for a user session", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "org", id: orgId }, "telegram", {
+      type: "bot_token",
+      accessToken: "telegram-org-token",
+    });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url, [telegramPlugin]);
+
+    const session = await h.sessionFor("sess-telegram", { userId, orgId, workspace: "/tmp" });
+
+    await expect(session.credentialProvider().get("telegram")).resolves.toMatchObject({
+      accessToken: "telegram-org-token",
+    });
+  });
 
   it("org-scoped slack credential + linked user → resolves and carries owner_slack_user_id", async () => {
     const { appDb, credentials } = await harness();

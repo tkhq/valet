@@ -259,15 +259,60 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('reply_to_origin posts on an addressed turn too (follow-ups after the first auto-posted message)', async () => {
-    // Only a turn's first message auto-posts; the action is the sanctioned
-    // path for anything after it, so an addressed origin must not refuse.
+  it('reply_to_origin is the only post for an addressed turn', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.10' }));
     const result = await action('slack.reply_to_origin').execute(
       { text: 'follow-up' },
       pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'auto', messageTs: '1.5' } }),
     );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'follow-up' });
     expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.10' } });
+  });
+
+  it('reply_file_to_origin uploads one sandbox file into the origin thread', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F1' }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const sandbox = {
+      id: 'sb-file',
+      stat: async () => ({ isFile: true, isDirectory: false, size: 3 }),
+      readBinary: async () => new Uint8Array([1, 2, 3]),
+    } as Sandbox;
+
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/report.pdf', mime_type: 'application/pdf', caption: 'Report' },
+      pluginCtx({
+        sandbox,
+        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' },
+      }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://uploads.slack.test/file');
+    const completeBody = JSON.parse(fetchMock.mock.calls[2]?.[1]?.body as string);
+    expect(completeBody).toMatchObject({
+      files: [{ id: 'F1' }],
+      channel_id: 'C1',
+      thread_ts: '1.2',
+      initial_comment: 'Report',
+    });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', fileId: 'F1' } });
+  });
+
+  it('reply_file_to_origin rejects a directory before calling Slack', async () => {
+    const sandbox = {
+      id: 'sb-directory',
+      stat: async () => ({ isFile: false, isDirectory: true, size: 0 }),
+    } as Sandbox;
+    const result = await action('slack.reply_file_to_origin').execute(
+      { path: '/workspace/output' },
+      pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
+    );
+    expect(result).toMatchObject({ success: false });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('react_to_origin adds a reaction to the origin message', async () => {

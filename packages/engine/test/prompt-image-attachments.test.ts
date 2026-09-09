@@ -143,6 +143,31 @@ describe("Image attachments", () => {
     });
   });
 
+  it("does not convert a non-image MIME type into an image block", () => {
+    const entry: MessageEntry = {
+      id: "e-pdf",
+      sessionId: "s1",
+      threadId: "t1",
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: "Read the PDF",
+      attachments: [
+        {
+          type: "image",
+          url: "data:application/pdf;base64,AQID",
+          mimeType: "application/pdf",
+          name: "report.pdf",
+        },
+      ],
+      createdAt: Date.now(),
+    };
+
+    expect(entriesToAgentMessages([entry], faux.getModel())).toEqual([
+      { role: "user", content: [{ type: "text", text: "Read the PDF" }], timestamp: expect.any(Number) },
+    ]);
+  });
+
   it("handles data: URLs in image attachments", () => {
     const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
     const dataUrl = `data:image/png;base64,${pngBase64}`;

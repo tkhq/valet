@@ -43,12 +43,16 @@ describe("orchestratorPersona", () => {
     expect(persona).not.toContain("team_c7268244");
   });
 
-  it("tells the model the first and final messages auto-post; the rest stays off the channel", () => {
+  it("requires explicit channel actions for addressed and overheard turns", () => {
     const persona = flat(orchestratorPersona({ type: "team", id: "t1" }, "Platform"));
-    expect(persona).toContain("two of your messages post to the origin thread automatically");
-    expect(persona).toContain("Every message between them stays off the");
-    expect(persona).toContain("End your turn with the result.");
-    expect(persona).toContain("use reply_to_origin");
+    expect(persona).toContain("the first eligible assistant text posts automatically");
+    expect(persona).toContain("Later updates and the final result stay internal");
+    expect(persona).toContain("reply_to_origin action for later updates and results");
+    expect(persona).toContain("suppresses the automatic copy and keeps one delivery");
+    expect(persona).toContain("Stay silent unless you can add something useful");
+    expect(persona).toContain("telegram.reply_to_origin");
+    expect(persona).toContain("reply_file_to_origin");
+    expect(persona).not.toContain("delivery_failure");
   });
 
   it("tells the model to check list_tools before denying a capability", () => {

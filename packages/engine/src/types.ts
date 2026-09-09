@@ -253,11 +253,8 @@ export interface ChannelOrigin {
   channelType: string;
   threadKey: string;
   /**
-   * How the assistant answers this turn. `"auto"` (the default) posts the final
-   * turn back to the channel — a direct mention or a DM, which is addressed.
-   * `"manual"` suppresses the auto-post: an overheard message in a followed
-   * thread, which the assistant answers only if it chooses to, through the
-   * `reply_to_origin` / `react_to_origin` actions.
+   * Whether the channel message addressed the assistant. `"manual"` marks
+   * overheard chatter. All replies require `reply_to_origin`.
    */
   reply?: "auto" | "manual";
   /** The specific message that triggered this turn, for `react_to_origin`. */
@@ -283,6 +280,8 @@ export interface SignalContent {
   tagName?: string;
   /** Set when this signal came from a channel and a reply should route back to it. */
   origin?: ChannelOrigin;
+  /** Media attached to the channel signal. */
+  attachments?: PromptAttachment[];
 }
 
 export type PromptContent =
@@ -504,7 +503,7 @@ export interface CommandResultEntry extends BaseEntry {
   ok: boolean;
   output: string; // markdown
   /** Surface the command came from (`PromptOptions.channel`). A command
-   * result only auto-posts to a bound channel when this is set — a web-typed
+   * result only posts to a bound channel when this is set. A web-typed
    * command answers in the web UI (TKAI-323). */
   channel?: ChannelTarget;
 }
@@ -635,8 +634,7 @@ export interface ToolResult {
    * when the action reported failure without throwing. An action failure is
    * NOT a tool error — the model must read the corrective text — so it
    * persists with part.status "completed". Consumers that must tell a
-   * successful call from a completed-but-failed one (the channel auto-post
-   * stand-down) read this from the persisted result's `details.ok`.
+   * successful call from a completed-but-failed one read this value.
    */
   ok?: boolean;
 }

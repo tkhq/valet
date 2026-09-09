@@ -151,13 +151,13 @@ describe("engine: single-thread happy path", () => {
       fauxAssistantMessage("ok"),
     ]);
 
-    let receivedCtx: { userId?: string; threadId?: string } | undefined;
+    let receivedCtx: { userId?: string; threadId?: string; origin?: { channelType: string; threadKey: string } } | undefined;
     const greet: ToolDef = {
       name: "greet",
       description: "greets",
       parameters: Type.Object({ who: Type.String() }),
       execute: async (args, ctx) => {
-        receivedCtx = { userId: ctx.userId, threadId: ctx.threadId };
+        receivedCtx = { userId: ctx.userId, threadId: ctx.threadId, origin: ctx.origin };
         return { text: `hello ${(args as { who: string }).who}` };
       },
     };
@@ -172,11 +172,17 @@ describe("engine: single-thread happy path", () => {
       tools: [greet],
     });
 
-    const receipt = await session.prompt("greet world");
+    const receipt = await session.prompt({
+      kind: "signal",
+      signalType: "slack.message",
+      body: "greet world",
+      origin: { channelType: "slack", threadKey: "slack:C1:1.2" },
+    });
     await waitForStatus(events, receipt.threadId, "idle");
 
     expect(receivedCtx?.userId).toBe("u-custom");
     expect(receivedCtx?.threadId).toBe(receipt.threadId);
+    expect(receivedCtx?.origin).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2" });
 
     faux.unregister();
   });

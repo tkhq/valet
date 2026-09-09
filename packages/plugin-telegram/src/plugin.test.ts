@@ -9,6 +9,11 @@ describe("telegram plugin manifest", () => {
   });
   it("declares the telegram transport and bot_token credential", () => {
     expect(plugin.transports?.[0]?.channelType).toBe("telegram");
-    expect(plugin.credentials?.[0]).toMatchObject({ type: "bot_token", configKeys: ["accessToken"] });
+    expect(plugin.credentials?.[0]).toMatchObject({
+      type: "bot_token",
+      configKeys: ["accessToken"],
+      requires: { orgCredential: true },
+    });
+    expect(plugin.actions?.[0]?.actions.map((action) => action.id)).toContain("telegram.reply_to_origin");
   });
 });

@@ -652,13 +652,9 @@ export class ChildWatcher {
           outcome: result.outcome,
           ...(title !== undefined ? { title } : {}),
         },
-        // Inherited verbatim from the spawning submission: an addressed
-        // ("auto") origin lets the settlement turn's first message auto-post
-        // the child's result back to the thread that asked; an overheard
-        // ("manual") origin keeps the settlement explicit-only. Without it
-        // the settlement turn cannot reach the channel at all — neither the
-        // auto-post nor reply_to_origin has an origin to route by.
-        ...(watch.origin !== undefined ? { origin: watch.origin } : {}),
+        // Preserve the route but make settlement explicit-only. The parent can
+        // use reply_to_origin, but settlement does not trigger a first auto-reply.
+        ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
       },
       dispatchId: `settled:${watch.childSessionId}:${watch.queueItemId}`,
     });

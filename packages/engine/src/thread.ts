@@ -3260,7 +3260,6 @@ export class Thread {
     // Extract attachments if the prompt content has them.
     let attachments: MessageEntry["attachments"];
     if (
-      !isSignalContent(item.content) &&
       typeof item.content === "object" &&
       item.content !== null &&
       "attachments" in item.content &&
@@ -4471,7 +4470,7 @@ export class Thread {
       policyResolver: session.options.policyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
       queueItemId: this.runningItem?.id,
-      // The running submission's channel origin, when it is a channel signal,
+      // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,
       resolveOutboundSender: session.options.resolveOutboundSender,
@@ -5443,7 +5442,7 @@ export function attachmentsToImageBlocks(
   if (!attachments || attachments.length === 0) return [];
   const blocks: Array<{ type: "image"; data: string; mimeType: string }> = [];
   for (const att of attachments) {
-    if (att.type !== "image") continue;
+    if (att.type !== "image" || !att.mimeType.startsWith("image/")) continue;
     let imageData: string;
     // att.data is set when a tool returns binary attachment data (e.g. screenshot utilities)
     if (att.data instanceof Uint8Array) {

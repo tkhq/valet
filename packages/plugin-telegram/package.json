@@ -20,7 +20,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@valet/engine": "workspace:*"
+    "@valet/engine": "workspace:*",
+    "typebox": "^1.0.5"
   },
   "devDependencies": {
     "@hono/node-server": "^1.13.0",

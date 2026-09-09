@@ -15,9 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
-  originFromEntries,
   parseAssistantSessionId,
-  type ChannelOrigin,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -31,6 +29,7 @@ import {
   type PromptAttachment,
   type Session,
   type SessionEntry,
+  type SignalContent,
   type SessionStore,
   type StoredCredential,
   type Unsubscribe,
@@ -51,7 +50,6 @@ import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/servi
 import { canResolveSessionGate } from "../services/session-access.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { EVENTS_THREAD_KEY } from "../events/orchestrator-target.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
@@ -140,6 +138,49 @@ export function publicUrlFromEnv(env: NodeJS.ProcessEnv): string | undefined {
 /** Result of `ChannelHost.handleWebhook` — mirrors the HTTP status the route maps it to. */
 export type HandleWebhookResult = "ok" | "rejected" | "unknown_channel";
 
+/** The channel origin attached to this submission's user signal. */
+function turnOrigin(entries: SessionEntry[], queueItemId: string) {
+  for (const entry of entries) {
+    if (entry.type === "message" && entry.role === "user" && entry.queueItemId === queueItemId) {
+      return entry.signal?.origin;
+    }
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+type OriginReplyState = "none" | "pending" | "succeeded" | "failed";
+
+/** Classify explicit origin delivery across every assistant entry in a submission. */
+function originReplyState(entries: SessionEntry[], queueItemId: string): OriginReplyState {
+  const calls = entries.flatMap((entry) => {
+    if (entry.type !== "message" || entry.role !== "assistant" || entry.queueItemId !== queueItemId) return [];
+    return (entry.parts ?? []).filter((part) => {
+      if (part.type !== "tool_call" || !isRecord(part.args)) return false;
+      const toolId = part.args.tool_id;
+      return typeof toolId === "string" && toolId.endsWith(".reply_to_origin");
+    });
+  });
+  if (calls.length === 0) return "none";
+  if (
+    calls.some(
+      (part) =>
+        part.type === "tool_call" &&
+        part.status === "completed" &&
+        isRecord(part.result) &&
+        isRecord(part.result.details) &&
+        part.result.details.ok === true,
+    )
+  ) {
+    return "succeeded";
+  }
+  if (calls.some((part) => part.type === "tool_call" && part.status === "running")) return "pending";
+  return "failed";
+}
+
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
 function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & { getMe(): Promise<{ username?: string }> } {
   return typeof (transport as { getMe?: unknown }).getMe === "function";
@@ -152,71 +193,12 @@ function chatIdFromKey(conversationKey: string): string {
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
 }
 
-/** True when the submission already replied through a channel's
- * `….reply_to_origin` action: a SUCCESSFUL `call_tool` in any of the
- * submission's assistant messages names such a tool id. The auto-post
- * safety net stands down for that submission. Success means the persisted
- * result carries `details.ok === true` — an action failure also persists
- * with status "completed" (the model reads the corrective text), and a
- * failed reply must NOT stand the safety net down, or the thread gets
- * nothing at all. */
-function turnCalledOriginTool(entries: SessionEntry[], queueItemId: string, suffixes: string[]): boolean {
-  for (const e of entries) {
-    if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
-    for (const part of e.parts ?? []) {
-      if (part.type !== "tool_call" || part.status !== "completed") continue;
-      const args = part.args;
-      const toolId =
-        args !== null && typeof args === "object" ? (args as Record<string, unknown>).tool_id : undefined;
-      if (typeof toolId !== "string" || !suffixes.some((s) => toolId.endsWith(s))) continue;
-      const result = part.result;
-      const details =
-        result !== null && typeof result === "object" ? (result as Record<string, unknown>).details : undefined;
-      const ok = details !== null && typeof details === "object" ? (details as Record<string, unknown>).ok : undefined;
-      if (ok === true) return true;
-    }
-  }
-  return false;
-}
-
-function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): boolean {
-  return turnCalledOriginTool(entries, queueItemId, [".reply_to_origin"]);
-}
-
-/** True when the submission delivered a channel response some way — the origin
- * actions, a direct channel post, or a DM. The dropped-reply feedback stands
- * down for such a turn: nagging "call reply_to_origin" at an agent that
- * answered via send_message (or deliberately went private via dm_*) would
- * invite a duplicate reply. */
-function turnActedOnOrigin(entries: SessionEntry[], queueItemId: string): boolean {
-  return turnCalledOriginTool(entries, queueItemId, [
-    ".reply_to_origin",
-    ".react_to_origin",
-    ".send_message",
-    ".dm_owner",
-    ".dm_user",
-  ]);
-}
-
-/** True when the submission's own prompt IS a delivery-feedback signal
- * (`attributes.feedback`). The loop guard: a feedback-triggered turn never
- * generates further feedback, so the exchange terminates after one note. */
-function turnPromptIsFeedback(entries: SessionEntry[], queueItemId: string): boolean {
-  return entries.some(
-    (e) =>
-      e.type === "message" &&
-      e.role === "user" &&
-      e.queueItemId === queueItemId &&
-      e.signal?.attributes?.feedback !== undefined,
-  );
-}
-
 /**
  * True when this submission is a plain web-UI prompt, the one kind of
  * submission whose output stays off a bound channel (TKAI-323).
  *
- * The single classifier for the submission's surface — the mute checks in
- * `deliverAssistantMessage` and `deliverGatePrompt` both read it. A
+ * The single classifier for the submission's surface. Gate prompts use it
+ * to stay off a channel when a prompt came from the web app. A
  * submission is NOT a web prompt when any of its user entries carries:
  *
  * - `channel` — the direct-message path (`handleMessage`) stamps it, and the
@@ -239,17 +221,6 @@ function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string): bo
   );
   if (prompts.length === 0) return false;
   return prompts.every((e) => e.channel === undefined && e.signal === undefined);
-}
-
-/** The submission's first assistant message that carries text or an
- * attachment — the one the auto-post posts. Derived from the store rather
- * than held in memory, so an api restart mid-submission cannot double-post. */
-function firstPostableEntry(entries: SessionEntry[], queueItemId: string): SessionEntry | undefined {
-  for (const e of entries) {
-    if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
-    if (e.content || (e.parts ?? []).some((part) => part.type === "attachment")) return e;
-  }
-  return undefined;
 }
 
 /** Feature-detects a transport that opens a direct conversation with one of
@@ -286,14 +257,6 @@ export class ChannelHost {
    * card its tool call raised, and fire-and-forget handlers would let the
    * two race. An entry is removed once its chain drains. */
   private outboundChains = new Map<string, Promise<void>>();
-  /** gateId → the submission slot key (`${sessionId}:turn:${queueItemId}`)
-   * of the submission that raised it, recorded when the gate card is sent. */
-  private gateSlots = new Map<string, string>();
-  /** Submission slots re-opened by a gate resolution, each consumed by the
-   * next auto-post for that submission — the post-approval segment's first
-   * message reaches the reader who approved. Bounded FIFO (DEDUP_CAP). */
-  private reopenedSlots = new Set<string>();
-  private reopenedOrder: string[] = [];
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
@@ -441,7 +404,6 @@ export class ChannelHost {
     }
     if (!this.started) return;
     this.startOutbound();
-    this.streamBridge.start();
     // Close streams a previous boot left open. Runs after the transports are
     // up because closing one needs its transport, and after `startOutbound`
     // so a slow sweep cannot delay live traffic.
@@ -559,14 +521,14 @@ export class ChannelHost {
   }
 
   /**
-   * Rule 1: subscribe once (no sessionId filter) to the three outbound event
-   * types. Live subscription only — no replay from a stored offset — which
-   * satisfies "high-water mark initializes to now" on restart.
+   * Rule 1: subscribe once (no sessionId filter) to outbound control events.
+   * Live subscription only. There is no replay from a stored offset.
+   * This satisfies "high-water mark initializes to now" on restart.
    */
   startOutbound(): void {
     if (this.outboundUnsub) return;
     this.outboundUnsub = this.deps.eventStream.subscribe(
-      { eventTypes: ["message_end", "decision_gate", "decision_gate_resolved", "command_result"] },
+      { eventTypes: ["message_end", "tool_end", "decision_gate", "decision_gate_resolved", "command_result"] },
       (event) => {
         // Serialize per (session, thread): each handler awaits transport
         // sends, and two concurrent handlers can land out of order — the
@@ -603,7 +565,15 @@ export class ChannelHost {
     try {
       const e = event.event;
       if (e.type === "message_end") {
-        await this.deliverAssistantMessage(event.sessionId, e.threadId, e.messageId, e.reason);
+        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
+          messageId: e.messageId,
+          queueItemId: event.queueItemId,
+          reason: e.reason,
+        });
+      } else if (e.type === "tool_end" && event.queueItemId !== undefined) {
+        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
+          queueItemId: event.queueItemId,
+        });
       } else if (e.type === "decision_gate") {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
@@ -614,6 +584,65 @@ export class ChannelHost {
     } catch (err) {
       console.error("[channels] outbound delivery failed", err);
     }
+  }
+
+  /** Post only the first assistant text for an addressed channel turn. */
+  private async deliverFirstAssistantReply(
+    sessionId: string,
+    threadId: string,
+    trigger: {
+      messageId?: string;
+      queueItemId?: string;
+      reason?: "end_turn" | "error" | "abort";
+    },
+  ): Promise<void> {
+    const thread = await this.deps.engineStore.getThread(sessionId, threadId);
+    if (!thread) return;
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    const triggerEntry = trigger.messageId === undefined
+      ? undefined
+      : entries.find(
+          (entry) =>
+            entry.id === trigger.messageId && entry.type === "message" && entry.role === "assistant",
+        );
+    const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
+    if (!queueItemId) return;
+    const dedupeKey = `${sessionId}:first-reply:${queueItemId}`;
+    if (trigger.reason !== undefined && trigger.reason !== "end_turn") {
+      if (trigger.reason === "abort") this.markDelivered(dedupeKey);
+      return;
+    }
+    const queueItem = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
+    if (queueItem?.abortRequestedAt !== undefined || queueItem?.outcome?.outcome === "aborted") {
+      this.markDelivered(dedupeKey);
+      return;
+    }
+
+    const first = entries.find(
+      (entry) =>
+        entry.type === "message" &&
+        entry.role === "assistant" &&
+        entry.queueItemId === queueItemId &&
+        Boolean(entry.content),
+    );
+    if (!first || first.type !== "message" || !first.content) return;
+    const origin = turnOrigin(entries, queueItemId);
+    if (!origin || origin.reply === "manual") return;
+
+    const explicit = originReplyState(entries, queueItemId);
+    if (explicit === "pending" || explicit === "succeeded") return;
+
+    const target = this.channelThreadFor(origin.threadKey);
+    if (!target) return;
+    if (this.delivered.has(dedupeKey)) return;
+    this.markDelivered(dedupeKey);
+    const transport = this.transports.get(target.channelType);
+    if (!transport) return;
+    const sender = await this.assistantSenderIdentity(sessionId);
+    await transport.send(target.conversationKey, {
+      markdown: first.content,
+      ...(sender !== undefined ? { sender } : {}),
+    });
   }
 
   /**
@@ -653,247 +682,6 @@ export class ChannelHost {
     }
   }
 
-  /** Rule 2: message_end → deliver any assistant message that carries text or
-   * an attachment (mid-turn ones included), dedup per message. */
-  private async deliverAssistantMessage(
-    sessionId: string,
-    threadId: string,
-    messageId: string,
-    reason: "end_turn" | "error" | "abort",
-  ): Promise<void> {
-    if (reason !== "end_turn") return;
-    // A streamed message is already on screen. Posting it again as a discrete
-    // message would show the reader the same answer twice, once under the
-    // stream. Checked before any await: the marker is written on
-    // `message_start`, which always precedes this event.
-    if (this.streamBridge.isStreamed(sessionId, messageId)) return;
-    const thread = await this.deps.engineStore.getThread(sessionId, threadId);
-    if (!thread) return;
-
-    // A thread that neither maps to a channel nor is the orchestrator "events"
-    // firehose (a plain web session) can never deliver here — return before the
-    // entries read, so a Slack-connected deployment does not read the store on
-    // every web turn. `mapped` is a cheap, synchronous key check.
-    const mapped = this.channelThreadFor(thread.key);
-    if (!mapped && thread.key !== EVENTS_THREAD_KEY) return;
-
-    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
-    const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
-    if (!entry || entry.type !== "message") return;
-    // message_end fires with reason "end_turn" for every non-abort assistant
-    // message, including a mid-turn message that stopped on a tool call
-    // (those persist stopReason undefined; only the turn's last message
-    // persists "end_turn"). Auto-post TWO messages per submission: the
-    // first that carries text or an attachment (the acknowledgement) and
-    // the turn-final one (the result). The rounds between are tool
-    // narration and stay off the channel. First-only proved insufficient in
-    // the field: a model acks, works for minutes, and ends the turn on the
-    // real answer — which must reach the thread without relying on the
-    // model to call reply_to_origin (and the channel-message path gives the
-    // action no origin to post through anyway).
-    const hasAttachment = (entry.parts ?? []).some((part) => part.type === "attachment");
-    if (!entry.content && !hasAttachment) return;
-
-    // The submission's channel origin (from its user signal entry). Used both to
-    // pick a delivery target when the thread key does not map, and to decide
-    // how an overheard turn behaves below.
-    const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
-    // The auto-post belongs to the channel MESSAGE being answered, not to the
-    // thread it landed on. A Slack-bound thread stays bound after the reader
-    // moves to the web UI, so the thread key alone says nothing about where
-    // this turn came from. A web-UI prompt answers in the UI and stays off
-    // the channel (TKAI-323). The submission still reaches the channel when
-    // the agent calls reply_to_origin, which is a deliberate cross-post.
-    //
-    // A gate approved from the UI does NOT change the submission's surface:
-    // the entries still carry the mark that started it, so the post-approval
-    // outcome posts to the channel through the reopened slot below.
-    //
-    // `queueItemId === undefined` keeps the pre-submission paths (an entry
-    // written outside a queue item) on their existing behavior — the surface
-    // classifier needs a submission to read. The debug line is the only
-    // record of the mute: an inbound path that forgets to mark its surface
-    // fails as a silent non-answer, and this line is how that gets found.
-    if (mapped && entry.queueItemId !== undefined && submissionIsWebPrompt(entries, entry.queueItemId)) {
-      console.debug(
-        `[channels] web-origin turn stays off ${mapped.channelType} (session=${sessionId} queueItem=${entry.queueItemId})`,
-      );
-      return;
-    }
-    // An overheard turn (a message in a followed thread the assistant did not
-    // choose to answer here) does not auto-post; the assistant replies only
-    // through reply_to_origin / react_to_origin, or stays silent. If the turn
-    // took NO origin action, the agent may believe this swallowed message was
-    // its reply — tell it once per thread (durable dispatchId dedup), so a
-    // dropped reply is recoverable but a deliberately silent assistant is not
-    // nagged into over-participation on every turn (TKAI-284 / TKAI-293).
-    if (origin?.reply === "manual") {
-      if (
-        entry.queueItemId !== undefined &&
-        entry.stopReason === "end_turn" &&
-        !turnActedOnOrigin(entries, entry.queueItemId) &&
-        !turnPromptIsFeedback(entries, entry.queueItemId)
-      ) {
-        await this.submitReplyFeedback(sessionId, thread.key, origin, {
-          dispatchId: `feedback:overheard-dropped:${threadId}`,
-          body:
-            `Heads up: your message was NOT posted to the channel thread (${origin.threadKey}). ` +
-            "This turn was overheard, so a normal message stays off the channel. " +
-            "If you meant to reply, call reply_to_origin with the text. " +
-            "If you meant to stay silent, do nothing — that is the default here. " +
-            "This reminder is sent once per thread.",
-        });
-      }
-      return;
-    }
-
-    // Delivery target: the thread's own channel key (a DM or channel thread),
-    // or, on the "events" thread an event delivery lands on, the submission's
-    // own channel origin.
-    const target = mapped ?? (origin ? this.channelTargetForOrigin(origin) : null);
-    if (!target) {
-      // No origin → a non-channel submission on the events thread: routine,
-      // not a drop. WITH an origin this is a swallowed reply (transport not
-      // running, or the key rebuild failed) — make it visible.
-      if (origin !== undefined) {
-        const orgId = this.orgId ?? (await this.deps.resolveOrgId());
-        await this.dropLog(orgId, "reply_target_unresolved", origin.threadKey, `channelType=${origin.channelType}`);
-      }
-      return;
-    }
-
-    const dedupeKey = `${sessionId}:${messageId}`;
-    if (this.delivered.has(dedupeKey)) return;
-    if (entry.queueItemId !== undefined) {
-      // An explicit, successful reply_to_origin in this submission IS the
-      // reply — the auto-post safety net stands down so the thread gets
-      // exactly one.
-      if (turnRepliedToOrigin(entries, entry.queueItemId)) return;
-      // Ack + result, narration suppressed: the segment's first postable
-      // message and the turn-final message (the only one persisted with
-      // stopReason "end_turn") post; the rounds between stay off the
-      // channel. Derived from the persisted entries (not memory), so an api
-      // restart mid-submission cannot double-post. A resolved gate re-opens
-      // the slot once, so a post-approval ack also reaches the reader who
-      // just approved (the final result posts regardless, via isFinal).
-      const slotKey = `${sessionId}:turn:${entry.queueItemId}`;
-      const first = firstPostableEntry(entries, entry.queueItemId);
-      const isFirst = first === undefined || first.id === entry.id;
-      const isFinal = entry.stopReason === "end_turn";
-      if (!isFirst && !isFinal && !this.reopenedSlots.delete(slotKey)) return;
-    }
-    this.markDelivered(dedupeKey);
-
-    const transport = this.transports.get(target.channelType);
-    if (!transport) {
-      // An origin-bearing reply with no running transport is a swallowed
-      // reply, not a routine skip — surface it on the Problems tab.
-      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
-      await this.dropLog(orgId, "reply_transport_missing", target.conversationKey, `channelType=${target.channelType}`);
-      return;
-    }
-
-    // Whether the reply's TEXT landed on the channel, so a later attachment
-    // failure does not produce a false "your reply was NOT posted" note.
-    let textPosted = false;
-    const sender = await this.assistantSenderIdentity(sessionId);
-    try {
-      if (entry.content) {
-        await transport.send(target.conversationKey, {
-          markdown: entry.content,
-          ...(sender !== undefined ? { sender } : {}),
-        });
-        textPosted = true;
-      }
-      for (const part of entry.parts ?? []) {
-        if (part.type !== "attachment") continue;
-        const attachment = part.attachment;
-        if (attachment.type === "image") {
-          await transport.sendMedia(target.conversationKey, {
-            type: "image",
-            data: attachment.data,
-            mimeType: attachment.mimeType,
-            name: attachment.name,
-          });
-        } else if (attachment.type === "file") {
-          await transport.sendMedia(target.conversationKey, {
-            type: "file",
-            data: attachment.data,
-            mimeType: attachment.mimeType,
-            name: attachment.name,
-          });
-        }
-        // "text" ToolAttachment variant is skipped (rule 2).
-      }
-    } catch (err) {
-      // A reply the assistant produced but could not deliver is a reportable
-      // miss, not a silent drop: surface it on the Problems tab. Also log it —
-      // the catch is broad, so a code fault (not just a transport error) lands
-      // here and must stay visible in the server log, not only the drop table.
-      console.error("[channels] channel reply delivery failed", err);
-      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
-      await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, String(err));
-      // Tell the agent its reply never landed, so it can retry or route around
-      // the failure instead of believing it answered (TKAI-284). Only for an
-      // origin-bearing turn: reply_to_origin needs an origin to post through.
-      // Only when the TEXT never posted — a partial failure (text landed, an
-      // attachment did not) must not invite a duplicate reply. Once per failed
-      // message (the dispatchId), and the feedback signal's manual origin
-      // keeps the recovery turn off the auto-post path, so a still-broken
-      // transport cannot loop.
-      if (!textPosted && origin !== undefined && entry.queueItemId !== undefined) {
-        await this.submitReplyFeedback(sessionId, thread.key, origin, {
-          dispatchId: `feedback:reply-failed:${messageId}`,
-          body:
-            `Your reply was NOT posted to the channel thread (${origin.threadKey}): ${String(err)}. ` +
-            "Retry with reply_to_origin, or tell the user through another channel you have.",
-        });
-      }
-    }
-  }
-
-  /**
-   * Submit a delivery-feedback signal onto the turn's own thread, so the agent
-   * learns a reply of its was dropped or failed and can recover with
-   * reply_to_origin (TKAI-284). Best-effort: feedback about a delivery problem
-   * must never fail the delivery path itself. The signal carries
-   * `attributes.feedback` — the loop guard `turnPromptIsFeedback` and the
-   * engine's digest coalescing both key on it — and a manual-reply origin, so
-   * the recovery turn's own final message never auto-posts.
-   */
-  private async submitReplyFeedback(
-    sessionId: string,
-    threadKey: string,
-    origin: ChannelOrigin,
-    args: { dispatchId: string; body: string },
-  ): Promise<void> {
-    try {
-      const session = this.deps.engineHost.liveSession(sessionId);
-      // The bus event that led here came from a live session; a miss means it
-      // was evicted in between — drop the feedback rather than re-waking it.
-      if (!session) return;
-      await session.thread(threadKey).submitPrompt(
-        {
-          kind: "signal",
-          signalType: "channel.reply_dropped",
-          body: args.body,
-          // Its own envelope tag: the manual origin renders addressed="false",
-          // and the persona reads that as ignorable overheard chatter — this
-          // note is a correction the agent must weigh (persona names the tag).
-          tagName: "delivery_failure",
-          attributes: { feedback: "reply_dropped" },
-          // Normalized origin — no messageTs. The dispatchId dedup compares
-          // CONTENT: a per-message ts would make the once-per-thread repeat a
-          // content conflict (a logged error) instead of a clean dedup.
-          origin: { channelType: origin.channelType, threadKey: origin.threadKey, reply: "manual" },
-        },
-        { dispatchId: args.dispatchId },
-      );
-    } catch (err) {
-      console.error("[channels] reply-dropped feedback failed", err);
-    }
-  }
-
   /**
    * Per-assistant outbound identity for a session's channel posts
    * (TKAI-387): the assistant's `name` and `avatarUrl`, read from the row
@@ -916,28 +704,12 @@ export class ChannelHost {
   }
 
   /**
-   * Resolve a submission's `ChannelOrigin` to an outbound target. Mirrors the
-   * `channelThreadFor` rebuild hop: the transport turns the stored thread key
-   * back into a conversationKey (Slack injects the workspace id it holds).
-   * `null` when the channel is not running or the transport disowns the key.
-   */
-  private channelTargetForOrigin(origin: ChannelOrigin): { channelType: string; conversationKey: string } | null {
-    if (!this.isRunning(origin.channelType)) return null;
-    const transport = this.transports.get(origin.channelType);
-    const conversationKey = transport?.conversationKeyFromThreadKey?.(origin.threadKey);
-    // Empty is as unusable as null: a rebuild that produced no address must not
-    // be sent to.
-    if (!conversationKey) return null;
-    return { channelType: origin.channelType, conversationKey };
-  }
-
-  /**
    * Rule 6: command_result → send the result markdown to the channel the
    * command came from. A slash command sent from Telegram or Slack must
    * answer there — the web UI reads the same entry over REST/WS. Dedup on
    * the entry id, same LRU as assistant messages.
    *
-   * Same surface rule as the auto-post (TKAI-323): the entry's `channel`
+   * The submission surface rule (TKAI-323): the entry's `channel`
    * mark says the command came from that surface; without it the command
    * was typed in the web UI and its result stays there. Today every engine
    * command arrives via the web REST route (`session.prompt` is its only
@@ -980,12 +752,11 @@ export class ChannelHost {
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;
 
-    // Same surface rule as the auto-post (TKAI-323): a web-UI submission's
+    // The submission surface rule (TKAI-323): a web-UI submission's
     // gate resolves in the web UI. With the submission's text muted on the
     // channel, its card would be a live approve/deny button with zero
     // surrounding context — an invitation to approve an action the channel
-    // reader never saw described. Returning before `gateSlots.set` also
-    // means the resolution re-opens no auto-post slot for this submission.
+    // reader never saw described.
     const entries = await this.deps.engineStore.getEntries(sessionId, gate.threadId);
     if (submissionIsWebPrompt(entries, gate.queueItemId)) {
       console.debug(
@@ -993,18 +764,6 @@ export class ChannelHost {
       );
       return;
     }
-
-    // Close any open stream FIRST, so the approval card lands after the text
-    // that led to it. Sequenced here rather than from the bridge's own
-    // subscriber, because two independent subscribers to `decision_gate` have
-    // no defined order and the reader would sometimes see the card first.
-    await this.streamBridge.closeForGate(sessionId, gate.threadId);
-
-    // Remember which submission this gate belongs to, so its resolution can
-    // re-open that submission's auto-post slot (the post-approval outcome
-    // must reach the thread even though the pre-gate segment already
-    // posted its first message).
-    this.gateSlots.set(gate.id, `${sessionId}:turn:${gate.queueItemId}`);
 
     // Digest before sending: a tool-approval gate's raw body is a
     // tool_id/args JSON dump; the card shows the summary plus labeled
@@ -1041,9 +800,9 @@ export class ChannelHost {
     },
     sessionId: string,
   ): Promise<void> {
-    // The card carries the asking assistant's identity, same as the
-    // auto-post: in a channel with several assistants the reader must see
-    // WHO is asking for approval. Resolution edits keep the posted identity.
+    // The card carries the asking assistant's identity. In a channel with
+    // several assistants, the reader must see who asks for approval.
+    // Resolution edits keep the posted identity.
     const sender = await this.assistantSenderIdentity(sessionId);
     const ref = await transport.sendGatePrompt(conversationKey, {
       ...prompt,
@@ -1059,19 +818,6 @@ export class ChannelHost {
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
   private async deliverGateResolution(gateId: string, resolution: DecisionResolution): Promise<void> {
-    // A resolved gate opens a new segment of its submission: re-open the
-    // auto-post slot so the post-approval outcome posts to the thread.
-    const slotKey = this.gateSlots.get(gateId);
-    if (slotKey !== undefined) {
-      this.gateSlots.delete(gateId);
-      this.reopenedSlots.add(slotKey);
-      this.reopenedOrder.push(slotKey);
-      if (this.reopenedOrder.length > DEDUP_CAP) {
-        const evict = this.reopenedOrder.shift();
-        if (evict !== undefined) this.reopenedSlots.delete(evict);
-      }
-    }
-
     // Remember the resolution BEFORE the refs check: a prompt still in
     // flight has no ref yet, and `sendAndRecordGatePrompt` reads this map to
     // backfill the edit when that send lands.
@@ -1278,23 +1024,6 @@ export class ChannelHost {
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
     const thread = session.thread(threadKey);
 
-    // Register the turn before the prompt is submitted, so the first
-    // `message_start` already knows where to stream. Nothing opens yet: a
-    // turn that parks on an approval gate before writing any text must not
-    // leave an empty stream on screen. Transports without a reply anchor
-    // (Telegram) supply no threadTs and never stream.
-    const streamTurn =
-      event.threadTs !== undefined
-        ? this.streamBridge.noteInboundTurn({
-            channelType,
-            conversationKey: event.conversationKey,
-            sessionId: session.id,
-            threadId: thread.id,
-            threadTs: event.threadTs,
-            orgId,
-          })
-        : undefined;
-
     let text = event.text ?? "";
     const attachments: PromptAttachment[] = [];
     for (const media of event.media ?? []) {
@@ -1303,26 +1032,38 @@ export class ChannelHost {
         text += "\n\n[attachment skipped: too large or unavailable]";
         continue;
       }
-      if (media.kind === "photo") {
-        attachments.push({ type: "image", data: fetched.data, mimeType: fetched.mimeType, name: fetched.name });
-      } else if (media.kind === "voice" || media.kind === "audio") {
-        attachments.push({ type: "audio", data: fetched.data, mimeType: fetched.mimeType, name: fetched.name });
-      } else {
-        attachments.push({ type: "file", data: fetched.data, mimeType: fetched.mimeType, name: fetched.name ?? "file" });
+      if (!fetched.mimeType.startsWith("image/")) {
+        text += `\n\n[attachment skipped: unsupported media type ${fetched.mimeType}]`;
+        continue;
       }
+      // Signal content is persisted before the turn runs. Keep image data
+      // JSON-safe across that queue boundary.
+      attachments.push({
+        type: "image",
+        url: `data:${fetched.mimeType};base64,${Buffer.from(fetched.data).toString("base64")}`,
+        mimeType: fetched.mimeType,
+        name: fetched.name,
+      });
     }
 
-    const receipt = await thread.submitPrompt(
-      { text: text === "" ? "(media message)" : text, attachments },
+    const content: SignalContent = {
+      kind: "signal",
+      signalType: `${channelType}.message`,
+      body: text === "" ? "(media message)" : text,
+      origin: { channelType, threadKey },
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
+    };
+    await thread.submitPrompt(
+      content,
       {
         dispatchId: event.dispatchId,
         author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId },
         // Stamp the surface this prompt came from. A channel thread keeps its
         // binding for its whole life, so the thread key alone cannot say
         // whether a given turn started on the channel or in the web UI. The
-        // outbound path reads this mark to auto-post only the turns that a
-        // channel message started (TKAI-323). A plain prompt carries no
-        // `signal.origin`, so this is the only durable record for this path.
+        // Gate and command-result delivery use this mark to distinguish a
+        // channel turn from a web turn on the same bound thread (TKAI-323).
         channel: { channelType, channelId: event.conversationKey },
       },
     );
@@ -1335,20 +1076,6 @@ export class ChannelHost {
       .set({ lastActivityAt: channelNow })
       .where(eq(agentSessions.id, session.id));
 
-    // Tie the stream registration to the admitted submission, so only THIS
-    // submission's `message_start` opens a stream. Without the binding, a
-    // registration outlives its turn (a queued item superseded before it is
-    // claimed, a turn parked on a gate) and the next turn on the thread —
-    // possibly a web one — would stream into it (TKAI-323).
-    if (streamTurn !== undefined) {
-      this.streamBridge.bindInboundTurn(streamTurn, receipt.queueItemId);
-    }
-
-    try {
-      await transport?.sendTyping?.(event.conversationKey);
-    } catch {
-      // best-effort
-    }
   }
 
   private async handleGateCallback(

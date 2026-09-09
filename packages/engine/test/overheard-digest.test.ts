@@ -34,6 +34,16 @@ function overheardSignal(fields: { body: string; sender?: string; messageTs?: st
   };
 }
 
+function settlementSignal(childId: string): SignalContent {
+  return {
+    kind: "signal",
+    signalType: "child.settled",
+    body: `${childId} completed`,
+    attributes: { child_session_id: childId, outcome: "completed", title: `Task ${childId}` },
+    origin: { channelType: "slack", threadKey: THREAD_KEY, reply: "manual" },
+  };
+}
+
 function queueItemOf(content: SignalContent, id: string, createdAt: number): QueueItem {
   return {
     id,
@@ -60,6 +70,7 @@ describe("overheard digest: pure helpers", () => {
     expect(overheardCoalesceKey(addressed)).toBeUndefined();
     const originless: SignalContent = { kind: "signal", signalType: "timer.fired", body: "tick" };
     expect(overheardCoalesceKey(originless)).toBeUndefined();
+    expect(overheardCoalesceKey(settlementSignal("child-1"))).toBeUndefined();
     // A delivery-feedback signal (TKAI-284) is addressed to the agent, not
     // overheard chatter — it never merges into a digest.
     const feedback: SignalContent = {
@@ -193,6 +204,41 @@ describe("overheard digest: queue coalescing", () => {
       `${OVERHEARD_DIGEST_HEADER}\nAlice: could it be my workflow?\nConner: nah just a bug\nKeisha: confirmed, TKAI-296`,
     );
     expect(userMessages[0].signal?.attributes?.digest).toBe("3");
+
+    faux.unregister();
+  });
+
+  it("keeps multiple settlements independent next to coalesced overheard chatter", async () => {
+    const faux = registerFauxProvider({ provider: "settlement-no-merge" });
+    faux.setResponses([]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+
+    const firstSettlement = await thread.submitPrompt(settlementSignal("child-1"), { dispatchId: "settled:1" });
+    const firstChatter = await thread.submitPrompt(overheardSignal({ body: "first aside", sender: "Alice" }), {
+      dispatchId: "slack:follow:1",
+    });
+    const secondSettlement = await thread.submitPrompt(settlementSignal("child-2"), { dispatchId: "settled:2" });
+    await thread.submitPrompt(overheardSignal({ body: "second aside", sender: "Bob" }), {
+      dispatchId: "slack:follow:2",
+    });
+
+    for (const [receipt, childId] of [[firstSettlement, "child-1"], [secondSettlement, "child-2"]] as const) {
+      const item = await store.getQueueItem(session.id, receipt.queueItemId);
+      expect(item?.status).toBe("queued");
+      expect(item?.mergedIntoItemId).toBeUndefined();
+      expect(item?.content).toMatchObject(settlementSignal(childId));
+    }
+    expect((await store.getQueueItem(session.id, firstChatter.queueItemId))?.outcome).toEqual({ outcome: "merged" });
 
     faux.unregister();
   });

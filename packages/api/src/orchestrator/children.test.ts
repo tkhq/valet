@@ -944,7 +944,7 @@ describe("ChildWatcher", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
-  it("child.settled inherits the spawning submission's channel origin, across a rearm", async () => {
+  it("child.settled inherits the channel route as manual across a rearm", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -1005,7 +1005,7 @@ describe("ChildWatcher", () => {
         (i.content as SignalContent).signalType === "child.settled",
     );
     expect(settledSignals).toHaveLength(1);
-    expect((settledSignals[0]?.content as SignalContent).origin).toEqual(origin);
+    expect((settledSignals[0]?.content as SignalContent).origin).toEqual({ ...origin, reply: "manual" });
   });
 
   it("leaves an un-diagnosable (retryable) failure UNSETTLED after exhausting in-process retries, relying on rearm() as the backstop", async () => {
