@@ -149,7 +149,7 @@ A fenced `mermaid` block compiles to the standard `language-mermaid` code marker
 
 The renderer uses Mermaid's `strict` security level and disables HTML labels. A second SVG filter removes executable elements, event handlers, remote links, and remote CSS loads. The UI loads the filtered SVG as an image, so SVG scripts cannot run.
 
-If rendering fails, the frame shows an error and the original source. A theme change requests a new render. A content change remounts the frame and discovers the new blocks.
+If rendering fails, the frame shows an error and the original source. A theme change requests a new render. A content change remounts the frame and discovers the new blocks. The parent coalesces duplicate block, source, and theme requests. It keeps one active render and at most 32 replacement requests per frame.
 
 ### Why one render path
 

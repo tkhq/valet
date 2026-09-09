@@ -57,6 +57,80 @@ function asRect(v: unknown): ArtifactAnchorRect | null {
 }
 
 const VDID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const MAX_PENDING_MERMAID_REQUESTS = 32;
+
+type MermaidRender = (source: string, id: string, theme: "default" | "dark") => Promise<string>;
+type MermaidResult =
+  | { type: "valet-artifact:mermaid-result"; id: string; svg: string }
+  | { type: "valet-artifact:mermaid-result"; id: string; error: true };
+
+interface MermaidRequest {
+  blockId: string;
+  source: string;
+  theme: "default" | "dark";
+}
+
+/**
+ * Keep at most one active render and a fixed number of replacement requests
+ * per artifact frame. Frame content is untrusted, so it can send messages as
+ * quickly as it wants. Only the latest source for each block is useful.
+ */
+export class ArtifactMermaidCoordinator {
+  private active: MermaidRequest | undefined;
+  private readonly pending = new Map<string, MermaidRequest>();
+  private nextRenderId = 0;
+  private generation = 0;
+
+  constructor(
+    private readonly render: MermaidRender,
+    private readonly postResult: (result: MermaidResult) => void,
+  ) {}
+
+  request(blockId: string, source: string, theme: "default" | "dark"): void {
+    const request = { blockId, source, theme };
+    if (this.sameRequest(this.active, request) || this.sameRequest(this.pending.get(blockId), request)) {
+      return;
+    }
+    if (!this.pending.has(blockId) && this.pending.size === MAX_PENDING_MERMAID_REQUESTS) {
+      return;
+    }
+    this.pending.set(blockId, request);
+    this.startNext();
+  }
+
+  clear(): void {
+    this.generation += 1;
+    this.pending.clear();
+  }
+
+  private sameRequest(current: MermaidRequest | undefined, request: MermaidRequest): boolean {
+    return current?.blockId === request.blockId && current.source === request.source && current.theme === request.theme;
+  }
+
+  private startNext(): void {
+    if (this.active || this.pending.size === 0) return;
+    const next = this.pending.entries().next().value;
+    if (!next) return;
+    const [blockId, request] = next;
+    this.pending.delete(blockId);
+    this.active = request;
+    const generation = this.generation;
+    const renderId = `artifact-mermaid-${++this.nextRenderId}`;
+
+    void this.render(request.source, renderId, request.theme).then(
+      (svg) => this.finish(request, generation, { type: "valet-artifact:mermaid-result", id: blockId, svg }),
+      () => this.finish(request, generation, { type: "valet-artifact:mermaid-result", id: blockId, error: true }),
+    );
+  }
+
+  private finish(request: MermaidRequest, generation: number, result: MermaidResult): void {
+    this.active = undefined;
+    if (generation === this.generation && !this.pending.has(request.blockId)) {
+      this.postResult(result);
+    }
+    this.startNext();
+  }
+}
 
 export function ArtifactFrame({
   title,
@@ -71,12 +145,18 @@ export function ArtifactFrame({
   theme,
 }: ArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const post = (message: unknown) => {
+    // "*" is the only addressable target: an opaque origin has no name. The
+    // payloads carry mode flags and vdids, nothing secret.
+    frameRef.current?.contentWindow?.postMessage(message, "*");
+  };
+  const mermaidCoordinatorRef = useRef<ArtifactMermaidCoordinator | null>(null);
+  mermaidCoordinatorRef.current ??= new ArtifactMermaidCoordinator(renderMermaid, post);
+  const mermaidCoordinator = mermaidCoordinatorRef.current;
   const readyRef = useRef(false);
   const mermaidTheme = useMermaidTheme();
   const mermaidThemeRef = useRef(mermaidTheme);
   mermaidThemeRef.current = mermaidTheme;
-  const mermaidRequestRef = useRef(0);
-  const latestMermaidRef = useRef(new Map<string, number>());
   // Live refs so the message listener never rebinds mid-load (rebinding can
   // drop the `ready` handshake and strand the bridge).
   const onPickRef = useRef(onPick);
@@ -113,14 +193,8 @@ export function ArtifactFrame({
   // A srcDoc change reloads the frame's document, so the bridge starts over.
   useEffect(() => {
     readyRef.current = false;
-    latestMermaidRef.current.clear();
+    mermaidCoordinator.clear();
   }, [srcDoc]);
-
-  const post = (message: unknown) => {
-    // "*" is the only addressable target: an opaque origin has no name. The
-    // payloads carry mode flags and vdids, nothing secret.
-    frameRef.current?.contentWindow?.postMessage(message, "*");
-  };
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
@@ -148,23 +222,7 @@ export function ArtifactFrame({
         ) {
           return;
         }
-        const blockId = msg.id;
-        const source = msg.source;
-        const request = ++mermaidRequestRef.current;
-        latestMermaidRef.current.set(blockId, request);
-        const renderId = `artifact-mermaid-${request}`;
-        void renderMermaid(source, renderId, mermaidThemeRef.current).then(
-          (svg) => {
-            if (latestMermaidRef.current.get(blockId) === request) {
-              post({ type: "valet-artifact:mermaid-result", id: blockId, svg });
-            }
-          },
-          () => {
-            if (latestMermaidRef.current.get(blockId) === request) {
-              post({ type: "valet-artifact:mermaid-result", id: blockId, error: true });
-            }
-          },
-        );
+        mermaidCoordinator.request(msg.id, msg.source, mermaidThemeRef.current);
         return;
       }
       if (msg.type === "valet-artifact:pick") {
