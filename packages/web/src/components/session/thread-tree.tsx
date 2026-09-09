@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   Archive,
   ArchiveRestore,
+  Bell,
   ChevronDown,
   MessageSquare,
   MoreHorizontal,
@@ -110,8 +111,8 @@ export function groupChildrenByThread(
 
 /**
  * Pure: the ids of threads that hold at least one pending gate. Feeds the
- * per-thread needs-you dot (TKAI-258): the gate card and header badge are
- * scoped to the ACTIVE thread, so this dot is the only in-session surface
+ * per-thread response-required bell (TKAI-258): the gate card and header badge are
+ * scoped to the ACTIVE thread, so this bell is the only in-session surface
  * for a gate pending on a thread you are not looking at.
  */
 export function threadIdsWithPendingGates(
@@ -453,11 +454,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             <Archive className="h-3 w-3 shrink-0" aria-hidden />
             <span>{showArchived ? "Hide archived" : "Show archived"}</span>
             {archivedGated && (
-              <span
-                role="img"
-                aria-label="An archived thread needs your decision"
-                className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
-              />
+              <span role="img" aria-label="Response required" title="Response required">
+                <Bell className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden />
+              </span>
             )}
           </button>
           {showArchived && (
@@ -469,11 +468,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                 <li key={t.id} className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
                   <span className="flex-1 truncate">{t.title ?? t.id}</span>
                   {gatedThreadIds.has(t.id) && (
-                    <span
-                      role="img"
-                      aria-label="Needs your decision"
-                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
-                    />
+                    <span role="img" aria-label="Response required" title="Response required">
+                      <Bell className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden />
+                    </span>
                   )}
                   <button
                     type="button"
@@ -515,7 +512,7 @@ function ThreadNode({
   models: ModelInfo[];
   tierMap?: GetModelTiersResponse;
   active: boolean;
-  /** The thread holds a pending decision gate — show the needs-you dot. */
+  /** The thread holds a pending decision gate — show the response-required bell. */
   hasPendingGate: boolean;
   childSessions: OrchestratorChildSummary[];
   activeChildId?: string;
@@ -677,11 +674,12 @@ function ThreadNode({
                 </span>
               )}
               {hasPendingGate && (
-                <span
-                  role="img"
-                  aria-label="Needs your decision"
-                  className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
-                />
+                <span role="img" aria-label="Response required" title="Response required">
+                  <Bell
+                    className="ml-2 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-300"
+                    aria-hidden
+                  />
+                </span>
               )}
             </Link>
           </Tooltip>
