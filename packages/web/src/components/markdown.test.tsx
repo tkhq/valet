@@ -18,6 +18,12 @@ vi.mock("~/lib/mermaid", () => ({ renderMermaid: renderMermaidMock }));
 import { Markdown } from "./markdown";
 
 describe("Markdown", () => {
+  function pointer(type: string, pointerId: number, clientX: number, clientY: number): Event {
+    const event = new Event(type, { bubbles: true });
+    Object.defineProperties(event, { pointerId: { value: pointerId }, clientX: { value: clientX }, clientY: { value: clientY } });
+    return event;
+  }
+
   beforeEach(() => {
     renderMermaidMock.mockReset();
     renderMermaidMock.mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg"><text>Diagram</text></svg>');
@@ -39,6 +45,89 @@ describe("Markdown", () => {
     await waitFor(() => expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy());
     expect(renderMermaidMock).toHaveBeenCalledWith("graph TD\n  A-->B", expect.any(String), "default");
     expect(container.querySelector(".code-block")).toBeNull();
+  });
+
+  it("collapses and expands a rendered Mermaid diagram", async () => {
+    render(<Markdown>{"```mermaid\ngraph TD\n  A-->B\n```"}</Markdown>);
+
+    await waitFor(() => expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy());
+    const toggle = screen.getByRole("button", { name: "Mermaid diagram" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("img", { name: "Mermaid diagram" })).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy();
+  });
+
+  it("limits a rendered Mermaid diagram to the compact viewport height", async () => {
+    const { container } = render(<Markdown>{"```mermaid\ngraph TD\n  A-->B\n```"}</Markdown>);
+
+    await waitFor(() => expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy());
+    const viewport = container.querySelector<HTMLElement>("[data-max-height]");
+    expect(viewport?.dataset.maxHeight).toBe("384");
+    expect(viewport?.className).toContain("max-h-96");
+    expect(viewport?.className).toContain("touch-none");
+  });
+
+  it("zooms and pans a rendered Mermaid diagram", async () => {
+    const { container } = render(<Markdown>{"```mermaid\ngraph TD\n  A-->B\n```"}</Markdown>);
+
+    await waitFor(() => expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy());
+    const image = screen.getByRole<HTMLImageElement>("img", { name: "Mermaid diagram" });
+    const viewport = container.querySelector<HTMLElement>("[data-max-height]");
+    if (!viewport) throw new Error("Missing Mermaid viewport");
+
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(image.style.transform).toContain("scale(1.2)");
+
+    fireEvent(viewport, pointer("pointerdown", 1, 10, 20));
+    fireEvent(viewport, pointer("pointermove", 1, 30, 35));
+    fireEvent(viewport, pointer("pointerup", 1, 30, 35));
+    expect(image.style.transform).toContain("translate(20px, 15px)");
+
+    const zoom = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1 });
+    fireEvent(viewport, zoom);
+    expect(zoom.defaultPrevented).toBe(true);
+    expect(image.style.transform).toContain("scale(1.4)");
+
+    const horizontalGesture = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaX: 1 });
+    fireEvent(viewport, horizontalGesture);
+    expect(horizontalGesture.defaultPrevented).toBe(false);
+    expect(image.style.transform).toContain("scale(1.4)");
+  });
+
+  it("removes the native wheel listener when the Mermaid viewport unmounts", async () => {
+    const { unmount } = render(<Markdown>{"```mermaid\ngraph TD\n  A-->B\n```"}</Markdown>);
+
+    await waitFor(() => expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy());
+    const viewport = screen.getByRole<HTMLElement>("region", { name: "Mermaid diagram viewport" });
+    unmount();
+
+    const wheel = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1 });
+    fireEvent(viewport, wheel);
+    expect(wheel.defaultPrevented).toBe(false);
+  });
+
+  it("pans the Mermaid viewport with the keyboard and clears cancelled touch drags", async () => {
+    const { container } = render(<Markdown>{"```mermaid\ngraph TD\n  A-->B\n```"}</Markdown>);
+
+    await waitFor(() => expect(screen.getByRole("img", { name: "Mermaid diagram" })).toBeTruthy());
+    const image = screen.getByRole<HTMLImageElement>("img", { name: "Mermaid diagram" });
+    const viewport = screen.getByRole<HTMLElement>("region", { name: "Mermaid diagram viewport" });
+
+    expect(viewport.getAttribute("aria-describedby")).toBeTruthy();
+    expect(container.querySelector(".sr-only")?.textContent).toContain("arrow keys to pan");
+
+    fireEvent.keyDown(viewport, { key: "ArrowRight" });
+    expect(image.style.transform).toContain("translate(40px, 0px)");
+
+    fireEvent(viewport, pointer("pointerdown", 1, 10, 20));
+    fireEvent(viewport, pointer("pointercancel", 1, 10, 20));
+    fireEvent(viewport, pointer("pointermove", 1, 30, 35));
+    expect(image.style.transform).toContain("translate(40px, 0px)");
   });
 
   it("keeps the Mermaid source visible when rendering fails", async () => {
