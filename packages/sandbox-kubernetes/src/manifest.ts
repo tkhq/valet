@@ -6,6 +6,7 @@
  * ./types.ts docblock for the source URL and confirmed shape).
  */
 import { createHash } from "node:crypto";
+import { homeInitContainer, persistentHomeMounts, withHomeLinks, WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type { SandboxCreateOpts } from "@valet/engine";
 import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, parseStorageQuantity } from "./quantity.js";
 import type {
@@ -261,7 +262,7 @@ export function buildSandboxManifest(
     // The controller/exec surface does the actual work; this just keeps the
     // container's PID 1 alive.
     command: ["sh", "-c", "tail -f /dev/null"],
-    volumeMounts: [{ name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH }],
+    volumeMounts: [{ name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH, subPath: WORKSPACE_SUBPATH }],
     // See SandboxContainer.workingDir's docblock (types.ts) — the k8s
     // pods/exec API has no per-call --workdir, so this container-level
     // default is what makes relative-path exec/file ops land on the
@@ -306,6 +307,8 @@ export function buildSandboxManifest(
   // Never sets privileged.
   // Reserved literal generation marker. Append after caller env so it cannot
   // be overridden; admission may rewrite `image` but leaves this request hash.
+  container.env = [...(container.env ?? []).filter((entry) => entry.name !== HOME_LAYOUT_ENV),
+    { name: HOME_LAYOUT_ENV, value: HOME_LAYOUT_VERSION }];
   container.env = [
     ...(container.env ?? []).filter((entry) => entry.name !== IMAGE_FINGERPRINT_ENV),
     { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(image) },
@@ -335,7 +338,10 @@ export function buildSandboxManifest(
     }
   }
 
+  container.command = withHomeLinks(container.command ?? ["sh", "-c", "tail -f /dev/null"]);
+  container.volumeMounts = [...persistentHomeMounts(), ...(container.volumeMounts ?? [])];
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
+    initContainers: [homeInitContainer(image)],
     containers: [container],
     restartPolicy: "Always",
     // Count all sandbox pods by session-label existence, regardless of value.

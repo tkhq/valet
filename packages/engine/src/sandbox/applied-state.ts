@@ -116,7 +116,7 @@ function posixSingleQuoteEscape(s: string): string {
  * Uses exec exclusively (not sandbox.writeFile) so the write lands inside the
  * container filesystem on docker and kubernetes providers.
  */
-async function writeAppliedState(
+export async function writeAppliedState(
   sandbox: Sandbox,
   state: AppliedState,
 ): Promise<void> {

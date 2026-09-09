@@ -86,6 +86,25 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
     kubectl(["delete", "namespace", namespace, "--ignore-not-found"]);
   }, 60_000);
 
+  it("preserves selected home state on the same claim after a new pod resumes", async () => {
+    const sandbox = await provider.create({ workspace: `home-${randomUUID()}` });
+    try {
+      const before = kubectl(["-n", namespace, "get", "pod", sandbox.id, "-o", "jsonpath={.metadata.uid}"]).stdout;
+      const claims = kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout;
+      expect((await sandbox.exec("echo repository > /workspace/kept; echo cache > /root/.cache/kept; echo config > /root/.gitconfig; echo user > /home/dockerd/.cache/kept")).exitCode).toBe(0);
+      await provider.suspend(sandbox.id);
+      expect(kubectl(["-n", namespace, "wait", "--for=delete", `pod/${sandbox.id}`, "--timeout=60s"]).status).toBe(0);
+      await provider.resume(sandbox.id);
+      expect(kubectl(["-n", namespace, "get", "pod", sandbox.id, "-o", "jsonpath={.metadata.uid}"]).stdout).not.toBe(before);
+      expect(kubectl(["-n", namespace, "get", "pvc", "-o", "name"]).stdout).toBe(claims);
+      const result = await sandbox.exec("cat /workspace/kept /root/.cache/kept /root/.gitconfig /home/dockerd/.cache/kept; stat -c '%u:%g' /home/dockerd/.cache; test ! -e /workspace/.valet-storage");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("repository\ncache\nconfig\nuser\n1500:1500\n");
+    } finally {
+      await provider.destroy(sandbox.id);
+    }
+  }, 120_000);
+
   it(
     "TKAI-349 fields land on the LIVE pod: sandbox label, spread constraint, ephemeral-storage request/limit",
     async () => {

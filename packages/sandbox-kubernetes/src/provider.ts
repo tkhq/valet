@@ -63,6 +63,7 @@
  * "signal-shaped exit code → confirm via a liveness probe" disambiguation
  * applies.
  */
+import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
 import { CONTAINER_DEATH_PATTERN, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
@@ -109,6 +110,7 @@ import {
   SANDBOX_KIND,
   sandboxStatus,
   setOperatingMode,
+  resumeWithPersistentHomes,
   type SandboxCustomObjectsApi,
   type SandboxPodDeleteApi,
   type SandboxPodsApi,
@@ -994,6 +996,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
     try {
       await this.waitReady(name, {
+        homeLayoutVersion: HOME_LAYOUT_VERSION,
         image: opts.image ?? this.cfg.defaultImage,
         resourceFingerprint: podTemplateResourceFingerprint(applied.spec.podTemplate),
       });
@@ -1119,8 +1122,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * CR is already Ready.
    */
   async resume(id: string): Promise<void> {
-    await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Running");
-    await this.waitReady(id);
+    await resumeWithPersistentHomes(this.deps.objectsApi, this.cfg, id);
+    await this.waitReady(id, { homeLayoutVersion: HOME_LAYOUT_VERSION });
   }
 
   /** Writes updated credential files into a running sandbox. Replaces the
@@ -1206,9 +1209,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * branch (no `error` state ever observed, just genuinely slow) keeps
    * throwing a plain `Error` — that IS a transient, retry-shaped condition.
    */
-  private async waitReady(name: string, expected?: { image: string; resourceFingerprint?: string }): Promise<void> {
+  private async waitReady(name: string, expected?: { image?: string; resourceFingerprint?: string; homeLayoutVersion?: string }): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
-    const expectedImageFingerprint = expected ? imageFingerprint(expected.image) : undefined;
+    const expectedImageFingerprint = expected?.image !== undefined ? imageFingerprint(expected.image) : undefined;
     const rolledGenerations = new Set<string>();
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
@@ -1230,6 +1233,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
             (pod?.imageFingerprint === undefined ? liveImage === expected?.image : pod.imageFingerprint === expectedImageFingerprint);
           const resourcesMatch = expected?.resourceFingerprint === undefined ||
             pod?.resourceFingerprint === expected.resourceFingerprint;
+          const homeMatches = expected?.homeLayoutVersion === undefined || pod?.homeLayoutVersion === expected.homeLayoutVersion;
           const matchesDesired = imageMatches && resourcesMatch;
 
           // Admission webhooks can rewrite pod.spec.containers[].image. The
@@ -1237,15 +1241,15 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           // so a rewrite does not look like drift while a real image roll does.
           const podReady = pod?.phase === "Running" &&
             pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True");
-          if (podName !== null && pod !== null && podReady && expected !== undefined && !matchesDesired && this.deps.podDeleteApi) {
-            const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}`;
+          if (podName !== null && pod !== null && podReady && expected !== undefined && (!matchesDesired || !homeMatches) && this.deps.podDeleteApi) {
+            const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}:${pod.homeLayoutVersion ?? "missing"}`;
             if (!rolledGenerations.has(generation)) {
               console.log(`k8s sandbox ${name}: rolling stale pod generation during readiness`);
               await this.deps.podDeleteApi.deletePod(this.cfg.namespace, podName);
               rolledGenerations.add(generation);
             }
           } else if (
-            status.state === "ready" && matchesDesired && pod?.phase === "Running" &&
+            status.state === "ready" && matchesDesired && homeMatches && pod?.phase === "Running" &&
             pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True")
           ) {
             return;

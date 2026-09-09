@@ -86,11 +86,11 @@ describe("step structure", () => {
     ]);
   });
 
-  it("credential-scripts and git-identity are not critical; clone steps are", () => {
+  it("credential-scripts, git-identity, and clone steps are critical", () => {
     const spec = computeSpec(snapWithRepoBake);
     const byId = Object.fromEntries(spec.steps.map((s) => [s.id, s]));
-    expect(byId["credential-scripts"]!.critical).toBe(false);
-    expect(byId["git-identity"]!.critical).toBe(false);
+    expect(byId["credential-scripts"]!.critical).toBe(true);
+    expect(byId["git-identity"]!.critical).toBe(true);
     expect(byId["clone:acme/widget"]!.critical).toBe(true);
   });
 
@@ -134,17 +134,17 @@ describe("determinism", () => {
 describe("golden hashes", () => {
   it("repoBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithRepoBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"244e2a15142201dd6129faa089e325349c1e03728eee45d81416b4d8d32d26e6"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"763a2854f5b98a321fb3553e5b47b4e84c6d4a9b90c5dee16d5fca0396ff0a59"`);
   });
 
   it("baseBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithBaseBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"0c92644f7476f5979eba1eb1d11299f029cccaa070f5b095ce79b3b455b182fa"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"70be64220783f7bcc8dffa5f573f2462d58c68cc37a564d7797929796e44d4b7"`);
   });
 
   it("stock image spec has expected specHash", () => {
     const spec = computeSpec(snapWithStockOnly);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"769f0ba5dc7557256831ecb5434974bb084c41aa958d7977599b86cc40cdb949"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"1358683b7229d4d578b6a5ee52c8315b08fd705f797aace261f7ecb4ec97b091"`);
   });
 });
 
@@ -153,7 +153,7 @@ describe("resource opinion hashing", () => {
 
   it("preserves the existing hash when no resource opinion exists", () => {
     expect(specHash(spec, undefined)).toBe(specHash(spec));
-    expect(specHash(spec)).toBe("244e2a15142201dd6129faa089e325349c1e03728eee45d81416b4d8d32d26e6");
+    expect(specHash(spec)).toBe("763a2854f5b98a321fb3553e5b47b4e84c6d4a9b90c5dee16d5fca0396ff0a59");
   });
 
   it("uses fixed cpu then memory order independent of insertion order", () => {

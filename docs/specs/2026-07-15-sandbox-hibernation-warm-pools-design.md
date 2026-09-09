@@ -76,3 +76,44 @@ On live Rancher Desktop k3s: start a session, run a command, wait past a shorten
 - Warm-pool implementation before the three-part gate opens (Stage 2 is design-only in this pass).
 - Hibernation for docker/local providers (capability off; docker container stop/start parity is a possible later nicety, not needed for the k8s payoff).
 - Autoscaling pool size, per-org pools, gVisor/Kata runtime classes.
+
+## Selected home persistence (TKAI-427, 2026-09-09)
+
+Kubernetes sandboxes keep the working directory mounted at `/workspace`. The
+existing PVC stores repository files under `.valet-storage/workspace` and home
+state under `.valet-storage/home/root` and `.valet-storage/home/dockerd`. These paths share the claim's storage limit and lifecycle.
+No extra PVC is created.
+
+The selected directories are `.config`, `.cache`, `.local`, `.ssh`, `.npm`,
+`.cargo`, `.rustup`, `.bun`, `.nvm`, `go`, `.gradle`, and `.m2`. The selected
+files are `.gitconfig`, `.git-credentials`, `.npmrc`, `.bashrc`, and `.profile`.
+System package installations and other paths remain part of the container
+filesystem. The Docker daemon keeps its separate temporary volume.
+
+An init container uses the workload image to seed absent paths from image
+defaults. Existing persisted paths win on later boots. Directory subPath mounts
+expose the selected directories at their original home paths. Startup creates
+symlinks for individual files so Git can use lock-and-rename updates. Root and
+the workload user have separate backing directories and ownership.
+
+The init container moves legacy volume contents into `.valet-storage/workspace`.
+A progress marker permits retry after interruption. Paths visible to agents stay
+the same. Home state is outside the repository, including legacy root clones.
+The provider updates retained sandbox templates during adoption and resume. It waits for the
+new home layout and replaces an old pod before it reports readiness. The first upgrade seeds image defaults;
+it does not copy changes from an old pod's ephemeral home. Home files already lost before adoption cannot
+be recovered. After migration, a
+rollback must retain the new mount paths; an older root-volume mount will not
+show the repository. The
+platform does not restart active sessions solely to install this layout.
+
+The engine's awaited resume hooks restore credential helpers and managed Git
+configuration before tools are released. They use current credentials from the
+separate rotating Secret mount. `/etc/valet/applied.json` stays ephemeral. See
+[the reconciliation spec](2026-08-02-sandbox-reconcile-design.md) for hook ordering
+and failure handling.
+
+Validation covers initial seeding, repeated initialization, user edits, Git file
+updates, mount construction, and adoption of retained templates. A live Rancher Desktop
+test verifies home persistence, ownership, and claim reuse after pod deletion and resume.
+Repeat the pod-cycle check on the production CSI driver before rollout.

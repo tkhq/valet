@@ -1,7 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   SandboxAttachment,
   SandboxStartupError,
+  SandboxPreparationError,
+  type PrepStep,
   type AttachmentStatus,
   type Sandbox,
   type SandboxCapabilities,
@@ -322,4 +324,210 @@ describe("SandboxAttachment hibernation", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(resolveCount).toBe(1);
   });
+});
+
+
+describe("awaited afterResume preparation", () => {
+  it("orders hooks and holds concurrent waiters until required restoration completes", async () => {
+    const provider = new HibernatingProvider();
+    const gate = defer<void>();
+    const entered = defer<void>();
+    const calls: string[] = [];
+    const steps: PrepStep[] = [
+      { id: "credentials", hash: "1", critical: true, apply: async () => {},
+        afterResume: async () => { calls.push("credentials"); entered.resolve(); await gate.promise; } },
+      { id: "identity", hash: "1", critical: true, apply: async () => {},
+        afterResume: async () => { calls.push("identity"); } },
+    ];
+    const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+    await att.ensureReady({ timeoutMs: 1000 });
+    await att.suspend();
+    let released = false;
+    const first = att.ensureReady({ timeoutMs: 1000 }).then(() => { released = true; });
+    const second = att.ensureReady({ timeoutMs: 1000 });
+    // The old implementation releases ready without invoking a hook.
+    await Promise.race([entered.promise, first]);
+    expect(calls).toEqual(["credentials"]);
+    expect(released).toBe(false);
+    expect(att.current()).toBeNull();
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(calls).toEqual(["credentials", "identity"]);
+    expect(provider.resumeCalls).toHaveLength(1);
+  });
+
+  it("rejects all waiters on a required hook failure", async () => {
+    const provider = new HibernatingProvider();
+    const steps: PrepStep[] = [{ id: "credentials", hash: "1", critical: true,
+      apply: async () => {}, afterResume: async () => { throw new Error("restore failed"); } }];
+    const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+    await att.ensureReady({ timeoutMs: 1000 });
+    await att.suspend();
+    const outcomes = await Promise.allSettled([
+      att.ensureReady({ timeoutMs: 1000 }), att.ensureReady({ timeoutMs: 1000 }),
+    ]);
+    for (const outcome of outcomes) {
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "rejected") expect(outcome.reason).toBeInstanceOf(SandboxPreparationError);
+    }
+    expect(att.state).toBe("error");
+  });
+});
+
+
+describe("afterResume lifecycle races", () => {
+  it("runs hooks with a retained marker and continues after optional failures", async () => {
+    const provider = new HibernatingProvider();
+    const sandbox = makeFakeSandbox("retained");
+    const calls: string[] = [];
+    sandbox.exec = async () => ({ exitCode: 0, stderr: "", stdout: JSON.stringify({
+      image: "", specHash: "1", steps: { optional: "1", required: "1", unchanged: "1" },
+    }) });
+    provider.nextDeferred().resolve(sandbox);
+    const steps: PrepStep[] = [
+      { id: "optional", hash: "1", critical: false, apply: async () => { calls.push("cold optional"); },
+        afterResume: async () => { calls.push("optional"); throw new Error("optional failed"); } },
+      { id: "required", hash: "1", critical: true, apply: async () => { calls.push("cold required"); },
+        afterResume: async () => { calls.push("required"); } },
+      { id: "unchanged", hash: "1", critical: true, apply: async () => { calls.push("unchanged"); } },
+    ];
+    const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await att.ensureReady({ timeoutMs: 1000 });
+      await att.suspend();
+      await att.ensureReady({ timeoutMs: 1000 });
+      expect(calls).toEqual(["optional", "required"]);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('optional'));
+    } finally { log.mockRestore(); }
+  });
+
+  it("cancels one waiter without canceling restoration for other waiters", async () => {
+    const provider = new HibernatingProvider();
+    const gate = defer<void>();
+    const entered = defer<void>();
+    const steps: PrepStep[] = [{ id: "restore", hash: "1", critical: true, apply: async () => {},
+      afterResume: async () => { entered.resolve(); await gate.promise; } }];
+    const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+    await att.ensureReady({ timeoutMs: 1000 });
+    await att.suspend();
+    const controller = new AbortController();
+    const canceled = att.ensureReady({ timeoutMs: 1000, signal: controller.signal });
+    const rejected = expect(canceled).rejects.toThrow("caller canceled");
+    const survivor = att.ensureReady({ timeoutMs: 1000 });
+    await entered.promise;
+    controller.abort(new Error("caller canceled"));
+    await rejected;
+    expect(att.current()).toBeNull();
+    gate.resolve();
+    expect((await survivor).sandbox.id).toBe("sb-1");
+    expect(provider.resumeCalls).toHaveLength(1);
+  });
+
+  it.each(["destroy", "reportFailure"] as const)("%s during a hook prevents later restoration and stale ready", async (action) => {
+    const provider = new HibernatingProvider();
+    const gate = defer<void>();
+    const entered = defer<void>();
+    let later = 0;
+    const steps: PrepStep[] = [
+      { id: "restore", hash: "1", critical: true, apply: async () => {},
+        afterResume: async () => { entered.resolve(); await gate.promise; } },
+      { id: "later", hash: "1", critical: true, apply: async () => {},
+        afterResume: async () => { later++; } },
+    ];
+    const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+    const initial = await att.ensureReady({ timeoutMs: 1000 });
+    await att.suspend();
+    const waiter = att.ensureReady({ timeoutMs: 1000 });
+    const outcome = Promise.allSettled([waiter]);
+    await entered.promise;
+    if (action === "destroy") await att.destroy();
+    else att.reportFailure(initial.epoch, new Error("transport failed"));
+    gate.resolve();
+    const [result] = await outcome;
+    expect(later).toBe(0);
+    if (action === "destroy") {
+      expect(result.status).toBe("rejected");
+      expect(att.state).toBe("released");
+    } else {
+      expect(result.status).toBe("fulfilled");
+      if (result.status === "fulfilled") expect(result.value.epoch).toBe(initial.epoch + 1);
+      expect(provider.createCalls).toBe(2);
+    }
+  });
+});
+
+
+it("clears retained hook hashes before a failed restoration can leave stale applied state", async () => {
+  const provider = new HibernatingProvider();
+  const sandbox = makeFakeSandbox("retained");
+  let marker = JSON.stringify({ image: "", specHash: "1", steps: { credentials: "1" } });
+  sandbox.exec = async (command) => {
+    if (command.startsWith("cat ")) return { stdout: marker, stderr: "", exitCode: 0 };
+    const content = command.match(/printf '%s' '([^']*)'/)?.[1];
+    if (content) marker = content;
+    return { stdout: "", stderr: "", exitCode: 0 };
+  };
+  provider.nextDeferred().resolve(sandbox);
+  const steps: PrepStep[] = [{ id: "credentials", hash: "1", critical: true, apply: async () => {},
+    afterResume: async () => { throw new Error("restore failed"); } }];
+  const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+  await att.ensureReady({ timeoutMs: 1000 });
+  await att.suspend();
+  await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+  expect(JSON.parse(marker).steps).toEqual({});
+});
+
+
+it("reprovisions when an epoch is superseded during the wake spec lookup", async () => {
+  const provider = new HibernatingProvider();
+  const entered = defer<void>();
+  const gate = defer<void>();
+  let calls = 0;
+  const att = new SandboxAttachment(provider, {}, async () => {
+    calls++;
+    if (calls === 2) { entered.resolve(); await gate.promise; }
+    return { specHash: "1", steps: [] };
+  });
+  const initial = await att.ensureReady({ timeoutMs: 1000 });
+  await att.suspend();
+  const waiter = att.ensureReady({ timeoutMs: 100 });
+  const outcome = Promise.allSettled([waiter]);
+  await entered.promise;
+  att.reportFailure(initial.epoch, new Error("transport failed"));
+  gate.resolve();
+  const [result] = await outcome;
+  expect(result.status).toBe("fulfilled");
+  if (result.status === "fulfilled") expect(result.value.epoch).toBe(initial.epoch + 1);
+  expect(provider.resumeCalls).toHaveLength(0);
+});
+
+it("retries required resume hooks without substituting cold preparation", async () => {
+  const provider = new HibernatingProvider();
+  const destroy = vi.spyOn(provider, "destroy");
+  let coldCalls = 0;
+  let restoreCalls = 0;
+  let fail = true;
+  const steps: PrepStep[] = [{ id: "credentials", hash: "1", critical: true,
+    apply: async () => { coldCalls++; },
+    afterResume: async () => {
+      restoreCalls++;
+      if (fail) throw new Error("restore failed");
+    },
+  }];
+  const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+  const initial = await att.ensureReady({ timeoutMs: 1000 });
+  await att.suspend();
+  await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+  await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+  expect(att.current()).toBeNull();
+  expect(coldCalls).toBe(1);
+  expect(restoreCalls).toBe(2);
+  expect(provider.createCalls).toBe(1);
+  expect(provider.resumeCalls).toHaveLength(1);
+  expect(destroy).not.toHaveBeenCalled();
+  fail = false;
+  const recovered = await att.ensureReady({ timeoutMs: 1000 });
+  expect(recovered).toEqual(initial);
+  expect(restoreCalls).toBe(3);
 });

@@ -1985,6 +1985,9 @@ export interface PrepStep {
   hash: string;
   critical: boolean;
   apply(sandbox: Sandbox): Promise<void>;
+  /** Restore container state after each resume, in step order, before ready.
+   * Without this callback, missing or changed steps use apply. */
+  afterResume?(sandbox: Sandbox): Promise<void>;
 }
 
 /**

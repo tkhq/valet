@@ -104,11 +104,11 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     // than the config means a rename or a changed reference reinstalls.
     (snap.credentialCommands ?? []).map(commandWrapperScript).join("") +
     String(PREP_VERSION);
-  steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: false });
+  steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: true });
 
   // Step 2: git-identity
   const identityInput = `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${PREP_VERSION}`;
-  steps.push({ id: "git-identity", hash: sha256(identityInput), critical: false });
+  steps.push({ id: "git-identity", hash: sha256(identityInput), critical: true });
 
   // Step 3: one clone step per binding
   for (const binding of snap.repos) {

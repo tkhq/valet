@@ -1,3 +1,4 @@
+import { withPersistentHomes, HOME_LAYOUT_ENV } from "./home-persistence.js";
 /**
  * CRD lifecycle module (decision 5's "churn containment" clause — all
  * agent-sandbox CRD-facing code lives here, behind narrow hand-written
@@ -300,6 +301,7 @@ export interface PatchSandboxParams {
   name: string;
   body:
     | { spec: { operatingMode: "Running" | "Suspended" } }
+    | { metadata: { resourceVersion?: string }; spec: { operatingMode: "Running"; podTemplate: Record<string, unknown> } }
     | { metadata: { annotations: Record<string, string | null> } };
 }
 
@@ -812,6 +814,26 @@ export async function setOperatingMode(
   });
 }
 
+/** Install the home layout in retained definitions before a fresh pod starts. */
+export async function resumeWithPersistentHomes(api: SandboxCustomObjectsApi, cfg: K8sProviderConfig, name: string): Promise<void> {
+  const { group, version } = parseApiVersion(cfg.apiVersion);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // Controller status updates can change resourceVersion during suspension.
+    // Rebuild from each fresh read so concurrent template changes survive.
+    const cr = await getSandbox(api, cfg, name);
+    if (!cr) throw new Error(`Sandbox ${name} is missing. Start the session again.`);
+    const podTemplate = withPersistentHomes(cr.spec.podTemplate);
+    try {
+      await api.patchNamespacedCustomObject({ group, version, namespace: cfg.namespace, plural: SANDBOX_PLURAL, name,
+        body: { metadata: { resourceVersion: cr.metadata.resourceVersion }, spec: { operatingMode: "Running", podTemplate } },
+      });
+      return;
+    } catch (err) {
+      if (!isApiError(err) || err.code !== 409 || attempt === 2) throw err;
+    }
+  }
+}
+
 export async function listSandboxes(
   api: SandboxCustomObjectsApi,
   cfg: K8sProviderConfig,
@@ -982,7 +1004,10 @@ export interface PodStatusCondition {
 
 /** Pod status and container spec fields used for startup and drift checks. */
 export interface PodStatusInfo {
+  /** Home mount generation, captured in the live pod spec. */
+  homeLayoutVersion?: string;
   phase?: string;
+  /** Workload and init containers, both of which can block startup. */
   containerStatuses?: PodContainerStatus[];
   conditions?: PodStatusCondition[];
   /** Named sandbox container image, available before container status exists. */
@@ -1025,8 +1050,12 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
         if (isApiError(err) && err.code === 404) return null;
         throw err;
       }
-      const images = new Map((pod.spec?.containers ?? []).map((c) => [c.name, c.image]));
-      const containerStatuses: PodContainerStatus[] = (pod.status?.containerStatuses ?? []).map((cs) => ({
+      const images = new Map([
+        ...(pod.spec?.initContainers ?? []), ...(pod.spec?.containers ?? []),
+      ].map((c) => [c.name, c.image]));
+      const containerStatuses: PodContainerStatus[] = [
+        ...(pod.status?.initContainerStatuses ?? []), ...(pod.status?.containerStatuses ?? []),
+      ].map((cs) => ({
         name: cs.name,
         image: images.get(cs.name) ?? cs.image,
         waitingReason: cs.state?.waiting?.reason,
@@ -1041,12 +1070,14 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
       const sandboxContainer = pod.spec?.containers.find((container) => container.name === SANDBOX_CONTAINER_NAME);
       const fingerprint = sandboxContainer?.env?.find((entry) => entry.name === RESOURCE_FINGERPRINT_ENV);
       const requestedImage = sandboxContainer?.env?.find((entry) => entry.name === IMAGE_FINGERPRINT_ENV);
+      const homeLayout = sandboxContainer?.env?.find((entry) => entry.name === HOME_LAYOUT_ENV);
       return {
         phase: pod.status?.phase, containerStatuses, conditions,
         sandboxImage: images.get(SANDBOX_CONTAINER_NAME),
         sandboxResources: sandboxCpuMemoryResources({ spec: pod.spec }),
         resourceFingerprint: fingerprint?.valueFrom === undefined ? fingerprint?.value : undefined,
         imageFingerprint: requestedImage?.valueFrom === undefined ? requestedImage?.value : undefined,
+        homeLayoutVersion: homeLayout?.valueFrom === undefined ? homeLayout?.value : undefined,
       };
     },
   };
