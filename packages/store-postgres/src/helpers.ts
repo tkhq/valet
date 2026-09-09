@@ -101,7 +101,11 @@ export function asCommandSource(value: unknown): CommandResultEntry["source"] {
   return "builtin";
 }
 
-/** Raw column shape of a `SELECT * FROM engine_entries` row. */
+/** Raw column shape of a `SELECT * FROM engine_entries` row, minus the
+ * stored generated columns (`input_tokens` ... `total_tokens`, `cost_total`,
+ * `priced` — see 0000_engine.sql). Those are derived read-only copies of
+ * `usage`/`cost` for the api's cost-attribution view; the engine never
+ * reads them, so `rawToEntryRow` deliberately ignores them. */
 export interface EntryRow {
   id: string;
   sessionId: string;

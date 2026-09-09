@@ -797,7 +797,10 @@ export const api = {
     return request<UsageSessionsResponse>("GET", `/usage/sessions?${qs}`);
   },
   getJournalSummary: () =>
-    request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
+    request<{ date: string; summary: string | null; pending?: boolean; failed?: boolean }>(
+      "GET",
+      "/memory/journal-summary",
+    ),
   getOrg: () => request<OrgResponse>("GET", "/org"),
   patchOrg: (body: PatchOrgRequest) => request<PatchOrgResponse>("PATCH", "/org", body),
   getOrgMembers: () => request<OrgMembersResponse>("GET", "/org/members"),

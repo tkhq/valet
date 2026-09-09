@@ -6,7 +6,7 @@
  * items satisfy this interface because both carry `dayMs` and `costUsd`. */
 interface DayBucket {
   dayMs: number;
-  costUsd: number;
+  costUsd: number | null;
 }
 
 interface SpendChartProps {
@@ -35,7 +35,7 @@ export function SpendChart({ buckets }: SpendChartProps) {
     );
   }
 
-  const maxCost = Math.max(...buckets.map((b) => b.costUsd), 0.0001);
+  const maxCost = Math.max(...buckets.map((b) => b.costUsd ?? 0), 0.0001);
   const svgW = buckets.length * (BAR_W + GAP) - GAP;
   const svgH = CHART_H + LABEL_H;
 
@@ -51,13 +51,13 @@ export function SpendChart({ buckets }: SpendChartProps) {
       >
         {buckets.map((bucket, i) => {
           const label = dayLabel(bucket.dayMs);
-          const barH = Math.max(2, (bucket.costUsd / maxCost) * (CHART_H - PADDING_TOP));
+          const barH = Math.max(2, ((bucket.costUsd ?? 0) / maxCost) * (CHART_H - PADDING_TOP));
           const x = i * (BAR_W + GAP);
           const y = CHART_H - barH;
           return (
             <g key={bucket.dayMs}>
               <title>
-                {label}: ${bucket.costUsd.toFixed(4)}
+                {label}: {bucket.costUsd === null ? "—" : "$" + bucket.costUsd.toFixed(4)}
               </title>
               <rect
                 x={x}

@@ -23,7 +23,7 @@ function window(partial: Partial<UsageWindow>): UsageWindow {
   };
 }
 
-function member(userId: string, costUsd: number, totalTokens = 0): UsageMemberSummary {
+function member(userId: string, costUsd: number | null, totalTokens = 0): UsageMemberSummary {
   return { userId, name: userId, ...window({ costUsd, totalTokens }) };
 }
 
@@ -40,7 +40,7 @@ describe("windowCostDisplay", () => {
   });
 
   it("shows a dash, not $0, when no turn in the window had a price", () => {
-    expect(windowCostDisplay(window({ turns: 3, unpricedTurns: 3, costUsd: 0 }))).toEqual({
+    expect(windowCostDisplay(window({ turns: 3, unpricedTurns: 3, costUsd: null }))).toEqual({
       text: "—",
       note: "unpriced",
     });
@@ -85,6 +85,11 @@ describe("topMembers", () => {
     expect(shown[0]?.userId).toBe("big");
     expect(shown).toHaveLength(ORG_MEMBER_CAP);
     expect(hidden).toBe(1);
+  });
+
+  it("ranks unknown costs below known costs", () => {
+    const { shown } = topMembers([member("unknown", null, 100), member("priced", 1, 1)]);
+    expect(shown.map((m) => m.userId)).toEqual(["priced", "unknown"]);
   });
 
   it("breaks cost ties by token volume, like the API's own ordering", () => {

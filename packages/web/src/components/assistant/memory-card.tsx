@@ -55,7 +55,9 @@ export function MemoryCard() {
   const summaryQ = useQuery({
     queryKey: ["memory", "journal-summary"],
     queryFn: () => api.getJournalSummary(),
-    refetchInterval: 5 * 60_000,
+    // `pending` means the server is generating the summary in the
+    // background right now — poll fast until it lands, then hourly-ish.
+    refetchInterval: (query) => (query.state.data?.pending ? 2_000 : 5 * 60_000),
   });
 
   const entries = treeQ.data?.entries ?? [];
@@ -119,7 +121,7 @@ export function MemoryCard() {
                   </span>
                 )}
               </div>
-              {summaryQ.isLoading && (
+              {(summaryQ.isLoading || summaryQ.data?.pending) && (
                 <div className="flex items-center gap-2 text-xs text-muted">
                   <Spinner size={12} /> Summarizing…
                 </div>
@@ -133,7 +135,10 @@ export function MemoryCard() {
                   {summaryQ.data.summary}
                 </Link>
               )}
-              {!summaryQ.isLoading && !summaryQ.data?.summary && (
+              {!summaryQ.isLoading && summaryQ.data?.failed && (
+                <p className="text-xs text-muted">Summary unavailable right now. It retries automatically.</p>
+              )}
+              {!summaryQ.isLoading && !summaryQ.data?.pending && !summaryQ.data?.failed && !summaryQ.data?.summary && (
                 <p className="text-xs text-muted">No journal entry yet today.</p>
               )}
             </div>

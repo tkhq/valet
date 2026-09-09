@@ -45,6 +45,15 @@ function toNum(v: unknown): number {
   return Number(v ?? 0);
 }
 
+/** A NULL cost means every turn in this nonempty bucket was unpriced. */
+function toCost(v: unknown): number | null {
+  return v === null ? null : toNum(v);
+}
+
+function compareCostDesc(a: number | null, b: number | null): number {
+  return (b ?? Number.NEGATIVE_INFINITY) - (a ?? Number.NEGATIVE_INFINITY);
+}
+
 // ── Scope ──────────────────────────────────────────────────────────────────
 
 export interface UsageScope {
@@ -88,30 +97,66 @@ function scopeWhere(prefix: "" | "ce.", since: number, s: UsageScope): SQL {
 
 // ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
 
-const BUCKET_COLS = sql`
-  COALESCE(SUM(cost_total),0)            AS cost_usd,
-  COALESCE(SUM(total_tokens),0)         AS total_tokens,
-  COALESCE(SUM(input_tokens),0)         AS input_tokens,
-  COALESCE(SUM(output_tokens),0)        AS output_tokens,
-  COALESCE(SUM(cache_read_tokens),0)    AS cache_read_tokens,
-  COALESCE(SUM(cache_write_tokens),0)   AS cache_write_tokens,
-  COUNT(*)                              AS turns,
-  COUNT(*) FILTER (WHERE NOT priced)    AS unpriced_turns`;
+/** The bucket metrics, in output order — the ONE list `bucketCols` emits as
+ * SQL and `readBucket` reads back. `sum` names the summed source column;
+ * the two count metrics are special-cased in `bucketCols`. */
+const BUCKET_METRICS: ReadonlyArray<{ column: string; sum?: string }> = [
+  { column: "cost_usd", sum: "cost_total" },
+  { column: "total_tokens", sum: "total_tokens" },
+  { column: "input_tokens", sum: "input_tokens" },
+  { column: "output_tokens", sum: "output_tokens" },
+  { column: "cache_read_tokens", sum: "cache_read_tokens" },
+  { column: "cache_write_tokens", sum: "cache_write_tokens" },
+  { column: "turns" },
+  { column: "unpriced_turns" },
+];
 
-interface BucketRow {
-  cost_usd: unknown; total_tokens: unknown; input_tokens: unknown; output_tokens: unknown;
-  cache_read_tokens: unknown; cache_write_tokens: unknown; turns: unknown; unpriced_turns: unknown;
+type WindowSuffix = "d" | "w" | "m";
+
+/** One row of bucket aggregates as raw (optionally suffixed) columns. */
+type BucketRow = Record<string, unknown>;
+
+/** The bucket aggregate columns. With `windowed`, every aggregate is
+ * FILTERed to the cutoff and each column name gets `_${suffix}`, so one
+ * scan computes several windows side by side. All names are hardcoded
+ * literals from `BUCKET_METRICS`, never input. */
+function bucketCols(windowed?: { since: number; suffix: WindowSuffix }): SQL {
+  const cond = windowed ? sql`created_at >= ${windowed.since}` : undefined;
+  const filter = (extra?: SQL): SQL => {
+    const both = cond && extra ? sql`${cond} AND ${extra}` : (cond ?? extra);
+    return both ? sql` FILTER (WHERE ${both})` : sql``;
+  };
+  const name = (base: string): SQL => sql.raw(windowed ? `${base}_${windowed.suffix}` : base);
+  const cols = BUCKET_METRICS.map(({ column, sum }) => {
+    if (sum !== undefined) {
+      if (column === "cost_usd") {
+        // An empty bucket costs $0; a nonempty bucket with no priced turns
+        // stays NULL so consumers cannot present unknown spend as free.
+        return sql`CASE WHEN COUNT(*)${filter()} = 0 THEN 0 ELSE SUM(${sql.raw(sum)})${filter()} END AS ${name(column)}`;
+      }
+      return sql`COALESCE(SUM(${sql.raw(sum)})${filter()},0) AS ${name(column)}`;
+    }
+    if (column === "turns") return sql`COUNT(*)${filter()} AS ${name(column)}`;
+    return sql`COUNT(*)${filter(sql`NOT priced`)} AS ${name(column)}`;
+  });
+  return sql.join(cols, sql`, `);
 }
-function toBucket(r: BucketRow | undefined): UsageBucket {
+const BUCKET_COLS = bucketCols();
+
+/** The read half of `bucketCols` — one mapper for windowed and unwindowed
+ * rows. `UsageBucket` and `UsageWindow` are the same eight fields. */
+function readBucket(row: BucketRow | undefined, suffix?: WindowSuffix): UsageBucket & UsageWindow {
+  const raw = (base: string): unknown => row?.[suffix !== undefined ? `${base}_${suffix}` : base];
+  const v = (base: string): number => toNum(raw(base));
   return {
-    costUsd: toNum(r?.cost_usd),
-    totalTokens: toNum(r?.total_tokens),
-    inputTokens: toNum(r?.input_tokens),
-    outputTokens: toNum(r?.output_tokens),
-    cacheReadTokens: toNum(r?.cache_read_tokens),
-    cacheWriteTokens: toNum(r?.cache_write_tokens),
-    turns: toNum(r?.turns),
-    unpricedTurns: toNum(r?.unpriced_turns),
+    costUsd: toCost(raw("cost_usd")),
+    totalTokens: v("total_tokens"),
+    inputTokens: v("input_tokens"),
+    outputTokens: v("output_tokens"),
+    cacheReadTokens: v("cache_read_tokens"),
+    cacheWriteTokens: v("cache_write_tokens"),
+    turns: v("turns"),
+    unpricedTurns: v("unpriced_turns"),
   };
 }
 
@@ -128,21 +173,21 @@ export async function getUsageBreakdown(
 
   const [byUseCase, byModel, byDay, totals, byUser] = await Promise.all([
     db.execute(sql`SELECT use_case, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY use_case`) as Promise<{ rows: (BucketRow & { use_case: string })[] }>,
-    db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
+    db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC NULLS LAST`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
     // `floor` truncates the day index deterministically whether Postgres infers
     // the `${DAY_MS}` parameter as integer or float (a plain `bigint / param`
     // could do float division on real Postgres → one bucket per row).
-    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
+    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, SUM(cost_total) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
     db.execute(sql`SELECT ${BUCKET_COLS} FROM cost_entries WHERE ${where}`) as Promise<{ rows: BucketRow[] }>,
     opts.scope.isOrg
       ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
         // workflow runs) so the per-member sum reconciles with the total —
         // dropping it made Σ byUser < totalCostUsd.
-        (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
+        (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC NULLS LAST`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
       : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
   ]);
 
-  const total = toBucket(totals.rows[0]);
+  const total = readBucket(totals.rows[0]);
   let byUserOut: (UsageBucket & { userId: string; name: string })[] | undefined;
   if (opts.scope.isOrg) {
     const ids = byUser.rows.map((r) => r.user_id).filter((id): id is string => id !== null);
@@ -151,7 +196,7 @@ export async function getUsageBreakdown(
     byUserOut = byUser.rows.map((r) => ({
       userId: r.user_id ?? "shared",
       name: r.user_id === null ? "Team / shared" : (nameById.get(r.user_id) ?? r.user_id),
-      ...toBucket(r),
+      ...readBucket(r),
     }));
   }
 
@@ -166,10 +211,10 @@ export async function getUsageBreakdown(
     totalCacheWriteTokens: total.cacheWriteTokens,
     totalTurns: total.turns,
     unpricedTurns: total.unpricedTurns,
-    byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
-    byModel: byModel.rows.map((r) => ({ model: r.model, ...toBucket(r) })),
+    byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...readBucket(r) })).sort((a, b) => compareCostDesc(a.costUsd, b.costUsd)),
+    byModel: byModel.rows.map((r) => ({ model: r.model, ...readBucket(r) })),
     byUser: byUserOut,
-    byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
+    byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toCost(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
   };
 }
 
@@ -189,16 +234,16 @@ export async function getUsageDrillItems(
     interface Row { session_id: string; title: string | null; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.session_id, s.title, cw.parent_session_id,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+             SUM(ce.cost_total) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
       FROM cost_entries ce
       LEFT JOIN agent_sessions s ON s.id = ce.session_id
       LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
       WHERE ${whereCe} AND ce.session_id IS NOT NULL AND ce.use_case = ${useCase}
       GROUP BY ce.session_id, s.title, cw.parent_session_id
-      ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+      ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
     return r.rows.map((x) => ({
       id: x.session_id, label: x.title ?? x.session_id, useCase, isChild: x.parent_session_id !== null,
-      parentId: x.parent_session_id, sessionId: x.session_id, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+      parentId: x.parent_session_id, sessionId: x.session_id, costUsd: toCost(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
     }));
   }
   if (useCase === "workflow") {
@@ -206,28 +251,28 @@ export async function getUsageDrillItems(
     interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.workflow_run_id, wd.name,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+             SUM(ce.cost_total) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
       FROM cost_entries ce
       LEFT JOIN workflow_definitions wd ON wd.id = ce.workflow_id
       WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_run_id IS NOT NULL
       GROUP BY ce.workflow_run_id, wd.name
-      ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+      ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
     return r.rows.map((x) => ({
       id: x.workflow_run_id ?? "", label: x.name ?? `run ${x.workflow_run_id}`, useCase, isChild: false,
-      parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+      parentId: null, sessionId: null, costUsd: toCost(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
     }));
   }
   // proxy — group the raw proxy rows by harness (cost_entries has no harness).
   const whereProxy = scopeWhere("", since, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
-    SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
+    SELECT harness, SUM(cost_usd) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
     FROM llm_proxy_requests
     WHERE ${whereProxy} AND total_tokens > 0
-    GROUP BY harness ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+    GROUP BY harness ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
   return r.rows.map((x) => ({
     id: x.harness ?? "unknown", label: x.harness ?? "unknown", useCase, isChild: false,
-    parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+    parentId: null, sessionId: null, costUsd: toCost(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
   }));
 }
 
@@ -246,7 +291,7 @@ export async function getUsageSessions(
   interface Row { session_id: string; title: string | null; use_case: string; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const result = (await db.execute(sql`
     SELECT ce.session_id, s.title, ce.use_case, cw.parent_session_id,
-           COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+           SUM(ce.cost_total) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
     FROM cost_entries ce
     LEFT JOIN agent_sessions s ON s.id = ce.session_id
     LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
@@ -254,14 +299,14 @@ export async function getUsageSessions(
       AND ce.session_id IS NOT NULL AND ce.use_case IN ('orchestrator','session')
       ${useCaseFilter}
     GROUP BY ce.session_id, s.title, ce.use_case, cw.parent_session_id
-    ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
+    ORDER BY cost_usd DESC NULLS LAST LIMIT 200`)) as { rows: Row[] };
   return result.rows.map((r) => ({
     sessionId: r.session_id,
     title: r.title,
     useCase: r.use_case as UsageUseCase,
     isChild: r.parent_session_id !== null,
     parentSessionId: r.parent_session_id,
-    costUsd: toNum(r.cost_usd),
+    costUsd: toCost(r.cost_usd),
     totalTokens: toNum(r.total_tokens),
     turns: toNum(r.turns),
   }));
@@ -305,61 +350,50 @@ export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; sco
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────
 
-interface WindowAggRow {
-  user_id: string;
-  input_tokens: unknown; output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;
-  total_tokens: unknown; cost_usd: unknown; turns: unknown; unpriced_turns: unknown;
-}
-function toWindow(row: WindowAggRow | undefined): UsageWindow {
-  return {
-    inputTokens: toNum(row?.input_tokens),
-    outputTokens: toNum(row?.output_tokens),
-    cacheReadTokens: toNum(row?.cache_read_tokens),
-    cacheWriteTokens: toNum(row?.cache_write_tokens),
-    totalTokens: toNum(row?.total_tokens),
-    costUsd: toNum(row?.cost_usd),
-    turns: toNum(row?.turns),
-    unpricedTurns: toNum(row?.unpriced_turns),
-  };
-}
-
-/** Per-user token/cost aggregate since a cutoff, one row per user. `onlyUserId`
- * scopes to a single user; omit it for the org-wide member list. */
-async function windowAggregate(db: AppDb, orgId: string, sinceMs: number, onlyUserId?: string): Promise<WindowAggRow[]> {
-  const result = (await db.execute(sql`
-    SELECT user_id, ${BUCKET_COLS}
-    FROM cost_entries
-    WHERE created_at >= ${sinceMs} AND org_id = ${orgId} AND user_id IS NOT NULL
-      ${onlyUserId ? sql`AND user_id = ${onlyUserId}` : sql``}
-    GROUP BY user_id`)) as { rows: WindowAggRow[] };
-  return result.rows;
-}
+/** One row per user with day/week/month aggregates side by side, keyed by
+ * suffix (`cost_usd_d`, `cost_usd_w`, `cost_usd_m`, ...). */
+type MultiWindowRow = BucketRow & { user_id: string };
 
 /** The `/api/usage/summary` body: the caller's day/week/month windows, plus an
- * org-wide member comparison when the organizations feature is on. */
+ * org-wide member comparison when the organizations feature is on.
+ *
+ * The view cannot push the org/user predicates down into `engine_entries`
+ * (`org_id`/`user_id` are computed from joins), so every scan reads the whole
+ * 30-day window. One grouped scan with per-window FILTERs therefore replaces
+ * the previous scan-per-window (day, week, month, org members = 4 scans). */
 export async function getUsageSummary(db: AppDb, opts: { orgId: string; userId: string; now: number }): Promise<UsageSummaryResponse> {
   const { orgId, userId, now } = opts;
-  const [day, week, month] = await Promise.all([
-    windowAggregate(db, orgId, now - DAY_MS, userId),
-    windowAggregate(db, orgId, now - 7 * DAY_MS, userId),
-    windowAggregate(db, orgId, now - 30 * DAY_MS, userId),
-  ]);
-  const body: UsageSummaryResponse = { me: { day: toWindow(day[0]), week: toWindow(week[0]), month: toWindow(month[0]) } };
-
   const orgRows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const features = (orgRows[0]?.features ?? {}) as { organizations?: boolean };
-  if (features.organizations === true) {
-    const memberAgg = await windowAggregate(db, orgId, now - 30 * DAY_MS);
+  const orgWide = features.organizations === true;
+
+  const monthCut = now - 30 * DAY_MS;
+  const result = (await db.execute(sql`
+    SELECT user_id,
+      ${bucketCols({ since: now - DAY_MS, suffix: "d" })},
+      ${bucketCols({ since: now - 7 * DAY_MS, suffix: "w" })},
+      ${bucketCols({ since: monthCut, suffix: "m" })}
+    FROM cost_entries
+    WHERE created_at >= ${monthCut} AND org_id = ${orgId} AND user_id IS NOT NULL
+      ${orgWide ? sql`` : sql`AND user_id = ${userId}`}
+    GROUP BY user_id`)) as { rows: MultiWindowRow[] };
+
+  const meRow = result.rows.find((row) => row.user_id === userId);
+  const body: UsageSummaryResponse = {
+    me: { day: readBucket(meRow, "d"), week: readBucket(meRow, "w"), month: readBucket(meRow, "m") },
+  };
+
+  if (orgWide) {
     // Look up exactly the ids the aggregate returned — bounded (not every user
     // in the deployment) AND complete (keeps a since-left member's name).
-    const spenderIds = memberAgg.map((row) => row.user_id);
+    const spenderIds = result.rows.map((row) => row.user_id);
     const userRows = spenderIds.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, spenderIds));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
     body.org = {
       windowDays: 30,
-      members: memberAgg
-        .map((row) => ({ userId: row.user_id, name: nameById.get(row.user_id) ?? row.user_id, ...toWindow(row) }))
-        .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
+      members: result.rows
+        .map((row) => ({ userId: row.user_id, name: nameById.get(row.user_id) ?? row.user_id, ...readBucket(row, "m") }))
+        .sort((a, b) => compareCostDesc(a.costUsd, b.costUsd) || b.totalTokens - a.totalTokens),
     };
   }
   return body;
