@@ -27,6 +27,7 @@ const DEFAULT_VIEWPORT: Viewport = { scale: 1, x: 0, y: 0 };
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 3;
 const SCALE_STEP = 0.2;
+const PAN_STEP = 40;
 
 /** Clamp Mermaid zoom to the range the diagram viewport supports. */
 export function clampMermaidScale(scale: number): number {
@@ -41,6 +42,7 @@ export function MermaidDiagram({ source }: { source: string }) {
   const [collapsed, setCollapsed] = useState(false);
   const [viewport, setViewport] = useState<Viewport>(DEFAULT_VIEWPORT);
   const dragStartRef = useRef<DragStart | undefined>(undefined);
+  const viewportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -63,6 +65,23 @@ export function MermaidDiagram({ source }: { source: string }) {
   useEffect(() => {
     setViewport(DEFAULT_VIEWPORT);
   }, [source]);
+
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element || !state.svg || collapsed) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0) return;
+      event.preventDefault();
+      setViewport((current) => ({
+        ...current,
+        scale: clampMermaidScale(current.scale + (event.deltaY < 0 ? SCALE_STEP : -SCALE_STEP)),
+      }));
+    };
+
+    element.addEventListener("wheel", handleWheel, { passive: false });
+    return () => element.removeEventListener("wheel", handleWheel);
+  }, [collapsed, state.svg]);
 
   const changeScale = (change: number) => {
     setViewport((current) => ({ ...current, scale: clampMermaidScale(current.scale + change) }));
@@ -106,9 +125,25 @@ export function MermaidDiagram({ source }: { source: string }) {
         </header>
         {!collapsed && (
           <div
+            ref={viewportRef}
             id={`mermaid-body-${reactId}`}
             data-max-height="384"
-            className="max-h-96 overflow-hidden bg-ink-wash"
+            className="max-h-96 touch-none overflow-hidden bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40"
+            role="region"
+            tabIndex={0}
+            aria-label="Mermaid diagram viewport"
+            aria-describedby={`mermaid-instructions-${reactId}`}
+            onKeyDown={(event) => {
+              const pan =
+                event.key === "ArrowLeft" ? { x: -PAN_STEP, y: 0 }
+                : event.key === "ArrowRight" ? { x: PAN_STEP, y: 0 }
+                : event.key === "ArrowUp" ? { x: 0, y: -PAN_STEP }
+                : event.key === "ArrowDown" ? { x: 0, y: PAN_STEP }
+                : undefined;
+              if (!pan) return;
+              event.preventDefault();
+              setViewport((current) => ({ ...current, x: current.x + pan.x, y: current.y + pan.y }));
+            }}
             onPointerDown={(event) => {
               dragStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
               event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -124,16 +159,19 @@ export function MermaidDiagram({ source }: { source: string }) {
               dragStartRef.current = { ...dragStart, x: event.clientX, y: event.clientY };
             }}
             onPointerUp={(event) => {
-              if (dragStartRef.current?.pointerId === event.pointerId) dragStartRef.current = undefined;
-            }}
-            onPointerCancel={() => {
+              if (dragStartRef.current?.pointerId !== event.pointerId) return;
+              event.currentTarget.releasePointerCapture?.(event.pointerId);
               dragStartRef.current = undefined;
             }}
-            onWheel={(event) => {
-              event.preventDefault();
-              changeScale(event.deltaY < 0 ? SCALE_STEP : -SCALE_STEP);
+            onPointerCancel={(event) => {
+              if (dragStartRef.current?.pointerId !== event.pointerId) return;
+              event.currentTarget.releasePointerCapture?.(event.pointerId);
+              dragStartRef.current = undefined;
             }}
           >
+            <span id={`mermaid-instructions-${reactId}`} className="sr-only">
+              Drag to pan, use the mouse wheel to zoom, or use the arrow keys to pan.
+            </span>
             <img
               src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(state.svg)}`}
               alt="Mermaid diagram"
