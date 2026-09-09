@@ -20,6 +20,7 @@ import {
   resourceFingerprint,
   sandboxStatus,
   setOperatingMode,
+  resumeWithPersistentHomes,
 } from "../src/lifecycle.js";
 import type {
   CreateSandboxParams,
@@ -152,7 +153,7 @@ class FakeCustomObjectsApi implements SandboxCustomObjectsApi {
       throw new FakeApiError(404, `sandboxes.agents.x-k8s.io "${params.name}" not found`);
     }
     const patched: SandboxCRRead = "spec" in params.body
-      ? { ...existing, spec: { ...existing.spec, operatingMode: params.body.spec.operatingMode } }
+      ? { ...existing, spec: { ...existing.spec, ...params.body.spec } }
       : {
           ...existing,
           metadata: {
@@ -260,6 +261,34 @@ describe("mapConditionsToStatus (pure)", () => {
     expect(
       mapConditionsToStatus("sess-1", [{ type: "Ready", status: "True", reason: "DependenciesReady" }], undefined),
     ).toEqual({ id: "sess-1", state: "ready" });
+  });
+});
+
+describe("init container startup classification", () => {
+  it.each([
+    ["ErrImagePull", "image pull failed (ErrImagePull): init:missing"],
+    ["ImagePullBackOff", "image pull failed (ImagePullBackOff): init:missing"],
+    ["CrashLoopBackOff", "container crash-looping (CrashLoopBackOff)"],
+    ["ContainerCreating", null],
+  ])("classifies init status %s through the pod adapter", async (reason, expected) => {
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        spec: {
+          initContainers: [{ name: "valet-home-init", image: "init:missing" }],
+          containers: [{ name: "sandbox", image: "sandbox:v1" }],
+        },
+        status: {
+          phase: "Pending",
+          initContainerStatuses: [{ name: "valet-home-init", image: "", imageID: "", ready: false,
+            restartCount: 0, state: { waiting: { reason: reason ?? undefined } } }],
+          containerStatuses: [{ name: "sandbox", image: "sandbox:v1", imageID: "", ready: false,
+            restartCount: 0, state: { waiting: { reason: "PodInitializing" } } }],
+        },
+      }),
+    });
+    const pod = await adapter.getPodStatus("ns", "pod");
+    expect(classifyPodFailure(pod)).toBe(expected);
+    expect(pod?.sandboxImage).toBe("sandbox:v1");
   });
 });
 
@@ -1203,4 +1232,77 @@ describe("livePodDrift", () => {
     await expect(livePodDrift(objectsApi, new FakePodsApi([]), podStatusApi, cfg, "sess-drift", cfg.defaultImage, {}))
       .rejects.toThrow("pod read failed");
   });
+});
+
+
+it("adopts home mounts in a retained sandbox before resuming without replacing the claim", async () => {
+  const api = new FakeCustomObjectsApi();
+  const manifest = buildSandboxManifest(cfg, "legacy", {});
+  const container = manifest.spec.podTemplate.spec.containers[0];
+  container.command = ["sh", "-c", "tail -f /dev/null"];
+  container.volumeMounts = [{ name: "workspace", mountPath: "/workspace" }];
+  delete manifest.spec.podTemplate.spec.initContainers;
+  manifest.spec.operatingMode = "Suspended";
+  api.seed(toCRRead(manifest));
+  await resumeWithPersistentHomes(api, cfg, "legacy");
+  expect(api.patchCalls).toHaveLength(1);
+  expect(api.patchCalls[0].body).toMatchObject({ metadata: { resourceVersion: "1" }, spec: {
+    operatingMode: "Running", podTemplate: { spec: { initContainers: [{ name: "valet-home-init" }] } },
+  } });
+  expect(api.get("legacy")?.spec.volumeClaimTemplates).toEqual(manifest.spec.volumeClaimTemplates);
+  expect(api.createCalls).toBe(0);
+  expect(api.replaceCalls).toBe(0);
+});
+
+it("re-reads the home template after a resume conflict and preserves concurrent changes", async () => {
+  const manifest = buildSandboxManifest(cfg, "conflict", {});
+  class ConflictOnceApi extends FakeCustomObjectsApi {
+    reads = 0;
+    attempts: PatchSandboxParams[] = [];
+    override async getNamespacedCustomObject(params: GetSandboxParams): Promise<unknown> {
+      this.reads++;
+      return super.getNamespacedCustomObject(params);
+    }
+    override async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
+      this.attempts.push(params);
+      if (this.attempts.length === 1) {
+        const updated = buildSandboxManifest(cfg, "conflict", { image: "updated:v2" });
+        updated.spec.podTemplate.metadata = { annotations: { concurrent: "keep" } };
+        this.seed(toCRRead(updated, { resourceVersion: "2" }));
+        throw new FakeApiError(409, "resourceVersion conflict");
+      }
+      return super.patchNamespacedCustomObject(params);
+    }
+  }
+  const api = new ConflictOnceApi();
+  api.seed(toCRRead(manifest));
+  await resumeWithPersistentHomes(api, cfg, "conflict");
+  expect(api.reads).toBe(2);
+  expect(api.attempts[0].body).toMatchObject({ metadata: { resourceVersion: "1" } });
+  expect(api.attempts[1].body).toMatchObject({ metadata: { resourceVersion: "2" }, spec: {
+    podTemplate: { metadata: { annotations: { concurrent: "keep" } }, spec: {
+      containers: [{ image: "updated:v2" }], initContainers: [{ image: "updated:v2" }],
+    } },
+  } });
+});
+
+it.each([[409, 3], [503, 1]])("bounds resume retries for HTTP %s to %s attempts", async (code, expectedAttempts) => {
+  const failure = new FakeApiError(code, "patch failed");
+  class FailingPatchApi extends FakeCustomObjectsApi {
+    reads = 0;
+    attempts = 0;
+    override async getNamespacedCustomObject(params: GetSandboxParams): Promise<unknown> {
+      this.reads++;
+      return super.getNamespacedCustomObject(params);
+    }
+    override async patchNamespacedCustomObject(): Promise<unknown> {
+      this.attempts++;
+      throw failure;
+    }
+  }
+  const api = new FailingPatchApi();
+  api.seed(toCRRead(buildSandboxManifest(cfg, "conflict", {})));
+  await expect(resumeWithPersistentHomes(api, cfg, "conflict")).rejects.toBe(failure);
+  expect(api.attempts).toBe(expectedAttempts);
+  expect(api.reads).toBe(expectedAttempts);
 });

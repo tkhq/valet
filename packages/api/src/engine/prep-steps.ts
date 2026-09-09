@@ -19,6 +19,7 @@ import type { ResolveSnapshot, StepSpec } from "./sandbox-spec.js";
 import {
   installCredentialHelper,
   configureGitIdentity,
+  dirHasGit,
   prepBinding,
   prepPrebuiltBinding,
   resolveStartRef,
@@ -50,6 +51,7 @@ export function buildPrepSteps(
         id: spec.id,
         hash: spec.hash,
         critical: spec.critical,
+        afterResume: (sandbox) => installCredentialHelper(sandbox, snap.apiUrl, snap.credentialCommands ?? []),
         async apply(sandbox) {
           await installCredentialHelper(sandbox, snap.apiUrl, snap.credentialCommands ?? []);
         },
@@ -62,6 +64,7 @@ export function buildPrepSteps(
         id: spec.id,
         hash: spec.hash,
         critical: spec.critical,
+        afterResume: (sandbox) => configureGitIdentity(sandbox, snap.userName, snap.userEmail),
         async apply(sandbox) {
           await configureGitIdentity(sandbox, snap.userName, snap.userEmail);
         },
@@ -87,13 +90,17 @@ export function buildPrepSteps(
         hash: spec.hash,
         critical: spec.critical,
         async apply(sandbox) {
-          if (prebuild) {
-            await prepPrebuiltBinding(sandbox, targetDir, binding, {
-              bakedSha: prebuild.bakedSha,
-              recipe: prebuild.recipe,
-            });
-          } else {
-            await prepBinding(sandbox, targetDir, binding);
+          // Container markers can disappear on resume or API restart. Existing
+          // repositories belong to the session: preserve their HEAD and files.
+          if (!await dirHasGit(sandbox, targetDir)) {
+            if (prebuild) {
+              await prepPrebuiltBinding(sandbox, targetDir, binding, {
+                bakedSha: prebuild.bakedSha,
+                recipe: prebuild.recipe,
+              });
+            } else {
+              await prepBinding(sandbox, targetDir, binding);
+            }
           }
 
           // Start-ref capture for the primary binding — best-effort.

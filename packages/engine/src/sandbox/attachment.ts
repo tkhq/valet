@@ -19,7 +19,7 @@ import {
   SandboxUnavailableError,
   WorkspaceProvisioningError,
 } from "../errors.js";
-import { type AppliedState, applyPlan, diffSteps, readAppliedState } from "./applied-state.js";
+import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
 
 /**
  * Max age of a cached observation before `reconcile` re-reads the applied-state
@@ -138,6 +138,8 @@ export class SandboxAttachment {
   private _state: AttachmentState = "detached";
   private _epoch = 0;
   private _wakeCount = 0;
+  /** A resumed container cannot become ready until its required hooks succeed. */
+  private pendingResumeEpoch: number | null = null;
   private _sandbox: Sandbox | null = null;
   private destroyed = false;
   private inFlight: Promise<void> | null = null;
@@ -726,8 +728,10 @@ export class SandboxAttachment {
     if (this.inFlight) return;
     // A `suspended` attachment already holds a live handle and epoch — wake it
     // via `resume` rather than a fresh `create` (no epoch mint, id stable). All
-    // other non-ready states go through the cold-provision path.
-    if (this._state === "suspended") {
+    // A failed restoration retains this handle and retries its resume hooks.
+    // It must not bypass required hooks through optional cold preparation.
+    if (this._state === "suspended" ||
+      (this._sandbox !== null && this.pendingResumeEpoch === this._epoch)) {
       this.inFlight = this.doResume();
       return;
     }
@@ -736,6 +740,9 @@ export class SandboxAttachment {
   }
 
   private async doResume(): Promise<void> {
+    const startEpoch = this._epoch;
+    const sandbox = this._sandbox;
+    const provider = this.provider;
     // Wake folding (spec decision 3, wake-when-stale). Before waking the
     // suspended sandbox, compare the desired image and resources with the
     // cached observation. If an isolated sandbox drifts, discard its suspended
@@ -755,7 +762,8 @@ export class SandboxAttachment {
       let staleWake = false;
       try {
         const desired = await this.specProvider();
-        staleWake = this.replacementNeeded(desired, this.observation.applied);
+        staleWake = this._epoch === startEpoch && this._sandbox === sandbox &&
+          this.replacementNeeded(desired, this.observation.applied);
         if (staleWake) {
           this.persistReplacementSpec(desired, this.observation.applied);
         }
@@ -767,6 +775,11 @@ export class SandboxAttachment {
       }
       if (this.destroyed) {
         this.inFlight = null;
+        return;
+      }
+      if (this._epoch !== startEpoch || this._sandbox !== sandbox) {
+        this.inFlight = null;
+        this.kickProvision();
         return;
       }
       if (staleWake) {
@@ -800,9 +813,6 @@ export class SandboxAttachment {
     // and every future ensureReady misses the fast-path while kickProvision
     // returns early on `ready`. So on completion we detect the supersession and
     // hand off to a fresh provision for the new epoch instead.
-    const startEpoch = this._epoch;
-    const sandbox = this._sandbox;
-    const provider = this.provider;
     // Silent-ish transition: emit a single `provisioning` status for the wake,
     // mirroring doProvision. The epoch is deliberately left unchanged.
     this._state = "provisioning";
@@ -812,7 +822,12 @@ export class SandboxAttachment {
       if (!provider) throw new Error("no provider");
       if (!provider.resume) throw new Error("provider does not support hibernation");
       if (!sandbox) throw new Error("suspended attachment has no sandbox handle");
-      await provider.resume(sandbox.id);
+      if (this.pendingResumeEpoch !== startEpoch) {
+        await provider.resume(sandbox.id);
+        if (!this.destroyed && this._epoch === startEpoch && this._sandbox === sandbox) {
+          this.pendingResumeEpoch = startEpoch;
+        }
+      }
       if (this.destroyed) return;
       // Superseded by a concurrent reportFailure (epoch bumped and/or the handle
       // dropped): discard this wake WITHOUT marking ready — the waiters stay
@@ -831,18 +846,61 @@ export class SandboxAttachment {
       // API restart (in-memory map is gone), so this branch is unreachable for
       // docker post-restart.
       await this.pushCredsBestEffort(sandbox, "resume");
-      // The raw handle is reused as-is — resume wakes the same sandbox.
+      // Resume may replace the container while retaining the working directory.
+      // Read its marker again. Never trust the old container's completed steps.
+      if (this.specProvider) {
+        try {
+          const desired = await this.specProvider();
+          const applied = await readAppliedState(sandbox);
+          const current = () => !this.destroyed && this._epoch === startEpoch && this._sandbox === sandbox;
+          const steps = desired.steps.map((step) => ({
+            ...step,
+            apply: async () => {
+              if (!current()) throw new SandboxUnavailableError(new Error("resume superseded"));
+              await (step.afterResume ?? step.apply)(sandbox);
+              if (!current()) throw new SandboxUnavailableError(new Error("resume superseded"));
+            },
+          }));
+          // Hooks run on every wake, even when the provider retained its marker.
+          const resumeState = applied ? { ...applied, steps: { ...applied.steps } } : null;
+          for (const step of desired.steps) {
+            if (step.afterResume && resumeState) delete resumeState.steps[step.id];
+          }
+          if (!current()) throw new SandboxUnavailableError(new Error("resume superseded"));
+          // Persist invalidation before callbacks. A failed required hook must
+          // remain pending if the next acquisition takes the cold adoption path.
+          if (resumeState && desired.steps.some((step) => step.afterResume)) {
+            await writeAppliedState(sandbox, resumeState);
+          }
+          const image = applied?.image || this.observation?.applied.image || this.createOpts.image || "";
+          const resources = applied?.resources ?? this.observation?.applied.resources;
+          const landed = await applyPlan(sandbox, { ...desired, steps, resources }, image, resumeState);
+          if (current()) this.observation = this.observationFromApplied(landed, startEpoch);
+        } catch (err) {
+          throw new SandboxPreparationError(err);
+        }
+      }
+      if (this.destroyed) return;
+      if (this._epoch !== startEpoch || this._sandbox !== sandbox) {
+        superseded = true;
+        return;
+      }
+      this.pendingResumeEpoch = null;
       this._state = "ready";
       this.emitStatus();
       this.flushWaiters();
     } catch (err) {
       if (this.destroyed) return;
+      if (this._epoch !== startEpoch || this._sandbox !== sandbox) {
+        superseded = true;
+        return;
+      }
       this._state = "error";
       this.emitStatus();
       // Same fast-fail rule as doProvision: a terminal SandboxStartupError
       // rejects waiters now; any other failure lets each waiter's own
       // ensureReady timeout govern (a slow wake is not degradation).
-      if (err instanceof SandboxStartupError) {
+      if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError) {
         const waiters = [...this.waiters];
         this.waiters.clear();
         for (const w of waiters) w.reject(err);
@@ -906,8 +964,8 @@ export class SandboxAttachment {
       // is still null and `_state` still `provisioning` throughout, so
       // `current()`/the ensureReady fast-path both miss). Absent specProvider:
       // this block is skipped and the path below is byte-identical to the
-      // pre-seam behavior. Only the cold `doProvision` runs prep — a
-      // hibernation wake (`doResume`, same epoch) deliberately does not.
+      // pre-seam behavior. A hibernation wake uses afterResume callbacks and
+      // applies missing container steps before it releases waiters.
       //
       // Fetch the spec before create so a fresh container boots the desired
       // image. Persist the image for later failure recovery (spec decision 9).

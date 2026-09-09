@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SandboxAttachment, SandboxStartupError } from "@valet/engine";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
+import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
 import { buildSandboxManifest, credsSecretName, DOCKER_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
 import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
@@ -594,10 +595,12 @@ describe("create() resource adoption and pod rollout", () => {
     let liveImage = cfg.defaultImage;
     let liveResources: SandboxCpuMemoryResources = resources ?? {};
     let liveFingerprint: string | undefined;
+    let liveHomeLayout: string | undefined = HOME_LAYOUT_VERSION;
     let podOverride: PodStatusInfo | null | undefined;
     const podDeleteApi = {
       deletePod: vi.fn(async (_namespace: string, podName: string) => {
         deletedPods.push(podName);
+        liveHomeLayout = HOME_LAYOUT_VERSION;
         uid = `pod-new-${deletedPods.length}`;
         liveResources = sandboxCpuMemoryResources(objectsApi.cr.spec.podTemplate);
         liveFingerprint = bootFingerprint(objectsApi.cr.spec.podTemplate);
@@ -616,7 +619,7 @@ describe("create() resource adoption and pod rollout", () => {
     const getLivePod = (): PodStatusInfo | null => podOverride === undefined ? {
       phase: "Running", conditions: [{ type: "Ready", status: "True" }],
       containerStatuses: [{ name: "sandbox", image: liveImage }],
-      sandboxResources: liveResources, resourceFingerprint: liveFingerprint,
+      sandboxResources: liveResources, resourceFingerprint: liveFingerprint, homeLayoutVersion: liveHomeLayout,
     } : podOverride;
     const podStatusApi = { getPodStatus: vi.fn(async () => getLivePod()) };
     const restartWithPodState = () => new KubernetesSandboxProvider({
@@ -625,6 +628,7 @@ describe("create() resource adoption and pod rollout", () => {
     }, cfg);
     return { provider: restartWithPodState(), restart: restartWithPodState, objectsApi, deletedPods, cfg, podDeleteApi,
       podStatusApi, setLivePod, getLivePod,
+      setHomeLayout: (version: string | undefined) => { liveHomeLayout = version; },
       setAdmittedResources: (admitted: SandboxCpuMemoryResources) => { liveResources = admitted; } };
   }
 
@@ -795,6 +799,7 @@ describe("create() resource adoption and pod rollout", () => {
   it("accepts a live image rewritten by admission when its requested-image fingerprint matches", async () => {
     const { provider, setLivePod, deletedPods } = setup(prior);
     setLivePod("pod-mutated", {
+      homeLayoutVersion: HOME_LAYOUT_VERSION,
       phase: "Running",
       sandboxImage: "mirror.internal/valet-sandbox@sha256:digest",
       imageFingerprint: imageFingerprint(providerCfg.defaultImage),
@@ -867,6 +872,27 @@ describe("create() resource adoption and pod rollout", () => {
     await provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true, env: { USER_FLAG: "keep" } });
     expect(bootFingerprint(objectsApi.cr.spec.podTemplate)).toBe(fingerprint);
     expect(objectsApi.cr.spec.podTemplate).toMatchObject({ spec: { containers: [{ env: expect.arrayContaining([{ name: "USER_FLAG", value: "keep" }]) }] } });
+  });
+
+  it("rolls a legacy home layout during same-image adoption before returning ready", async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, setHomeLayout, getLivePod, podDeleteApi } = setup(prior);
+      setHomeLayout(undefined);
+      let settled = false;
+      const creating = provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true })
+        .then(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(podDeleteApi.deletePod).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      await creating;
+      expect(settled).toBe(true);
+      expect(getLivePod()?.homeLayoutVersion).toBe(HOME_LAYOUT_VERSION);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retries one transient resolvePodName read before accepting readiness", async () => {
@@ -947,7 +973,7 @@ describe("create() resource adoption and pod rollout", () => {
       await vi.advanceTimersByTimeAsync(1000);
       expect.soft(settled).toBe(false);
 
-      setLivePod("pod-pending", { phase: "Running", sandboxImage: "image:new", conditions: [{ type: "Ready", status: "True" }] });
+      setLivePod("pod-pending", { phase: "Running", homeLayoutVersion: HOME_LAYOUT_VERSION, sandboxImage: "image:new", conditions: [{ type: "Ready", status: "True" }] });
       await vi.advanceTimersByTimeAsync(1000);
       await creating;
       expect(settled).toBe(true);
@@ -1138,7 +1164,7 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
   }
 
   async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
-    if (this.cr !== null && "metadata" in params.body) {
+    if (this.cr !== null && "metadata" in params.body && "annotations" in params.body.metadata) {
       this.cr.metadata.annotations = Object.fromEntries(Object.entries({
         ...this.cr.metadata.annotations,
         ...params.body.metadata.annotations,
@@ -1163,6 +1189,7 @@ function makeCapacityPendingProvider(opts: {
       podReads.push({ name: podName, uid: podIdentity.uid });
       if (objectsApi.ready) {
         return {
+          homeLayoutVersion: HOME_LAYOUT_VERSION,
           phase: "Running",
           sandboxImage: providerCfg.defaultImage,
           sandboxResources: {},
@@ -1757,4 +1784,26 @@ describe("create() adoption convergence (TKAI-402)", () => {
     expect(patches).toHaveLength(0);
     expect(falseWarn).toBe(false);
   });
+});
+
+it("waits for the home layout when an old pod survives a rapid suspend/resume", async () => {
+  let upgraded = false;
+  const manifest = buildSandboxManifest(providerCfg, "resume-home", {});
+  class ResumeObjects extends FakeObjectsApi {
+    override async getNamespacedCustomObject(): Promise<unknown> {
+      return { ...manifest, metadata: { ...manifest.metadata, resourceVersion: "1", annotations: { "agents.x-k8s.io/pod-name": "resume-home-pod" } },
+        status: { podName: "resume-home-pod", conditions: [{ type: "Ready", status: "True" }] } };
+    }
+  }
+  const deletePod = vi.fn(async () => { upgraded = true; });
+  const provider = new KubernetesSandboxProvider({ objectsApi: new ResumeObjects(), podsApi: new FakePodsApi(),
+    livenessApi: { getPodUid: async () => upgraded ? "new-pod" : "old-pod" },
+    execApi: fakePodExecApi,
+    podDeleteApi: { deletePod },
+    podStatusApi: { getPodStatus: async () => ({ phase: "Running", conditions: [{ type: "Ready", status: "True" }],
+      homeLayoutVersion: upgraded ? "1" : undefined }) },
+  }, providerCfg);
+  await provider.resume("resume-home");
+  expect(deletePod).toHaveBeenCalledTimes(1);
+  expect(upgraded).toBe(true);
 });

@@ -7,7 +7,12 @@
  * no engine, no docker, just direct function calls with scripted exec results.
  */
 import { describe, it, expect, vi } from "vitest";
-import type { ExecOpts, ExecResult, Sandbox, SessionStartRef } from "@valet/engine";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SandboxAttachment, SandboxPreparationError } from "@valet/engine";
+import type { ExecOpts, ExecResult, Sandbox, SandboxProvider, SessionStartRef } from "@valet/engine";
 import { buildPrepSteps } from "./prep-steps.js";
 import { computeSpec } from "./sandbox-spec.js";
 import type { ResolveSnapshot } from "./sandbox-spec.js";
@@ -179,4 +184,127 @@ describe("buildPrepSteps — start-ref capture (position-0 clone step)", () => {
     expect(sandbox.execCalls.some((c) => c.command.includes("git remote get-url origin"))).toBe(false);
     expect(callback).not.toHaveBeenCalled();
   });
+});
+
+
+describe("resume-safe preparation", () => {
+  it("restores credential commands and identity without clone mutations", async () => {
+    const snap = makeSnap([makeBinding({ ref: "main" })]);
+    const sandbox = new RecordingSandbox();
+    const steps = buildPrepSteps(snap, computeSpec(snap).steps);
+    for (const step of steps) await step.afterResume?.(sandbox);
+    expect(sandbox.execCalls.some(({ command }) => command.includes("/usr/local/bin/gh"))).toBe(true);
+    expect(sandbox.execCalls.some(({ command }) => command.includes("credential.helper"))).toBe(true);
+    expect(sandbox.execCalls.some(({ command }) => command.includes("user.name"))).toBe(true);
+    expect(sandbox.execCalls.some(({ command }) => /git (clone|fetch|checkout|reset)/.test(command))).toBe(false);
+  });
+
+  it("preserves existing checkout when the container applied marker is missing", async () => {
+    const snap = makeSnap([makeBinding({ ref: "main" })]);
+    const sandbox = new RecordingSandbox();
+    sandbox.markExistingClone(".");
+    const steps = buildPrepSteps(snap, computeSpec(snap).steps);
+    for (const step of steps) await step.apply(sandbox);
+    expect(sandbox.execCalls.filter(({ command }) => /git (fetch|checkout|reset)/.test(command))).toEqual([]);
+  });
+});
+
+
+it("restores managed Git settings idempotently while preserving user settings", async () => {
+  const home = mkdtempSync(join(tmpdir(), "valet-resume-config-"));
+  const env = { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (...args: string[]) => execFileSync("git", args, { env, encoding: "utf8" }).trim();
+  const sandbox = new RecordingSandbox();
+  sandbox.exec = async (command) => {
+    if (command.startsWith("git config ")) execFileSync("sh", ["-c", command], { env });
+    return { stdout: "", stderr: "", exitCode: 0 };
+  };
+  try {
+    git("config", "--global", "alias.mine", "status --short");
+    git("config", "--global", "--add", "safe.directory", "/user/repo");
+    const snap = makeSnap();
+    const steps = buildPrepSteps(snap, computeSpec(snap).steps);
+    for (let wake = 0; wake < 2; wake++) {
+      for (const step of steps) await step.afterResume?.(sandbox);
+    }
+    expect(git("config", "--global", "--get-all", "safe.directory").split("\n")).toEqual(["/user/repo", "*"]);
+    expect(git("config", "--global", "alias.mine")).toBe("status --short");
+    expect(git("config", "--global", "user.name")).toBe("Ada Lovelace");
+    expect(git("config", "--global", "credential.helper")).toBe("/usr/local/bin/git-credential-valet");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+
+it("keeps local commits, dirty files, and untracked files during missing-marker preparation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "valet-resume-repo-"));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, env, encoding: "utf8" }).trim();
+  try {
+    git("init", "-b", "main");
+    git("config", "user.name", "Test");
+    git("config", "user.email", "test@example.com");
+    writeFileSync(join(dir, "tracked.txt"), "original");
+    git("add", ".");
+    git("commit", "-m", "base");
+    git("checkout", "-b", "local-work");
+    writeFileSync(join(dir, "local.txt"), "unpublished commit");
+    git("add", ".");
+    git("commit", "-m", "local work");
+    writeFileSync(join(dir, "tracked.txt"), "dirty work");
+    writeFileSync(join(dir, "untracked.txt"), "untracked work");
+    const head = git("rev-parse", "HEAD");
+    const status = git("status", "--porcelain");
+    const sandbox = new RecordingSandbox();
+    sandbox.stat = async (path) => {
+      const st = statSync(join(dir, path));
+      return { isFile: st.isFile(), isDirectory: st.isDirectory(), size: st.size };
+    };
+    sandbox.exec = async (command) => ({
+      stdout: execFileSync("sh", ["-c", command], { cwd: dir, env, encoding: "utf8" }), stderr: "", exitCode: 0,
+    });
+    const snap = makeSnap([makeBinding({ ref: "main" })]);
+    const step = buildPrepSteps(snap, computeSpec(snap).steps).find((step) => step.id.startsWith("clone:"));
+    expect(step).toBeDefined();
+    await step?.apply(sandbox);
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(git("branch", "--show-current")).toBe("local-work");
+    expect(git("status", "--porcelain")).toBe(status);
+    expect(readFileSync(join(dir, "local.txt"), "utf8")).toBe("unpublished commit");
+    expect(readFileSync(join(dir, "untracked.txt"), "utf8")).toBe("untracked work");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+it.each([
+  { adopted: false, failingCommand: "mkdir -p /usr/local/bin" },
+  { adopted: true, failingCommand: "mkdir -p /usr/local/bin" },
+  { adopted: false, failingCommand: "git config --global user.name" },
+  { adopted: true, failingCommand: "git config --global user.name" },
+])("blocks readiness when $failingCommand fails (adopted: $adopted)", async ({ adopted, failingCommand }) => {
+  const recording = new RecordingSandbox();
+  const sandbox: Sandbox = Object.assign(recording, { adopted });
+  recording.markExistingClone(".");
+  recording.exec = async (command) => ({
+    stdout: "", stderr: "container write failed", exitCode: command.startsWith("cat ") || command.includes(failingCommand) ? 1 : 0,
+  });
+  const destroy = vi.fn(async () => {});
+  const release = vi.fn(async () => {});
+  const provider: SandboxProvider = {
+    backend: "test",
+    capabilities: () => ({ snapshot: "none", persistentWorkspace: true, tunnels: false, warmPool: false, hibernation: true, customImage: false, coldStartEstimateMs: 0 }),
+    create: async () => sandbox,
+    restore: async () => sandbox,
+    destroy, release,
+    status: async () => ({ id: sandbox.id, state: "ready" }),
+  };
+  const snap = makeSnap([makeBinding()]);
+  const steps = buildPrepSteps(snap, computeSpec(snap).steps);
+  const att = new SandboxAttachment(provider, {}, async () => ({ specHash: "1", steps }));
+  await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+  expect(att.current()).toBeNull();
+  expect(att.state).toBe("error");
+  if (adopted) {
+    expect(release).toHaveBeenCalledWith(sandbox.id);
+    expect(destroy).not.toHaveBeenCalled();
+  }
 });

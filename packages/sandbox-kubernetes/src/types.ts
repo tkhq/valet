@@ -126,6 +126,7 @@ export interface ResourceRequirements {
 }
 
 export interface VolumeMount {
+  subPath?: string;
   name: string;
   mountPath: string;
 }
@@ -193,6 +194,7 @@ export interface TopologySpreadConstraint {
 
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */
 export interface SandboxPodSpec {
+  initContainers?: SandboxContainer[];
   containers: SandboxContainer[];
   /** Soft (ScheduleAnyway) spread of sandbox pods across nodes and zones. */
   topologySpreadConstraints?: TopologySpreadConstraint[];

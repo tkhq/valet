@@ -334,7 +334,7 @@ export async function installCredentialHelper(
   // dockerd-owned clones — files the rootless docker daemon's user
   // namespace can map. Non-docker sandboxes are unchanged (non-privileged
   // execs keep the container's default user).
-  const safeDirectory = await sandbox.exec("git config --global --add safe.directory '*'");
+  const safeDirectory = await sandbox.exec("git config --global --fixed-value --replace-all safe.directory '*' '*'");
   if (safeDirectory.exitCode !== 0) {
     throw new Error(execFailureMessage("workspace prep: git config safe.directory failed", safeDirectory));
   }
@@ -357,7 +357,7 @@ export async function configureGitIdentity(sandbox: Sandbox, userName?: string, 
 /** True when `<dir>/.git` exists (file or directory — a worktree's `.git`
  * is a file), i.e. `dir` already holds a clone. `dir` is workspace-relative
  * (`.` or a subdir name). */
-async function dirHasGit(sandbox: Sandbox, dir: string): Promise<boolean> {
+export async function dirHasGit(sandbox: Sandbox, dir: string): Promise<boolean> {
   try {
     const st = await sandbox.stat(posixJoin(dir, ".git"));
     return st.isDirectory || st.isFile;

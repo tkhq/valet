@@ -150,7 +150,7 @@ describe("installCredentialHelper", () => {
     expect(commands).toContain("git config --global credential.useHttpPath true");
     // Discovered against a real Docker sandbox: without this, git refuses
     // to operate on the bind-mounted workspace ("dubious ownership").
-    expect(commands).toContain("git config --global --add safe.directory '*'");
+    expect(commands).toContain("git config --global --fixed-value --replace-all safe.directory '*' '*'");
     // Staging dir cleanup is best-effort, but still attempted.
     expect(commands).toContain("rm -rf '.valet-prep'");
   });

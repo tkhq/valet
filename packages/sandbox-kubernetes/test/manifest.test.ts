@@ -143,13 +143,15 @@ describe("buildSandboxManifest", () => {
     expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
       { name: "VALET_SANDBOX_TOKEN", value: "tok-123" },
       { name: "VALET_API_URL", value: "http://valet-api.valet.svc.cluster.local" },
+      { name: "VALET_HOME_LAYOUT_VERSION", value: "1" },
       { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
     ]);
   });
 
-  it("emits only the requested-image fingerprint when opts.env is not provided", () => {
+  it("emits image and home-layout fingerprints when opts.env is not provided", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
     expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
+      { name: "VALET_HOME_LAYOUT_VERSION", value: "1" },
       { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
     ]);
   });
@@ -334,9 +336,9 @@ describe("buildSandboxManifest", () => {
   it("mounts the workspace volume in the container", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
     const container = manifest.spec.podTemplate.spec.containers[0];
-    expect(container?.volumeMounts).toEqual([
-      { name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH },
-    ]);
+    expect(container?.volumeMounts).toContainEqual(
+      { name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH, subPath: ".valet-storage/workspace" },
+    );
   });
 
   it("declares a matching workspace volumeClaimTemplate with default storage size", () => {
@@ -384,7 +386,7 @@ describe("buildSandboxManifest", () => {
       // exiting 127 forever (CrashLoopBackOff, the dev-v2 DinD outage).
       const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "full" });
       const container = manifest.spec.podTemplate.spec.containers[0];
-      expect(container?.command).toEqual([
+      expect(container?.command?.slice(4)).toEqual([
         "sh",
         "-c",
         "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
@@ -406,8 +408,8 @@ describe("buildSandboxManifest", () => {
     it("keeps the bare tail placeholder command when profile is omitted/headless", () => {
       const omitted = buildSandboxManifest(baseConfig, "sess-1", opts);
       const headless = buildSandboxManifest(baseConfig, "sess-1", { ...opts, profile: "headless" });
-      expect(omitted.spec.podTemplate.spec.containers[0]?.command).toEqual(["sh", "-c", "tail -f /dev/null"]);
-      expect(headless.spec.podTemplate.spec.containers[0]?.command).toEqual(["sh", "-c", "tail -f /dev/null"]);
+      expect(omitted.spec.podTemplate.spec.containers[0]?.command?.slice(4)).toEqual(["sh", "-c", "tail -f /dev/null"]);
+      expect(headless.spec.podTemplate.spec.containers[0]?.command?.slice(4)).toEqual(["sh", "-c", "tail -f /dev/null"]);
     });
   });
 
@@ -541,7 +543,7 @@ describe("docker flag (rootless DinD)", () => {
 
   it("headless+docker uses the start-headless probe wrapper command", () => {
     const cr = buildSandboxManifest(cfg, "sb-docker", { docker: true });
-    expect(cr.spec.podTemplate.spec.containers[0]!.command).toEqual([
+    expect(cr.spec.podTemplate.spec.containers[0]!.command?.slice(4)).toEqual([
       "sh",
       "-c",
       "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
@@ -558,7 +560,7 @@ describe("docker flag (rootless DinD)", () => {
     expect(s).not.toContain("capabilities");
     expect(s).not.toContain("procMount");
     expect(s).not.toContain("VALET_DOCKER_USERNS");
-    expect(s).not.toContain("fsGroup");
+    expect(cr.spec.podTemplate.spec.securityContext).toBeUndefined();
     expect(s).not.toContain(DOCKER_LABEL_KEY);
   });
 });
