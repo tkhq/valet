@@ -37,6 +37,8 @@ The generator uses tag creation time for released checkpoints. It uses the commi
 
 If the artifact SHA has no checkpoint, the API returns `latest-known`. If manifest validation fails, the API logs the failure and serves an empty changelog response.
 
+The response accepts a string or null artifact SHA. This type stays fixed when release generation replaces the development null with a commit SHA. CI generates release metadata before typechecking to cover the Docker and CLI build input.
+
 ## Generation
 
 Use this command to generate a rolling checkpoint:
