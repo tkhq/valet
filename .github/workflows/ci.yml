@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # pnpm version comes from package.json "packageManager".
       - uses: pnpm/action-setup@v4
@@ -55,6 +57,15 @@ jobs:
       # Run either by hand if you ever need to touch V1:
       #   cd packages/worker && bun scripts/generate-plugin-registry.ts
       #   cd packages/client && npx tsc --noEmit
+
+      - name: Generate release metadata for typecheck
+        run: |
+          node packages/api/scripts/generate-changelog.mjs \
+            --unreleased-sha HEAD \
+            --built-at "$(git show -s --format=%cI HEAD)" \
+            --artifact-version Unreleased \
+            --artifact-sha HEAD \
+            --metadata packages/api/src/changelog/release.json
 
       - name: Typecheck
         run: pnpm typecheck

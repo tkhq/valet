@@ -152,7 +152,7 @@ function checkpointSha(checkpoint: ChangelogCheckpoint): string {
 export function changelogResponse(
   manifest: ChangelogManifest,
   version = process.env.VALET_RELEASE_VERSION || bundledRelease.version,
-  sha = process.env.VALET_RELEASE_SHA || bundledRelease.sha,
+  sha: string | null = process.env.VALET_RELEASE_SHA || bundledRelease.sha,
 ): GetChangelogResponse {
   const exact = sha ? manifest.checkpoints.find((item) => checkpointSha(item) === sha) : undefined;
   const latest = manifest.checkpoints[0];
