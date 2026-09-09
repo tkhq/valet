@@ -9,7 +9,7 @@
  *     local/virtual always boot the stock image and ignore any catalog ref);
  *   - the session has a PRIMARY (position-0) repo binding;
  *   - an ENABLED `prebuild_configs` row matches that binding's
- *     (orgId, host, fullName);
+ *     (orgId, host, fullName, ref);
  *   - that config has at least one `pushed` prebuild (newest by `createdAt`).
  *
  * The newest pushed prebuild's `imageRef` becomes the sandbox image and its
@@ -100,6 +100,7 @@ export async function resolvePrebuildImage(
           eq(imageSources.kind, "repo"),
           eq(imageSources.repoHost, host),
           eq(imageSources.repoFullName, primary.fullName),
+          eq(imageSources.repoRef, primary.ref ?? ""),
         ),
       )
       .limit(1);

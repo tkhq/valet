@@ -51,7 +51,7 @@ export function applySandboxResourceOverrides(
 export async function resolveRepoResources(
   db: AppDb | undefined,
   orgId: string,
-  primary: Pick<RepoBinding, "host" | "fullName"> | undefined,
+  primary: Pick<RepoBinding, "host" | "fullName" | "ref"> | undefined,
   readYaml: () => Promise<RepoPrebuildFlags>,
 ): Promise<ResolvedRepoPrebuildFlags> {
   if (!primary) return { docker: false, outcome: "absent", resources: {} };
@@ -67,6 +67,7 @@ export async function resolveRepoResources(
           eq(imageSources.orgId, orgId),
           inArray(imageSources.repoHost, hosts),
           eq(imageSources.repoFullName, primary.fullName),
+          eq(imageSources.repoRef, primary.ref ?? ""),
         ))
         .limit(hosts.length);
       // The unique repo index permits one row per host spelling. An exact

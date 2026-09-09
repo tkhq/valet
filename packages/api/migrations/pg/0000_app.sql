@@ -919,6 +919,7 @@ CREATE TABLE "image_sources" (
 	"profile" text CHECK (profile IS NULL OR profile IN ('headless','full')),
 	"repo_host" text,
 	"repo_full_name" text,
+	"repo_ref" text NOT NULL DEFAULT '',
 	"clone_url" text,
 	"sandbox_resources" jsonb,
 	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
@@ -928,7 +929,7 @@ CREATE TABLE "image_sources" (
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "image_sources_org_repo" ON "image_sources" ("org_id","repo_host","repo_full_name") WHERE kind = 'repo';
+CREATE UNIQUE INDEX "image_sources_org_repo_ref" ON "image_sources" ("org_id","repo_host","repo_full_name","repo_ref") WHERE kind = 'repo';
 --> statement-breakpoint
 CREATE UNIQUE INDEX "image_sources_org_base_profile" ON "image_sources" ("org_id","profile") WHERE kind = 'base';
 --> statement-breakpoint

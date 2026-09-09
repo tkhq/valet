@@ -1309,10 +1309,10 @@ export const api = {
   // the caller has access to — only `github` today.
   getRepos: () => request<GetReposResponse>("GET", "/repos"),
 
-  getPrebuildForRepo: (fullName: string) =>
+  getPrebuildForRepo: (fullName: string, ref = "") =>
     request<GetPrebuildForRepoResponse>(
       "GET",
-      `/sources/for-repo?fullName=${encodeURIComponent(fullName)}`,
+      `/sources/for-repo?fullName=${encodeURIComponent(fullName)}&ref=${encodeURIComponent(ref)}`,
     ),
 
   // sandbox image sources (sandbox-reconciliation plan, Task 18): org-admin

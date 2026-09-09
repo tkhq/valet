@@ -7,6 +7,7 @@
  * preserved; new tests cover: base one-per-org 409, kind='repo' POST 400,
  * newline setup command 400, PATCH kind-scoped field 400s.
  */
+import { eq } from "drizzle-orm";
 import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -723,6 +724,23 @@ describe("GET /api/org/sources/:id/bakes", () => {
 // ── GET /api/sources/for-repo ─────────────────────────────────────────────────
 
 describe("GET /api/sources/for-repo", () => {
+  it("scopes the badge to the requested host and ref", async () => {
+    api = await bootTestApi();
+    const { imageSources, bakes } = await import("../schema/index.js");
+    const source = await seedRepoSource(api);
+    await api.providers.db.update(imageSources).set({ repoRef: "dev-v2" }).where(eq(imageSources.id, source.id));
+    await api.providers.db.insert(bakes).values({
+      id: "ref-bake", sourceId: source.id, identityHash: "identity", commitSha: "dev-sha",
+      imageRef: "dev-image", status: "pushed", finishedAt: 1, createdAt: 1,
+    });
+    for (const query of ["", "&ref=main", "&ref=dev-v2&host=gitlab"]) {
+      const response = await fetch(`${api.baseUrl}/api/sources/for-repo?fullName=acme/widgets${query}`, { headers: HEADERS });
+      expect(await response.json()).toEqual({ prebuild: null });
+    }
+    const response = await fetch(`${api.baseUrl}/api/sources/for-repo?fullName=acme/widgets&ref=dev-v2`, { headers: HEADERS });
+    expect(await response.json()).toEqual({ prebuild: { commitSha: "dev-sha", finishedAt: 1 } });
+  });
+
   it("400s when fullName is missing", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/sources/for-repo`, { headers: HEADERS });

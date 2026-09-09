@@ -289,6 +289,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         host: binding.host ?? "github",
         fullName: binding.fullName,
         cloneUrl: binding.cloneUrl,
+        ref: binding.ref,
       });
     }
 

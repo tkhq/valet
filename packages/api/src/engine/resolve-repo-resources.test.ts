@@ -76,6 +76,17 @@ describe("resolveRepoResources", () => {
     });
   }
 
+  it("does not apply saved resources from another ref", async () => {
+    await seed();
+    await harness.appDb.insert(imageSources).values({
+      id: "ref-dev", orgId: "org-a", kind: "repo", name: "widgets@dev-v2", repoHost: "github",
+      repoFullName: primary.fullName, repoRef: "dev-v2", sandboxResources: { cpu: 6 }, createdAt: 1, updatedAt: 1,
+    });
+    const resolved = await resolveRepoResources(harness.appDb, "org-a", { ...primary, ref: "dev-v2" },
+      async () => ({ docker: false, outcome: "absent" }));
+    expect(resolved.resources).toEqual({ cpu: 6 });
+  });
+
   it("merges YAML per field and uses saved defaults for absent YAML", async () => {
     await seed();
     const merged = await resolveRepoResources(harness.appDb, "org-a", primary, async () => ({

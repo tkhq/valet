@@ -171,7 +171,7 @@ async function seedBake(
 async function seedLiveSession(
   db: AppDb,
   repoFullName: string,
-  overrides: { status?: "active" | "hibernated" | "archived" | "deleted"; host?: string } = {},
+  overrides: { status?: "active" | "hibernated" | "archived" | "deleted"; host?: string; ref?: string } = {},
 ): Promise<void> {
   const sessionId = `s_${Math.random().toString(36).slice(2)}`;
   await db.insert(agentSessions).values({
@@ -191,7 +191,7 @@ async function seedLiveSession(
     host: overrides.host ?? "github",
     fullName: repoFullName,
     cloneUrl: "https://github.com/acme/widgets.git",
-    ref: null,
+    ref: overrides.ref ?? null,
     auth: "auto",
     position: 0,
     targetDir: null,
@@ -318,6 +318,7 @@ describe("SourceService", () => {
           setupCommands: null,
           repoHost: null,
           repoFullName: null,
+        repoRef: "",
           cloneUrl: null,
           schedule: "off",
           enabled: true,
@@ -345,6 +346,7 @@ describe("SourceService", () => {
         profile: "headless",
         repoHost: null,
         repoFullName: null,
+        repoRef: "",
         cloneUrl: null,
         schedule: "nightly",
         enabled: true,
@@ -376,6 +378,7 @@ describe("SourceService", () => {
         profile: "full",
         repoHost: null,
         repoFullName: null,
+        repoRef: "",
         cloneUrl: null,
         schedule: "nightly",
         enabled: true,
@@ -675,6 +678,7 @@ describe("SourceService", () => {
         setupCommands: null,
         repoHost: null,
         repoFullName: null,
+        repoRef: "",
         cloneUrl: null,
         schedule: "off",
         enabled: true,
@@ -804,6 +808,20 @@ describe("SourceService", () => {
   });
 
   describe("decay (spec decision 13)", () => {
+    it("a live binding on another ref does not prevent decay", async () => {
+      const srcId = await seedRepoSource(db, { repoRef: "dev-v2", lastBoundAt: NOW - 40 * 24 * 60 * 60 * 1000 });
+      await seedLiveSession(db, "acme/widgets", { ref: "main" });
+      await service.runSchedulerPass();
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, srcId)))[0].enabled).toBe(false);
+    });
+
+    it("a live binding on the same explicit ref prevents decay", async () => {
+      const srcId = await seedRepoSource(db, { repoRef: "dev-v2", lastBoundAt: NOW - 40 * 24 * 60 * 60 * 1000 });
+      await seedLiveSession(db, "acme/widgets", { ref: "dev-v2" });
+      await service.runSchedulerPass();
+      expect((await db.select().from(imageSources).where(eq(imageSources.id, srcId)))[0].enabled).toBe(true);
+    });
+
     it("a live binding blocks decay even past 30 days", async () => {
       const srcId = await seedRepoSource(db, { lastBoundAt: NOW - 40 * 24 * 60 * 60 * 1000 });
       await seedLiveSession(db, "acme/widgets", { status: "hibernated" });
@@ -845,6 +863,92 @@ describe("SourceService", () => {
       await service.ensureRepoSource(orgId, repo);
       expect(await db.select().from(imageSources)).toHaveLength(0);
       expect(builder.specs).toHaveLength(0);
+    });
+
+    it("bakes the bound ref's recipe instead of the default branch", async () => {
+      await fixture.close();
+      fixture = startGithubFixture({
+        getCommit: (_owner, _repo, ref) => ({ body: { sha: ref === "dev-v2" ? "dev-sha" : "main-sha" } }),
+        getContents: (_owner, _repo, path, ref) => {
+          if (path === ".valet/prebuild.yaml" && ref === "dev-sha") {
+            return { body: { type: "file", encoding: "base64", content: b64('skipDetect: true\nsetup:\n  - corepack prepare pnpm@9.12.3 --activate\n') } };
+          }
+          if (path === "pnpm-lock.yaml") return { body: { type: "file", encoding: "base64", content: b64("lockfileVersion: 9") } };
+          return { status: 404, body: { message: "Not Found" } };
+        },
+      });
+      service = makeService();
+      const binding = { ...repo, ref: "dev-v2" };
+      await service.ensureRepoSource(orgId, binding);
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0]).toMatchObject({
+        commitSha: "dev-sha", recipe: [], setup: ["corepack prepare pnpm@9.12.3 --activate"],
+      });
+      expect(await db.select().from(bakes)).toMatchObject([{
+        commitSha: "dev-sha", recipe: { recipe: [], setup: ["corepack prepare pnpm@9.12.3 --activate"] },
+      }]);
+      expect(fixture.calls.filter((call) => call.path.endsWith("/commits/main"))).toHaveLength(0);
+    });
+
+    it("keeps separate sources and builds for two refs of the same repository", async () => {
+      const defaultBinding = { ...repo };
+      const branchBinding = { ...repo, ref: "dev-v2" };
+      await service.ensureRepoSource(orgId, defaultBinding);
+      await service.ensureRepoSource(orgId, branchBinding);
+      expect(await db.select().from(imageSources).where(eq(imageSources.kind, "repo"))).toHaveLength(2);
+      expect(builder.specs).toHaveLength(2);
+      expect(new Set(builder.specs.map((spec) => spec.imageRef)).size).toBe(2);
+    });
+
+    it("nightly scheduling follows the stored ref when its head advances", async () => {
+      let devSha = "dev-sha-1";
+      await fixture.close();
+      fixture = startGithubFixture({ getCommit: (_owner, _repo, ref) => ({ body: { sha: ref === "dev-v2" ? devSha : "main-sha" } }) });
+      service = makeService();
+      const binding = { ...repo, ref: "dev-v2" };
+      await service.ensureRepoSource(orgId, binding);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+      devSha = "dev-sha-2";
+      await service.runSchedulerPass();
+      expect(builder.specs.map((spec) => spec.commitSha)).toEqual(["dev-sha-1", "dev-sha-2"]);
+      expect(fixture.calls.some((call) => call.path.endsWith("/commits/main"))).toBe(false);
+    });
+
+    it("keeps branch base layers separate and uses each ref in the push cascade", async () => {
+      await fixture.close();
+      fixture = startGithubFixture({
+        getCommit: (_owner, _repo, ref) => ({ body: { sha: `${ref}-sha` } }),
+        getContents: (_owner, _repo, path, ref) => path === ".valet/prebuild.yaml"
+          ? { body: { type: "file", encoding: "base64", content: b64(`skipDetect: true\nbaseSetup:\n  - echo ${ref}\n`) } }
+          : { status: 404, body: { message: "Not Found" } },
+      });
+      service = makeService();
+      for (const ref of ["dev-v2", "release"]) {
+        const binding = { ...repo, ref };
+        await service.ensureRepoSource(orgId, binding);
+      }
+      const sources = await db.select().from(imageSources).where(eq(imageSources.kind, "repo"));
+      expect(sources).toHaveLength(2);
+      expect(new Set(sources.map((source) => source.parentId)).size).toBe(2);
+      expect(builder.specs.map((spec) => spec.setup)).toEqual([["echo dev-v2-sha"], ["echo release-sha"]]);
+      for (const buildId of [...builder.buildIds]) builder.setState(buildId, { state: "pushed" });
+      await service.syncActiveBuilds();
+      expect(builder.specs.filter((spec) => spec.kind === "repo").map((spec) => spec.commitSha).sort())
+        .toEqual(["dev-v2-sha", "release-sha"]);
+      expect(fixture.calls.some((call) => call.path.endsWith("/commits/main"))).toBe(false);
+    });
+
+    it("does not fall back to the default branch when an explicit ref is missing", async () => {
+      await fixture.close();
+      fixture = startGithubFixture({ getCommit: () => ({ status: 404, body: { message: "Not Found" } }) });
+      service = makeService();
+      const binding = { ...repo, ref: "missing/branch" };
+      await service.ensureRepoSource(orgId, binding);
+      expect(builder.specs).toHaveLength(0);
+      expect(await db.select().from(bakes)).toHaveLength(0);
+      expect(fixture.calls.some((call) => call.path.includes("/commits/missing/branch") || call.path.includes("/commits/missing%2Fbranch"))).toBe(true);
+      expect(fixture.calls.some((call) => call.path.endsWith("/commits/main"))).toBe(false);
     });
 
     it("happy path: upserts the source and queues the first bake", async () => {
@@ -933,12 +1037,15 @@ describe("SourceService", () => {
     it("bakes a public repository without an org GitHub credential", async () => {
       // A different org with no credential seeded.
       await db.insert(orgs).values({ id: "org-nocred", name: "NoCred", createdAt: NOW, allowAnonymousImageBakes: true });
-      await service.ensureRepoSource("org-nocred", repo);
+      await service.ensureRepoSource("org-nocred", { ...repo, ref: "dev-v2" });
       const sources = await db.select().from(imageSources).where(eq(imageSources.orgId, "org-nocred"));
       expect(sources).toHaveLength(1);
+      expect(sources[0].repoRef).toBe("dev-v2");
       expect(builder.specs).toHaveLength(1);
       expect(builder.specs[0].gitToken).toBeUndefined();
       expect(builder.specs[0].commitSha).toBeTruthy();
+      expect(fixture.calls.some((call) => call.path === "/repos/acme/widgets/commits/dev-v2")).toBe(true);
+      expect(fixture.calls.some((call) => call.path === "/repos/acme/widgets/commits/main")).toBe(false);
       expect(fixture.calls.every((call) => !call.authHeader)).toBe(true);
     });
 

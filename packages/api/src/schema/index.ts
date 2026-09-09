@@ -1722,7 +1722,7 @@ export const githubInstallations = pgTable(
 //   kind='base': the org's single base image layer (partial unique index).
 //   kind='repo': a repo-tied source whose nightly/manual bakes produce the
 //     prebuilt sandbox image (replaces prebuild_configs). Partial unique
-//     index on (org_id, repo_host, repo_full_name) for kind='repo' only.
+//     index on (org_id, repo_host, repo_full_name, repo_ref) for kind='repo'.
 //   `parent_id` chains sources (e.g. repo source → base source). Nullable;
 //   Task 15 owns real parent-first resolution.
 //
@@ -1752,6 +1752,8 @@ export const imageSources = pgTable(
     // kind='repo' fields
     repoHost: text("repo_host"),
     repoFullName: text("repo_full_name"),
+    // Empty means the default branch. Explicit refs remain case-sensitive.
+    repoRef: text("repo_ref").notNull().default(""),
     cloneUrl: text("clone_url"),
     sandboxResources: jsonb("sandbox_resources").$type<PrebuildResources>(),
     // Shared scheduling/state

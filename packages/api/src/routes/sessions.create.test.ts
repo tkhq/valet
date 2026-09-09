@@ -582,7 +582,7 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     const res = await fetch(`${api.baseUrl}/api/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspace, repo: REPO }),
+      body: JSON.stringify({ workspace, repo: { ...REPO, ref: "dev-v2" } }),
     });
     const elapsed = Date.now() - t0;
     expect(res.status).toBe(201);
@@ -610,7 +610,7 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     const res = await fetch(`${api.baseUrl}/api/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspace, repo: REPO }),
+      body: JSON.stringify({ workspace, repo: { ...REPO, ref: "dev-v2" } }),
     });
     expect(res.status).toBe(201);
 
@@ -633,6 +633,7 @@ describe("POST /api/sessions: zero-config repo sources", () => {
       .where(eq(imageSources.repoFullName, "acme/widgets"));
     expect(sources[0]?.kind).toBe("repo");
     expect(sources[0]?.enabled).toBe(true);
+    expect(sources[0]?.repoRef).toBe("dev-v2");
     sourceId = sources[0]!.id;
 
     // Poll until bakes exist for the source.
@@ -666,7 +667,7 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-nocred-"));
     const res = await fetch(`${api.baseUrl}/api/sessions`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspace, repo: REPO }),
+      body: JSON.stringify({ workspace, repo: { ...REPO, ref: "dev-v2" } }),
     });
     expect(res.status).toBe(201);
     expect(ensure).not.toHaveBeenCalled();
@@ -691,7 +692,7 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     const res = await fetch(`${api.baseUrl}/api/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspace, repo: REPO }),
+      body: JSON.stringify({ workspace, repo: { ...REPO, ref: "dev-v2" } }),
     });
     expect(res.status).toBe(201);
 

@@ -40,8 +40,8 @@ let reposData: GetReposResponse = { repos: [], connected: false, installed: fals
 const prebuildByRepo = new Map<string, GetPrebuildForRepoResponse>();
 vi.mock("~/api/repos", () => ({
   useRepos: () => ({ data: reposData, isLoading: false, error: null }),
-  useRepoPrebuild: (fullName: string | undefined) => ({
-    data: fullName ? prebuildByRepo.get(fullName) : undefined,
+  useRepoPrebuild: (fullName: string | undefined, ref = "") => ({
+    data: fullName ? prebuildByRepo.get(`${fullName}@${ref}`) : undefined,
     isLoading: false,
     error: null,
   }),
@@ -320,13 +320,29 @@ describe("NewSessionDialog", () => {
       installed: true,
     };
     const finishedAt = Date.now() - 5 * 60_000;
-    prebuildByRepo.set("acme/api", { prebuild: { commitSha: "abcdef1234567", finishedAt } });
+    prebuildByRepo.set("acme/api@main", { prebuild: { commitSha: "abcdef1234567", finishedAt } });
     render(<NewSessionDialog open onOpenChange={() => {}} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("combobox", { name: /search repositories/i }));
     await user.click(screen.getByRole("option", { name: /acme\/api/i }));
 
     expect(screen.getByText("prebuilt · api@abcdef1 · built 5m ago")).toBeTruthy();
+  });
+
+  it("changes the prebuilt badge when the bound ref changes", async () => {
+    reposData = { repos: [repo("acme/api")], connected: true, installed: false };
+    prebuildByRepo.set("acme/api@main", { prebuild: { commitSha: "mainsha123", finishedAt: Date.now() } });
+    prebuildByRepo.set("acme/api@dev-v2", { prebuild: { commitSha: "devsha123", finishedAt: Date.now() } });
+    render(<NewSessionDialog open onOpenChange={() => {}} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: /search repositories/i }));
+    await user.click(screen.getByRole("option", { name: /acme\/api/i }));
+    expect(screen.getByText(/prebuilt · api@mainsha/)).toBeTruthy();
+    const branch = screen.getByLabelText("Branch");
+    await user.clear(branch);
+    await user.type(branch, "dev-v2");
+    expect(screen.getByText(/prebuilt · api@devsha1/)).toBeTruthy();
+    expect(screen.queryByText(/prebuilt · api@mainsha/)).toBeNull();
   });
 
   it("no prebuilt badge when the repo has no ready prebuild", async () => {

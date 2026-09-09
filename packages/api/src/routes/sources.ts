@@ -139,6 +139,7 @@ sourcesRouter.post("/", async (c) => {
       profile: null,
       repoHost: null,
       repoFullName: null,
+      repoRef: "",
       cloneUrl: null,
       schedule: "nightly" as const,
       enabled: true,
@@ -182,6 +183,7 @@ sourcesRouter.post("/", async (c) => {
       profile: body.profile as "headless" | "full",
       repoHost: null,
       repoFullName: null,
+      repoRef: "",
       cloneUrl: null,
       schedule: "nightly" as const,
       enabled: true,
@@ -401,6 +403,8 @@ sourcesPublicRouter.get("/for-repo", async (c) => {
     return c.json({ error: "fullName is required" }, 400);
   }
 
+  const host = c.req.query("host") ?? "github";
+  const ref = c.req.query("ref") ?? "";
   const { db } = c.var.providers;
   const sourceRows = await db
     .select({ id: imageSources.id })
@@ -410,6 +414,8 @@ sourcesPublicRouter.get("/for-repo", async (c) => {
         eq(imageSources.orgId, c.var.user.orgId),
         eq(imageSources.kind, "repo"),
         eq(imageSources.repoFullName, fullName),
+        eq(imageSources.repoHost, host),
+        eq(imageSources.repoRef, ref),
       ),
     )
     .limit(1);

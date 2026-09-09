@@ -31,7 +31,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { sql, and, desc, eq, inArray } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
@@ -77,8 +77,8 @@ export class PrebuildUnavailableError extends Error {
 
 /** Name marker for a repo-declared base layer's synthetic source (prebuild
  * `baseSetup` — see `ensureRepoBaseLayer`). */
-export function repoBaseSourceName(repoFullName: string): string {
-  return `repo-base:${repoFullName}`;
+export function repoBaseSourceName(repoFullName: string, ref = "", host = "github"): string {
+  return ref ? `repo-base:${host}:${repoFullName}@${encodeURIComponent(ref)}` : `repo-base:${repoFullName}`;
 }
 
 export class AnonymousImageBakesDisabledError extends Error {
@@ -979,7 +979,8 @@ export class SourceService {
    * re-running on every commit's rebake.
    *
    * The synthetic source is a plain `kind='base'` row named
-   * `repo-base:<fullName>` with `profile: null` — NULL keeps it clear of the
+   * `repo-base:<fullName>` for the default ref. Explicit refs include host
+   * and ref in the name. Each row has `profile: null` — NULL keeps it clear of the
    * one-base-per-(org,profile) partial unique index, which belongs to the
    * org's seeded lineage bases. It parents at the org's default full base
    * (single lineage) and rides ALL the existing base machinery unchanged:
@@ -996,7 +997,7 @@ export class SourceService {
    */
   private async ensureRepoBaseLayer(source: ImageSourceRow, baseSetup: string[]): Promise<ImageSourceRow> {
     if (source.kind !== "repo") return source;
-    const name = repoBaseSourceName(source.repoFullName ?? "");
+    const name = repoBaseSourceName(source.repoFullName ?? "", source.repoRef, source.repoHost ?? "github");
     const rows = await this.db
       .select()
       .from(imageSources)
@@ -1119,8 +1120,8 @@ export class SourceService {
     const gitToken = await this.repoBakeToken(source);
 
     const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
-    const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
-    const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
+    const sha = await resolveRefSha(this.githubTokenDeps, apiToken, owner, repo, source.repoRef);
+    const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, sha);
     source = await this.ensureRepoBaseLayer(source, resolved.baseSetup);
     // Derivation invariant: never bake a repo whose base parent has no
     // consistent pushed bake — it would FROM stock while recording the
@@ -1141,12 +1142,12 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
-    const imageRef = imageRefFor(builder.backend, source.id, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
+    const imageRef = imageRefFor(builder.backend, source.id, owner, repo, sha, this.env.VALET_PREBUILD_REGISTRY);
     const now = this.now();
     const row: BakeRow = {
       id: newBakeId(this.newId),
       sourceId: source.id,
-      commitSha: head.sha,
+      commitSha: sha,
       imageRef,
       status: "queued",
       identityHash: identity,
@@ -1167,7 +1168,7 @@ export class SourceService {
       configId: source.id,
       prebuildId: row.id,
       cloneUrl: source.cloneUrl ?? "",
-      commitSha: head.sha,
+      commitSha: sha,
       baseImage,
       recipe: resolved.recipe,
       setup: resolved.setup.length > 0 ? resolved.setup : undefined,
@@ -1429,14 +1430,14 @@ export class SourceService {
         const owner = ownerOf(child.repoFullName ?? "");
         const repo = repoOf(child.repoFullName ?? "");
         const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, child.orgId, owner, repo);
-        const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
-        const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
+        const sha = await resolveRefSha(this.githubTokenDeps, apiToken, owner, repo, child.repoRef);
+        const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, sha);
         const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
         const parentIdent = await this.parentIdentity(child);
         const identity = this.identityHash(child, parentIdent, snapshot);
 
         const current = await this.currentBake(child.id);
-        if (current && current.commitSha === head.sha && current.identityHash === identity) continue;
+        if (current && current.commitSha === sha && current.identityHash === identity) continue;
         // Skip when a bake is already in flight — the scheduler tick may race
         // this cascade for the same child.
         if (await this.hasActiveBake(child.id)) continue;
@@ -1449,8 +1450,8 @@ export class SourceService {
     }
   }
 
-  /** True when a live (active/hibernated) session has `repoFullName` bound. */
-  private async hasLiveBinding(orgId: string, host: string, repoFullName: string): Promise<boolean> {
+  /** True when a live session binds the same repository and ref. */
+  private async hasLiveBinding(orgId: string, host: string, repoFullName: string, ref: string): Promise<boolean> {
     const rows = await this.db
       .select({ sessionId: sessionRepos.sessionId })
       .from(sessionRepos)
@@ -1459,6 +1460,7 @@ export class SourceService {
         and(
           eq(sessionRepos.host, host),
           eq(sessionRepos.fullName, repoFullName),
+          sql`coalesce(${sessionRepos.ref}, '') = ${ref}`,
           eq(agentSessions.orgId, orgId),
           inArray(agentSessions.status, ["active", "hibernated"]),
         ),
@@ -1531,7 +1533,7 @@ export class SourceService {
     const repoFullName = source.repoFullName ?? "";
 
     // Decay (spec decision 13): no live binding AND untouched for 30d.
-    const live = await this.hasLiveBinding(source.orgId, repoHost, repoFullName);
+    const live = await this.hasLiveBinding(source.orgId, repoHost, repoFullName, source.repoRef);
     if (!live) {
       const lastBound = source.lastBoundAt ?? source.createdAt;
       if (this.now() - lastBound > DECAY_AGE_MS) {
@@ -1548,14 +1550,14 @@ export class SourceService {
     const owner = ownerOf(repoFullName);
     const repo = repoOf(repoFullName);
     const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
-    const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
-    const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
+    const sha = await resolveRefSha(this.githubTokenDeps, apiToken, owner, repo, source.repoRef);
+    const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, sha);
     const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
     const current = await this.currentBake(source.id);
-    if (current && current.commitSha === head.sha && current.identityHash === identity) {
+    if (current && current.commitSha === sha && current.identityHash === identity) {
       console.log(`prebuild scheduler: skip ${source.name}: up to date`);
       return;
     }
@@ -1593,7 +1595,7 @@ export class SourceService {
    */
   async ensureRepoSource(
     orgId: string,
-    repo: { host: string; fullName: string; cloneUrl: string },
+    repo: { host: string; fullName: string; cloneUrl: string; ref?: string },
   ): Promise<void> {
     try {
       const result = await checkRepoExistence(this.githubTokenDeps, {
@@ -1614,6 +1616,7 @@ export class SourceService {
             eq(imageSources.kind, "repo"),
             eq(imageSources.repoHost, repo.host),
             eq(imageSources.repoFullName, repo.fullName),
+            eq(imageSources.repoRef, repo.ref ?? ""),
           ),
         )
         .limit(1);
@@ -1663,12 +1666,13 @@ export class SourceService {
         orgId,
         kind: "repo",
         parentId,
-        name: repo.fullName,
+        name: repo.ref ? `${repo.fullName}@${repo.ref}` : repo.fullName,
         externalRef: null,
         pullSecretName: null,
         setupCommands: null,
         repoHost: repo.host,
         repoFullName: repo.fullName,
+        repoRef: repo.ref ?? "",
         cloneUrl: repo.cloneUrl,
         schedule: "nightly",
         enabled: true,

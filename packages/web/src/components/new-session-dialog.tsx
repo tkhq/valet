@@ -216,7 +216,7 @@ function RepoRowView({
   // authenticating the clone. Otherwise the server's "auto" pick is the
   // only usable path anyway.
   const showAuthSelect = !!row.installed && connected;
-  const prebuildQ = useRepoPrebuild(row.fullName);
+  const prebuildQ = useRepoPrebuild(row.fullName, row.ref);
   const prebuild = prebuildQ.data?.prebuild;
 
   return (

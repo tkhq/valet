@@ -22,7 +22,7 @@ import { qkSettings } from "./settings";
 
 export const qkRepos = {
   list: () => ["repos"] as const,
-  prebuildForRepo: (fullName: string) => ["repos", "prebuild", fullName] as const,
+  prebuildForRepo: (fullName: string, ref = "") => ["repos", "prebuild", fullName, ref] as const,
   githubOrgStatus: () => ["repos", "githubOrgStatus"] as const,
 };
 
@@ -72,10 +72,10 @@ export function useConnectGithub() {
 /** `GET /api/sources/for-repo` — member-accessible (sandbox-reconciliation
  * plan, Task 17). Powers the new-session dialog's "prebuilt" badge; `enabled`
  * gates it so it only fires once a repo is actually selected. */
-export function useRepoPrebuild(fullName: string | undefined) {
+export function useRepoPrebuild(fullName: string | undefined, ref = "") {
   return useQuery<GetPrebuildForRepoResponse>({
-    queryKey: qkRepos.prebuildForRepo(fullName ?? ""),
-    queryFn: () => api.getPrebuildForRepo(fullName as string),
+    queryKey: qkRepos.prebuildForRepo(fullName ?? "", ref),
+    queryFn: () => api.getPrebuildForRepo(fullName as string, ref),
     enabled: fullName !== undefined && fullName.trim() !== "",
     staleTime: 60_000,
   });

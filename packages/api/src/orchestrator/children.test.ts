@@ -486,7 +486,7 @@ describe("buildChildSpawner", () => {
         .select()
         .from(imageSources)
         .where(and(eq(imageSources.orgId, "local-org"), eq(imageSources.repoFullName, "tkhq/sdk")));
-      return sources.length === 1;
+      return sources.length === 1 && sources[0].repoRef === "main";
     });
   });
 
