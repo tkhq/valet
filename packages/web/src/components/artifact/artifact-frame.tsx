@@ -78,8 +78,10 @@ interface MermaidRequest {
 export class ArtifactMermaidCoordinator {
   private active: MermaidRequest | undefined;
   private readonly pending = new Map<string, MermaidRequest>();
+  private readonly completed = new Map<string, MermaidRequest>();
   private nextRenderId = 0;
   private generation = 0;
+  private disposed = false;
 
   constructor(
     private readonly render: MermaidRender,
@@ -87,8 +89,13 @@ export class ArtifactMermaidCoordinator {
   ) {}
 
   request(blockId: string, source: string, theme: "default" | "dark"): void {
+    if (this.disposed) return;
     const request = { blockId, source, theme };
-    if (this.sameRequest(this.active, request) || this.sameRequest(this.pending.get(blockId), request)) {
+    if (
+      this.sameRequest(this.active, request) ||
+      this.sameRequest(this.pending.get(blockId), request) ||
+      this.sameRequest(this.completed.get(blockId), request)
+    ) {
       return;
     }
     if (!this.pending.has(blockId) && this.pending.size === MAX_PENDING_MERMAID_REQUESTS) {
@@ -100,7 +107,14 @@ export class ArtifactMermaidCoordinator {
 
   clear(): void {
     this.generation += 1;
+    this.active = undefined;
     this.pending.clear();
+    this.completed.clear();
+  }
+
+  dispose(): void {
+    this.clear();
+    this.disposed = true;
   }
 
   private sameRequest(current: MermaidRequest | undefined, request: MermaidRequest): boolean {
@@ -108,7 +122,7 @@ export class ArtifactMermaidCoordinator {
   }
 
   private startNext(): void {
-    if (this.active || this.pending.size === 0) return;
+    if (this.disposed || this.active || this.pending.size === 0) return;
     const next = this.pending.entries().next().value;
     if (!next) return;
     const [blockId, request] = next;
@@ -124,8 +138,13 @@ export class ArtifactMermaidCoordinator {
   }
 
   private finish(request: MermaidRequest, generation: number, result: MermaidResult): void {
-    this.active = undefined;
-    if (generation === this.generation && !this.pending.has(request.blockId)) {
+    if (this.active === request) this.active = undefined;
+    if (
+      !this.disposed &&
+      generation === this.generation &&
+      !this.pending.has(request.blockId)
+    ) {
+      this.completed.set(request.blockId, request);
       this.postResult(result);
     }
     this.startNext();
@@ -195,6 +214,8 @@ export function ArtifactFrame({
     readyRef.current = false;
     mermaidCoordinator.clear();
   }, [srcDoc]);
+
+  useEffect(() => () => mermaidCoordinator.dispose(), [mermaidCoordinator]);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {

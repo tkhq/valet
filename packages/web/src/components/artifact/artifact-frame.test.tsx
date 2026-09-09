@@ -104,6 +104,67 @@ describe("ArtifactMermaidCoordinator", () => {
     expect(postResult).toHaveBeenCalledTimes(1);
   });
 
+  it("suppresses a request that already completed", async () => {
+    const render = vi
+      .fn<(source: string, id: string, theme: "default" | "dark") => Promise<string>>()
+      .mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg" />');
+    const postResult = vi.fn();
+    const coordinator = new ArtifactMermaidCoordinator(render, postResult);
+
+    coordinator.request("mermaid-0", "same source", "default");
+    await waitFor(() => expect(postResult).toHaveBeenCalledTimes(1));
+
+    coordinator.request("mermaid-0", "same source", "default");
+    expect(render).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts matching requests after a frame reload and drops stale results", async () => {
+    const resolvers: Array<(svg: string) => void> = [];
+    const render = vi
+      .fn<(source: string, id: string, theme: "default" | "dark") => Promise<string>>()
+      .mockImplementation(() => new Promise<string>((resolve) => { resolvers.push(resolve); }));
+    const postResult = vi.fn();
+    const coordinator = new ArtifactMermaidCoordinator(render, postResult);
+
+    coordinator.request("mermaid-0", "same source", "default");
+    coordinator.clear();
+    coordinator.request("mermaid-0", "same source", "default");
+    expect(render).toHaveBeenCalledTimes(2);
+
+    resolvers[0]?.('<svg xmlns="http://www.w3.org/2000/svg"><text>stale</text></svg>');
+    await Promise.resolve();
+    expect(postResult).not.toHaveBeenCalled();
+
+    resolvers[1]?.('<svg xmlns="http://www.w3.org/2000/svg"><text>current</text></svg>');
+    await waitFor(() => expect(postResult).toHaveBeenCalledWith(
+      expect.objectContaining({ svg: expect.stringContaining("current") }),
+    ));
+
+    coordinator.clear();
+    coordinator.request("mermaid-0", "same source", "default");
+    expect(render).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not drain pending renders after disposal", async () => {
+    let resolveFirst: (svg: string) => void = () => {};
+    const render = vi
+      .fn<(source: string, id: string, theme: "default" | "dark") => Promise<string>>()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg" />');
+    const postResult = vi.fn();
+    const coordinator = new ArtifactMermaidCoordinator(render, postResult);
+
+    coordinator.request("mermaid-0", "first", "default");
+    coordinator.request("mermaid-1", "pending", "default");
+    coordinator.dispose();
+    coordinator.request("mermaid-2", "ignored", "default");
+    resolveFirst('<svg xmlns="http://www.w3.org/2000/svg" />');
+
+    await Promise.resolve();
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(postResult).not.toHaveBeenCalled();
+  });
+
   it("does not coalesce requests from different blocks", async () => {
     let resolveFirst: (svg: string) => void = () => {};
     const render = vi
