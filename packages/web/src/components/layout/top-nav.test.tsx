@@ -178,6 +178,7 @@ describe("TopNav", () => {
       "Usage",
       "Skills",
       "Integrations",
+      "Changelog",
     ]);
   });
 

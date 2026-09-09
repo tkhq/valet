@@ -4512,6 +4512,64 @@ export interface ListEventDropsResponse {
   lastEventAt: number | null;
 }
 
+// ── REST: changelog ────────────────────────────────────────────────────
+
+export type ChangelogCategory = "feature" | "improvement" | "fix" | "security";
+
+export interface ChangelogEntry {
+  title: string;
+  description: string;
+  category: ChangelogCategory;
+  sources: { commitSha: string; pullRequest?: number };
+  links?: Array<{ label: string; url: string }>;
+  /** True when the generator had no pull-request identifier to preserve. */
+  followUp: boolean;
+}
+
+interface ChangelogCheckpointBase {
+  id: string;
+  previousSha: string | null;
+  entries: ChangelogEntry[];
+}
+
+export interface ReleasedChangelogCheckpoint extends ChangelogCheckpointBase {
+  kind: "released";
+  /** Idempotency key: `<version>@<releasedSha>`. */
+  id: string;
+  version: string;
+  releasedAt: string;
+  releasedSha: string;
+  releaseUrl?: string;
+}
+
+export interface UnreleasedChangelogCheckpoint extends ChangelogCheckpointBase {
+  kind: "unreleased";
+  /** Replaceable build key: `unreleased@<buildSha>`. */
+  id: string;
+  buildSha: string;
+  builtAt: string;
+  buildUrl?: string;
+}
+
+export type ChangelogCheckpoint = ReleasedChangelogCheckpoint | UnreleasedChangelogCheckpoint;
+
+export interface ChangelogManifest {
+  schema: "valet-changelog/v2";
+  generatedAt: string;
+  checkpoints: ChangelogCheckpoint[];
+}
+
+export interface GetChangelogResponse {
+  manifest: ChangelogManifest;
+  artifact: {
+    version: string;
+    sha: string | null;
+    checkpointId: string | null;
+    /** `unreleased` identifies a rolling build checkpoint for this SHA. */
+    status: "exact" | "unreleased" | "latest-known" | "empty";
+  };
+}
+
 // ── REST: health (single-binary CLI, portable-runtime plan) ──────────────
 //
 // `GET /api/health` — public, unauthenticated. The API currently answers

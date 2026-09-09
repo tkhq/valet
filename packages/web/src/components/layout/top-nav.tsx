@@ -5,7 +5,8 @@ import { useSidebarControls } from "./app-shell";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { useAssistants, useCreateAssistant } from "~/api/assistants";
 import { useSession } from "~/api/queries";
-import { pluginEnabledForCaller, useOrg, useTeams } from "~/api/settings";
+import { useChangelog } from "~/api/changelog";
+import { pluginEnabledForCaller, useMe, useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import {
   WorkspaceSwitcher,
@@ -13,6 +14,7 @@ import {
   type WorkspaceOption,
 } from "~/components/layout/workspace-switcher";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
 import { PresenceMark } from "~/components/assistant/presence-mark";
 import { NotificationsBell } from "./notifications-bell";
 
@@ -133,6 +135,11 @@ export function TopNav() {
   const assistantsQ = useAssistants();
   const teamsQ = useTeams();
   const orgQ = useOrg();
+  const meQ = useMe();
+  const changelogQ = useChangelog();
+  const newestCheckpoint = changelogQ.data?.manifest.checkpoints[0];
+  const seenCheckpoint = useLastSeenCheckpoint(meQ.data?.id);
+  const changelogUnread = !!meQ.data && !!newestCheckpoint && seenCheckpoint !== newestCheckpoint.id;
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
   const options = workspaceOptions(assistantsQ.data?.assistants, teams);
   // The active workspace is no longer derived here from `?assistant=`. That
@@ -263,6 +270,14 @@ export function TopNav() {
         <NavLink to="/usage">Usage</NavLink>
         <NavLink to="/skills">Skills</NavLink>
         <NavLink to="/integrations">Integrations</NavLink>
+        <NavLink to="/changelog">
+          <span className="inline-flex items-center gap-1.5">
+            Changelog
+            {changelogUnread && (
+              <span className="h-1.5 w-1.5 rounded-full bg-accent-500" aria-label="New releases" />
+            )}
+          </span>
+        </NavLink>
       </nav>
 
       <div className="shrink-0">

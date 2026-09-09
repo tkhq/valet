@@ -62,6 +62,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # pnpm version comes from package.json "packageManager".
       - uses: pnpm/action-setup@v4
@@ -77,6 +79,29 @@ jobs:
           bun-version: 1.2.17
 
       - run: pnpm install --frozen-lockfile
+
+      - name: Generate changelog artifact
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/dev-v2'
+        run: |
+          set -euo pipefail
+          common=(
+            --backfill-tags 'chart/valet-v*'
+            --backfill-tags 'v*'
+            --artifact-sha "$GITHUB_SHA"
+            --metadata packages/api/src/changelog/release.json
+          )
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            node packages/api/scripts/generate-changelog.mjs \
+              "${common[@]}" \
+              --artifact-version "${GITHUB_REF_NAME#v}"
+          else
+            node packages/api/scripts/generate-changelog.mjs \
+              "${common[@]}" \
+              --unreleased-sha "$GITHUB_SHA" \
+              --built-at "$(git show -s --format=%cI "$GITHUB_SHA")" \
+              --build-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              --artifact-version Unreleased
+          fi
 
       # registry.gen.ts is committed, but regenerate so a tag always reflects
       # the current plugin set.

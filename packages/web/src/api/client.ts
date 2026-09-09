@@ -53,6 +53,7 @@ import type {
   DeletePolicyOverrideResponse,
   EnsureOrchestratorResponse,
   GetArtifactResponse,
+  GetChangelogResponse,
   GetGithubAppResponse,
   GetGithubOrgStatusResponse,
   GetMemoryTreeResponse,
@@ -504,6 +505,9 @@ export interface WorkflowRunFilter extends WorkflowRunPage {
 export const api = {
   // auth
   getAuthConfig: () => fetchAuthConfig(),
+
+  // release artifact
+  getChangelog: () => request<GetChangelogResponse>("GET", "/changelog"),
 
   // sessions
   /** Unscoped lists the caller's own sessions plus every team's they can

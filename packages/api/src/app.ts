@@ -35,6 +35,7 @@ import { securityRouter } from "./routes/security.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { assistantsRouter } from "./routes/assistants.js";
 import { notificationsRouter } from "./routes/notifications.js";
+import { changelogRouter } from "./routes/changelog.js";
 import { workflowPreviewRouter } from "./routes/workflow-preview.js";
 import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowsRouter } from "./routes/workflows.js";
@@ -319,6 +320,7 @@ export function createApp(
   app.route("/api", profilePicturesRouter);
   app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);
+  app.route("/api/changelog", changelogRouter);
   // Trigger routes first: workflowsRouter's `GET /:id` would otherwise
   // swallow `/triggers` and `/runs` as workflow ids.
   app.route("/api/workflows", workflowTriggersRouter);
