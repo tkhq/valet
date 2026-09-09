@@ -12,3 +12,8 @@ export function resolveGithubApiUrl(env: NodeJS.ProcessEnv): string {
 export function resolveGithubUrl(env: NodeJS.ProcessEnv): string {
   return env.GITHUB_URL || "https://github.com";
 }
+
+/** Builds the account-selection URL for a GitHub App installation. */
+export function githubAppInstallUrl(env: NodeJS.ProcessEnv, appSlug: string): string {
+  return `${resolveGithubUrl(env)}/apps/${appSlug}/installations/new`;
+}

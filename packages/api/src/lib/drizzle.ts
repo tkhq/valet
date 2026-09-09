@@ -170,6 +170,11 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "orgs.allow_personal_installations column",
+    probe: { kind: "column", table: "orgs", column: "allow_personal_installations" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_personal_installations" boolean NOT NULL DEFAULT true',
+  },
+  {
     describe: "image_sources.sandbox_resources column",
     probe: { kind: "column", table: "image_sources", column: "sandbox_resources" },
     sql: 'ALTER TABLE "image_sources" ADD COLUMN IF NOT EXISTS "sandbox_resources" jsonb',

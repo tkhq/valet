@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { credentials, githubInstallations } from "../schema/index.js";
+import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import type {
   GetGithubOrgStatusResponse,
@@ -118,6 +118,7 @@ describe("GET /api/me/github/org-status", () => {
       configured: true,
       installationCount: 0,
       suspendedCount: 0,
+      personalInstallUrl: `${fixture?.url}/apps/fixture-app/installations/new`,
     });
   });
 
@@ -169,18 +170,35 @@ describe("GET /api/me/github/org-status", () => {
     expect(adminRead.status).toBe(403);
   });
 
-  it("carries counts only — no app id, slug, install url or account login", async () => {
+  it("gives members a personal install URL without app details", async () => {
     api = await bootTestApi();
     useFixture();
     await configureOrgApp(api.baseUrl);
 
     const res = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });
     const body: unknown = await res.json();
-    expect(Object.keys(body as Record<string, unknown>).sort()).toEqual([
-      "configured",
-      "installationCount",
-      "suspendedCount",
-    ]);
+    expect(body).toEqual({
+      configured: true,
+      installationCount: 0,
+      suspendedCount: 0,
+      personalInstallUrl: `${fixture?.url}/apps/fixture-app/installations/new`,
+    });
+  });
+
+  it("does not give members a personal install URL when the org disables it", async () => {
+    api = await bootTestApi();
+    useFixture();
+    await configureOrgApp(api.baseUrl);
+    await api.providers.db
+      .update(orgs)
+      .set({ allowPersonalInstallations: false })
+      .where(eq(orgs.id, "local-org"));
+
+    expect(await readStatus(api.baseUrl, MEMBER_HEADERS)).toEqual({
+      configured: true,
+      installationCount: 0,
+      suspendedCount: 0,
+    });
   });
 });
 

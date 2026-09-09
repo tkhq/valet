@@ -58,7 +58,7 @@ import { publicUrlFromEnv } from "../channels/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState as verifySignedState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { resolveReturnOrigin } from "./credential-connect.js";
-import { resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
+import { githubAppInstallUrl, resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import {
   buildAppConfig,
   discoverInstallations,
@@ -113,7 +113,6 @@ function toInstallationSummary(row: typeof githubInstallations.$inferSelect): Gi
 async function buildGetResponse(deps: GithubAppDeps, orgId: string): Promise<GetGithubAppResponse> {
   const loaded = await loadAppConfigWithSource(deps, orgId);
   const rows = await deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
-  const githubUrl = resolveGithubUrl(process.env);
   return {
     configured: loaded !== null,
     source: loaded?.source,
@@ -122,7 +121,7 @@ async function buildGetResponse(deps: GithubAppDeps, orgId: string): Promise<Get
           appId: loaded.config.appId,
           appSlug: loaded.config.appSlug,
           htmlUrl: loaded.config.htmlUrl,
-          installUrl: `${githubUrl}/apps/${loaded.config.appSlug}/installations/new`,
+          installUrl: githubAppInstallUrl(process.env, loaded.config.appSlug),
         }
       : undefined,
     installations: rows.map(toInstallationSummary),

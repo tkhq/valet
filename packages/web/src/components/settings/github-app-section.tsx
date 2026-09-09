@@ -10,6 +10,8 @@ import { livePollInterval } from "~/lib/use-live-query";
 import { relativeTime } from "~/lib/relative-time";
 import {
   qkSettings,
+  useOrg,
+  usePatchOrgSettings,
   useCreateGithubAppManifest,
   useDeleteGithubApp,
   useGithubApp,
@@ -64,7 +66,10 @@ export function GithubAppSection() {
   if (!githubAppQ.data) return null;
 
   return githubAppQ.data.configured ? (
-    <ConfiguredCard data={githubAppQ.data} checkedAt={githubAppQ.data.installationsCheckedAt} />
+    <ConfiguredCard
+      data={githubAppQ.data}
+      checkedAt={githubAppQ.data.installationsCheckedAt}
+    />
   ) : (
     <NotConfiguredCard webhookMode={githubAppQ.data.webhook.mode} />
   );
@@ -565,6 +570,8 @@ function ConfiguredCard({
 }) {
   const refresh = useRefreshGithubApp();
   const deleteApp = useDeleteGithubApp();
+  const orgQ = useOrg();
+  const patchSettings = usePatchOrgSettings();
   const [confirmRemove, setConfirmRemove] = useState(false);
   const app = data.app;
   const uninstalled = data.installations.length === 0;
@@ -664,6 +671,24 @@ function ConfiguredCard({
         error={deleteApp.error != null ? errorText(deleteApp.error) : undefined}
         onConfirm={() => deleteApp.mutate(undefined, { onSuccess: () => setConfirmRemove(false) })}
       />
+
+      <div className="flex items-start justify-between gap-4 border-t border-line pt-4">
+        <div className="min-w-0">
+          <label htmlFor="gh-personal-installations" className="text-sm font-medium text-ink">
+            Allow personal installations
+          </label>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted">
+            Allow members to install the GitHub App on personal accounts.
+          </p>
+        </div>
+        <Switch
+          id="gh-personal-installations"
+          checked={orgQ.data?.allowPersonalInstallations ?? true}
+          disabled={patchSettings.isPending}
+          onCheckedChange={(allowPersonalInstallations) => patchSettings.mutate({ allowPersonalInstallations })}
+          aria-label="Allow personal installations"
+        />
+      </div>
 
       <div className="space-y-2">
         <div className="flex flex-wrap items-baseline justify-between gap-2">

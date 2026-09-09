@@ -7,6 +7,7 @@ CREATE TABLE "orgs" (
 	"bare_skill_commands" boolean NOT NULL DEFAULT false,
 	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
 	"allow_anonymous_image_bakes" boolean NOT NULL DEFAULT false,
+	"allow_personal_installations" boolean NOT NULL DEFAULT true,
 	"model_tiers" jsonb,
 	"approved_models" jsonb,
 	"reasoning_settings" jsonb
