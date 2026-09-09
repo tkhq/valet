@@ -3,7 +3,7 @@
  * Thread tree actions (orchestrator UX redesign): the per-thread context
  * menu (archive + session-wide replace sandbox), the "Show archived"
  * toggle with unarchive, the dismiss affordance on settled children, and
- * the per-thread pending-gate dot (TKAI-258). The pure helpers behind
+ * the per-thread response-required bell (TKAI-258). The pure helpers behind
  * these live in `thread-tree.tsx` and are tested in `thread-tree.test.ts`;
  * this file checks the DOM wiring.
  */
@@ -85,7 +85,7 @@ vi.mock("~/api/orchestrator", () => ({
 }));
 
 // Applies the component's real selectors against a minimal store shape:
-// `pendingGates` drives the gate dot, `queueByThread` the children
+// `pendingGates` drives the response-required bell, `queueByThread` the children
 // live-update hook, and the absent `setPendingGates` is never called
 // because the mocked useDecisions returns no data.
 vi.mock("~/stores/stream", () => {
@@ -360,13 +360,13 @@ describe("ThreadTree — settled children", () => {
 });
 
 /**
- * Per-thread needs-you dot (TKAI-258): a gate pending on thread A must be
- * visible while the user looks at thread B. The gate card and the header
- * badge are scoped to the active thread, so the tree row is the only
+ * Per-thread response-required bell (TKAI-258): a gate pending on thread A
+ * must be visible while the user looks at thread B. The gate card and the
+ * header badge are scoped to the active thread, so the tree row is the only
  * in-session surface for it — including when a filter, a search query, or
  * the archive would otherwise hide the row.
  */
-describe("ThreadTree — pending-gate dot", () => {
+describe("ThreadTree — response-required bell", () => {
   it("marks a NON-active thread that holds a pending gate", () => {
     threads = [
       thread({ id: "thread-new", title: "Active thread", createdAt: 2_000 }),
@@ -375,14 +375,14 @@ describe("ThreadTree — pending-gate dot", () => {
     pendingGates = { g1: gate("g1", "thread-old") };
     renderTree();
 
-    const dot = screen.getByLabelText("Needs your decision");
-    expect(dot.closest("a")?.textContent).toContain("Gated thread");
+    const bell = screen.getByLabelText("Response required");
+    expect(bell.closest("a")?.textContent).toContain("Gated thread");
+    expect(bell.getAttribute("title")).toBe("Response required");
   });
 
-  it("shows no dot when no gate is pending", () => {
+  it("shows no bell when no gate is pending", () => {
     renderTree();
-    expect(screen.queryByLabelText("Needs your decision")).toBeNull();
-    expect(screen.queryByLabelText("An archived thread needs your decision")).toBeNull();
+    expect(screen.queryByLabelText("Response required")).toBeNull();
   });
 
   it("marks each gated thread, and only those", () => {
@@ -394,12 +394,12 @@ describe("ThreadTree — pending-gate dot", () => {
     pendingGates = { g1: gate("g1", "thread-a"), g2: gate("g2", "thread-b") };
     renderTree();
 
-    const dots = screen.getAllByLabelText("Needs your decision");
-    const marked = dots.map((d) => d.closest("a")?.textContent ?? "");
+    const bells = screen.getAllByLabelText("Response required");
+    const marked = bells.map((bell) => bell.closest("a")?.textContent ?? "");
     expect(marked.some((t) => t.includes("Active thread"))).toBe(true);
     expect(marked.some((t) => t.includes("Gated B"))).toBe(true);
     expect(marked.some((t) => t.includes("Quiet C"))).toBe(false);
-    expect(dots).toHaveLength(2);
+    expect(bells).toHaveLength(2);
   });
 
   it("keeps a gated thread visible when the search query would hide it", async () => {
@@ -417,21 +417,21 @@ describe("ThreadTree — pending-gate dot", () => {
     expect(screen.getByText("Newest")).toBeTruthy();
     expect(screen.getByText("Plan the launch")).toBeTruthy();
     expect(screen.queryByText("Old notes")).toBeNull();
-    expect(screen.getByLabelText("Needs your decision")).toBeTruthy();
+    expect(screen.getByLabelText("Response required")).toBeTruthy();
   });
 
-  it("surfaces a gate on an archived thread: toggle dot, then row dot", async () => {
+  it("surfaces a gate on an archived thread: toggle bell, then row bell", async () => {
     archivedThreads = [thread({ id: "thread-old", title: "Old gated" })];
     pendingGates = { g1: gate("g1", "thread-old") };
     const user = userEvent.setup();
     renderTree();
 
     // Closed section: the toggle itself carries the surface.
-    expect(screen.getByLabelText("An archived thread needs your decision")).toBeTruthy();
+    expect(screen.getByLabelText("Response required")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: /show archived/i }));
     const row = screen.getByText("Old gated").closest("li");
-    expect(row?.querySelector('[aria-label="Needs your decision"]')).toBeTruthy();
+    expect(row?.querySelector('[aria-label="Response required"]')).toBeTruthy();
   });
 });
 
