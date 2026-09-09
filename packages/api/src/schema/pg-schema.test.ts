@@ -65,6 +65,8 @@ const APP_TABLES = [
   "user_identity_links",
   "memory_files",
   "workflow_definitions",
+  "skill_invocations",
+  "skill_context_attributions",
   "workflow_templates",
   "workflow_runs",
   "workflow_checkpoints",

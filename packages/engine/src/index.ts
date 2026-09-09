@@ -265,6 +265,7 @@ export {
 } from "./compaction.js";
 export {
   entriesToAgentMessages,
+  skillInvocationsInContext,
   buildSpilledInputMarker,
   resolveModelId,
   type CompactionOutcome,

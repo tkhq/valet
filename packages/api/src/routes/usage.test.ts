@@ -6,7 +6,14 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, llmProxyRequests, teams, teamMembers } from "../schema/index.js";
+import {
+  agentSessions,
+  llmProxyRequests,
+  skillContextAttributions,
+  skillInvocations,
+  teams,
+  teamMembers,
+} from "../schema/index.js";
 import type { UsageBreakdownResponse, UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -68,6 +75,58 @@ describe("GET /api/usage/breakdown", () => {
     expect(body.byDay.length).toBeGreaterThan(0);
   });
 
+  it("aggregates skill adoption, actorless use, revisions, and carried tokens", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.insert(agentSessions).values({
+      id: "skill-session", userId: "local-user", orgId: "local-org", workspace: "/w",
+      status: "active", ownerType: "user", ownerId: "local-user",
+      createdAt: now, updatedAt: now, title: "Skills",
+    });
+    await db.insert(skillInvocations).values([
+      {
+        id: "ski-1", createdAt: now, orgId: "local-org", sessionId: "skill-session",
+        threadId: "th", invokerUserId: "local-user", invocationEntryId: null,
+        path: "slash_context", skillKey: "stored:skill-1", skillName: "review",
+        storedSkillId: "skill-1", pluginName: null, origin: "local", contentSha: "sha-a",
+        injectedCharacters: 40, estimatedBodyTokens: 10,
+      },
+      {
+        id: "ski-2", createdAt: now + 1, orgId: "local-org", sessionId: "skill-session",
+        threadId: "th", invokerUserId: null, invocationEntryId: null,
+        path: "model_tool", skillKey: "stored:skill-1", skillName: "review",
+        storedSkillId: "skill-1", pluginName: null, origin: "local", contentSha: "sha-b",
+        injectedCharacters: 80, estimatedBodyTokens: 20,
+      },
+      {
+        id: "ski-old", createdAt: now - 31 * 24 * 60 * 60 * 1000,
+        orgId: "local-org", sessionId: "skill-session", threadId: "th",
+        invokerUserId: "old-user", invocationEntryId: null, path: "slash_prompt",
+        skillKey: "stored:skill-1", skillName: "review", storedSkillId: "skill-1",
+        pluginName: null, origin: "local", contentSha: "sha-old",
+        injectedCharacters: 20, estimatedBodyTokens: 5,
+      },
+    ]);
+    await db.insert(skillContextAttributions).values([
+      { skillInvocationId: "ski-1", llmRequestId: "req-1", sessionId: "skill-session", threadId: "th", createdAt: now, estimatedSkillTokens: 10 },
+      { skillInvocationId: "ski-1", llmRequestId: "req-2", sessionId: "skill-session", threadId: "th", createdAt: now, estimatedSkillTokens: 10 },
+      { skillInvocationId: "ski-2", llmRequestId: "req-2", sessionId: "skill-session", threadId: "th", createdAt: now, estimatedSkillTokens: 20 },
+      { skillInvocationId: "ski-old", llmRequestId: "req-3", sessionId: "skill-session", threadId: "th", createdAt: now, estimatedSkillTokens: 5 },
+    ]);
+
+    const res = await fetch(api.baseUrl + "/api/usage/breakdown?window=30d");
+    const body = (await res.json()) as UsageBreakdownResponse;
+    expect(res.status).toBe(200);
+    expect(body.skillBreakdown).toEqual([
+      {
+        skillKey: "stored:skill-1", name: "review", origin: "local",
+        invocations: 2, uniqueInvokers: 1, unassignedInvocations: 1,
+        attributedContextTokens: 45, carryingCalls: 3,
+      },
+    ]);
+  });
+
   it("scope=org is admin-only: member 403s, admin gets org-wide + byUser", async () => {
     api = await bootTestApi();
     const now = Date.now();
@@ -109,6 +168,22 @@ describe("GET /api/usage — scope=team", () => {
     ]);
     await seedEngineEntry(api, "e-team", "s-team", now);
     await seedEngineEntry(api, "e-mine", "s-mine", now);
+    await db.insert(skillInvocations).values([
+      {
+        id: "ski-team", createdAt: now, orgId: "local-org", sessionId: "s-team",
+        threadId: "th", invokerUserId: "local-user", invocationEntryId: null,
+        path: "slash_context", skillKey: "plugin:github:github", skillName: "github",
+        storedSkillId: null, pluginName: "github", origin: "plugin", contentSha: "sha-team",
+        injectedCharacters: 40, estimatedBodyTokens: 10,
+      },
+      {
+        id: "ski-mine", createdAt: now, orgId: "local-org", sessionId: "s-mine",
+        threadId: "th", invokerUserId: "local-user", invocationEntryId: null,
+        path: "slash_context", skillKey: "stored:mine", skillName: "mine",
+        storedSkillId: "mine", pluginName: null, origin: "local", contentSha: "sha-mine",
+        injectedCharacters: 40, estimatedBodyTokens: 10,
+      },
+    ]);
   }
 
   it("breakdown covers the team's owned spend only; non-member 404s; missing teamId 400s", async () => {
@@ -122,6 +197,7 @@ describe("GET /api/usage — scope=team", () => {
     expect(body.scope).toBe("team");
     expect(body.totalTurns).toBe(1); // s-team only, not s-mine
     expect(body.totalCostUsd).toBeCloseTo(0.003, 6);
+    expect(body.skillBreakdown.map((row) => row.skillKey)).toEqual(["plugin:github:github"]);
 
     // A non-member gets 404, not 403 — a team you are not on must be
     // indistinguishable from one that does not exist (the sessions/teams

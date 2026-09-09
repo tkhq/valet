@@ -133,6 +133,7 @@ import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
+import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
@@ -1141,6 +1142,7 @@ export class EngineHost {
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
       : await engine.createSession({
@@ -1166,6 +1168,7 @@ export class EngineHost {
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
     builtSession = session;
@@ -2491,6 +2494,7 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       resolveOutboundSender: async () => {
         try {
           const current = await loadAssistant(db, assistantId);
@@ -3508,6 +3512,7 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
@@ -3662,6 +3667,7 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       owner: opts.owner,
       // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are
       // sandbox-less by default, like orchestrators. A session-node turn

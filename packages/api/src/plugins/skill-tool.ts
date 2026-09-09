@@ -68,15 +68,15 @@ function describeSkills(skills: SkillSource[]): string {
  * including failures — a thrown error would abort the turn, while text
  * lets the model correct itself and call again.
  */
-export function renderSkill(
+function renderSkillResult(
   skills: Map<string, SkillSource>,
   name: string,
   args: Record<string, unknown>,
-): string {
+): { text: string; skill?: SkillSource } {
   const skill = skills.get(name);
   if (!skill) {
     const known = [...skills.keys()].join(", ");
-    return `[skill_not_found] There is no skill named "${name}". Call skill again with one of: ${known}.`;
+    return { text: `[skill_not_found] There is no skill named "${name}". Call skill again with one of: ${known}.` };
   }
   if (skill.argsSchema) {
     const validator = Compile(skill.argsSchema);
@@ -84,10 +84,20 @@ export function renderSkill(
       const errors = [...validator.Errors(args)]
         .map((e) => `  - ${e.instancePath || "(root)"}: ${e.message}`)
         .join("\n");
-      return `[skill_bad_args] The arguments for skill "${name}" are not valid. Correct them and call skill again:\n${errors}`;
+      return {
+        text: `[skill_bad_args] The arguments for skill "${name}" are not valid. Correct them and call skill again:\n${errors}`,
+      };
     }
   }
-  return renderTemplate(skill.content, args);
+  return { text: renderTemplate(skill.content, args), skill };
+}
+
+export function renderSkill(
+  skills: Map<string, SkillSource>,
+  name: string,
+  args: Record<string, unknown>,
+): string {
+  return renderSkillResult(skills, name, args).text;
 }
 
 /**
@@ -120,8 +130,12 @@ export function buildSkillTool(skills: SkillSource[]): ToolDef | null {
     parameters: skillParameters,
     riskLevel: "low",
     protectedFromPruning: true,
-    execute: async (args): Promise<ToolResult> => ({
-      text: renderSkill(byName, args.name, args.args ?? {}),
-    }),
+    execute: async (args, ctx): Promise<ToolResult> => {
+      const rendered = renderSkillResult(byName, args.name, args.args ?? {});
+      if (rendered.skill && ctx.recordSkillInvocation) {
+        await ctx.recordSkillInvocation(rendered.skill, "model_tool", rendered.text);
+      }
+      return { text: rendered.text };
+    },
   });
 }

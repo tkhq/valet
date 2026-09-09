@@ -89,6 +89,19 @@ const mockBreakdown: UsageBreakdownResponse = {
       unpricedTurns: 0,
     },
   ],
+  skillBreakdown: [
+    {
+      skillKey: "plugin:github:github",
+      name: "github",
+      origin: "plugin",
+      pluginName: "github",
+      invocations: 12,
+      uniqueInvokers: 3,
+      unassignedInvocations: 2,
+      attributedContextTokens: 3456,
+      carryingCalls: 9,
+    },
+  ],
   byModel: [
     {
       model: "claude-opus-4-5",
@@ -717,6 +730,18 @@ describe("UsagePage — by-use-case table", () => {
       a.textContent?.includes("claude-code"),
     );
     expect(proxyLinks.length).toBe(0);
+  });
+});
+
+describe("UsagePage — skills section", () => {
+  it("renders adoption and estimated context telemetry", () => {
+    render(<UsagePage />);
+    const heading = screen.getByText("Skills");
+    const section = heading.closest("div");
+    expect(section?.textContent).toContain("github");
+    expect(section?.textContent).toContain("Plugin: github");
+    expect(section?.textContent).toContain("3,456");
+    expect(screen.getByText("Estimated marginal context tokens")).toBeTruthy();
   });
 });
 

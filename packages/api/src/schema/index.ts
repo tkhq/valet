@@ -1019,6 +1019,49 @@ export const skills = pgTable(
   ],
 );
 
+// Immutable facts for skill adoption and marginal context telemetry.
+export const skillInvocations = pgTable(
+  "skill_invocations",
+  {
+    id: text("id").primaryKey(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    orgId: text("org_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    invokerUserId: text("invoker_user_id"),
+    invocationEntryId: text("invocation_entry_id"),
+    path: text("path", {
+      enum: ["model_tool", "host_thread_skill", "slash_context", "slash_prompt"],
+    }).notNull(),
+    skillKey: text("skill_key").notNull(),
+    skillName: text("skill_name").notNull(),
+    storedSkillId: text("stored_skill_id"),
+    pluginName: text("plugin_name"),
+    origin: text("origin", { enum: ["plugin", "local", "repo"] }).notNull(),
+    contentSha: text("content_sha").notNull(),
+    injectedCharacters: integer("injected_characters").notNull(),
+    estimatedBodyTokens: integer("estimated_body_tokens").notNull(),
+  },
+  (t) => [
+    index("skill_invocations_org_created").on(t.orgId, t.createdAt),
+    index("skill_invocations_session_thread_created").on(t.sessionId, t.threadId, t.createdAt),
+    index("skill_invocations_skill_created").on(t.skillKey, t.createdAt),
+  ],
+);
+
+export const skillContextAttributions = pgTable(
+  "skill_context_attributions",
+  {
+    skillInvocationId: text("skill_invocation_id").notNull(),
+    llmRequestId: text("llm_request_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    estimatedSkillTokens: integer("estimated_skill_tokens").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.skillInvocationId, t.llmRequestId] })],
+);
+
 /** What one tracked repository mirrors. `skills` is the kind that ships; the
  * other two join the same rail
  * (`docs/specs/2026-08-24-workflows-mvp-design.md`). */

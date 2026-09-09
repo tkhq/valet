@@ -3515,6 +3515,19 @@ export type UsageScopeName = "me" | "org" | "team";
  * `scope=team` covers one team's owned spend; `byUser` is present for the org
  * scope, and for a team scope when the caller ADMINISTERS the team — a plain
  * member reads the team's aggregate without colleagues' individual spend. */
+export interface SkillUsageBreakdown {
+  skillKey: string;
+  name: string;
+  origin: "plugin" | "local" | "repo";
+  pluginName?: string;
+  invocations: number;
+  uniqueInvokers: number;
+  unassignedInvocations: number;
+  /** Estimated skill-body tokens carried across model requests. */
+  attributedContextTokens: number;
+  carryingCalls: number;
+}
+
 export interface UsageBreakdownResponse {
   windowMs: number;
   scope: UsageScopeName;
@@ -3527,6 +3540,7 @@ export interface UsageBreakdownResponse {
   totalTurns: number;
   unpricedTurns: number;
   byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
+  skillBreakdown: SkillUsageBreakdown[];
   byModel: (UsageBucket & { model: string | null })[];
   /** Org scope always; team scope when the caller administers the team. */
   byUser?: (UsageBucket & { userId: string; name: string })[];

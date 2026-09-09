@@ -259,6 +259,25 @@ An update and a delete carry their authority on the statement that changes the r
 
 Every write action is `riskLevel: high`, which the plugin catalog's default policy turns into an approval gate. A stored skill is standing instruction text that every later session of that owner can pull into a turn, so a silent create or update would let anything the agent read steer its own future turns; the delete is a hard delete with no restore path. Only `skills.list_skills` is `low`.
 
+## Usage telemetry
+
+Valet records one immutable `skill_invocations` fact for each skill injection path:
+
+- A model calls the `skill` tool.
+- A host calls `Thread.skill()`.
+- A user invokes a context skill with a slash command.
+- A user invokes a prompt skill with a slash command.
+
+Each fact keeps the source-qualified skill key, content SHA, source, path, body size, session, thread, and human invoker. Actorless team and organization runs use a null invoker. The usage service counts those rows separately as unassigned invocations.
+
+Plugin keys use `plugin:<plugin-name>:<skill-name>`. Stored local and repository skills use `stored:<skill-row-id>`. The usage table groups content revisions under this stable key.
+
+Before each model request, the engine records one `skill_context_attributions` row for each skill body in the live context. Each row uses the body token estimate and a durable request ID. Compaction removes an attribution source when it removes the body from live context.
+
+`GET /api/usage/breakdown` returns invocation counts, unique human invokers, unassigned invocations, carrying calls, and estimated marginal context tokens. The `/usage` page shows these values in its Skills table. Estimated marginal context tokens are not provider-billed tokens or dollars.
+
+Both fact tables are app-owned. They do not change `action_invocations` or `cost_entries`.
+
 ## Valet extensions
 
 Two things are Valet's, not the spec's. Do not present them as standard fields.

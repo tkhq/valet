@@ -284,6 +284,7 @@ export function UsagePage() {
   ];
 
   const modelRows = breakdown?.byModel ?? [];
+  const skillRows = breakdown?.skillBreakdown ?? [];
   const byUserRows = breakdown?.byUser ?? [];
   const chartBuckets = breakdown?.byDay ?? [];
 
@@ -472,6 +473,51 @@ export function UsagePage() {
                   </div>
                 )}
               </div>
+            </div>
+
+            <div>
+              <h2 className="text-sm font-medium text-ink mb-3">Skills</h2>
+              {skillRows.length === 0 ? (
+                <p className="text-sm text-muted">No skill use in this window.</p>
+              ) : (
+                <div className="overflow-x-auto rounded border border-line">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-line bg-paper-muted">
+                        <th className="px-3 py-2 text-left font-medium text-muted">Skill</th>
+                        <th className="px-3 py-2 text-left font-medium text-muted">Source</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Invocations</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Invokers</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Unassigned</th>
+                        <th
+                          className="px-3 py-2 text-right font-medium text-muted"
+                          title="Estimated skill-body tokens carried across model requests. This is not a billed-token or cost value."
+                        >
+                          Estimated marginal context tokens
+                        </th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Carrying calls</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {skillRows.map((row) => (
+                        <tr key={row.skillKey} className="border-b border-line last:border-0 hover:bg-ink-wash/30">
+                          <td className="px-3 py-2 text-ink">{row.name}</td>
+                          <td className="px-3 py-2 text-muted">
+                            {row.origin === "plugin" && row.pluginName
+                              ? `Plugin: ${row.pluginName}`
+                              : row.origin === "repo" ? "Repository" : "Local"}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">{fmt(row.invocations)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">{fmt(row.uniqueInvokers)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">{fmt(row.unassignedInvocations)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">{fmt(row.attributedContextTokens)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">{fmt(row.carryingCalls)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             {/* By model — with input/output/cache columns */}

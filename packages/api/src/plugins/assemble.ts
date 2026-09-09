@@ -28,6 +28,7 @@
  *     entries come back in `shadowedSkills` so `/api/skills` can say what
  *     happened instead of dropping them in silence.
  */
+import { createHash } from "node:crypto";
 import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
 import type { PinnedActionSpec, RoleSpec, SkillSource, ToolDef } from "@valet/engine";
 import { buildSkillTool, SKILL_TOOL_NAME } from "./skill-tool.js";
@@ -231,7 +232,14 @@ function collectSkills(plugins: ValetPlugin[]): SkillSource[] {
         );
       }
       ownerByName.set(skill.name, plugin.name);
-      skills.push(skill);
+      skills.push({
+        ...skill,
+        source: "plugin",
+        key: `plugin:${plugin.name}:${skill.name}`,
+        pluginName: plugin.name,
+        contentSha: createHash("sha256").update(skill.content).digest("hex"),
+        origin: "plugin",
+      });
     }
   }
 

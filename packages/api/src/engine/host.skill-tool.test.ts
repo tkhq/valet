@@ -20,6 +20,8 @@ import type {
   MessageQuery,
   Sandbox,
   SessionEntry,
+  SkillInvocationFact,
+  SkillSource,
   ToolContext,
   ToolDef,
 } from "@valet/engine";
@@ -32,7 +34,9 @@ const stubCredentials: CredentialProvider = {
   },
 };
 
-function makeCtx(): ToolContext {
+function makeCtx(
+  recordSkillInvocation?: (skill: SkillSource, text: string) => Promise<SkillInvocationFact>,
+): ToolContext {
   // Only `id` is read on this path; a full fake Sandbox would be noise.
   const sandbox: Partial<Sandbox> & { id: string } = { id: "sb-1" };
   return {
@@ -42,6 +46,9 @@ function makeCtx(): ToolContext {
     threadId: "t1",
     credentials: stubCredentials,
     sandbox: sandbox as Sandbox,
+    ...(recordSkillInvocation
+      ? { recordSkillInvocation: (skill, _path, text) => recordSkillInvocation(skill, text) }
+      : {}),
     requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
       throw new Error("not implemented in test stub");
     },
@@ -89,12 +96,30 @@ describe("the `skill` tool on a real session", () => {
     });
 
     const tool = findSkillTool(session.options.tools);
-    const result = await tool.execute({ name: "github" }, makeCtx());
+    let recorded: { skill: SkillSource; text: string } | undefined;
+    const result = await tool.execute(
+      { name: "github" },
+      makeCtx(async (skill, text) => {
+        recorded = { skill, text };
+        return {
+          id: "skill-call", createdAt: 1, sessionId: "s1", threadId: "t1",
+          invokerUserId: "local-user", invocationEntryId: null, path: "model_tool",
+          skillKey: skill.key ?? "", skillName: skill.name,
+          storedSkillId: null, pluginName: skill.pluginName ?? null,
+          origin: skill.origin ?? "plugin", contentSha: skill.contentSha ?? "",
+          injectedCharacters: text.length, estimatedBodyTokens: 1,
+        };
+      }),
+    );
 
     // Real text from packages/plugin-github/skills/github.md — not a stub.
     expect(result.text).toContain("# GitHub Integration Tools");
     // Frontmatter is stripped by `loadSkillFromMarkdown`.
     expect(result.text).not.toContain("---\nname: github");
+    expect(recorded?.skill).toMatchObject({
+      key: "plugin:github:github", pluginName: "github", origin: "plugin",
+    });
+    expect(recorded?.text).toBe(result.text);
   });
 
   it("names the available skills when the requested one does not exist", async () => {
