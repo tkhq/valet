@@ -90,6 +90,10 @@ This replaces the per-user requirement gate in `installWorkflowTemplate` (`templ
 
 If that spec spells any of the three differently, this spec adapts at one call site each. Half 1 has no dependency on it and ships on its own.
 
+### Workflow list filters (TKAI-437)
+
+The workflow list and cross-workflow run list reject a nonempty `teamId` query parameter. Callers must use `ownerType=team` and `ownerId` to filter by team. Empty values remain equivalent to an omitted filter.
+
 ## Reconciliation with in-flight work
 
 **PR #151 `feat/rbac-permissions` (open, last touched 2026-07-30, 57 files, +2649/-312) — supersede its spec-only half; do not block on the branch.**

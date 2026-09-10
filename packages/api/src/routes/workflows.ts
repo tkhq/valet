@@ -107,6 +107,19 @@ function blankToUndefined(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }
 
+/**
+ * `teamId` names a team on the sibling listings (`/api/templates`,
+ * `/api/credentials`), so clients send it here as well. Owner scoping on
+ * these two lists is `ownerType`/`ownerId`, and one name for one thing beats
+ * a second spelling of it, so `teamId` is refused rather than aliased. It is
+ * read before the owner pair: a request carrying both says one thing twice,
+ * and a precedence rule invented here would be one more rule to know.
+ */
+function unsupportedTeamIdError(raw: string | undefined): string | undefined {
+  if (blankToUndefined(raw) === undefined) return undefined;
+  return "teamId is not supported here. Filter by owner with ownerType=team and ownerId=<team id>.";
+}
+
 /** Parses `?limit=` for the run lists. Both list handlers share the range. */
 function parseRunLimit(raw: string | undefined): { limit?: number } | { error: string } {
   const value = blankToUndefined(raw);
@@ -194,6 +207,9 @@ workflowsRouter.post("/", async (c) => {
 workflowsRouter.get("/", async (c) => {
   const { deps, owner } = serviceCtx(c);
 
+  const teamIdError = unsupportedTeamIdError(c.req.query("teamId"));
+  if (teamIdError) return c.json({ error: teamIdError }, 400);
+
   const filter = parseWorkflowOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
   if (filter.error) return c.json({ error: filter.error }, 400);
   // The same check `GET /api/workflows/:id` runs, asked of the owner instead
@@ -225,6 +241,9 @@ workflowsRouter.get("/runs", async (c) => {
 
   const limit = parseRunLimit(c.req.query("limit"));
   if ("error" in limit) return c.json({ error: limit.error }, 400);
+
+  const teamIdError = unsupportedTeamIdError(c.req.query("teamId"));
+  if (teamIdError) return c.json({ error: teamIdError }, 400);
 
   // Optional `?ownerType=&ownerId=` scope: the hub's Runs tab pins one
   // workspace, the same shape `GET /workflows` takes. A filter the caller may
