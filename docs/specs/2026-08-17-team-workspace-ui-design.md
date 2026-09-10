@@ -102,6 +102,26 @@ the switcher — legible and trustworthy.
    reaches a team assistant), and the thread tree passes the open assistant's
    session id. Dismiss authorizes the same way.
 
+10. **Integrations follow the switcher.** Added 2026-09-10 (TKAI-447).
+    Personal keeps its existing catalog, connect forms, and sharing controls.
+    A team workspace lists only that team's stored credentials and delegations
+    through `GET /api/credentials?scope=team&teamId=…`. It does not mount the
+    personal catalog, token forms, or identity controls.
+
+    Integrations and Team Settings share `TeamCredentials`. Each row identifies
+    a direct team credential or its delegating member. Team and organization
+    admins can confirm a disconnect or stop sharing. Other members can read
+    the list. The existing server member and admin gates remain authoritative.
+    Users switch to Personal to connect and share their own credentials.
+
+    Credential cache keys include scope and team ID. A workspace change
+    unmounts open forms and dialogs. A completed team disconnect invalidates
+    its request's team key, even after the caller switches workspaces.
+    Personal disconnects still invalidate linked team lists because they remove
+    the source credential. Loading and failed reads never show another
+    workspace's rows. A failed credential refetch hides cached rows and removal
+    dialogs. Failed member-name reads show IDs and a reload instruction.
+
 ## Known limits
 
 An adversarial review (2026-08-17) confirmed four limits this pass ships

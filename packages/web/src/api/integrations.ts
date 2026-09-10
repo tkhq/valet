@@ -80,7 +80,12 @@ export function useDisconnectCredential() {
   >({
     mutationFn: ({ service, scope, teamId }) =>
       api.deleteCredential(service, scope ? { scope, teamId } : undefined),
-    onSuccess: () => {
+    onSuccess: (_data, { scope, teamId }) => {
+      if (scope === "team") {
+        // The completed request owns this invalidation, even after a workspace switch.
+        qc.invalidateQueries({ queryKey: qkIntegrations.credentials("team", teamId) });
+        return;
+      }
       qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
       qc.invalidateQueries({ queryKey: ["credentials"] });
       qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });

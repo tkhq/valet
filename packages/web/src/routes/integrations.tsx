@@ -8,6 +8,8 @@ import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integ
 import { pluginDisplayName } from "~/components/integrations/display-name";
 import { matchesNeedle } from "~/lib/text-match";
 import { textParam } from "~/lib/search-params";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { TeamIntegrations } from "~/components/integrations/team-integrations";
 
 /**
  * `/integrations` — the services a person can connect, in the settings
@@ -83,6 +85,12 @@ function useConnectResult(): ConnectResult {
 }
 
 export function IntegrationsPage() {
+  const { teamId } = useWorkspaceScope();
+  // Unmount personal forms and team dialogs when the workspace changes.
+  return teamId ? <TeamIntegrations key={teamId} teamId={teamId} /> : <PersonalIntegrationsPage />;
+}
+
+function PersonalIntegrationsPage() {
   const { data, isLoading, error } = usePlugins();
   const plugins = data?.plugins ?? [];
   const connectResult = useConnectResult();
