@@ -33,6 +33,17 @@ function fileMarker(raw: RawReply): string | null {
   return named.length ? `[shared: ${named.join(", ")}]` : `[shared ${files.length} file(s)]`;
 }
 
+/** A message body, an author name and a file name all carry attacker text. A
+ *  line break inside any of them splits one message into two transcript lines,
+ *  and the second line carries no author, so a reader cannot tell forged words
+ *  from a real participant's. Mark each break instead of dropping it, so a
+ *  genuine multi-line message stays readable. Covers every Unicode line
+ *  terminator, not only \n. */
+const LINE_BREAK_RE = /\s*[\r\n\v\f\u0085\u2028\u2029]+\s*/g;
+function oneLine(text: string): string {
+  return text.replace(LINE_BREAK_RE, " \u23ce ").trim();
+}
+
 /** Keep the thread's opening message (the topic) and the most recent tail; drop
  *  from the middle when the whole transcript is over budget. */
 function trimToBudget(lines: string[]): string {
@@ -124,7 +135,8 @@ export async function fetchThreadTranscript(
           ? "You" // the assistant's own earlier reply — so it does not answer itself.
           : authors.get(userId) ?? `@${userId}`
         : str(raw.username) ?? str((raw.bot_profile as Record<string, unknown> | undefined)?.name) ?? "app";
-      return `${who}: ${content}`;
+      // Both halves are flattened, so one message is always exactly one line.
+      return `${oneLine(who)}: ${oneLine(content)}`;
     }),
   );
   const lines = formatted.filter((l): l is string => !!l);

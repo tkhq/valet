@@ -292,3 +292,8 @@ this order:
 3. `followed_threads` table + follow flag + dispatcher write.
 4. The follow-router consumer + overheard delivery + persona guidance.
 5. The outcome-first wizard.
+
+
+### Transcript line boundaries (TKAI-434)
+
+Thread hydration replaces line breaks in message text, speaker names, and file markers with a visible `⏎` separator. Each Slack message occupies one attributed line. This prevents embedded newlines from creating a second speaker line; it does not make message content trusted.
