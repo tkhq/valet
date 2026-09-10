@@ -28,6 +28,7 @@ import { eq, inArray } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { ValetAuth } from "../auth/index.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 import { resolveOrgId } from "../lib/org.js";
 import { agentSessions, users } from "../schema/index.js";
 import { requireUser, resolveOptionalIdentity, type AuthUser, type RequestIdentity } from "../middleware/auth.js";
@@ -35,7 +36,7 @@ import { userPrincipal } from "../lib/request-principal.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
-import { isTeamMember } from "../services/teams.js";
+import { getTeamInOrg, isTeamMember } from "../services/teams.js";
 import { canViewSession } from "../services/session-access.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
@@ -564,8 +565,13 @@ artifactsRouter.get("/", async (c) => {
     return c.json({ error: "mine cannot be combined with an owner filter." }, 400);
   }
 
+  if ((c.req.query("limit") !== undefined || c.req.query("cursor") !== undefined) &&
+      ownerType === undefined && ownerId === undefined) {
+    return c.json({ error: "Send an owner filter to paginate artifacts." }, 400);
+  }
+
   if (mine) {
-    // The gallery's "your own artifacts" view. Force `orgAdmin: false` even
+    // The legacy publisher-filtered view. Force `orgAdmin: false` even
     // for an org admin caller — admin status must never leak a colleague's
     // rows into a filter whose whole point is "just mine". Client-side
     // filtering on `actorUserId` had the same intent but failed open: if
@@ -577,14 +583,44 @@ artifactsRouter.get("/", async (c) => {
   }
 
   if (ownerType !== undefined || ownerId !== undefined) {
-    if (ownerType !== "team" || !ownerId) {
-      return c.json({ error: "owner filter must be ownerType=team with an ownerId." }, 400);
+    if ((ownerType !== "team" && ownerType !== "user") || !ownerId) {
+      return c.json({ error: "Send ownerType=user or team with an ownerId." }, 400);
     }
-    const allowed =
-      (await isTeamMember(db, ownerId, user.id)) || (await isOrgAdmin(db, user.orgId, user.id));
-    if (!allowed) return c.json({ error: "owner not found" }, 404);
-    const rows = await listArtifactsForOwner(db, user.orgId, { type: "team", id: ownerId });
-    const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };
+    if (ownerType === "user") {
+      if (ownerId !== user.id) return c.json({ error: "owner not found" }, 404);
+    } else {
+      const team = await getTeamInOrg(db, user.orgId, ownerId);
+      const allowed = team && (
+        (await isTeamMember(db, ownerId, user.id)) || (await isOrgAdmin(db, user.orgId, user.id))
+      );
+      if (!allowed) return c.json({ error: "owner not found" }, 404);
+    }
+    const limitParam = c.req.query("limit");
+    const cursorParam = c.req.query("cursor");
+    const paged = limitParam !== undefined || cursorParam !== undefined;
+    const limit = readLimit(limitParam, 50, 100);
+    if (limit === undefined) return c.json({ error: "Send a positive whole number for limit." }, 400);
+    const decoded = cursorParam === undefined ? undefined : decodePageCursor(cursorParam);
+    let cursor: { updatedAt: number; id: string } | undefined;
+    if (cursorParam !== undefined) {
+      if (!decoded || typeof decoded.updatedAt !== "number" || !Number.isSafeInteger(decoded.updatedAt) ||
+          typeof decoded.id !== "string" || !decoded.id ||
+          decoded.ownerType !== ownerType || decoded.ownerId !== ownerId) {
+        return c.json({ error: "Invalid artifact cursor. Remove it to start at the first page." }, 400);
+      }
+      cursor = { updatedAt: decoded.updatedAt, id: decoded.id };
+    }
+    const rows = await listArtifactsForOwner(
+      db, user.orgId, { type: ownerType, id: ownerId }, paged ? { limit, cursor } : undefined,
+    );
+    const visible = paged ? rows.slice(0, limit) : rows;
+    const last = visible.at(-1);
+    const body: ListArtifactsResponse = { artifacts: visible.map((row) => toListItem(c, row)) };
+    if (paged) {
+      body.nextCursor = rows.length > limit && last
+        ? encodePageCursor({ updatedAt: last.updatedAt, id: last.id, ownerType, ownerId })
+        : null;
+    }
     return c.json(body);
   }
 

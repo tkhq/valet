@@ -369,3 +369,18 @@ themselves. Anything else degrades to `/`.
   team-owned docs — the same rule as the tool surface, which refuses
   `team:{id}/...` paths in v1. Write actions (pin, edit, delete) show only
   when the caller may administer the team, mirroring `authorizeOwner`.
+
+
+### Workspace artifact gallery (TKAI-448)
+
+The Artifacts list follows the selected workspace through the existing `useListOwner` hook. Stored `ownerType` and `ownerId` select rows. `actorUserId` records who published an artifact and does not define its workspace. The personal gallery therefore excludes team artifacts that the caller published.
+
+`GET /api/artifacts?ownerType=user&ownerId=<id>` requires the caller's own user id. A team filter requires a team in the caller's org and current membership. The existing org-admin read exception remains. Unknown, foreign-org, and unauthorized owners return 404. The unfiltered and `mine=1` lists retain their existing behavior.
+
+Owner lists accept optional `limit` and `cursor` parameters. The default page size is 50, capped at 100. Paged lists omit revoked rows before pagination and sort by `updatedAt` and `id`, both descending. The opaque cursor carries both sort fields and the selected owner. A cursor from another workspace or an invalid limit returns 400. `nextCursor` is null on the last page. Requests without pagination retain the legacy response and revoked rows.
+
+The gallery caches each owner and page separately. A workspace change resets the cursor stack and row dialogs before the next request. While personal identity loads, the gallery makes no unscoped request. Loading, empty, and error states remain visible. An authorization error hides cached rows.
+
+Public token reads, link visibility, publishing, and sharer-or-admin management permissions do not change. Team membership grants list access, not permission to revoke a colleague's artifact. No schema migration is required.
+
+Validation covers owner versus actor filtering, member access, nonmember refusal, foreign owners, membership removal, cursor boundaries, revoked rows, and workspace pagination reset. Existing public-link and personal-access suites remain part of the targeted checks.

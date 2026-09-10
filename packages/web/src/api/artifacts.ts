@@ -22,12 +22,13 @@ export const qkArtifacts = {
   // `mine` gets its own key segment (not folded into the owner tuple — it
   // composes with no owner) so the caller-scoped gallery view and an
   // unfiltered/team-owned list cache separately instead of colliding.
-  list: (owner?: OwnerFilter, mine?: boolean) =>
+  list: (owner?: OwnerFilter, mine?: boolean, page?: { limit?: number; cursor?: string }) =>
     [
       "artifacts",
       "list",
       ...(owner ? [owner.ownerType, owner.ownerId] : []),
       ...(mine ? ["mine"] : []),
+      ...(page ? [page.limit, page.cursor] : []),
     ] as const,
   byToken: (token: string) => ["artifacts", "token", token] as const,
   comments: (token: string) => ["artifacts", "comments", token] as const,
@@ -50,12 +51,12 @@ export function useArtifact(token: string, opts?: Partial<UseQueryOptions<GetArt
 
 export function useArtifacts(
   owner?: OwnerFilter,
-  opts?: Partial<UseQueryOptions<ListArtifactsResponse>> & { mine?: boolean },
+  opts?: Partial<UseQueryOptions<ListArtifactsResponse>> & { mine?: boolean; limit?: number; cursor?: string },
 ) {
-  const { mine, ...queryOpts } = opts ?? {};
+  const { mine, limit, cursor, ...queryOpts } = opts ?? {};
   return useQuery<ListArtifactsResponse>({
-    queryKey: qkArtifacts.list(owner, mine),
-    queryFn: () => api.listArtifacts(owner, { mine }),
+    queryKey: qkArtifacts.list(owner, mine, limit !== undefined || cursor !== undefined ? { limit, cursor } : undefined),
+    queryFn: () => api.listArtifacts(owner, { mine, limit, cursor }),
     ...queryOpts,
   });
 }

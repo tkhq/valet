@@ -1,14 +1,7 @@
 // @vitest-environment jsdom
 /**
- * `/artifacts` gallery (final-review fix wave). `GET /api/artifacts` hands
- * an org ADMIN every member's artifacts unfiltered, so ownership filtering
- * moved server-side behind `?mine=1` (a client-side `actorUserId` match
- * against `/api/me` failed open: a failed `/api/me` call compared against
- * `undefined` and silently emptied the whole gallery). This suite asserts
- * the page asks for the `mine`-filtered view and still gets revoked-row
- * filtering and per-row revoke right. Mocked the same way
- * `-workflows.index.test.tsx` mocks `@tanstack/react-router` and its data
- * hooks.
+ * Workspace-scoped artifact gallery. The list uses stored ownership and
+ * resets the cursor before requesting a different workspace.
  *
  * Revoke confirms in a `ConfirmDialog`, not `window.confirm`: a native
  * confirm is auto-accepted by browser automation, so an agent driving this
@@ -18,7 +11,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { ArtifactListItem } from "@valet/api/wire";
+import type { OwnerFilter } from "~/api/client";
+import type { ArtifactListItem, ListArtifactsResponse } from "@valet/api/wire";
 
 const mine: ArtifactListItem = {
   id: "art_mine",
@@ -54,12 +48,18 @@ const revoked: ArtifactListItem = {
   revoked: true,
 };
 
-let artifactsData: { artifacts: ArtifactListItem[] } = { artifacts: [mine, revoked] };
+let artifactsData: ListArtifactsResponse = { artifacts: [mine, revoked] };
 
 const revokeMutate = vi.fn();
 let revokePending = false;
 let revokeError: Error | null = null;
 const useArtifactsMock = vi.fn();
+let owner: OwnerFilter | undefined = { ownerType: "user", ownerId: "u-1" };
+let listError: Error | null = null;
+let listLoading = false;
+let identityError: Error | null = null;
+vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
+vi.mock("~/api/settings", () => ({ useMe: () => ({ error: identityError }) }));
 
 vi.mock("@tanstack/react-router", () => ({
   // `params` is spread as a real prop (an object), not through `...rest`,
@@ -84,7 +84,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/api/artifacts", () => ({
   useArtifacts: (...args: unknown[]) => {
     useArtifactsMock(...args);
-    return { data: artifactsData, isLoading: false, error: null };
+    return { data: artifactsData, isLoading: listLoading, error: listError };
   },
   useRevokeArtifact: () => ({
     mutate: revokeMutate,
@@ -117,6 +117,10 @@ function openDialog(index = 0) {
 
 beforeEach(() => {
   artifactsData = { artifacts: [mine, revoked] };
+  owner = { ownerType: "user", ownerId: "u-1" };
+  listError = null;
+  listLoading = false;
+  identityError = null;
   revokePending = false;
   revokeError = null;
   revokeMutate.mockReset();
@@ -124,9 +128,57 @@ beforeEach(() => {
 });
 
 describe("ArtifactsPage", () => {
-  it("requests the server-filtered `mine` view instead of filtering client-side", () => {
+  it("requests the personal owner rather than the publishing actor", () => {
     renderPage();
-    expect(useArtifactsMock).toHaveBeenCalledWith(undefined, { mine: true });
+    expect(useArtifactsMock).toHaveBeenCalledWith(owner, { limit: 50, cursor: undefined });
+  });
+
+  it("resets pagination on personal, team, and team-to-team switches", () => {
+    artifactsData = { artifacts: [mine], nextCursor: "page-two" };
+    const view = renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(useArtifactsMock).toHaveBeenLastCalledWith(owner, { limit: 50, cursor: "page-two" });
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(useArtifactsMock).toHaveBeenLastCalledWith(owner, { limit: 50, cursor: undefined });
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    for (const nextOwner of [
+      { ownerType: "team", ownerId: "team-1" },
+      { ownerType: "team", ownerId: "team-2" },
+      { ownerType: "user", ownerId: "u-1" },
+    ] satisfies OwnerFilter[]) {
+      useArtifactsMock.mockClear();
+      owner = nextOwner;
+      view.rerender(<ArtifactsPage />);
+      expect(useArtifactsMock).toHaveBeenCalledWith(owner, { limit: 50, cursor: undefined });
+      expect(useArtifactsMock.mock.calls.every((call) => call[1].cursor === undefined)).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    }
+  });
+
+  it("does not request an unscoped list while identity is loading or failed", () => {
+    owner = undefined;
+    const view = renderPage();
+    expect(screen.getByText("Loading artifacts…")).toBeTruthy();
+    expect(useArtifactsMock).not.toHaveBeenCalled();
+    identityError = new Error("offline");
+    view.rerender(<ArtifactsPage />);
+    expect(screen.getByText(/Could not load your workspace/)).toBeTruthy();
+    expect(useArtifactsMock).not.toHaveBeenCalled();
+  });
+
+  it("hides cached rows when access fails and shows a corrective error", () => {
+    listError = new Error("owner not found");
+    renderPage();
+    expect(screen.getByText(/Check your access, then reload/)).toBeTruthy();
+    expect(screen.queryByText("Deploy report")).toBeNull();
+  });
+
+  it("shows loading instead of old rows while a workspace loads", () => {
+    listLoading = true;
+    renderPage();
+    expect(screen.getByText("Loading artifacts…")).toBeTruthy();
+    expect(screen.queryByText("Deploy report")).toBeNull();
   });
 
   it("filters out revoked rows", () => {
@@ -135,7 +187,7 @@ describe("ArtifactsPage", () => {
     expect(screen.queryByText("Old page")).toBeNull();
   });
 
-  it("shows the empty state when the mine-filtered list is empty", () => {
+  it("shows the empty state when the workspace list is empty", () => {
     artifactsData = { artifacts: [revoked] };
     renderPage();
     expect(

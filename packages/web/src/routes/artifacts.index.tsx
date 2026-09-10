@@ -1,6 +1,11 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ArtifactListItem } from "@valet/api/wire";
 import { useState } from "react";
+import { useListOwner } from "~/lib/use-list-owner";
+import { useMe } from "~/api/settings";
+import { Pager } from "~/components/pager";
+import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
+import type { OwnerFilter } from "~/api/client";
 import { useArtifacts, useRevokeArtifact } from "~/api/artifacts";
 import { ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
@@ -8,18 +13,13 @@ import { relativeTime } from "~/lib/relative-time";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
 /**
- * `/artifacts` — the gallery of pages the caller published (memory docs and
+ * `/artifacts` — the selected workspace's gallery (memory docs and
  * agent-generated snapshots alike; see the artifacts design). Revoked
  * artifacts are filtered out: a revoked link is a dead link, not a row to
  * manage from here.
  *
- * `GET /api/artifacts` hands an org ADMIN every member's artifacts (see the
- * warning on `ArtifactListItem.actorUserId`), so this page asks for the
- * `mine`-filtered view (`?mine=1`, server-side) instead of listing
- * everything and matching `actorUserId` against `/api/me` here: a failed
- * `/api/me` call used to compare against `undefined` and silently empty the
- * whole gallery. The server filter has no such failure mode — it is the
- * same identity the auth middleware already resolved for this request.
+ * The workspace owner selects the list. The keyed child resets pagination
+ * and row dialogs before a different workspace issues its first request.
  *
  * Rows link in-app with `token` (`/a/$token`), never `url` — `url` is the
  * absolute share link, whose origin is the deployment's public URL, which
@@ -29,7 +29,19 @@ import { useCopyToClipboard } from "~/lib/use-copy";
 export const Route = createFileRoute("/artifacts/")({ component: ArtifactsPage });
 
 export function ArtifactsPage() {
-  const listQ = useArtifacts(undefined, { mine: true });
+  const owner = useListOwner();
+  const me = useMe();
+  if (!owner) {
+    return me.error
+      ? <ErrorRow>Could not load your workspace. Reload to try again.</ErrorRow>
+      : <LoadingRow label="Loading artifacts…" />;
+  }
+  return <ScopedArtifactsPage key={`${owner.ownerType}:${owner.ownerId}`} owner={owner} />;
+}
+
+function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
+  const [cursors, setCursors] = useState<string[]>([]);
+  const listQ = useArtifacts(owner, { limit: 50, cursor: currentCursor(cursors) });
   const loading = listQ.isLoading;
   const artifacts = (listQ.data?.artifacts ?? []).filter((a) => !a.revoked);
 
@@ -38,23 +50,36 @@ export function ArtifactsPage() {
       <div className="mx-auto max-w-4xl px-6 py-10">
         <h1 className="font-display text-2xl text-ink">Artifacts</h1>
         <p className="mt-1 text-sm text-muted">
-          Pages you published. A link serves logged-in members of your org unless you made it public.
+          Pages published in this workspace. A link serves logged-in members of your org unless it is public.
         </p>
 
         <div className="mt-6">
           {loading && <LoadingRow label="Loading artifacts…" />}
           {listQ.error && (
-            <ErrorRow>Could not load your artifacts. Check that the server is running, then reload.</ErrorRow>
+            <ErrorRow>Could not load artifacts for this workspace. Check your access, then reload.</ErrorRow>
           )}
-          {!loading && listQ.data && artifacts.length === 0 && (
+          {!loading && !listQ.error && listQ.data && artifacts.length === 0 && (
             <EmptyRow>Nothing published yet. Ask your agent to publish a page, or share a memory doc.</EmptyRow>
           )}
-          {!loading && artifacts.length > 0 && (
+          {!loading && !listQ.error && artifacts.length > 0 && (
             <div className="divide-y divide-line border-t border-line">
               {artifacts.map((artifact) => (
                 <ArtifactRow key={artifact.id} artifact={artifact} />
               ))}
             </div>
+          )}
+          {!loading && !listQ.error && (
+            <Pager
+              label="artifacts"
+              page={pageNumber(cursors)}
+              hasPrevious={cursors.length > 0}
+              hasNext={listQ.data?.nextCursor != null}
+              onPrevious={() => setCursors(popCursor(cursors))}
+              onNext={() => {
+                const next = listQ.data?.nextCursor;
+                if (next) setCursors(pushCursor(cursors, next));
+              }}
+            />
           )}
         </div>
       </div>

@@ -3299,6 +3299,8 @@ export interface ArtifactListItem {
 
 export interface ListArtifactsResponse {
   artifacts: ArtifactListItem[];
+  /** Present for paged owner lists; null on the last page. */
+  nextCursor?: string | null;
 }
 
 /** `PATCH /api/artifacts/:id` — widen/narrow, or pin the served version.
