@@ -57,7 +57,7 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 
 ## Implementation
 
-1. On create, require `canAdministerTeam` for the workspace `teamId`. Stamp `{ teamId, createdBy }` in metadata and `team_id` in one SQL statement after `createApiKey`; re-read both before returning the secret.
+1. On create, require `canAdministerTeam` for the workspace `teamId`. Stamp `{ teamId, createdBy }` in metadata and `team_id` in one SQL statement after `createApiKey`; re-read both before returning the secret. The final authorization check, stamp, and read share the team ownership lock with deletion.
 2. List filters on the indexed `team_id` column and projects the summary columns. Personal list omits team keys on the server and recomputes `total`.
 3. Extend the auth ladder to promote a team-metadata key to a team principal. Reject the key if the team is gone or belongs to another org.
 4. Session and workflow create paths use `resolveCreateOwner`. A team principal skips membership but still requires the team row under the ownership lock.
@@ -92,3 +92,9 @@ A `vlt_` key created in a team workspace starts a team-owned session. A personal
 ### Team deletion (TKAI-446)
 
 Deleting a team removes its API key rows in the same transaction. Keys belonging to other teams and personal keys remain. Authentication already refuses keys whose team is missing; this change removes the stored rows as well.
+
+Concurrent key creation uses the same `lockTeamForOwnership(tx, teamId)` lock as team deletion (#624). Better-auth mints outside the transaction. After minting, the route takes the lock and rechecks the team in the caller's org and the caller's administration rights. The route writes and verifies both team pins through `tx` before releasing the lock. It never calls the outer database handle inside that transaction.
+
+If deletion or lost authorization wins, creation returns 404 without the secret. A failed pin returns 500 without the secret. After the transaction settles, the route deletes the minted row on either failure, including transaction errors. If creation wins, team deletion removes the pinned row through its existing cleanup.
+
+The route regression suite completes team deletion after a real better-auth mint and before the final pin. It verifies 404, no secret, no stored key, and failed authentication. Additional cases cover lost administration rights, a missing minted row, and a pin write error. The existing create, revoke, and authorization tests remain.

@@ -3,13 +3,14 @@
  * and a real POST /api/sessions — the done-when is ownerType team, not a
  * mocked principal.
  */
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as authModule from "../auth/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { apikey, teamMembers, teams, users } from "../schema/index.js";
+import { apikey, orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import type {
   CreateTeamApiKeyResponse,
   CreateTeamResponse,
@@ -23,6 +24,7 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.restoreAllMocks();
 });
 
 function extractSessionCookie(setCookieHeader: string | null): string {
@@ -256,6 +258,74 @@ describe("team API keys", () => {
     const dead = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
     expect(dead.status).toBe(401);
   });
+
+  it.each(["team deleted", "admin demoted", "key missing", "pin throws"] as const)(
+    "cleans up a minted key when %s before the final pin",
+    async (interleaving) => {
+      let afterMint: (id: string) => Promise<void> = async () => {};
+      let mintedId = "";
+      let mintedKey = "";
+      const buildAuth = authModule.buildAuth;
+      vi.spyOn(authModule, "buildAuth").mockImplementation((opts) => {
+        const auth = buildAuth(opts);
+        const createApiKey = auth.api.createApiKey;
+        vi.spyOn(auth.api, "createApiKey").mockImplementation(async (input) => {
+          const created = await createApiKey(input);
+          if (!created) throw new Error("Expected better-auth to mint a key");
+          mintedId = created.id;
+          mintedKey = created.key;
+          // The real mint has committed, but the route has not received it.
+          // Complete the competing operation here without timing or sleeps.
+          await afterMint(created.id);
+          return created;
+        });
+        return auth;
+      });
+      api = await bootTestApi({ auth: true });
+      const { baseUrl, providers: { db } } = api;
+      const cookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin");
+      const teamId = await createTeam(baseUrl, cookie, "Platform");
+      afterMint = async (keyId) => {
+        const rows = await db.select().from(apikey).where(eq(apikey.id, keyId));
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.teamId).toBeNull();
+        if (interleaving === "team deleted") {
+          const deleted = await fetch(`${baseUrl}/api/teams/${teamId}`, {
+            method: "DELETE", headers: { cookie },
+          });
+          expect(deleted.status).toBe(200);
+          expect(await db.select().from(teams).where(eq(teams.id, teamId))).toEqual([]);
+        } else if (interleaving === "admin demoted") {
+          const creatorId = rows[0]?.referenceId;
+          if (!creatorId) throw new Error("Expected a key creator");
+          await db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.userId, creatorId));
+          await db.update(teamMembers).set({ role: "member" }).where(eq(teamMembers.teamId, teamId));
+        } else if (interleaving === "key missing") {
+          await db.delete(apikey).where(eq(apikey.id, keyId));
+        } else {
+          const transaction = db.transaction.bind(db);
+          vi.spyOn(db, "transaction").mockImplementationOnce((callback) => transaction(async (tx) => {
+            vi.spyOn(tx, "update").mockImplementationOnce(() => {
+              throw new Error("Injected pin write failure");
+            });
+            return callback(tx);
+          }));
+        }
+      };
+
+      const response = await fetch(`${baseUrl}/api/teams/${teamId}/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ name: "CI" }),
+      });
+      expect(response.status).toBe(interleaving === "team deleted" || interleaving === "admin demoted" ? 404 : 500);
+      expect(await response.text()).not.toContain(mintedKey);
+      expect(mintedId).not.toBe("");
+      expect(await db.select().from(apikey).where(eq(apikey.id, mintedId))).toEqual([]);
+      const dead = await fetch(`${baseUrl}/api/me`, { headers: { "x-api-key": mintedKey } });
+      expect(dead.status).toBe(401);
+    },
+  );
 
   it("personal create/update cannot stamp metadata.teamId", async () => {
     api = await bootTestApi({ auth: true });
