@@ -11,7 +11,7 @@
  * (TKAI-296): archived + is_default cleared in the same transaction, so
  * the rail drops it and the team can mint a fresh default.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistants, teamMembers, teams } from "../schema/index.js";
@@ -169,7 +169,7 @@ describe("DELETE /api/sessions/:id — assistant guard", () => {
     expect(await storedStatus(api, "orchestrator:user:local-user")).toBe("active");
   });
 
-  it("retires a migrated team assistant with a legacy session id", async () => {
+  it.each(["active", "deleted"] as const)("retires a migrated team assistant whose session is %s", async (status) => {
     api = await bootTestApi();
     const { db } = api.providers;
     await db.insert(teams).values({
@@ -193,7 +193,10 @@ describe("DELETE /api/sessions/:id — assistant guard", () => {
       owner: { type: "team", id: "team_legacy" },
     });
 
-    const res = await del(api, "orchestrator:team:team_legacy");
+    await db.update(agentSessions).set({ credentialOwnerMode: "actor", status })
+      .where(eq(agentSessions.id, "orchestrator:team:team_legacy"));
+    const destroy = vi.spyOn(api.providers.engineHost, "destroy");
+    const res = await del(api, "orchestrator:team:team_legacy?retireLegacyTeam=true");
     expect(res.status).toBe(200);
     const retired = (
       await db.select().from(assistants).where(eq(assistants.id, "asst_legacy_team")).limit(1)
@@ -201,4 +204,42 @@ describe("DELETE /api/sessions/:id — assistant guard", () => {
     expect(retired?.archivedAt).not.toBeNull();
     expect(retired?.isDefault).toBe(false);
   });
+  it("legacy cleanup refuses a plain personal chat", async () => {
+    api = await bootTestApi();
+    await seedSession(api, { id: "personal-kept", owner: { type: "user", id: "local-user" } });
+    const res = await del(api, "personal-kept?retireLegacyTeam=true");
+    expect(res.status).toBe(400);
+    expect(await storedStatus(api, "personal-kept")).toBe("active");
+  });
+
+  it("legacy cleanup refuses a current team assistant", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "team_current", orgId: "local-org", name: "Current", createdAt: Date.now() });
+    await seedAssistant(api, { id: "asst_current", owner: { type: "team", id: "team_current" } });
+    await seedSession(api, { id: "assistant:asst_current", owner: { type: "team", id: "team_current" } });
+    const res = await del(api, "assistant:asst_current?retireLegacyTeam=true");
+    expect(res.status).toBe(400);
+    expect(await storedStatus(api, "assistant:asst_current")).toBe("active");
+  });
+
+  it("legacy cleanup leaves an unsettled team assistant intact", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, engineHost } = api.providers;
+    const id = "assistant:asst_busy";
+    await db.insert(teams).values({ id: "team_busy", orgId: "local-org", name: "Busy", createdAt: Date.now() });
+    await seedAssistant(api, { id: "asst_busy", owner: { type: "team", id: "team_busy" } });
+    await seedSession(api, { id, owner: { type: "team", id: "team_busy" } });
+    await db.update(agentSessions).set({ credentialOwnerMode: "actor" }).where(eq(agentSessions.id, id));
+    await engineHost.sessionFor(id, { userId: "local-user", orgId: "local-org", workspace: "/tmp/legacy-cleanup", ownerType: "team", ownerTeamId: "team_busy", credentialOwnerMode: "actor" });
+    const now = Date.now();
+    await engineStore.saveThread(id, { id: "thread_busy", sessionId: id, key: "web:thread_busy", status: "active", queueMode: "followup", createdAt: now, updatedAt: now });
+    await engineStore.admitSubmission(id, "thread_busy", { id: "queued_busy", threadId: "thread_busy", content: "waiting", status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60000, createdAt: now, updatedAt: now });
+    const res = await del(api, `${id}?retireLegacyTeam=true`);
+    expect(res.status).toBe(409);
+    expect(await storedStatus(api, id)).toBe("active");
+    const [kept] = await db.select().from(assistants).where(eq(assistants.id, "asst_busy"));
+    expect(kept.archivedAt).toBeNull();
+    expect(kept.isDefault).toBe(true);
+  });
+
 });
