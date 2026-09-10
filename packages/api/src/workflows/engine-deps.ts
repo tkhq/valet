@@ -134,7 +134,7 @@ interface WorkflowSessionIdParts {
  */
 const ID_PART_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdParts {
+export function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdParts {
   const parts = sessionId.split(":");
   if (parts[0] !== "wf" || (parts.length !== 3 && parts.length !== 4)) {
     throw new Error(
@@ -249,14 +249,13 @@ export function workflowSessionWorkspace(sessionId: string): string {
  * app row (they're owned by `workflow_runs`, not the sessions UI), so the
  * generic app-row restore path skips them — without this, a process restart
  * mid-session-node leaves the run parked on a submission that never
- * settles.
+ * settles. Decision routes also use this path after verifying the run owner.
  */
 export async function ensureWorkflowSession(
   opts: WorkflowEngineDepsOpts,
   sessionId: string,
-): Promise<{ id: string }> {
-  const session = await ensureSession(opts, sessionId);
-  return { id: session.id };
+) {
+  return ensureSession(opts, sessionId);
 }
 
 async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, title?: string) {

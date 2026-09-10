@@ -1,3 +1,4 @@
+import { WorkflowAgentApprovals } from "~/components/workflows/agent-approvals";
 import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 import type { OrchestratorChildSummary } from "@valet/api/wire";
@@ -47,6 +48,11 @@ export function findChild(
 }
 
 function SessionPage() {
+  const { sessionId } = Route.useParams();
+  return sessionId.startsWith("wf:") ? <WorkflowAgentApprovals sessionId={sessionId} /> : <AppSessionPage />;
+}
+
+function AppSessionPage() {
   const { sessionId } = Route.useParams();
   const { thread, tab, finding, child: childPanelId } = Route.useSearch();
   const navigate = Route.useNavigate();

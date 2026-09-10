@@ -249,3 +249,9 @@ Team and org orchestrators have no meaningful legacy counterpart and launch v2-o
 - Delegation UX: how the org orchestrator presents "answered on behalf of" attribution on shared surfaces.
 - Author-aware steer on team threads (a member steering their own in-flight turn without affecting others').
 - Whether org memory participates in personal orchestrators' read union the way team memory does, or stays org-orchestrator-private.
+
+### Workflow agent approval links (2026-09-10)
+
+Approval and escalation links include the originating thread. Workflow session nodes have no app session row, so their session links open an approval view instead of the standalone session viewer. The view uses the shared decision card and polls pending gates.
+
+Only decision-list, resolve, and withdraw endpoints accept these workflow sessions. They require an existing engine session, its run, a definition in the caller's organization, and current owner access. The workflow engine restores the session through its existing path. This does not grant prompt, sandbox, or session lifecycle access. Old workflow-session notification URLs reach the same view. A resolved gate shows an empty state with a link to the run.

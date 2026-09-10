@@ -21,7 +21,8 @@ import {
 } from "@valet/engine";
 import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions, sessionThreads, users } from "../schema/index.js";
+import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
+import { agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -49,7 +50,7 @@ import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engi
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
-import { canResolveSessionGate, canViewSession } from "../services/session-access.js";
+import { canResolveSessionGate, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -910,8 +911,47 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
 // / `Session.withdrawDecision` — which finds the thread that owns the gate
 // and unblocks it.
 
+async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike): Promise<boolean> {
+  if (session.ownerType === "org" && c.req.param("id").startsWith("wf:")) {
+    return c.var.principal.type === "user" && session.ownerId === c.var.user.orgId
+      && await isOrgAdminUser(c);
+  }
+  return canResolveSessionGate(c.var.providers.db, session, c.var.principal);
+}
+
+/** Workflow agent gates have a run owner, but no app session row. Only
+ * decision endpoints use this fallback; it grants no sandbox or prompt access.
+ */
+async function loadDecisionSession(c: Context<AppEnv>) {
+  const id = c.req.param("id");
+  if (!id.startsWith("wf:")) return loadEngineSession(c);
+  const missing = () => ({ error: c.json({ error: "session not found" }, 404) });
+  let parts;
+  try { parts = parseWorkflowSessionId(id); } catch { return missing(); }
+  const p = c.var.providers;
+  const run = await p.workflowStore.getRun(parts.runId);
+  if (!run?.owner) return missing();
+  const [definition] = await p.db.select({ orgId: workflowDefinitions.orgId })
+    .from(workflowDefinitions).where(eq(workflowDefinitions.id, run.params.workflowId)).limit(1);
+  if (!definition || definition.orgId !== c.var.user.orgId) return missing();
+  const session = {
+    ownerType: run.owner.ownerType, ownerId: run.owner.ownerId,
+    userId: run.owner.ownerType === "user" ? run.owner.ownerId : "",
+    orgId: definition.orgId,
+  };
+  if (!(await canAnswerDecision(c, session))) return missing();
+  // A guessed node ID must not materialize a new agent on a read request.
+  if (!(await p.engineStore.getSession(id))) return missing();
+  const engineSession = await ensureWorkflowSession({
+    db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+    host: p.engineHost, actionPluginByService: p.actionPluginByService,
+    credentials: p.engineCredentials,
+  }, id);
+  return { session, engineSession };
+}
+
 messagesRouter.get("/:id/decisions", async (c) => {
-  const result = await loadEngineSession(c);
+  const result = await loadDecisionSession(c);
   if ("error" in result) return result.error;
   const { engineSession } = result;
 
@@ -921,7 +961,7 @@ messagesRouter.get("/:id/decisions", async (c) => {
 });
 
 messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
-  const result = await loadEngineSession(c);
+  const result = await loadDecisionSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
@@ -929,7 +969,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // Explicit resolve authorization, distinct from `loadEngineSession`'s
   // view check: answering a gate acts on the session's behalf. The same
   // named check gates the channel gate-callback path.
-  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.principal))) {
+  if (!(await canAnswerDecision(c, session))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,
@@ -987,14 +1027,14 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
 });
 
 messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
-  const result = await loadEngineSession(c);
+  const result = await loadDecisionSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
 
   // Same explicit resolve authorization as the resolve route above —
   // withdrawing settles the gate too.
-  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.principal))) {
+  if (!(await canAnswerDecision(c, session))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,
