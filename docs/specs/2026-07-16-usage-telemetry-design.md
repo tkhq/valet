@@ -62,3 +62,13 @@ Run a handful of sessions (some web, one long-running with a >60s job, one error
 - OpenTelemetry/external export (possible later sink for the same projector).
 - Backfilling telemetry for sessions that predate the feature.
 - User-level privacy controls beyond admin-gating (single-org trust model today).
+
+## Daily active agents (2026-09-10)
+
+`GET /api/usage/daily-agents?scope=org&window=30d` returns daily activity for collection outside Valet. It uses the existing usage scope checks. Org reads require an org admin; team reads require membership. The response contains aggregate counts, not session IDs.
+
+An active agent is a distinct engine session with positive recorded token usage on a UTC calendar day. Repeated turns and threads count once per session per day. Children and workflow agents count separately from their parent assistant. Kinds are `assistant`, `child`, `workflow`, and `session`. Idle sessions, page views, zero-token entries, and external proxy calls do not count. Unpriced usage counts.
+
+Each row contains `dayMs`, `teamId`, `teamName`, `kind`, and `activeAgents`. Team attribution uses the session or workflow owner from `cost_entries`, never the actor's team memberships. A null team ID means no team owner. Names reflect current team names. Sum the kinds for a team's daily total; do not sum daily counts to compute monthly unique agents.
+
+Windows include the current partial UTC day and the preceding calendar days: `24h`, `7d`, `30d`, or `90d`. Missing day/group rows mean zero. This endpoint reads retained usage and ownership rows. Deletion can remove historical observations, and removing child-watch metadata can change classification. Collect completed-day snapshots externally if history must survive cleanup. No per-agent Prometheus labels or new telemetry writes are added.

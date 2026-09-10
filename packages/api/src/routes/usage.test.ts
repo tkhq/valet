@@ -8,13 +8,16 @@ import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   agentSessions,
+  assistants,
+  childWatches,
+  workflowDefinitions,
   llmProxyRequests,
   skillContextAttributions,
   skillInvocations,
   teams,
   teamMembers,
 } from "../schema/index.js";
-import type { UsageBreakdownResponse, UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
+import type { DailyAgentActivityResponse, UsageBreakdownResponse, UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -363,5 +366,68 @@ describe("GET /api/usage/summary", () => {
     const body = (await res.json()) as { me: { day: { costUsd: number; totalTokens: number } } };
     expect(body.me.day.costUsd).toBeCloseTo(0.003, 6);
     expect(body.me.day.totalTokens).toBe(120);
+  });
+});
+
+describe("GET /api/usage/daily-agents", () => {
+  it("counts distinct active sessions per UTC day and team, including children", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const day = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+    const yesterday = day - 86_400_000;
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(teams).values([
+      { id: "activity-a", orgId: "local-org", name: "Activity A", createdAt: day },
+      { id: "activity-b", orgId: "local-org", name: "Activity B", createdAt: day },
+    ]);
+    await db.insert(teamMembers).values({ teamId: "activity-a", userId: "local-user", role: "member" });
+    await db.insert(agentSessions).values([
+      ...["assistant:activity", "activity-child", "activity-idle"].map((id) => ({
+        id, userId: "local-user", orgId: "local-org", workspace: "/w", status: "active" as const,
+        ownerType: "team" as const, ownerId: "activity-a", createdAt: yesterday, updatedAt: day,
+      })),
+      { id: "activity-other", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "activity-b", createdAt: yesterday, updatedAt: day },
+      { id: "orchestrator:activity", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: yesterday, updatedAt: day },
+      { id: "activity-foreign", userId: "local-user", orgId: "other-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: yesterday, updatedAt: day },
+    ]);
+    await db.insert(assistants).values({ id: "activity", orgId: "local-org", ownerType: "team", ownerId: "activity-a", sessionId: "assistant:activity", createdAt: yesterday });
+    await db.insert(childWatches).values({ childSessionId: "activity-child", queueItemId: "activity-q", parentSessionId: "assistant:activity", parentThreadId: "th", actorUserId: "local-user", orgId: "local-org", createdAt: yesterday });
+    for (const [id, session, at] of [
+      ["activity-1", "assistant:activity", yesterday],
+      ["activity-2", "assistant:activity", day - 1],
+      ["activity-3", "assistant:activity", day],
+      ["activity-4", "activity-child", day],
+      ["activity-5", "activity-child", day],
+      ["activity-6", "activity-other", day],
+      ["activity-7", "orchestrator:activity", day],
+      ["activity-8", "activity-foreign", day],
+    ] satisfies Array<[string, string, number]>) await seedEngineEntry(api, id, session, at);
+    // Unpriced usage still counts; a zero-token assistant message does not.
+    await db.execute(sql`UPDATE engine_entries SET cost = NULL WHERE id = 'activity-4'`);
+    await seedEngineEntry(api, "activity-zero", "activity-idle", day);
+    await db.execute(sql`UPDATE engine_entries SET usage = '{"total":0}' WHERE id = 'activity-zero'`);
+    await db.insert(workflowDefinitions).values({ id: "activity-workflow", orgId: "local-org", ownerType: "team", ownerId: "activity-a", name: "Activity workflow", definition: {}, createdAt: day, updatedAt: day });
+    await api.providers.workflowStore.createRun("activity-run", { workflowId: "activity-workflow", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "activity-a" });
+    await seedEngineEntry(api, "activity-wf1", "wf:activity-run:node", day);
+    await seedEngineEntry(api, "activity-wf2", "wf:activity-run:node", day);
+    await seedEngineEntry(api, "activity-wf3", "wf:activity-run:node:1", day);
+    const res = await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=org&window=7d`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as DailyAgentActivityResponse;
+    expect(body.timezone).toBe("UTC");
+    expect(body.days).toEqual([
+      { dayMs: yesterday, teamId: "activity-a", teamName: "Activity A", kind: "assistant", activeAgents: 1 },
+      { dayMs: day, teamId: null, teamName: null, kind: "assistant", activeAgents: 1 },
+      { dayMs: day, teamId: "activity-a", teamName: "Activity A", kind: "assistant", activeAgents: 1 },
+      { dayMs: day, teamId: "activity-a", teamName: "Activity A", kind: "child", activeAgents: 1 },
+      { dayMs: day, teamId: "activity-a", teamName: "Activity A", kind: "workflow", activeAgents: 2 },
+      { dayMs: day, teamId: "activity-b", teamName: "Activity B", kind: "session", activeAgents: 1 },
+    ]);
+    const teamRes = await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=team&teamId=activity-a&window=24h`);
+    const teamBody = await teamRes.json() as DailyAgentActivityResponse;
+    expect(teamBody.days).toEqual(body.days.filter((r) => r.dayMs === day && r.teamId === "activity-a"));
+    expect((await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=team&teamId=activity-b`)).status).toBe(404);
+    expect((await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=org`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(403);
   });
 });

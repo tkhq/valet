@@ -5077,3 +5077,16 @@ export interface ListFlaggedResponse {
   /** Present when more rows exist; pass back as ?cursor=. */
   nextCursor?: string;
 }
+
+/** Distinct active agent sessions per UTC day and owning team. */
+export interface DailyAgentActivityResponse {
+  scope: "me" | "team" | "org";
+  timezone: "UTC";
+  days: Array<{
+    dayMs: number;
+    teamId: string | null;
+    teamName: string | null;
+    kind: "assistant" | "child" | "workflow" | "session";
+    activeAgents: number;
+  }>;
+}

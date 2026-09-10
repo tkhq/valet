@@ -12,6 +12,7 @@ import { isOrgAdmin } from "./org.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
+  DailyAgentActivityResponse,
   UsageBucket,
   UsageDrillItem,
   UsageSessionRow,
@@ -225,6 +226,52 @@ async function getSkillBreakdown(
     attributedContextTokens: toNum(row.attributed_context_tokens),
     carryingCalls: toNum(row.carrying_calls),
   }));
+}
+
+/** Distinct sessions with positive token usage, grouped into UTC calendar days.
+ * Reads retained usage; page views, idle sessions and proxy calls do not count.
+ */
+export async function getDailyAgentActivity(
+  db: AppDb,
+  opts: { windowMs: number; scope: UsageScope; now?: number },
+): Promise<DailyAgentActivityResponse> {
+  const now = opts.now ?? Date.now();
+  const since = Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS;
+  const where = scopeWhere("ce.", since, opts.scope);
+  type ActivityRow = {
+    day_ms: unknown; team_id: string | null; team_name: string | null;
+    kind: "assistant" | "child" | "workflow" | "session"; active_agents: unknown;
+  };
+  // AppDb abstracts Postgres and PGlite; the selected columns define this result.
+  const rows = await db.execute(sql`
+    SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+      CASE WHEN ce.owner_type = 'team' THEN ce.owner_id END AS team_id,
+      t.name AS team_name,
+      CASE
+        WHEN ce.use_case = 'workflow' THEN 'workflow'
+        WHEN ce.session_id LIKE 'orchestrator:%' OR EXISTS (
+          SELECT 1 FROM assistants a WHERE a.session_id = ce.session_id AND a.org_id = ce.org_id
+        ) THEN 'assistant'
+        WHEN EXISTS (
+          SELECT 1 FROM child_watches w WHERE w.child_session_id = ce.session_id AND w.org_id = ce.org_id
+        ) THEN 'child'
+        ELSE 'session'
+      END AS kind,
+      COUNT(DISTINCT ce.session_id) AS active_agents
+    FROM cost_entries ce
+    LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
+    WHERE ${where} AND ce.created_at <= ${now}
+      AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
+    GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
+  `) as { rows: ActivityRow[] };
+  return {
+    scope: opts.scope.scope,
+    timezone: "UTC",
+    days: rows.rows.map((r) => ({
+      dayMs: toNum(r.day_ms), teamId: r.team_id, teamName: r.team_name,
+      kind: r.kind, activeAgents: toNum(r.active_agents),
+    })),
+  };
 }
 
 // ── Breakdown ────────────────────────────────────────────────────────────────
