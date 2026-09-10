@@ -240,6 +240,10 @@ describe("workflow collector", () => {
       },
       schedule: { name: "Parent", cron: "0 3 * * *" },
     });
+    repo.sha = "c2";
+    await serviceFor(f).syncOnce(id);
+    const parentId = (await mirrored()).find((row) => row.upstreamPath?.endsWith("a-parent.yaml"))?.id;
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
     if (state === "removed") delete repo.files[path];
     if (state === "invalid") repo.files[path] = "valet: [";
     if (state === "unreadable") repo.unreadable = [path];
@@ -247,10 +251,91 @@ describe("workflow collector", () => {
     if (state === "other-owner") {
       await db.update(workflowDefinitions).set({ ownerType: "user", ownerId: "u1" }).where(eq(workflowDefinitions.id, childId));
     }
-    repo.sha = "c2";
+    // Change a blob so the manifest shortcut cannot skip this collector pass.
+    repo.files[".valet/workflows/a-parent.yaml"] += "\n";
+    repo.sha = "c3";
     const outcome = await serviceFor(f).syncOnce(id);
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
     expect(outcome?.warnings.join(" ")).toContain("Reference a workflow this team owns");
+    const remaining = await mirrored();
+    expect(remaining.some((row) => row.id === parentId)).toBe(true);
+    expect(remaining.some((row) => row.id === childId)).toBe(state !== "removed");
+  });
+
+  it("keeps an unseen callee and its surviving parent's schedule on a partial scan", async () => {
+    const childPath = ".valet/workflows/z-child.yaml";
+    const parentPath = ".valet/workflows/a-parent.yaml";
+    const repo: FakeRepo = { sha: "c1", files: { [childPath]: workflowYaml("Child") } };
+    const f = serve(repo);
+    const id = await teamSource();
+    await serviceFor(f).syncOnce(id);
+    const childId = (await mirrored())[0].id;
+    const parent = JSON.stringify({
+      valet: "workflow/v1",
+      definition: {
+        version: "dag/v1",
+        nodes: [{ id: "start", type: "trigger" }, { id: "call", type: "workflow", workflowId: childId }],
+        edges: [{ from: "start", to: "call" }],
+      },
+      schedule: { name: "Parent", cron: "0 3 * * *" },
+    });
+    repo.files[parentPath] = parent;
+    repo.sha = "c2";
+    await serviceFor(f).syncOnce(id);
+    const [schedule] = await db.select().from(workflowSchedules);
+    expect(schedule).toBeDefined();
+    const [source] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+    // The workflow rail currently refuses cut trees. Exercise the collector's
+    // defensive partial-scan contract directly, without a complete listing.
+    const pass = new WorkflowCollector({ plugins: [], credentials }).discover({
+      source, entries: [{ path: parentPath, type: "blob", mode: "100644", sha: blobShaOf(parent) }],
+    });
+    const result = await pass.reconcile({
+      db, source, text: new Map([[parentPath, parent]]), discovery: "directory-walk",
+      commitSha: "c3", now: Date.now,
+    });
+    expect(result.deleted).toBe(0);
+    expect(result.keptStale).toEqual(["Child"]);
+    expect((await mirrored()).some((row) => row.id === childId)).toBe(true);
+    expect(await db.select().from(workflowSchedules)).toEqual([schedule]);
+  });
+
+  it.each(["team", "user"] as const)("does not overwrite another source's %s-owned callee through a file ID", async (ownerType) => {
+    const id = await teamSource();
+    const otherSource = await teamSource("tkhq/other-automation");
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "tool", type: "tool", service: "linear", action: "list_issues", params: {} },
+      ],
+      edges: [{ from: "start", to: "tool" }],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: "external-child", orgId: ORG, ownerType, ownerId: ownerType === "team" ? TEAM : "u1",
+      name: "External", origin: "repo", sourceId: otherSource,
+      upstreamPath: ".valet/workflows/z-child.yaml", definition, createdAt: 1, updatedAt: 1,
+    });
+    const f = serve({ sha: "c1", files: {
+      ".valet/workflows/z-child.yaml": JSON.stringify({ valet: "workflow/v1", id: "external-child", definition: GRAPH }),
+      ".valet/workflows/a-parent.yaml": JSON.stringify({
+        valet: "workflow/v1",
+        definition: {
+          version: "dag/v1",
+          nodes: [{ id: "start", type: "trigger" }, { id: "call", type: "workflow", workflowId: "external-child" }],
+          edges: [{ from: "start", to: "call" }],
+        },
+        schedule: { name: "Parent", cron: "0 3 * * *" },
+      }),
+    } });
+    const outcome = await serviceFor(f).syncOnce(id);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+    expect(outcome?.warnings.join(" ")).toContain(ownerType === "team" ? "linear" : "Reference a workflow this team owns");
+    const [external] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, "external-child"));
+    expect(external).toMatchObject({ sourceId: otherSource, ownerType, definition });
+    const ownChild = (await mirrored()).find((row) => row.sourceId === id && row.upstreamPath?.endsWith("z-child.yaml"));
+    expect(ownChild?.id).toBeDefined();
+    expect(ownChild?.id).not.toBe("external-child");
   });
 
   it("mirrors a workflow file from each root, owned by the source's team", async () => {

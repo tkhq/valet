@@ -283,6 +283,7 @@ class WorkflowPass implements CollectorPass {
     const definitions = new Map<string, WorkflowDefinition | null>();
     for (const row of existing) {
       if (row.upstreamPath === null) continue;
+      // Partial scans delete nothing below, so unseen rows remain callable.
       if (discovery === "directory-walk" && !upstream.has(row.upstreamPath)) continue;
       definitions.set(row.id, incoming.get(row.upstreamPath)?.file.definition ?? null);
     }
