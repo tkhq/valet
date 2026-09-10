@@ -7,7 +7,7 @@
  * and gate replay idempotence.
  */
 import { describe, expect, it, beforeEach } from "vitest";
-import type { WireEvent, WireQueueState } from "@valet/api/wire";
+import type { Message, WireEvent, WireQueueState } from "@valet/api/wire";
 import { queueBusy, useStreamStore } from "./stream";
 
 const SESSION = "sess-1";
@@ -740,6 +740,44 @@ describe("active model state", () => {
 describe("setThreadMessages", () => {
   beforeEach(reset);
 
+  function restMessage(id: string): Message {
+    return {
+      id,
+      sessionId: SESSION,
+      threadId: THREAD,
+      role: "assistant",
+      content: id,
+      parts: [{ kind: "text", text: id }],
+      createdAt: 1,
+    };
+  }
+
+  it("keeps the prefix when a bounded tail advances by one row", () => {
+    const { setThreadMessages } = useStreamStore.getState();
+    const initial = Array.from({ length: 200 }, (_, index) => restMessage(`m${index + 1}`));
+    const tail = Array.from({ length: 200 }, (_, index) => restMessage(`m${index + 2}`));
+
+    setThreadMessages(SESSION, THREAD, initial);
+    setThreadMessages(SESSION, THREAD, tail, true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map((message) => message.id)).toEqual(
+      Array.from({ length: 201 }, (_, index) => `m${index + 1}`),
+    );
+  });
+
+  it("keeps the prefix when several rows cross the bounded-tail boundary", () => {
+    const { setThreadMessages } = useStreamStore.getState();
+    const initial = Array.from({ length: 200 }, (_, index) => restMessage(`m${index + 1}`));
+    const tail = Array.from({ length: 200 }, (_, index) => restMessage(`m${index + 4}`));
+
+    setThreadMessages(SESSION, THREAD, initial);
+    setThreadMessages(SESSION, THREAD, tail, true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map((message) => message.id)).toEqual(
+      Array.from({ length: 203 }, (_, index) => `m${index + 1}`),
+    );
+  });
+
   it("keeps a mid-stream assistant message that hasn't been persisted to REST yet", () => {
     const { ingest, setThreadMessages } = useStreamStore.getState();
 
@@ -767,7 +805,7 @@ describe("setThreadMessages", () => {
         parts: [{ kind: "text", text: "do the thing" }],
         createdAt: 1,
       },
-    ]);
+    ], true);
 
     const afterRefetch = useStreamStore.getState().bySession[SESSION].messages;
     expect(afterRefetch.map((m) => m.id)).toEqual(["user-1", "asst-1"]);
@@ -786,6 +824,18 @@ describe("setThreadMessages", () => {
     });
     const afterDelta = useStreamStore.getState().bySession[SESSION].messages;
     expect(afterDelta.find((m) => m.id === "asst-1")?.content).toBe("hello");
+  });
+
+  it("does not reorder the prefix when a stale tail follows message_start", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("m1"), restMessage("m2")]);
+    ingest(SESSION, messageStart("m3", 1));
+
+    setThreadMessages(SESSION, THREAD, [restMessage("m2")], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map((message) => message.id)).toEqual(
+      ["m1", "m2", "m3"],
+    );
   });
 
   it("drops the store's copy once the REST snapshot includes the same id (no duplicate)", () => {

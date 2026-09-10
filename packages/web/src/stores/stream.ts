@@ -46,6 +46,8 @@ export type AgentStatus =
  * comment on `submission.settled` for the fallback this store uses instead).
  */
 export interface StreamMessage extends Message {
+  /** Client-only rows stay until REST confirms the same message or queue item. */
+  persistence?: "optimistic" | "streaming";
   settledOutcome?: SettledOutcome;
   /**
    * Reason for a non-clean `settledOutcome`, taken from the wire event's
@@ -212,28 +214,16 @@ export interface StreamStore {
    */
   setMessageQueueItemId(sessionId: string, messageId: string, queueItemId: string): void;
   /**
-   * Merge the messages for a single thread with a fresh REST snapshot.
-   * Other threads' messages stay put. Within the target thread, any
-   * store message whose id is *absent* from the REST snapshot is kept
-   * (positioned after the REST rows, in its original relative order) —
-   * this generalizes the old user-opt- prefix special case to cover any
-   * client-local row the REST snapshot hasn't caught up to yet, most
-   * importantly a mid-stream assistant message (created at `message_start`,
-   * not yet persisted) that this same refetch would otherwise silently
-   * wipe out from under an in-flight `text_delta`/`tool_start` stream. Once
-   * the REST snapshot's id set includes a given row (e.g. the engine has
-   * persisted it under the same id), the REST copy wins and the local
-   * extra is dropped.
-   *
-   * This is the entry point for thread history loading after a thread
-   * switch (or initial route mount), and is also invoked opportunistically
-   * mid-turn (see `useInvalidateMessagesOnQueueState`) — hence the merge
-   * rather than a hard replace.
+   * Merge one thread with a REST snapshot. If REST returns a bounded tail,
+   * preserve the current prefix before the first overlap. Keep only typed
+   * client-local rows after the REST tail. A complete snapshot replaces all
+   * canonical rows for the thread.
    */
   setThreadMessages(
     sessionId: string,
     threadId: string,
     messages: Message[],
+    hasMore?: boolean,
   ): void;
   /**
    * Seed pending gates from REST (the bootstrap path on session detail
@@ -326,7 +316,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // synthesized events.
       const exists = next.messages.some((m) => m.id === ev.messageId);
       if (exists) return next;
-      const newMsg: Message = {
+      const newMsg: StreamMessage = {
         id: ev.messageId,
         sessionId,
         threadId: ev.threadId,
@@ -334,6 +324,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         content: "",
         parts: [],
         createdAt: ev.ts,
+        persistence: "streaming",
       };
       next.messages = [...next.messages, newMsg];
       return next;
@@ -785,13 +776,13 @@ export const useStreamStore = create<StreamStore>((set) => ({
     }),
 
   addUserMessage: (sessionId, text, threadId, attachments) => {
-    // Synthetic id; the next WS init replaces this row with the server's
-    // persisted message (different id, same content). A short collision
-    // window with content-based dedupe is acceptable for v1.
+    // Synthetic id; the next REST snapshot replaces this row with the
+    // persisted message. A short collision window with content-based
+    // dedupe is acceptable for v1.
     const id = `user-opt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     set((state) => {
       const slice = ensure(state, sessionId);
-      const message: Message = {
+      const message: StreamMessage = {
         id,
         sessionId,
         threadId,
@@ -799,6 +790,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
         content: text,
         parts: [{ kind: "text", text }],
         createdAt: Date.now(),
+        persistence: "optimistic",
         // Optimistic mirror of the wire projection: the REST refetch will
         // overwrite this row with the server's canonical attachments field.
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
@@ -849,45 +841,40 @@ export const useStreamStore = create<StreamStore>((set) => ({
       };
     }),
 
-  setThreadMessages: (sessionId, threadId, freshMessages) =>
+  setThreadMessages: (sessionId, threadId, freshMessages, hasMore = false) =>
     set((state) => {
       const slice = ensure(state, sessionId);
-      // Keep messages from other threads untouched.
-      const others = slice.messages.filter((m) => m.threadId !== threadId);
-      // Store-local rows for this thread that the REST snapshot doesn't
-      // (yet) know about — optimistic user messages awaiting persistence,
-      // and in-flight assistant messages the engine hasn't flushed to
-      // `engine_entries` yet. Kept in their original relative order,
-      // appended after the REST rows.
-      const freshIds = new Set(freshMessages.map((m) => m.id));
-      // REST-persisted user messages carry `queueItemId` (stamped when the
-      // optimistic row's submission settles). A persisted user message gets
-      // a *fresh* server id — merge-by-id alone never drops the optimistic
-      // twin, producing a duplicate bubble. Match on queueItemId when the
-      // optimistic row has been stamped; if the 202 hasn't returned yet
-      // (unstamped), fall back to content match against REST user rows —
-      // the pre-id-merge dedupe behavior.
+      const others = slice.messages.filter((message) => message.threadId !== threadId);
+      const current = slice.messages.filter((message) => message.threadId === threadId);
+      const freshIds = new Set(freshMessages.map((message) => message.id));
       const freshQueueItemIds = new Set(
-        freshMessages.filter((m) => m.queueItemId).map((m) => m.queueItemId),
+        freshMessages.flatMap((message) => message.queueItemId ? [message.queueItemId] : []),
       );
       const freshUserContents = new Set(
-        freshMessages.filter((m) => m.role === "user").map((m) => m.content),
+        freshMessages.filter((message) => message.role === "user").map((message) => message.content),
       );
-      const isDupedOptimisticUser = (m: StreamMessage): boolean => {
-        if (m.role !== "user" || !m.id.startsWith("user-opt-")) return false;
-        if (m.queueItemId) return freshQueueItemIds.has(m.queueItemId);
-        return freshUserContents.has(m.content);
+      const isConfirmedOptimisticUser = (message: StreamMessage): boolean => {
+        if (message.persistence !== "optimistic" || message.role !== "user") return false;
+        if (message.queueItemId) return freshQueueItemIds.has(message.queueItemId);
+        return freshUserContents.has(message.content);
       };
-      const localOnly = slice.messages.filter(
-        (m) =>
-          m.threadId === threadId && !freshIds.has(m.id) && !isDupedOptimisticUser(m),
+      const overlap = hasMore
+        ? current.findIndex((message) => freshIds.has(message.id))
+        : -1;
+      const prefix = overlap >= 0 ? current.slice(0, overlap) : [];
+      const afterTail = overlap >= 0 ? current.slice(overlap) : current;
+      const transient = afterTail.filter(
+        (message) =>
+          message.persistence !== undefined &&
+          !freshIds.has(message.id) &&
+          !isConfirmedOptimisticUser(message),
       );
       return {
         bySession: {
           ...state.bySession,
           [sessionId]: {
             ...slice,
-            messages: [...others, ...freshMessages, ...localOnly],
+            messages: [...others, ...prefix, ...freshMessages, ...transient],
           },
         },
       };

@@ -129,7 +129,12 @@ export function SessionView({
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
     if (!effectiveThreadId || !messagesQ.data) return;
-    setThreadMessages(sessionId, effectiveThreadId, messagesQ.data.messages);
+    setThreadMessages(
+      sessionId,
+      effectiveThreadId,
+      messagesQ.data.messages,
+      messagesQ.data.hasMore,
+    );
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
 
   usePendingGatesSeed(sessionId);

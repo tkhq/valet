@@ -601,15 +601,19 @@ messagesRouter.get("/:id/messages", async (c) => {
 
   const limit = Number.parseInt(c.req.query("limit") ?? "100", 10);
   const cursor = c.req.query("cursor") ?? undefined;
-  const entries = await thread.readEntries({ limit, cursor });
+  // Read one extra row so the bounded tail can report whether older rows
+  // exist. The response still contains at most the requested limit.
+  const entries = await thread.readEntries({ limit: limit + 1, cursor });
+  const hasMore = entries.length > limit;
+  const tail = hasMore ? entries.slice(1) : entries;
 
-  const messages = entries
+  const messages = tail
     .map((e) => entryToMessage(e, session.id, thread.id))
     .filter((m): m is Message => m !== null);
 
   const body: ListMessagesResponse = {
     messages,
-    hasMore: entries.length === limit,
+    hasMore,
     nextCursor: undefined, // engine cursor pagination is opaque; revisit if needed
   };
   return c.json(body);
