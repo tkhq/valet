@@ -118,3 +118,44 @@ Each phase: own plan (`docs/plans/`), own PR against `dev-v2`, spec Deviations u
 - Team channel bindings (Slack/Telegram routing to team orchestrators).
 - Delegation audit surface (who used my delegated credential when) beyond run-history actor attribution.
 - Per-workflow delegation grants (revisit only if per-team proves too broad in practice).
+
+## Personal resource copies (TKAI-431, 2026-09-10)
+
+The personal assistant can copy an explicitly named memory file or workflow
+into a destination team. These operations do not move resources. They leave
+source content, ownership, schedules, event subscriptions and webhooks unchanged.
+The caller chooses the destination team and path or name. A conflict fails with
+corrective text; the service does not overwrite an existing destination.
+
+- `mem_copy_to_team` calls `POST /api/memory/copy-to-team` with
+  `{ from, to, teamId }`. The source must belong to the acting user. The service
+  requires destination membership plus `canAdministerTeam`, the existing memory
+  write authority, including on authenticated internal tool requests. The team
+  supplies the destination org ID. Content and metadata are copied without LLM
+  reconstruction. Version history starts at one; source-session and mirror
+  bindings are cleared. The response identifies the destination by owner and path.
+- `workflows.copy_to_team` calls the existing workflow copy service with
+  `{ workflow_id, team_id, name }`. HTTP callers use
+  `POST /api/workflows/:id/copy-to-team` with `{ teamId, name }`. Source access
+  follows the workflow read check, then requires personal ownership. Destination
+  access follows the implemented workflow creation rule: membership in a team
+  within the caller's org. This is the current service rule, not the proposed
+  admin-only gate in Phase B above. HTTP retains the creation API-key restrictions.
+  The copy gets a new workflow ID and version-one snapshot. Team assistant and
+  team-key contexts cannot copy an actor's personal graph.
+
+Both services use the existing team ownership lock around destination checks
+and creation. Memory insertion also uses the owner/path unique key to reject a
+conflict. Workflow names are checked within that lock. No copy creates runs,
+active triggers, webhook secrets, credentials or execution grants.
+
+Memory links and nested workflow references remain unchanged. This operation
+copies only the named resource, not its dependencies. Referenced personal
+resources may remain unavailable to the team. The workflow action reports this
+limit so the assistant can arrange explicit dependency copies and remapping.
+
+Artifact copies use `artifact_copy_to_team` and the existing artifact store.
+The server checks personal ownership and destination membership in the same organization.
+A copy gets a new ID, token and version history. Its default audience is the organization,
+as on ordinary publish; team ownership does not make an artifact link team-private.
+Public grants, comments and source-session links do not transfer. A key collision refuses the copy.

@@ -42,6 +42,7 @@ import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import type { MemoryScope } from "../services/memory.js";
 import {
   addArtifactComment,
+  copyArtifactToTeam,
   decideArtifactAccess,
   getAllowPublicArtifacts,
   getArtifactById,
@@ -458,6 +459,25 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
 // ─── Share + management (authed) ───────────────────────────────────────
 
 export const artifactsRouter = new Hono<AppEnv>();
+
+artifactsRouter.post("/copy-to-team", async (c) => {
+  try {
+    const scope = await resolveScope(c, "read");
+    const body: unknown = await c.req.json().catch(() => null);
+    if (!body || typeof body !== "object" || !("artifactId" in body) || typeof body.artifactId !== "string" ||
+        !("teamId" in body) || typeof body.teamId !== "string" || !body.teamId.trim() ||
+        !("key" in body) || typeof body.key !== "string") {
+      return c.json({ error: "Provide artifactId, teamId and a new key to copy a personal artifact." }, 400);
+    }
+    const db = c.var.providers.db;
+    const row = await copyArtifactToTeam(db, scope, await orgIdForShare(c, db), { artifactId: body.artifactId, teamId: body.teamId, key: body.key });
+    return c.json({ id: row.id, path: row.sourceMemoryPath, url: shareUrl(c, row.token), visibility: row.visibility }, 201);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+});
 
 artifactsRouter.post("/share", async (c) => {
   let scope: MemoryScope;

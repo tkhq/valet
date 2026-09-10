@@ -17,6 +17,9 @@ import type {
   ToolContext,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { eq } from "drizzle-orm";
+import { teamMembers } from "../schema/index.js";
+import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   memWriteTool,
@@ -24,6 +27,7 @@ import {
   memReadTool,
   memSearchTool,
   memMoveTool,
+  memCopyToTeamTool,
   memLinksTool,
   memShareTool,
   artifactPublishTool,
@@ -65,7 +69,7 @@ afterEach(async () => {
 });
 
 describe("buildMemoryTools", () => {
-  it("returns the eight mem_* tools plus artifact_publish", () => {
+  it("returns memory and artifact tools", () => {
     const names = buildMemoryTools().map((t) => t.name);
     expect(names).toEqual([
       "mem_write",
@@ -73,6 +77,8 @@ describe("buildMemoryTools", () => {
       "mem_read",
       "mem_search",
       "mem_move",
+      "mem_copy_to_team",
+      "artifact_copy_to_team",
       "mem_links",
       "mem_share",
       "artifact_publish",
@@ -377,5 +383,24 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const revoked = await artifactPublishTool.execute({ key: "pages/board", revoke: true }, ctx);
     expect(revoked.text).toBe("revoked page pages/board");
+  });
+});
+
+
+describe("mem_copy_to_team", () => {
+  it("copies over HTTP and rechecks membership even for internal tool requests", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Copy team", creatorUserId: "local-user" });
+    await memWriteTool.execute({ path: "notes/source.md", content: "# Source\n\nExact content.\n" }, ctx);
+    const args = { from: "notes/source.md", to: "notes/team.md", teamId: team.id };
+    const result = await memCopyToTeamTool.execute(args, ctx);
+    expect(result.text).toContain(`"ownerId":"${team.id}"`);
+    expect(result.text).toContain('"path":"notes/team.md"');
+    expect((await memCopyToTeamTool.execute(args, ctx)).text).toContain("already exists");
+    await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
+    expect((await memCopyToTeamTool.execute({ ...args, to: "notes/second.md" }, ctx)).text).toContain("[memory_error]");
+    expect((await memReadTool.execute({ path: args.from }, ctx)).text).toContain("Exact content.");
   });
 });

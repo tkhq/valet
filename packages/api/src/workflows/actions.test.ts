@@ -39,6 +39,7 @@ describe("workflowsActionPlugin", () => {
     expect(plugin.actions.map((a) => a.id).sort()).toEqual([
       "workflows.add_aggregate",
       "workflows.cancel_run",
+      "workflows.copy_to_team",
       "workflows.create_schedule",
       "workflows.create_trigger",
       "workflows.create_webhook",
@@ -223,6 +224,19 @@ describe("DB-backed actions", () => {
     );
     return created.id;
   }
+
+  it("copies a personal graph to a team through the agent action and rejects team assistant context", async () => {
+    const workflowId = await seedWorkflow();
+    await db.insert(teams).values({ id: "copy-team", orgId: "org1", name: "Copy team", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "copy-team", userId: "user1", role: "member" });
+    const copy = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.copy_to_team");
+    if (!copy) throw new Error("copy_to_team action missing");
+    const args = { workflow_id: workflowId, team_id: "copy-team", name: "Copy" };
+    expect(await copy.execute(args, ctx({ owner: { type: "team", id: "copy-team" } }))).toMatchObject({ success: false });
+    const result = await copy.execute(args, ctx());
+    expect(result).toMatchObject({ success: true, data: { workflowId: expect.any(String), teamId: "copy-team", name: "Copy" } });
+    expect(await copy.execute(args, ctx())).toMatchObject({ success: false, error: expect.stringContaining("already exists") });
+  });
 
   it("uses the configured org vault for agent schedules and event triggers", async () => {
     await db.insert(teams).values({ id: "vault-team", orgId: "org1", name: "Vault team", createdAt: 1 });

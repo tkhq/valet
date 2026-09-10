@@ -34,6 +34,7 @@ import {
 import type { AppDb } from "../lib/drizzle.js";
 import { normalizePath } from "../lib/okf.js";
 import { artifactComments, artifactVersions, artifacts, orgs } from "../schema/index.js";
+import { getTeamInOrg, isTeamMember, lockTeamForOwnership } from "./teams.js";
 import { readFile, type MemoryScope } from "./memory.js";
 
 export type ArtifactRow = typeof artifacts.$inferSelect;
@@ -155,6 +156,39 @@ export async function publishArtifact(db: AppDb, scope: MemoryScope, opts: Publi
     icon: normalizeArtifactIcon(opts.icon),
     orgId: opts.orgId,
     sourceSessionId: opts.sourceSessionId,
+  });
+}
+
+/** Copy the current personal snapshot. Audience grants and history do not transfer. */
+export async function copyArtifactToTeam(
+  db: AppDb, scope: MemoryScope, orgId: string,
+  input: { artifactId: string; teamId: string; key: string },
+): Promise<ArtifactRow> {
+  if (scope.owner.type !== "user" || scope.owner.id !== scope.actorUserId) {
+    throw new ValidationError("Copy personal artifacts from your personal assistant or workspace.");
+  }
+  const source = await getArtifactById(db, input.artifactId);
+  if (!source || source.orgId !== orgId || source.ownerType !== "user" || source.ownerId !== scope.owner.id || source.revokedAt !== null) {
+    throw new NotFoundError("artifact", input.artifactId);
+  }
+  const key = normalizePath(input.key);
+  if (key.endsWith("/")) throw new ValidationError("Choose a file-like key for the team artifact.");
+  return db.transaction(async (tx) => {
+    await lockTeamForOwnership(tx, input.teamId);
+    if (!(await getTeamInOrg(tx, orgId, input.teamId)) || !(await isTeamMember(tx, input.teamId, scope.actorUserId))) {
+      throw new NotFoundError("team", input.teamId);
+    }
+    const now = Date.now();
+    const [copy] = await tx.insert(artifacts).values({
+      id: randomUUID(), token: mintToken(), ownerType: "team", ownerId: input.teamId,
+      orgId, actorUserId: scope.actorUserId, sourceSessionId: "", sourceMemoryPath: key,
+      title: source.title, content: source.content, rendered: source.rendered, format: source.format,
+      description: source.description, icon: source.icon, version: 1, visibility: "org",
+      createdAt: now, updatedAt: now,
+    }).onConflictDoNothing().returning();
+    if (!copy) throw new ValidationError("A team artifact already uses that key. Choose another key.");
+    await appendVersion(tx, copy, scope.actorUserId, now);
+    return copy;
   });
 }
 

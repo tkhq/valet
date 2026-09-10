@@ -24,7 +24,7 @@ import {
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
-import { NotFoundError, RepoOwnedWorkflowError } from "@valet/shared";
+import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   actionInvocations,
@@ -949,7 +949,8 @@ export async function addAggregateNode(
 }
 
 /**
- * Copies a workflow into a `local` one the caller owns, named `<name> (copy)`.
+ * Copies a workflow into a local personal copy, or an explicitly named team copy.
+ * Team copies require a personal source and destination creation authority.
  *
  * This is the escape hatch for a mirrored workflow: the file stays the source
  * of the original, and the copy is an ordinary workflow the product can edit.
@@ -963,9 +964,31 @@ export async function copyWorkflowDefinition(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   id: string,
+  destination?: { teamId: string; name: string },
 ): Promise<WorkflowDefinitionSummary | null> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
+
+  if (destination) {
+    if (owner.principal?.type === "team" || row.ownerType !== "user" || row.ownerId !== owner.userId) {
+      throw new ValidationError("Copy a personal workflow from your personal assistant or workspace.");
+    }
+    const name = destination.name.trim();
+    if (!name) throw new ValidationError("Choose a name for the team workflow copy.");
+    return deps.db.transaction(async (tx) => {
+      await lockTeamForOwnership(tx, destination.teamId);
+      if (!(await getTeamInOrg(tx, owner.orgId, destination.teamId)) ||
+          !(await isTeamMember(tx, destination.teamId, owner.userId))) {
+        throw new NotFoundError("team", destination.teamId);
+      }
+      const [existing] = await tx.select({ id: workflowDefinitions.id }).from(workflowDefinitions).where(and(
+        eq(workflowDefinitions.orgId, owner.orgId), eq(workflowDefinitions.ownerType, "team"),
+        eq(workflowDefinitions.ownerId, destination.teamId), eq(workflowDefinitions.name, name),
+      )).limit(1);
+      if (existing) throw new ValidationError("A workflow with that name already exists in the team. Choose another name.");
+      return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition: row.definition, teamId: destination.teamId });
+    });
+  }
 
   const now = Date.now();
   const copyId = newWorkflowId("wf");
