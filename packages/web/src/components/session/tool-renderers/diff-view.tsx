@@ -114,8 +114,9 @@ export function DiffView({ before, after }: { before: string; after: string }) {
   return (
     <div className="font-mono text-[12px] leading-[1.55] py-1">
       {/* Not a <pre>: the rows are divs and the gap is a button, neither of
-          which is valid inside <pre>. whitespace-pre keeps the layout. */}
-      <div className="whitespace-pre overflow-x-auto">
+          which is valid inside <pre>. whitespace-pre-wrap preserves each
+          source line's whitespace while it wraps within the card. */}
+      <div className="whitespace-pre-wrap break-words">
         {rows.map((row, i) => {
           if (row.kind !== "gap") {
             return <DiffLine key={i} kind={row.kind} line={row.line} />;
