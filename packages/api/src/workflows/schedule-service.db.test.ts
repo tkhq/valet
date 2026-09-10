@@ -3,14 +3,21 @@
  * `schedule-service.test.ts`; this file owns anything that touches PGlite.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { InMemoryCredentialStore } from "@valet/engine";
+import type { ValetPlugin } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { teamMembers, workflowDefinitions } from "../schema/index.js";
 import {
   createWorkflowSchedule,
   updateWorkflowSchedule,
   nextFireAt,
 } from "./schedule-service.js";
 import type { AppDb } from "../lib/drizzle.js";
+
+/** Arm-gate deps for the create calls. Every workflow in this file is
+ * user-owned, so the team readiness gate never runs. */
+const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), plugins: [] });
+
 
 let db: AppDb;
 let cleanup: () => Promise<void>;
@@ -31,7 +38,7 @@ afterAll(async () => {
 describe("updateWorkflowSchedule", () => {
   it("updates name and enabled without recomputing nextFireAt", async () => {
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "daily digest", name: "digest", cron: "0 9 * * *" },
       NOW,
@@ -55,7 +62,7 @@ describe("updateWorkflowSchedule", () => {
 
   it("recomputes nextFireAt when cron changes", async () => {
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
@@ -78,7 +85,7 @@ describe("updateWorkflowSchedule", () => {
 
   it("recomputes nextFireAt on re-enable so a stale slot does not fire immediately", async () => {
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
@@ -107,7 +114,7 @@ describe("updateWorkflowSchedule", () => {
 
   it("rejects an invalid cron with a corrective error and 400", async () => {
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
@@ -138,7 +145,7 @@ describe("updateWorkflowSchedule", () => {
     if (!missing.ok) expect(missing.status).toBe(404);
 
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "p", name: "s", cron: "0 9 * * *" },
       NOW,
@@ -169,7 +176,7 @@ describe("updateWorkflowSchedule", () => {
     });
 
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { workflowId: "wf_1", name: "s", cron: "0 9 * * *" },
       NOW,
@@ -186,5 +193,78 @@ describe("updateWorkflowSchedule", () => {
     if (updated.ok) return;
     expect(updated.status).toBe(400);
     expect(updated.error).toContain("orchestrator");
+  });
+});
+
+// ── Team readiness at arm time (TKAI-444) ─────────────────────────────────
+//
+// A scheduled team run bills the team, so it resolves the TEAM's
+// credentials. Armed over a service the team cannot act as, it fails on
+// every fire. The install gate already refuses that; this path must give
+// the same answer with the same predicate.
+
+const LINEAR_PLUGIN: ValetPlugin = {
+  name: "linear",
+  version: "0.0.0",
+  credentials: [{ type: "api_key", service: "linear", configKeys: [] }],
+};
+
+describe("createWorkflowSchedule team readiness", () => {
+  const TEAM = "team-sched";
+  const MEMBER = { userId: "member-sched", orgId: "org_1" };
+
+  async function seedTeamWorkflow(id: string): Promise<void> {
+    await db.insert(teamMembers).values({ teamId: TEAM, userId: MEMBER.userId, role: "member" }).onConflictDoNothing();
+    await db.insert(workflowDefinitions).values({
+      id,
+      orgId: MEMBER.orgId,
+      ownerType: "team",
+      ownerId: TEAM,
+      name: "target",
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "start", type: "trigger" },
+          { id: "step", type: "tool", service: "linear", action: "do", params: {} },
+        ],
+        edges: [{ from: "start", to: "step" }],
+      },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+  }
+
+  function teamArmDeps(credentials: InMemoryCredentialStore) {
+    return { db, credentials, plugins: [LINEAR_PLUGIN], env: {} as NodeJS.ProcessEnv };
+  }
+
+  it("refuses a schedule the team cannot run, and names the fix", async () => {
+    await seedTeamWorkflow("wf_team_sched_blocked");
+
+    const result = await createWorkflowSchedule(
+      teamArmDeps(new InMemoryCredentialStore()),
+      MEMBER,
+      { workflowId: "wf_team_sched_blocked", name: "nightly", cron: "0 9 * * *" },
+      NOW,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("Connect linear for this team, then create the schedule.");
+  });
+
+  it("arms once the team holds the credential", async () => {
+    await seedTeamWorkflow("wf_team_sched_ready");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.save({ type: "team", id: TEAM }, "linear", { type: "api_key", apiKey: "k" });
+
+    const result = await createWorkflowSchedule(
+      teamArmDeps(credentials),
+      MEMBER,
+      { workflowId: "wf_team_sched_ready", name: "nightly", cron: "0 9 * * *" },
+      NOW,
+    );
+
+    expect(result.ok).toBe(true);
   });
 });

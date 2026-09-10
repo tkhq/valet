@@ -8,7 +8,9 @@
  * the agent-facing workflows action plugin); this file is HTTP plumbing.
  */
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { NotFoundError } from "@valet/shared";
+import type { CredentialStore } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import { resolveCreateOwner, type RequestPrincipal } from "../lib/request-principal.js";
@@ -54,6 +56,7 @@ import {
   type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
+import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
@@ -94,6 +97,13 @@ import type {
 
 export const workflowsRouter = new Hono<AppEnv>();
 
+/** The credential reads the team arm gate makes before a schedule arms
+ * (`workflows/team-service-readiness.ts#teamArmBlock`). */
+function armDeps(c: Context<AppEnv>): TeamServiceReadinessDeps {
+  const { db, engineCredentials, plugins, onePassword } = c.var.providers;
+  return { db, credentials: engineCredentials, plugins, onePassword };
+}
+
 /** An empty query value means "not set": a client that always sends the
  * field must not get a 400 for leaving it blank. */
 function blankToUndefined(value: string | undefined): string | undefined {
@@ -113,14 +123,14 @@ function parseRunLimit(raw: string | undefined): { limit?: number } | { error: s
 
 function serviceCtx(c: {
   var: {
-    providers: WorkflowServiceDeps;
+    providers: Omit<WorkflowServiceDeps, "credentials"> & { engineCredentials: CredentialStore };
     user: { id: string; orgId: string };
     principal?: RequestPrincipal;
   };
 }): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
-  const { db, workflowStore, workflowRunHost, actionPluginByService } = c.var.providers;
+  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials } = c.var.providers;
   return {
-    deps: { db, workflowStore, workflowRunHost, actionPluginByService },
+    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials },
     owner: { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
     env: buildValidateEnvironment(actionPluginByService),
   };
@@ -674,7 +684,7 @@ workflowsRouter.post("/:id/schedules", async (c) => {
     return c.json({ error: "input must be a JSON object" }, 400);
   }
 
-  const result = await createWorkflowSchedule(deps.db, owner, {
+  const result = await createWorkflowSchedule(armDeps(c), owner, {
     workflowId: id,
     name,
     cron: body.cron,

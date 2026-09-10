@@ -55,10 +55,15 @@ import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { teamServiceReadiness, type TeamServiceReadiness } from "./team-service-readiness.js";
+import {
+  teamArmRefusals,
+  teamServiceReadiness,
+  withNextStep,
+  type TeamServiceReadiness,
+} from "./team-service-readiness.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
-import { toolNodesOf } from "./tool-nodes.js";
+import { toolNodesOf, workflowCallsOf } from "./tool-nodes.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
 // template-declared subscription and a hand-made one are held to one rule.
 // `trigger-service.ts` set the precedent for importing it from a service.
@@ -581,7 +586,10 @@ function readinessSignature(definition: WorkflowDefinition): string {
     // otherwise read as a different node's signature.
     return JSON.stringify([node.service, node.credential ?? "auto", owner, repo]);
   });
-  return JSON.stringify([...new Set(nodes)].sort());
+  // The callee's own tool nodes are part of the answer, so two definitions
+  // that call DIFFERENT workflows must not share one memoized readiness.
+  const calls = workflowCallsOf(definition).map((node) => node.workflowId);
+  return JSON.stringify([[...new Set(nodes)].sort(), [...new Set(calls)].sort()]);
 }
 
 /**
@@ -888,9 +896,7 @@ function resolveInstallValues(
  * becomes the join.
  */
 function withInstallStep(reason: string): string {
-  return reason.endsWith(".")
-    ? `${reason.slice(0, -1)}, then install this template.`
-    : `${reason} Then install this template.`;
+  return withNextStep(reason, "install this template");
 }
 
 /**
@@ -960,7 +966,8 @@ export async function installWorkflowTemplate(
       { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
       { orgId: owner.orgId, teamId, definition: summarized.value.definition },
     );
-    if (readiness.blocked.length > 0) {
+    const refusals = teamArmRefusals(readiness);
+    if (refusals.length > 0) {
       // Each reason names who acts: a member connects a team credential, an
       // admin configures the App. A service the ORGANIZATION has not
       // configured is the personal path's case, and takes its message: the
@@ -968,10 +975,10 @@ export async function installWorkflowTemplate(
       // The readiness reason is caller-neutral (the repository sync reads
       // the same predicate), so the step that follows the fix in THIS flow
       // is added here.
-      const reasons = readiness.blocked.map((b) =>
-        unavailable.has(b.service)
-          ? `${b.service} is not configured for this organization, so this template cannot run yet. An admin sets it up in Settings → Organization.`
-          : withInstallStep(b.reason),
+      const reasons = refusals.map((refusal) =>
+        refusal.service !== undefined && unavailable.has(refusal.service)
+          ? `${refusal.service} is not configured for this organization, so this template cannot run yet. An admin sets it up in Settings → Organization.`
+          : withInstallStep(refusal.reason),
       );
       return { ok: false, code: "not_connected", error: reasons.join(" ") };
     }

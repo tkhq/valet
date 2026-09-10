@@ -16,6 +16,12 @@ import type { RunHost } from "@valet/workflow";
 import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
 import { PgWorkflowStore } from "./pg-store.js";
 import type { PgDb } from "@valet/store-postgres";
+import { InMemoryCredentialStore } from "@valet/engine";
+
+/** Arm-gate deps for the create calls. Every workflow in this file is
+ * user-owned, so the team readiness gate never runs. */
+const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), plugins: [] });
+
 
 let db: AppDb;
 let pgdb: PgDb;
@@ -69,7 +75,7 @@ function buildScheduler(host: RunHost, deliver: OrchestratorDeliverFn): Workflow
 describe("WorkflowScheduler.fireNow", () => {
   it("fires an orchestrator schedule and does not advance nextFireAt", async () => {
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "daily digest", name: "orch-sched-a", cron: "0 9 * * *" },
       FIXED_NOW - 1000,
@@ -106,7 +112,7 @@ describe("WorkflowScheduler.fireNow", () => {
     });
 
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { workflowId: "wf_fire_b", name: "wf-sched-b", cron: "0 9 * * *" },
       FIXED_NOW - 1000,
@@ -126,7 +132,7 @@ describe("WorkflowScheduler.fireNow", () => {
 
   it("returns not_found for cross-org and unknown ids", async () => {
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "p", name: "cross-org-sched-c", cron: "0 9 * * *" },
       FIXED_NOW - 1000,
@@ -144,7 +150,7 @@ describe("WorkflowScheduler.fireNow", () => {
 
   it("fires a disabled schedule (manual fire is the test path)", async () => {
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { prompt: "p", name: "disabled-sched-d", cron: "0 9 * * *" },
       FIXED_NOW - 1000,

@@ -29,6 +29,12 @@ import { PgWorkflowStore } from "./pg-store.js";
 import type { RunHost } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkflowServiceDeps, WorkflowOwner } from "./service.js";
+import { InMemoryCredentialStore } from "@valet/engine";
+
+/** Arm-gate deps for the create calls. Every workflow in this file is
+ * user-owned, so the team readiness gate never runs. */
+const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), plugins: [githubPlugin] });
+
 
 /** Minimal run-host stub: this test file never starts or cancels runs. */
 const stubRunHost: RunHost = {
@@ -54,7 +60,12 @@ beforeAll(async () => {
   cleanup = boot.cleanup;
 
   const store = new PgWorkflowStore(boot.pgdb);
-  deps = { db, workflowStore: store, workflowRunHost: stubRunHost };
+  deps = {
+    db,
+    workflowStore: store,
+    workflowRunHost: stubRunHost,
+    credentials: new InMemoryCredentialStore(),
+  };
 });
 
 afterAll(async () => {
@@ -70,7 +81,7 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
 
     // Seed a schedule targeting this workflow
     const sched = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { workflowId: def.id, name: "daily", cron: "0 9 * * *" },
       NOW,
@@ -78,7 +89,7 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
     if (!sched.ok) throw new Error(sched.error);
 
     // Seed an event trigger targeting this workflow
-    const trigger = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
+    const trigger = await createWorkflowTrigger(armDeps(), OWNER, {
       workflowId: def.id,
       name: "on-pr",
       eventKeys: ["github.pull_request.opened"],
@@ -91,7 +102,7 @@ describe("deleteWorkflowDefinition trigger cleanup", () => {
       definition: { version: "dag/v1", nodes: [], edges: [] },
     });
 
-    const trigger2 = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
+    const trigger2 = await createWorkflowTrigger(armDeps(), OWNER, {
       workflowId: def2.id,
       name: "survivor-trigger",
       eventKeys: ["github.pull_request.closed"],
@@ -197,13 +208,13 @@ describe("reapTeamWorkflows", () => {
     });
 
     const sched = await createWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       { workflowId: one.id, name: "daily", cron: "0 9 * * *" },
       NOW,
     );
     if (!sched.ok) throw new Error(sched.error);
-    const trigger = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
+    const trigger = await createWorkflowTrigger(armDeps(), OWNER, {
       workflowId: two.id,
       name: "on-pr",
       eventKeys: ["github.pull_request.opened"],

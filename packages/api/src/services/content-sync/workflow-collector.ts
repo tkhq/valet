@@ -52,9 +52,13 @@ import {
   purgeWorkflowRows,
 } from "../../workflows/service.js";
 import { nextFireAt } from "../../workflows/schedule-service.js";
-import { teamServiceReadiness, type TeamServiceReadinessDeps } from "../../workflows/team-service-readiness.js";
+import {
+  teamArmRefusals,
+  teamServiceReadiness,
+  type TeamServiceReadinessDeps,
+} from "../../workflows/team-service-readiness.js";
 import type { OnePasswordService } from "../onepassword.js";
-import { toolNodesOf } from "../../workflows/tool-nodes.js";
+import { toolNodesOf, workflowCallsOf } from "../../workflows/tool-nodes.js";
 import { validateSubscriptionWrite } from "../../events/subscription-write.js";
 import type { SubscriptionFilter } from "../../events/match.js";
 import type { SkillTreeEntry } from "../skill-repo-reader.js";
@@ -794,16 +798,19 @@ async function teamTriggerGate(
   if (file.schedule === undefined && (file.events === undefined || file.events.length === 0)) {
     return null;
   }
-  if (toolNodesOf(file.definition).length === 0) return null;
+  // A call node carries tool nodes the team must fund too (TKAI-443), so a
+  // file whose only work is a call is still judged.
+  if (toolNodesOf(file.definition).length === 0 && workflowCallsOf(file.definition).length === 0) return null;
   const readiness = await teamServiceReadiness(deps, {
     orgId: source.orgId,
     teamId: source.ownerId,
     definition: file.definition,
   });
-  if (readiness.blocked.length === 0) return null;
+  const refusals = teamArmRefusals(readiness);
+  if (refusals.length === 0) return null;
   // The readiness reasons are caller-neutral; the step that follows the fix
   // in THIS flow is the resync, and it is named once after them.
-  const reasons = readiness.blocked.map((b) => b.reason).join(" ");
+  const reasons = refusals.map((refusal) => refusal.reason).join(" ");
   return `this workflow declares a trigger over tool actions the team cannot act as yet, so Valet mirrored the workflow and left the trigger off. ${reasons} Valet arms it after you connect the service.`;
 }
 

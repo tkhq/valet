@@ -16,6 +16,7 @@ import {
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
+import { InMemoryCredentialStore } from "@valet/engine";
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -206,7 +207,12 @@ describe("DB-backed actions", () => {
     await buildAppQueryable(pglite).query(
       `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs RESTART IDENTITY CASCADE`,
     );
-    deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new StubRunHost() };
+    deps = {
+      db,
+      workflowStore: new InMemoryWorkflowStore(),
+      workflowRunHost: new StubRunHost(),
+      credentials: new InMemoryCredentialStore(),
+    };
   });
 
   async function seedWorkflow(): Promise<string> {
@@ -787,6 +793,7 @@ describe("update actions", () => {
       db,
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: new StubRunHost(),
+      credentials: new InMemoryCredentialStore(),
       plugins: [githubPlugin],
     };
 
