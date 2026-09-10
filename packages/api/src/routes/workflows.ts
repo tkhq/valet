@@ -432,7 +432,15 @@ workflowsRouter.get("/:id/file", async (c) => {
   const body =
     format === "json" ? `${JSON.stringify(envelope, null, 2)}\n` : stringifyYaml(envelope);
   c.header("Content-Type", format === "json" ? "application/json; charset=utf-8" : "text/yaml; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  // Keep the quoted fallback ASCII; filename* preserves the upstream name.
+  const fallback = workflowFileBasename(summary.name, format);
+  const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  const disposition = /^[a-zA-Z0-9._-]+$/.test(filename)
+    ? `attachment; filename="${filename}"`
+    : `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+  c.header("Content-Disposition", disposition);
   return c.body(body);
 });
 

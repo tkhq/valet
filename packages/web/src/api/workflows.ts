@@ -117,7 +117,15 @@ export async function downloadWorkflowFile(
   const blob = await res.blob();
   const disposition = res.headers.get("content-disposition") ?? "";
   const match = /filename="([^"]+)"/.exec(disposition);
-  const filename = match?.[1] ?? `workflow.${format}`;
+  let filename = match?.[1] ?? `workflow.${format}`;
+  const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  if (extended) {
+    try {
+      filename = decodeURIComponent(extended[1]);
+    } catch {
+      // Keep the ASCII fallback if the server sends invalid encoding.
+    }
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

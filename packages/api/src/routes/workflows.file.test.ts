@@ -40,6 +40,37 @@ async function createWorkflow(baseUrl: string, name = "Nightly triage"): Promise
   return (await res.json()) as { id: string };
 }
 
+async function seedMirrored(testApi: TestApi, path: string): Promise<void> {
+  const now = Date.now();
+  await testApi.providers.db.insert(contentSources).values({
+    id: SOURCE,
+    orgId: "local-org",
+    ownerType: "user",
+    ownerId: "local-user",
+    repoFullName: REPO,
+    ref: "",
+    subpath: "",
+    kinds: ["workflows"],
+    createdAt: now,
+    updatedAt: now,
+    nextAttemptAt: now,
+  });
+  await testApi.providers.db.insert(workflowDefinitions).values({
+    id: "wf_mirrored_export",
+    orgId: "local-org",
+    ownerType: "user",
+    ownerId: "local-user",
+    name: "Nightly",
+    definition: VALID_DEFINITION,
+    origin: "repo",
+    sourceId: SOURCE,
+    upstreamPath: path,
+    contentSha: "blob-1",
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
 describe("GET /api/workflows/:id/file", () => {
   it("exports YAML that parses back into the same definition", async () => {
     api = await bootTestApi();
@@ -73,34 +104,7 @@ describe("GET /api/workflows/:id/file", () => {
 
   it("puts a mirrored workflow's upstream reference in description only", async () => {
     api = await bootTestApi();
-    const now = Date.now();
-    await api.providers.db.insert(contentSources).values({
-      id: SOURCE,
-      orgId: "local-org",
-      ownerType: "user",
-      ownerId: "local-user",
-      repoFullName: REPO,
-      ref: "",
-      subpath: "",
-      kinds: ["workflows"],
-      createdAt: now,
-      updatedAt: now,
-      nextAttemptAt: now,
-    });
-    await api.providers.db.insert(workflowDefinitions).values({
-      id: "wf_mirrored_export",
-      orgId: "local-org",
-      ownerType: "user",
-      ownerId: "local-user",
-      name: "Nightly",
-      definition: VALID_DEFINITION,
-      origin: "repo",
-      sourceId: SOURCE,
-      upstreamPath: PATH,
-      contentSha: "blob-1",
-      createdAt: now,
-      updatedAt: now,
-    });
+    await seedMirrored(api, PATH);
 
     const res = await fetch(`${api.baseUrl}/api/workflows/wf_mirrored_export/file`);
     expect(res.status).toBe(200);
@@ -119,6 +123,18 @@ describe("GET /api/workflows/:id/file", () => {
     if (!parsed.ok || parsed.file.kind !== "workflow") return;
     expect(parsed.file.definition).toEqual(VALID_DEFINITION);
     expect(parsed.file.description).toBe(`Mirrored from ${REPO}:${PATH}`);
+  });
+
+  it.each(["每日", 'a"b', "a\\b", "line\nbreak"])("exports an unsafe header filename: %s", async (name) => {
+    api = await bootTestApi();
+    await seedMirrored(api, `.valet/workflows/${name}.yaml`);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/wf_mirrored_export/file`);
+    expect(res.status).toBe(200);
+    const disposition = res.headers.get("content-disposition") ?? "";
+    expect(disposition).toMatch(/^attachment; filename="[a-z0-9.-]+"; filename\*=UTF-8''/);
+    expect(decodeURIComponent(disposition.split("filename*=UTF-8''")[1])).toBe(`${name}.yaml`);
+    expect(parseWorkflowFileValue(parseYaml(await res.text()), `${name}.yaml`).ok).toBe(true);
   });
 
   it("accepts format=json and refuses anything else", async () => {
