@@ -134,7 +134,7 @@ describe("wireAttentionRouter", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.userId).toBe("local-user");
     expect(rows[0]?.sessionId).toBe(sessionId);
-    expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(sessionId)}`);
+    expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(sessionId)}?thread=th-1`);
 
     // Re-emitting the same stuck alarm (same queueItemId) must not double-insert.
     await eventStream.append(event, `test-stuck-again-${randomUUID()}`);
@@ -201,7 +201,7 @@ describe("wireAttentionRouter", () => {
     expect(rows[0]?.userId).toBe("local-user");
     expect(rows[0]?.title).toBe("Approve deploy?");
     expect(rows[0]?.sessionId).toBe(childSessionId);
-    expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(childSessionId)}`);
+    expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(childSessionId)}?thread=th-child`);
   });
 
   it("decision_gate hands the gate's id and actions to channel deliverers", async () => {
@@ -301,7 +301,7 @@ describe("wireAttentionRouter", () => {
     expect(rows[0]?.userId).toBe("local-user");
     expect(rows[0]?.title).toBe("Approve something?");
     expect(rows[0]?.sessionId).toBe(sessionId);
-    expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(sessionId)}`);
+    expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(sessionId)}?thread=th-1`);
   });
 
   it("decision_gate on an assistant session routes an approval to that session's own owner", async () => {
@@ -332,7 +332,7 @@ describe("wireAttentionRouter", () => {
     // that does not list it. The `?assistant=` form also carries the owner
     // implicitly, so the reader lands in the right context instead of
     // looking at a conversation their current scope excludes.
-    expect(rows[0]?.href).toBe("/chat?assistant=asst_attention");
+    expect(rows[0]?.href).toBe("/chat?assistant=asst_attention&thread=th-1");
   });
 
   it("marks a gate's notification read when the gate resolves, and only that gate's", async () => {

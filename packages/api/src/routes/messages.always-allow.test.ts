@@ -9,6 +9,9 @@
  * bogus/nonexistent gateId, which is what these tests exercise (no real
  * decision gate needs to exist for the 403 case).
  */
+import { eq } from "drizzle-orm";
+import { agentSessions, teams, teamMembers, workflowDefinitions } from "../schema/index.js";
+import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { CreateSessionResponse } from "../wire/types.js";
@@ -77,4 +80,49 @@ describe("POST /decisions/:gateId/resolve — always_allow admin gate", () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "gate not pending" });
   });
+});
+
+it("lets current team members reach an existing workflow agent gate without an app session row", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const now = Date.now();
+  await p.db.insert(teams).values({ id: "approval-team", orgId: "local-org", name: "Approval team", createdAt: now });
+  await p.db.insert(teamMembers).values({ teamId: "approval-team", userId: "local-user", role: "member" });
+  await p.db.insert(workflowDefinitions).values({ id: "approval-workflow", orgId: "local-org", ownerType: "team", ownerId: "approval-team", name: "Approval workflow", definition: {}, createdAt: now, updatedAt: now });
+  await p.workflowStore.createRun("approval-run", { workflowId: "approval-workflow", definitionVersionId: "v1" },
+    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "approval-team" });
+  const sessionId = "wf:approval-run:triage";
+  const session = await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+    host: p.engineHost, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, sessionId);
+  const threadId = session.thread().id;
+  await p.engineStore.saveDecisionGate(sessionId, threadId, {
+    id: "join-channel", sessionId, threadId, queueItemId: "q", resumeKey: "join", ordinal: 0,
+    type: "approval", title: "Approve Join Channel?", actions: [{ id: "approve", label: "Approve" }],
+    status: "pending", createdAt: now, updatedAt: now,
+  });
+  expect(await p.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId))).toEqual([]);
+  const base = `${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions`;
+  const get = await fetch(base);
+  expect(get.status).toBe(200);
+  expect(await get.json()).toMatchObject({ gates: [{ id: "join-channel", title: "Approve Join Channel?" }] });
+  const outsider = { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" };
+  expect((await fetch(base, { headers: outsider })).status).toBe(404);
+  expect((await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: outsider, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
+  const approved = await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
+  expect(approved.status).toBe(200);
+  expect(await p.engineStore.getDecisionGate(sessionId, "join-channel")).toMatchObject({ status: "resolved", resolution: { actionId: "approve", resolvedBy: "local-user" } });
+  const guessed = "wf:approval-run:never-created";
+  expect((await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(guessed)}/decisions`)).status).toBe(404);
+  expect(await p.engineStore.getSession(guessed)).toBeNull();
+  await p.workflowStore.createRun("org-approval-run", { workflowId: "approval-workflow", definitionVersionId: "v1" },
+    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "org", ownerId: "local-org" });
+  await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+    host: p.engineHost, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, "wf:org-approval-run:triage");
+  const orgBase = `${api.baseUrl}/api/sessions/wf%3Aorg-approval-run%3Atriage/decisions`;
+  expect((await fetch(orgBase)).status).toBe(200);
+  expect((await fetch(orgBase, { headers: outsider })).status).toBe(404);
+  const orgResolve = await fetch(`${orgBase}/missing/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
+  expect(await orgResolve.json()).toEqual({ error: "gate not pending" });
+  await p.db.delete(teamMembers).where(eq(teamMembers.teamId, "approval-team"));
+  expect((await fetch(base)).status).toBe(404);
 });

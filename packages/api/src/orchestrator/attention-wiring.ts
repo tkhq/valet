@@ -69,13 +69,15 @@ async function sessionLabel(db: AppDb, sessionId: string): Promise<string> {
  * lets the client put the reader in the right context rather than leaving
  * them looking at a conversation their current scope excludes.
  *
- * Everything else is an ordinary session and keeps the direct link.
+ * Other sessions keep the direct link. The web route shows workflow-agent
+ * approvals separately because workflow sessions have no app session row.
  */
-export function attentionHref(sessionId: string): string {
+export function attentionHref(sessionId: string, threadId?: string): string {
   const assistantId = parseAssistantSessionId(sessionId);
-  return assistantId === null
+  const href = assistantId === null
     ? `/sessions/${encodeURIComponent(sessionId)}`
     : `/chat?assistant=${encodeURIComponent(assistantId)}`;
+  return threadId ? `${href}${assistantId === null ? "?" : "&"}thread=${encodeURIComponent(threadId)}` : href;
 }
 
 async function handleSubmissionStuck(deps: AttentionWiringDeps, delivered: DeliveredBusEvent): Promise<void> {
@@ -93,7 +95,7 @@ async function handleSubmissionStuck(deps: AttentionWiringDeps, delivered: Deliv
     sessionId,
     title: `Stuck submission in "${label}" (thread ${threadId})`,
     body: `Queue item ${queueItemId} hasn't settled after ${delivered.event.attemptCount} attempt(s).`,
-    href: attentionHref(sessionId),
+    href: attentionHref(sessionId, threadId),
     dedupeKey: queueItemId,
   });
 }
@@ -131,7 +133,7 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
     sessionId,
     title: digest.title,
     body: digest.body,
-    href: attentionHref(sessionId),
+    href: attentionHref(sessionId, gate.threadId),
     dedupeKey: gate.id,
     gate: { id: gate.id, actions: gate.actions, fields: digest.fields },
   });
