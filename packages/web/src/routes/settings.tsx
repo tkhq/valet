@@ -1,6 +1,6 @@
 import { Navigate, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { SettingsRail, TEAM_SETTINGS_PATH } from "~/components/settings/settings-rail";
+import { SettingsRail, TEAM_SETTINGS_PATH, isTeamSettingsPath } from "~/components/settings/settings-rail";
 
 /**
  * `/settings` layout shell (split-settings design, decision 1): left rail +
@@ -17,7 +17,7 @@ export function SettingsLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const organization = pathname === "/settings/organization" || pathname.startsWith("/settings/organization/");
   // Do not mount a personal form under a team label, even for one render.
-  const redirectTo = teamId !== undefined && !organization && pathname !== TEAM_SETTINGS_PATH
+  const redirectTo = teamId !== undefined && !organization && !isTeamSettingsPath(pathname)
     ? TEAM_SETTINGS_PATH
     : teamId === undefined && pathname === TEAM_SETTINGS_PATH
       ? "/settings/profile"

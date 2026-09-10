@@ -21,7 +21,15 @@ import { cn } from "~/lib/cn";
  */
 
 export const TEAM_SETTINGS_PATH = "/settings/team";
-const TEAM_ITEMS = [{ to: TEAM_SETTINGS_PATH, label: "General" }];
+const TEAM_ITEMS = [
+  { to: TEAM_SETTINGS_PATH, label: "General" },
+  { to: "/settings/api-keys", label: "API keys" },
+];
+
+/** Keep the team rail and the layout's route allowlist in agreement. */
+export function isTeamSettingsPath(pathname: string): boolean {
+  return TEAM_ITEMS.some((item) => item.to === pathname);
+}
 
 const YOU_ITEMS = [
   { to: "/settings/profile", label: "Profile" },

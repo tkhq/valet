@@ -63,7 +63,7 @@ describe("settings workspace routing", () => {
     expect(directoryRead).not.toHaveBeenCalled();
   });
 
-  it.each(["/settings", "/settings/profile", "/settings/appearance", "/settings/assistant", "/settings/api-keys", "/settings/policies"])("does not mount personal forms at %s in team scope", (path) => {
+  it.each(["/settings", "/settings/profile", "/settings/appearance", "/settings/assistant", "/settings/policies"])("does not mount personal forms at %s in team scope", (path) => {
     teamId = "team_1";
     pathname = path;
     render(<SettingsLayout />);
@@ -73,6 +73,25 @@ describe("settings workspace routing", () => {
     expect(screen.getByRole("link", { name: "General" }).getAttribute("href")).toBe("/settings/team");
     expect(screen.getByTestId("redirect").textContent).toBe("/settings/team");
     expect(screen.queryByRole("button", { name: "Save personal" })).toBeNull();
+  });
+
+  it("keeps the workspace-aware API keys route reachable in both scopes", () => {
+    pathname = "/settings/api-keys";
+    teamId = "team_1";
+    const view = render(<SettingsLayout />);
+    expect(screen.getByRole("link", { name: "API keys" }).getAttribute("href")).toBe("/settings/api-keys");
+    expect(screen.queryByTestId("redirect")).toBeNull();
+    // The outlet draft stands in for the API-key form's name and revealed key.
+    fireEvent.change(screen.getByLabelText("Personal draft"), { target: { value: "team one key" } });
+    teamId = "team_2";
+    view.rerender(<SettingsLayout />);
+    expect(screen.queryByTestId("redirect")).toBeNull();
+    expect(screen.getByLabelText("Personal draft")).toHaveProperty("value", "");
+    teamId = undefined;
+    view.rerender(<SettingsLayout />);
+    expect(screen.queryByTestId("redirect")).toBeNull();
+    expect(screen.getByRole("link", { name: "API keys" })).toBeTruthy();
+    expect(personalSave).not.toHaveBeenCalled();
   });
 
   it("drops personal drafts when entering and leaving a team", () => {
