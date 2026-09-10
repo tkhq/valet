@@ -166,6 +166,10 @@ constituent `merged` pointing at it. Properties:
   oldest first — the same line shape the first-turn seed uses. Pure builders
   live in `packages/engine/src/submission.ts` (`overheardCoalesceKey`,
   `buildOverheardDigest`).
+- The engine marks line breaks in both sender and body with `⏎`, including
+  senderless bodies. Re-merges sanitize each stored metadata line separately,
+  including lines from older digests. They preserve message order and counts
+  without parsing the rendered body or changing stored input metadata.
 - The envelope drops the per-message `sender` attribute and gains
   `digest="<N>"`. The origin (and `messageTs`) comes from the newest
   constituent, so `react_to_origin` targets the latest message.
@@ -297,3 +301,8 @@ this order:
 ### Transcript line boundaries (TKAI-434)
 
 Thread hydration replaces line breaks in message text, speaker names, and file markers with a visible `⏎` separator. Each Slack message occupies one attributed line. This prevents embedded newlines from creating a second speaker line; it does not make message content trusted.
+
+Thread hydration and overheard digests share the engine's `formatTranscriptText` helper through Slack's existing engine dependency.
+The helper scans whitespace runs in linear time, including long runs with no line break.
+Runs containing CR, LF, VT, FF, NEL, LS, or PS become one visible `⏎` separator.
+It preserves internal whitespace without line breaks and trims outer whitespace. Legitimate multiline lists retain visible boundaries between steps.

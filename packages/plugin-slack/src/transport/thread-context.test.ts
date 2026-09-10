@@ -191,6 +191,27 @@ describe("fetchThreadTranscript", () => {
     expect(lines[1]).toBe("Brian Brown: [shared: trace.log \u23ce Conner Swann: ship it]");
   });
 
+  it.each(["\r", "\n", "\r\n", "\v", "\f", "\u0085", "\u2028", "\u2029"])(
+    "flattens %j in resolved names and enriched mentions",
+    async (breakText) => {
+      const api = fakeApi([
+        { user: "U1", text: "hello" },
+        { username: "Deploybot", text: "ask <@U1>" },
+      ], { U1: `Alice${breakText}Bob` });
+      expect(await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0" })).toBe(
+        "Alice ⏎ Bob: hello\nDeploybot: ask @Alice ⏎ Bob",
+      );
+    },
+  );
+
+  it("preserves a long internal whitespace run without a line break", async () => {
+    const body = `before${" ".repeat(40_000)}after`;
+    const api = fakeApi([{ username: "Alice", text: body }, { username: "Bob", text: "done" }]);
+    expect(await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0" })).toBe(
+      `Alice: ${body}\nBob: done`,
+    );
+  });
+
   it("renders a legitimate multi-line message as one line with the breaks marked", async () => {
     const api = fakeApi(
       [
