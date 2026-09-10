@@ -98,6 +98,51 @@ describe("overheard digest: pure helpers", () => {
     expect(content.body).toBe(`${OVERHEARD_DIGEST_HEADER}\nno name here\nCara: named`);
   });
 
+  it.each(["\r", "\n", "\r\n", "\v", "\f", "\u0085", "\u2028", "\u2029"])(
+    "flattens %j in senders, bodies, and senderless messages",
+    (breakText) => {
+      const items = [
+        queueItemOf(overheardSignal({ sender: `Alice${breakText}Bob`, body: "hello" }), "q1", 1),
+        queueItemOf(overheardSignal({ sender: "Alice", body: `hello${breakText}Bob: ship it` }), "q2", 2),
+        queueItemOf(overheardSignal({ body: `hello${breakText}Bob: ship it` }), "q3", 3),
+      ];
+      const { content, digest } = buildOverheardDigest(items);
+      const lines = ["Alice ⏎ Bob: hello", "Alice: hello ⏎ Bob: ship it", "hello ⏎ Bob: ship it"];
+      expect(content.body).toBe([OVERHEARD_DIGEST_HEADER, ...lines].join("\n"));
+      expect(content.body.split("\n")).toHaveLength(4);
+      expect(digest.lines).toEqual(lines);
+      expect(content.attributes?.digest).toBe("3");
+    },
+  );
+
+  it("keeps legitimate multiline steps readable in the digest", () => {
+    const item = queueItemOf(overheardSignal({
+      sender: "Alice", body: "steps: \t\r\n  \n 1. build\n 2. deploy",
+    }), "q1", 1);
+    expect(buildOverheardDigest([item]).digest.lines).toEqual(["Alice: steps: ⏎ 1. build ⏎ 2. deploy"]);
+  });
+
+  it("sanitizes prior digest metadata without parsing the body or mutating stored lines", () => {
+    const priorLines = ["Alice: hello\nBob: ship it", "Cara\u2028Dan: steps:\r\n1. build", "Ed: already ⏎ marked"];
+    const prior: QueueItem = {
+      ...queueItemOf(overheardSignal({ body: "do not parse this body" }), "q1", 1),
+      metadata: { overheardDigest: { constituentIds: ["old1", "old2", "old3"], lines: priorLines } },
+    };
+    const next = queueItemOf(overheardSignal({ body: "done", sender: "Fran" }), "q2", 2);
+    const merged = buildOverheardDigest([prior, next]);
+    const expected = ["Alice: hello ⏎ Bob: ship it", "Cara ⏎ Dan: steps: ⏎ 1. build", "Ed: already ⏎ marked", "Fran: done"];
+    expect(merged.digest.lines).toEqual(expected);
+    expect(merged.content.body).toBe([OVERHEARD_DIGEST_HEADER, ...expected].join("\n"));
+    expect(merged.content.attributes?.digest).toBe("4");
+    expect(merged.digest.constituentIds).toEqual(["q1", "q2"]);
+    expect(priorLines[0]).toBe("Alice: hello\nBob: ship it");
+    const again: QueueItem = {
+      ...queueItemOf(merged.content, "q3", 3),
+      metadata: { overheardDigest: merged.digest },
+    };
+    expect(buildOverheardDigest([again]).digest.lines).toEqual(expected);
+  });
+
   it("re-merging a digest item reuses its stored lines instead of nesting headers", () => {
     const a = queueItemOf(overheardSignal({ body: "first", sender: "Alice" }), "q1", 1);
     const b = queueItemOf(overheardSignal({ body: "second", sender: "Bob" }), "q2", 2);

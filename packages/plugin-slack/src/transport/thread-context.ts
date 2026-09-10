@@ -5,6 +5,7 @@
  * thread itself with `read_thread`, so it starts a group conversation with full
  * context rather than the lone trigger message.
  */
+import { formatTranscriptText } from "@valet/engine";
 import type { SlackApi } from "./api.js";
 import { enrichSlackText } from "./text-enrich.js";
 
@@ -124,7 +125,8 @@ export async function fetchThreadTranscript(
           ? "You" // the assistant's own earlier reply — so it does not answer itself.
           : authors.get(userId) ?? `@${userId}`
         : str(raw.username) ?? str((raw.bot_profile as Record<string, unknown> | undefined)?.name) ?? "app";
-      return `${who}: ${content}`;
+      // Both halves are flattened, so one message is always exactly one line.
+      return `${formatTranscriptText(who)}: ${formatTranscriptText(content)}`;
     }),
   );
   const lines = formatted.filter((l): l is string => !!l);

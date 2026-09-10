@@ -13,6 +13,7 @@ import type {
   SuspendedTurnState,
 } from "./types.js";
 import { ValidationError } from "./errors.js";
+import { formatTranscriptText } from "./transcript-formatter.js";
 
 /** Default max stamped hopCount an internally-admitted signal may carry (Phase 4 decision 4). */
 export const SIGNAL_HOP_BUDGET = 3;
@@ -104,10 +105,12 @@ export function isOverheardDigestMeta(value: unknown): value is OverheardDigestM
 /** The digest transcript lines one queued item contributes: its own prior digest lines, or one "Name: message" line. */
 function overheardLines(item: QueueItem): string[] {
   const meta = item.metadata?.overheardDigest;
-  if (isOverheardDigestMeta(meta)) return meta.lines;
+  // Older digests can contain raw newlines. Keep each stored entry as one line.
+  if (isOverheardDigestMeta(meta)) return meta.lines.map(formatTranscriptText);
   if (!isSignalContent(item.content)) return [];
   const sender = item.content.attributes?.sender;
-  return [sender ? `${sender}: ${item.content.body}` : item.content.body];
+  const body = formatTranscriptText(item.content.body);
+  return [sender ? `${formatTranscriptText(sender)}: ${body}` : body];
 }
 
 /**
