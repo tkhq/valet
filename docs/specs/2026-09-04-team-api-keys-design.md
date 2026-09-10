@@ -87,3 +87,8 @@ A `vlt_` key created in a team workspace starts a team-owned session. A personal
 ## Deviations from this design (recorded at implementation)
 
 1. **A team key is refused on sandbox replace as well as on `sandbox-jwt`.** Decision 5 gates `POST /api/sessions/:id/sandbox/replace` on direct ownership and names `sandbox-jwt` as the one route that refuses a team key outright. A team key is the direct owner of its team's sessions, so the ownership gate alone admitted it to a rebuild of a live team session. What shipped refuses a team principal on sandbox replace with the same 403 that `sandbox-jwt` gives, naming a personal key or the web app as the fix. Rebuilding a sandbox is a person's act on a session, not a key's. Recorded 2026-09-07.
+
+
+### Team deletion (TKAI-446)
+
+Deleting a team removes its API key rows in the same transaction. Keys belonging to other teams and personal keys remain. Authentication already refuses keys whose team is missing; this change removes the stored rows as well.

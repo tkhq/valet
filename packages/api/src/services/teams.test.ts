@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import {
+  apikey,
   assistants,
   contentSources,
   credentials,
@@ -289,6 +290,36 @@ describe("teams service", () => {
       .from(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id)));
     expect(leftover).toEqual([]);
+  });
+
+  it("deleteTeam reaps the team's API keys and leaves every other key", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    const survivor = await createTeam(db, { orgId, name: "Design", creatorUserId: "u2" });
+    const minted = { createdAt: new Date(), updatedAt: new Date() };
+    await db.insert(apikey).values([
+      {
+        id: "ak_doomed",
+        referenceId: "u1",
+        key: "hash-doomed",
+        teamId: team.id,
+        metadata: JSON.stringify({ teamId: team.id, createdBy: "u1" }),
+        ...minted,
+      },
+      {
+        id: "ak_other_team",
+        referenceId: "u2",
+        key: "hash-other",
+        teamId: survivor.id,
+        metadata: JSON.stringify({ teamId: survivor.id, createdBy: "u2" }),
+        ...minted,
+      },
+      { id: "ak_personal", referenceId: "u1", key: "hash-personal", ...minted },
+    ]);
+
+    await deleteTeam(db, { teamId: team.id });
+
+    const remaining = await db.select({ id: apikey.id }).from(apikey);
+    expect(remaining.map((row) => row.id).sort()).toEqual(["ak_other_team", "ak_personal"]);
   });
 
   it("deleteTeam rejects deletion while the team owns a workflow", async () => {

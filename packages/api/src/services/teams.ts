@@ -14,6 +14,7 @@ import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   agentSessions,
+  apikey,
   assistants,
   channelBindings,
   credentials,
@@ -763,6 +764,12 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, opts.teamId)));
+    // The team's `vlt_` keys go with it. Once the team row is gone, every
+    // route that could revoke one is closed: the team key list 404s, and
+    // the personal routes refuse a team-pinned key, so a surviving row is
+    // unreachable forever. It is not an open door. The auth ladder already
+    // reads a key whose team is gone as invalid.
+    await tx.delete(apikey).where(eq(apikey.teamId, opts.teamId));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

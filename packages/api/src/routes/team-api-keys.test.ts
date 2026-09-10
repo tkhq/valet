@@ -229,6 +229,34 @@ describe("team API keys", () => {
     expect(((await gone.json()) as { error: string }).error).toBe("invalid api key");
   });
 
+  it("deleting the team through the route reaps its keys", async () => {
+    api = await bootTestApi({ auth: true });
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const teamId = await createTeam(api.baseUrl, cookie, "Platform");
+    const created = (await (
+      await fetch(`${api.baseUrl}/api/teams/${teamId}/api-keys`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ name: "CI" }),
+      })
+    ).json()) as CreateTeamApiKeyResponse;
+
+    const del = await fetch(`${api.baseUrl}/api/teams/${teamId}`, { method: "DELETE", headers: { cookie } });
+    expect(del.status).toBe(200);
+
+    // Nothing left to revoke it: the team list 404s on a team that is
+    // gone, and the personal routes refuse every team-pinned key. A row
+    // that survives here survives forever.
+    const rows = await api.providers.db
+      .select({ id: apikey.id })
+      .from(apikey)
+      .where(eq(apikey.id, created.id));
+    expect(rows).toEqual([]);
+
+    const dead = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
+    expect(dead.status).toBe(401);
+  });
+
   it("personal create/update cannot stamp metadata.teamId", async () => {
     api = await bootTestApi({ auth: true });
     const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
