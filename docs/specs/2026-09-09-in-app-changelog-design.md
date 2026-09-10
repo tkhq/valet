@@ -80,6 +80,10 @@ A checkpoint with no included changes has an empty entry list. The generator pri
 
 `GET /api/changelog` returns the bundled manifest and its match to the running artifact. The route uses normal app authentication.
 
-The `/changelog` page shows the unreleased checkpoint first when present. It labels that checkpoint `Unreleased` and shows its build time, build SHA, build link, entries, and source links. Released checkpoints follow in newest-first order.
+The `/changelog` page defaults to newest-first checkpoint order. Users can reverse this order, filter entries by change type, and search entry text or source identifiers. The page omits checkpoints with no matching entries while a filter or search is active. It shows a clear empty state when no entries match.
+
+Each checkpoint groups entries by change type. Features appear first. Improvements, fixes, and security changes follow in that order. The page paginates whole checkpoints and does not split one checkpoint across pages. The URL stores the type, search, sort, and page state. A filter, search, or sort change resets the page to the first valid page.
+
+The page labels an unreleased checkpoint `Unreleased`. It keeps the build time, build SHA, build link, pull request links, and commit links available. Entry rows use a compact horizontal layout on wide screens and stack source links on narrow screens.
 
 The client stores the newest displayed checkpoint ID in local storage. The key includes the user ID. The page snapshots unread checkpoints before it updates storage. A replaced unreleased ID marks only the new unreleased checkpoint unread. Promotion recognizes a released checkpoint with the same SHA as already seen.

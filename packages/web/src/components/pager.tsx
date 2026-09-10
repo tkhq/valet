@@ -1,16 +1,11 @@
 import { Button } from "~/components/primitives";
 
 /**
- * Previous / page number / Next for a keyset-paginated list.
+ * Previous / page number / Next for a paginated list.
  *
- * State-free on purpose: the caller keeps the cursor stack, and every list
- * that pages keeps it in the URL (see `~/lib/cursor-stack`). This component
- * only draws the two controls and says which page is open, so one list
- * cannot end up with a pager that looks or reads different from another's.
- *
- * The page number is shown, but no total is: a keyset read knows only whether
- * one more page exists, and counting the rest would cost a second query per
- * page for a number nobody acts on.
+ * State-free on purpose: the caller keeps page state in the URL. This
+ * component only draws the controls, so list pagers look and read the same.
+ * A keyset list omits `totalPages`. An offset list can show its known total.
  */
 export function Pager({
   page,
@@ -20,6 +15,7 @@ export function Pager({
   onNext,
   label,
   busy = false,
+  totalPages,
 }: {
   /** 1-based number of the page being read. */
   page: number;
@@ -35,6 +31,8 @@ export function Pager({
    * Previous stays live because the cursor stack in the URL is always
    * about the current query. */
   busy?: boolean;
+  /** Total page count when the caller knows it. */
+  totalPages?: number;
 }) {
   // One page and nothing after it needs no controls at all.
   if (!hasPrevious && !hasNext) return null;
@@ -50,7 +48,9 @@ export function Pager({
       >
         Previous
       </Button>
-      <span className="text-xs text-muted">Page {page}</span>
+      <span className="text-xs text-muted">
+        Page {page}{totalPages === undefined ? "" : ` of ${totalPages}`}
+      </span>
       <Button type="button" variant="ghost" size="sm" disabled={busy || !hasNext} onClick={onNext}>
         Next
       </Button>
