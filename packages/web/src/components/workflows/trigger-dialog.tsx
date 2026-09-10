@@ -18,6 +18,7 @@
  */
 import { useState, useEffect } from "react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
+import { apiErrorMessage } from "~/api/policies";
 import {
   useCreateEventTrigger,
   useCreateSchedule,
@@ -333,7 +334,7 @@ export function TriggerDialog({
 
       onOpenChange(false);
     } catch (err) {
-      setServerError(err instanceof Error ? err.message : "Request failed.");
+      setServerError(apiErrorMessage(err));
     }
   }
 

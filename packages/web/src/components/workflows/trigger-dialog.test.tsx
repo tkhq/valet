@@ -4,6 +4,8 @@
  * verbatim, and picks event keys from the catalog.
  */
 import { describe, expect, it, vi } from "vitest";
+import type { WorkflowTriggerItem } from "@valet/api/wire";
+import { ApiError } from "~/api/client";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const createScheduleMutateAsync = vi.fn().mockResolvedValue({});
@@ -87,6 +89,37 @@ describe("TriggerDialog", () => {
     fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "x" } });
     fireEvent.click(screen.getByText(/^Create$/));
     await waitFor(() => expect(screen.getByText(/Use 5 fields/)).toBeTruthy());
+  });
+
+  it.each([
+    { kind: "schedule", editing: false },
+    { kind: "schedule", editing: true },
+    { kind: "event", editing: false },
+    { kind: "event", editing: true },
+  ] as const)("shows the API payload for $kind errors (editing: $editing)", async ({ kind, editing }) => {
+    const mutation = kind === "schedule"
+      ? editing ? updateScheduleMutateAsync : createScheduleMutateAsync
+      : editing ? updateEventMutateAsync : createEventTriggerMutateAsync;
+    const reason = "linear is not connected for this team. Store a team credential, then create the schedule.";
+    const transportMessage = "POST /workflows/schedules → 400";
+    mutation.mockClear().mockRejectedValueOnce(new ApiError(400, transportMessage, { error: reason }));
+    const onOpenChange = vi.fn();
+    const shared = { id: "trigger-1", workflowId: "wf_team", name: "Team trigger", enabled: true };
+    const item: WorkflowTriggerItem = kind === "schedule"
+      ? { ...shared, kind, detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: 1, lastFiredAt: null } }
+      : { ...shared, kind, detail: { eventKeys: ["github.pull_request.opened"], filters: [] } };
+    render(<TriggerDialog open onOpenChange={onOpenChange} workflowId="wf_team" editing={editing ? item : undefined} />);
+    if (!editing && kind === "event") {
+      fireEvent.click(screen.getByRole("button", { name: "Event" }));
+      fireEvent.change(screen.getByLabelText("Event"), { target: { value: "github.pull_request.opened" } });
+    }
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Changed trigger" } });
+    if (kind === "schedule") fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 8 * * *" } });
+    fireEvent.click(screen.getByRole("button", { name: editing ? "Save" : "Create" }));
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(screen.queryByText(transportMessage)).toBeNull();
+    expect(mutation).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   it("disables the workflow select when editing a schedule trigger", async () => {
