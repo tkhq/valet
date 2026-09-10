@@ -348,8 +348,9 @@ window.
 
 The web stream store treats a response with `hasMore` as a bounded tail. It
 keeps the current prefix before the first message id that overlaps the tail.
-It replaces the overlapping suffix with the REST tail. The store keeps only
-rows marked `optimistic` or `streaming` after that tail. REST confirmation
+It replaces the overlapping suffix with the REST tail. If no row overlaps,
+the tail replaces the thread. The store keeps only rows marked `optimistic`
+or `streaming` after that tail. REST confirmation
 removes a client row with the same message id or queue item id. A complete
 response replaces canonical rows for the thread.
 

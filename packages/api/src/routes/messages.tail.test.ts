@@ -54,5 +54,13 @@ describe("GET /messages: bounded tail", () => {
     expect(full.messages.map((message) => message.id)).toEqual(
       Array.from({ length: 201 }, (_, index) => `m${index + 1}`),
     );
+
+    for (const limit of ["0", "-1"]) {
+      const clampedRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?limit=${limit}`);
+      expect(clampedRes.status).toBe(200);
+      const clamped = (await clampedRes.json()) as ListMessagesResponse;
+      expect(clamped.hasMore).toBe(true);
+      expect(clamped.messages.map((message) => message.id)).toEqual(["m201"]);
+    }
   });
 });

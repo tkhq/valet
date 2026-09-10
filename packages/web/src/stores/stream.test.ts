@@ -778,6 +778,19 @@ describe("setThreadMessages", () => {
     );
   });
 
+  it("replaces the thread when a bounded tail has no overlap", () => {
+    const { setThreadMessages } = useStreamStore.getState();
+    const initial = Array.from({ length: 200 }, (_, index) => restMessage(`m${index + 1}`));
+    const tail = Array.from({ length: 200 }, (_, index) => restMessage(`m${index + 500}`));
+
+    setThreadMessages(SESSION, THREAD, initial);
+    setThreadMessages(SESSION, THREAD, tail, true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map((message) => message.id)).toEqual(
+      Array.from({ length: 200 }, (_, index) => `m${index + 500}`),
+    );
+  });
+
   it("keeps a mid-stream assistant message that hasn't been persisted to REST yet", () => {
     const { ingest, setThreadMessages } = useStreamStore.getState();
 
