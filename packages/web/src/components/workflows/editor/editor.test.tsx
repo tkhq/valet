@@ -14,7 +14,7 @@
  */
 import { useEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WorkflowDefinition } from "@valet/workflow";
 import { ApiError } from "~/api/client";
@@ -57,6 +57,46 @@ function baseDefinition(): WorkflowDefinition {
 }
 
 describe("Editor", () => {
+  it("keeps a mirrored definition unchanged through controls and keyboard actions", async () => {
+    const onDirtyChange = vi.fn();
+    const onSave = vi.fn();
+    const user = userEvent.setup();
+    render(<Editor initialDefinition={baseDefinition()} onSave={onSave} onDirtyChange={onDirtyChange} readOnly />);
+    const add = screen.getByRole("button", { name: "LLM" });
+    expect(add.matches(":disabled")).toBe(true);
+    await user.click(add);
+    fireEvent.click(screen.getByText("hello"));
+    const prompt = screen.getByLabelText("Prompt");
+    expect(prompt.matches(":disabled")).toBe(true);
+    await user.type(prompt, "changed");
+    for (const name of ["Duplicate", "Remove"]) {
+      const action = screen.getByRole("button", { name });
+      expect(action.matches(":disabled")).toBe(true);
+      await user.click(action);
+    }
+    const node = within(screen.getByTestId("workflow-canvas")).getByText("hello").closest(".react-flow__node");
+    expect(node?.classList.contains("draggable")).toBe(false);
+    if (node instanceof HTMLElement) node.focus();
+    await user.keyboard("{Delete}{Backspace}{ArrowRight}");
+    expect(within(screen.getByTestId("workflow-canvas")).getByText("hello")).toBeTruthy();
+    expect(screen.queryByTestId("unsaved-indicator")).toBeNull();
+    expect(onDirtyChange.mock.calls.every(([dirty]) => dirty === false)).toBe(true);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("discards an editable draft when it becomes read-only", () => {
+    const definition = baseDefinition();
+    const onSave = vi.fn();
+    const onDirtyChange = vi.fn();
+    const view = render(<Editor initialDefinition={definition} onSave={onSave} onDirtyChange={onDirtyChange} />);
+    fireEvent.click(screen.getByText("hello"));
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "local edit" } });
+    view.rerender(<Editor initialDefinition={definition} onSave={onSave} onDirtyChange={onDirtyChange} readOnly />);
+    expect(screen.getByText("hello")).toBeTruthy();
+    expect(screen.queryByText("local edit")).toBeNull();
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("has no unsaved indicator and a disabled Save button before any edit", () => {
     render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
     expect(screen.queryByTestId("unsaved-indicator")).toBeNull();

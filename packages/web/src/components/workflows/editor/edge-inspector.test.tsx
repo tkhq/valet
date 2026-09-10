@@ -5,6 +5,7 @@
  * true/false source handles — everything else is a single unconditional
  * edge).
  */
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { EdgeInspector } from "./edge-inspector";
@@ -23,6 +24,22 @@ function edge(overrides: Partial<WorkflowFlowEdge> = {}): WorkflowFlowEdge {
 function noop() {}
 
 describe("EdgeInspector", () => {
+  it("disables branch, condition, and remove controls in read-only mode", async () => {
+    const onChange = vi.fn();
+    const onRemove = vi.fn();
+    const user = userEvent.setup();
+    render(<EdgeInspector edge={edge()} sourceNodeType="if" onChange={onChange} onRemove={onRemove} readOnly />);
+    const branch = screen.getByLabelText("From output");
+    const condition = screen.getByLabelText("When (condition expression)");
+    const remove = screen.getByRole("button", { name: "Remove edge" });
+    for (const control of [branch, condition, remove]) expect(control.matches(":disabled")).toBe(true);
+    await user.selectOptions(branch, "true");
+    await user.type(condition, "changed");
+    await user.click(remove);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onRemove).not.toHaveBeenCalled();
+  });
+
   it("shows the fromOutput select for an if source", () => {
     render(<EdgeInspector edge={edge()} sourceNodeType="if" onChange={noop} onRemove={noop} />);
     expect(screen.getByLabelText("From output")).toBeTruthy();

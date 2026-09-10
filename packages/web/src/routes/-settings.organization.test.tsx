@@ -15,7 +15,7 @@ import type { ReactElement, ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { TeamSummary } from "@valet/api/wire";
+import type { TeamSummary, SkillSourceSummary } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { TooltipProvider } from "~/components/primitives";
 
@@ -229,22 +229,7 @@ vi.mock("~/api/invites", () => ({
 }));
 
 const addSourceMutate = vi.fn();
-let orgSourcesData: {
-  sources: Array<{
-    id: string;
-    repo: string;
-    ref: string;
-    subpath: string;
-    ownerType: "user" | "team" | "org";
-    ownerId: string;
-    enabled: boolean;
-    status: "pending" | "ok" | "warning" | "error";
-    skillCount: number;
-    lastSyncedAt: number | null;
-    lastSha: string | null;
-    lastMessage: string | null;
-  }>;
-} = { sources: [] };
+let orgSourcesData: { sources: SkillSourceSummary[] } = { sources: [] };
 
 vi.mock("~/api/skill-sources", () => ({
   useSkillSources: () => ({ data: { ...orgSourcesData, nextCursor: null }, isLoading: false, error: null }),
@@ -274,10 +259,11 @@ import { OrganizationMembersPage } from "./settings.organization.members";
 import { OrganizationTeamsPage } from "./settings.organization.teams";
 import { OrganizationLibraryPage } from "./settings.organization.library";
 
-function orgSource(over: Record<string, unknown> = {}) {
+function orgSource(over: Partial<SkillSourceSummary> = {}): SkillSourceSummary {
   return {
     id: "s_org",
     repo: "tkhq/org-skills",
+    kinds: ["skills"],
     ref: "",
     subpath: "",
     ownerType: "org" as const,
@@ -680,7 +666,7 @@ describe("OrganizationLibraryPage", () => {
       target: { value: "tkhq/org-skills" },
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
-    expect(addSourceMutate).toHaveBeenCalledWith({ repo: "tkhq/org-skills", ownerType: "org" });
+    expect(addSourceMutate).toHaveBeenCalledWith({ repo: "tkhq/org-skills", ownerType: "org", kinds: ["skills"] });
   });
 
   it("a member sees status but no Sync, Remove, or import controls", () => {

@@ -430,7 +430,7 @@ describe("SkillsIndexPage — the repositories panel", () => {
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
 
-    expect(addSource).toHaveBeenCalledWith({ repo: "tkhq/skills" });
+    expect(addSource).toHaveBeenCalledWith({ repo: "tkhq/skills", kinds: ["skills"] });
   });
 
   it("keeps its own cursor stack, apart from the grid's", () => {

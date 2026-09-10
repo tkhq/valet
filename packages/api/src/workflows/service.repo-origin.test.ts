@@ -83,7 +83,7 @@ beforeAll(async () => {
     ownerType: "user",
     ownerId: OWNER.userId,
     repoFullName: REPO,
-    ref: "",
+    ref: "release/v2",
     subpath: "",
     kinds: ["workflows"],
     createdAt: now,
@@ -174,12 +174,13 @@ describe("a mirrored workflow refuses every product write", () => {
     expect(summary?.origin).toBe("repo");
     expect(summary?.upstream).toEqual({
       repoFullName: REPO,
+      ref: "release/v2",
       path: ".valet/workflows/summary.yaml",
     });
 
     const listed = await listWorkflowDefinitions(deps, OWNER);
     const found = listed.find((w) => w.id === id);
-    expect(found?.upstream?.repoFullName).toBe(REPO);
+    expect(found?.upstream).toEqual(summary?.upstream);
     // A workflow the product owns carries neither field.
     const local = await createWorkflowDefinition(deps, OWNER, { name: "local", definition: GRAPH });
     expect(listed.concat(await listWorkflowDefinitions(deps, OWNER)).find((w) => w.id === local.id)?.origin).toBeUndefined();

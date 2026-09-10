@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
-import { SkillSourcesPanel } from "~/components/skills/skill-sources-panel";
+import { RepoSourcesPanel } from "~/components/skills/repo-sources-panel";
 import {
   readSkillFilter,
   skillFilterQuery,
@@ -94,7 +94,7 @@ export function OrganizationLibraryPage() {
             <Spinner size={14} /> Loading the organization…
           </div>
         ) : (
-          <SkillSourcesPanel
+          <RepoSourcesPanel
             owner={{ type: "org", id: orgId }}
             readOnly={!isAdmin}
             cursors={parseCursorStack(search.sourcePage)}

@@ -1,3 +1,5 @@
+import { blobUrl } from "~/lib/blob-url";
+export { blobUrl } from "~/lib/blob-url";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -68,23 +70,6 @@ import { FindingStatusChip, SeverityBadge, SeverityBar, severityRank } from "./s
  */
 
 type SortKey = "severity" | "recency";
-
-/** GitHub blob URL at the pinned SHA — a finding the user cannot jump to is
- * dead text. Null while the engagement is unstarted (no pinned ref). */
-export function blobUrl(
-  engagement: Pick<SecurityEngagementWire, "repoFullName" | "repoRef">,
-  file: string | null,
-  line: number | null,
-): string | null {
-  if (!file || engagement.repoRef === "") return null;
-  const path = file
-    .split("/")
-    .map((seg) => encodeURIComponent(seg))
-    .join("/");
-  return `https://github.com/${engagement.repoFullName}/blob/${engagement.repoRef}/${path}${
-    line !== null ? `#L${line}` : ""
-  }`;
-}
 
 /** One list row: a fingerprint group's representative plus its siblings.
  * Ungrouped findings are a group of one. */

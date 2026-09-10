@@ -9,6 +9,7 @@ import type { DagNodeType, EdgePatch, WorkflowFlowEdge } from "../editor-model";
 import { LabeledInput, SelectField } from "./fields";
 
 export interface EdgeInspectorProps {
+  readOnly?: boolean;
   edge: WorkflowFlowEdge;
   sourceNodeType: DagNodeType;
   onChange: (patch: EdgePatch) => void;
@@ -21,11 +22,11 @@ const FROM_OUTPUT_OPTIONS = [
   { value: "false", label: "false" },
 ];
 
-export function EdgeInspector({ edge, sourceNodeType, onChange, onRemove }: EdgeInspectorProps) {
+export function EdgeInspector({ edge, sourceNodeType, onChange, onRemove, readOnly = false }: EdgeInspectorProps) {
   const showFromOutput = sourceNodeType === "if" || sourceNodeType === "approval";
 
   return (
-    <div className="flex flex-col gap-3 p-3">
+    <fieldset disabled={readOnly} className="flex min-w-0 flex-col gap-3 p-3">
       <div>
         <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Edge</span>
         <div className="mt-0.5 truncate text-sm text-ink" title={`${edge.source} → ${edge.target}`}>
@@ -54,6 +55,6 @@ export function EdgeInspector({ edge, sourceNodeType, onChange, onRemove }: Edge
       <Button variant="danger" size="sm" onClick={onRemove}>
         Remove edge
       </Button>
-    </div>
+    </fieldset>
   );
 }

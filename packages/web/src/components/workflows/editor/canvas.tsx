@@ -78,6 +78,7 @@ const nodeTypes = { workflow: FlowNode };
 const ARROW_END: EdgeMarker = { type: MarkerType.ArrowClosed };
 
 export interface CanvasProps {
+  readOnly?: boolean;
   flow: WorkflowFlowState;
   errorNodeIds?: ReadonlySet<string>;
   /** Per-node policy predictions (`gate` on `FlowNodeData`), keyed by node
@@ -253,6 +254,7 @@ function toXyEdges(flow: WorkflowFlowState): Edge[] {
 }
 
 export function Canvas({
+  readOnly = false,
   flow,
   errorNodeIds,
   gateByNodeId,
@@ -314,16 +316,19 @@ export function Canvas({
   }, [flow]);
 
   function handleNodesChange(changes: NodeChange<FlowXyNode>[]) {
+    if (readOnly) changes = changes.filter((change) => change.type === "select" || change.type === "dimensions");
     setNodes((current) => applyNodeChanges(changes, current));
     routeNodeChanges(changes, { onNodePositionChange, onRemoveNode });
   }
 
   function handleEdgesChange(changes: EdgeChange<Edge>[]) {
+    if (readOnly) changes = changes.filter((change) => change.type === "select");
     setEdges((current) => applyEdgeChanges(changes, current));
     routeEdgeChanges(changes, { onRemoveEdge });
   }
 
   function handleConnect(connection: Connection) {
+    if (readOnly) return;
     onConnect({
       source: connection.source,
       target: connection.target,
@@ -338,6 +343,10 @@ export function Canvas({
   return (
     <div className="h-full w-full" data-testid="workflow-canvas">
       <ReactFlow
+        nodesDraggable={!readOnly}
+        nodesConnectable={!readOnly}
+        edgesReconnectable={!readOnly}
+        deleteKeyCode={readOnly ? null : "Backspace"}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
@@ -399,7 +408,7 @@ export function Canvas({
           ))}
         </ViewportPortal>
         <Background />
-        <Controls />
+        <Controls showInteractive={!readOnly} />
       </ReactFlow>
     </div>
   );

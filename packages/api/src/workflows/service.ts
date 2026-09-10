@@ -167,7 +167,7 @@ export function validateDefinitionInput(
 
 type WorkflowRow = typeof workflowDefinitions.$inferSelect;
 
-function rowToDefinition(row: WorkflowRow, repoFullName?: string): WorkflowDefinitionSummary {
+function rowToDefinition(row: WorkflowRow, source?: { repoFullName: string; ref: string }): WorkflowDefinitionSummary {
   const summary: WorkflowDefinitionSummary = {
     id: row.id,
     name: row.name,
@@ -183,22 +183,22 @@ function rowToDefinition(row: WorkflowRow, repoFullName?: string): WorkflowDefin
   // takes every badge with it. A mirrored row whose source is gone keeps
   // `origin` and loses the reference: it is still read-only, and the sweep
   // that removes the source removes the row.
-  if (repoFullName !== undefined && row.upstreamPath !== null) {
-    summary.upstream = { repoFullName, path: row.upstreamPath };
+  if (source !== undefined && row.upstreamPath !== null) {
+    summary.upstream = { ...source, path: row.upstreamPath };
   }
   return summary;
 }
 
-/** `source_id` to `repo_full_name`, for the mirrored rows in `rows`. One
+/** Source repository and ref for the mirrored rows in `rows`. One
  * query for a whole list, and none at all when nothing is mirrored. */
-async function repoNamesFor(db: AppDb, rows: WorkflowRow[]): Promise<Map<string, string>> {
+async function repoNamesFor(db: AppDb, rows: WorkflowRow[]): Promise<Map<string, { repoFullName: string; ref: string }>> {
   const ids = [...new Set(rows.flatMap((r) => (r.origin === "repo" && r.sourceId ? [r.sourceId] : [])))];
   if (ids.length === 0) return new Map();
   const sources = await db
-    .select({ id: contentSources.id, repoFullName: contentSources.repoFullName })
+    .select({ id: contentSources.id, repoFullName: contentSources.repoFullName, ref: contentSources.ref })
     .from(contentSources)
     .where(inArray(contentSources.id, ids));
-  return new Map(sources.map((row) => [row.id, row.repoFullName]));
+  return new Map(sources.map((row) => [row.id, { repoFullName: row.repoFullName, ref: row.ref }]));
 }
 
 /**
@@ -213,7 +213,7 @@ async function repoNamesFor(db: AppDb, rows: WorkflowRow[]): Promise<Map<string,
 async function refuseRepoOwned(db: AppDb, row: WorkflowRow): Promise<void> {
   if (row.origin !== "repo") return;
   const names = await repoNamesFor(db, [row]);
-  const repo = (row.sourceId !== null ? names.get(row.sourceId) : undefined) ?? "its repository";
+  const repo = (row.sourceId !== null ? names.get(row.sourceId)?.repoFullName : undefined) ?? "its repository";
   throw new RepoOwnedWorkflowError(repo, row.upstreamPath ?? "its workflow file");
 }
 

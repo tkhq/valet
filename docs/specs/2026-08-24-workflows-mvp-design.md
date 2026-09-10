@@ -280,7 +280,7 @@ The platform engineer performs this sequence against a manually rolled deploymen
 Task 1 ships on `feat/content-sync-rail`, which generalizes the rail with no behaviour
 change for a skills-only source. Task 2 ships on `feat/valet-skills-discovery`, stacked on
 it, which opens `.valet/skills` to discovery and re-scans a source when the discovery rules
-change. Task 3 — one parser for the workflow file envelope — ships on `feat/workflow-file-envelope` and is reviewed separately; that branch carries no spec of its own, so this document governs it too, and deviations 7, 8, and 10 below record what changed there. Tasks 4, 5, 6, 7 and the reachable half of 8 ship on `feat/workflow-collector`: the mirror columns, the read-only guard, the copy endpoint, the collector that mirrors definitions, trigger arming from a file, template mirroring with an owner-scoped catalog, `kinds` on the create route with decision 10's gate, and push resync. Deviations 12 to 23 record what changed there. Task 9 ships on `feat/workflow-file-export`: `GET /api/workflows/:id/file` returns the decision-4 envelope, and the editor overflow menu downloads it. Tasks 10 through 13 have not shipped, so the web client shows no repository badge.
+change. Task 3 — one parser for the workflow file envelope — ships on `feat/workflow-file-envelope` and is reviewed separately; that branch carries no spec of its own, so this document governs it too, and deviations 7, 8, and 10 below record what changed there. Tasks 4, 5, 6, 7 and the reachable half of 8 ship on `feat/workflow-collector`: the mirror columns, the read-only guard, the copy endpoint, the collector that mirrors definitions, trigger arming from a file, template mirroring with an owner-scoped catalog, `kinds` on the create route with decision 10's gate, and push resync. Deviations 12 to 23 record what changed there. Task 9 ships on `feat/workflow-file-export`: `GET /api/workflows/:id/file` returns the decision-4 envelope, and the editor overflow menu downloads it. Task 10 ships on `feat/repo-sources-ui`: the source form has kind checkboxes, a mirrored workflow shows a repository badge and a read-only editor, and the Runs tab pages on the existing cursor. Tasks 11 through 13 have not shipped.
 
 1. **The sync service is `ContentSyncService`, not `RepoContentSyncService`.** Decision 1 and tasks 1 and 8 first named the class `RepoContentSyncService`, and its options `RepoContentSyncDeps`. What ships in `packages/api/src/services/content-sync/service.ts` is `ContentSyncService` and `ContentSyncServiceDeps`. This repository names an exported class for the path it sits at — `events/dispatcher.ts` exports `EventDispatcher`, `workflows/scheduler.ts` exports `WorkflowScheduler` — so a `Repo` prefix on a file that already sits in `content-sync/` says the directory twice. Every place this design named the class carries the shipped name.
 
@@ -401,3 +401,14 @@ RBAC vocabulary. Decision 10 uses the direct `isTeamMember` and `canAdministerTe
 ### Download filenames
 
 Workflow downloads use an ASCII filename fallback and a UTF-8 `filename*` parameter when the upstream name needs encoding. The web download action prefers the UTF-8 name. Unicode, quotes, and control characters cannot enter a response header unescaped.
+
+## Changelog
+
+### 2026-09-10: Task 10 review fixes (#560)
+
+- Mirrored editors disable palette actions, node movement, connections, keyboard deletion, and inspector controls. Selection and pan/zoom remain available.
+- Read-only mode discards local edits and does not block navigation with an unsaved-change warning.
+- The Runs tab resets pagination when the workspace owner changes. Empty later pages retain Previous.
+- Repository kind selections reset when the owner or admin permission changes. Submission excludes disabled kinds.
+- Team sources permit workflows and templates for team admins and org admins, matching the server gate.
+- Workflow list and detail responses include the source ref. File links encode that ref and each path segment; unpinned sources use HEAD.
