@@ -20,7 +20,7 @@
  * `allow_public_artifacts` opt-in, live-checked on every read.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, or } from "drizzle-orm";
 import { marked } from "marked";
 import {
   NotFoundError,
@@ -475,8 +475,9 @@ export async function listArtifactsForOwner(
   db: AppDb,
   orgId: string,
   owner: { type: string; id: string },
+  page?: { limit: number; cursor?: { updatedAt: number; id: string } },
 ): Promise<ArtifactSummaryRow[]> {
-  return db
+  const query = db
     .select(summaryColumns)
     .from(artifacts)
     .where(
@@ -484,9 +485,16 @@ export async function listArtifactsForOwner(
         eq(artifacts.orgId, orgId),
         eq(artifacts.ownerType, owner.type),
         eq(artifacts.ownerId, owner.id),
+        // The paged gallery omits revoked links before selecting a page.
+        page ? isNull(artifacts.revokedAt) : undefined,
+        page?.cursor ? or(
+          lt(artifacts.updatedAt, page.cursor.updatedAt),
+          and(eq(artifacts.updatedAt, page.cursor.updatedAt), lt(artifacts.id, page.cursor.id)),
+        ) : undefined,
       ),
     )
-    .orderBy(desc(artifacts.updatedAt));
+    .orderBy(desc(artifacts.updatedAt), desc(artifacts.id));
+  return page ? query.limit(page.limit + 1) : query;
 }
 
 export async function setArtifactVisibility(
