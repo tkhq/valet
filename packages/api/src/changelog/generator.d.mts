@@ -76,4 +76,5 @@ export function backfillTags(options: {
   repo: string;
   manifest: GeneratedManifest;
   patterns: string[];
+  targetRef?: string;
 }): GeneratedManifest;

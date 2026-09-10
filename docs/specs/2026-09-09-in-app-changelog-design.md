@@ -45,7 +45,6 @@ Use this command to generate a rolling checkpoint:
 
 ```bash
 pnpm changelog:generate -- \
-  --backfill-tags 'chart/valet-v*' \
   --backfill-tags 'v*' \
   --unreleased-sha HEAD \
   --built-at "$(git show -s --format=%cI HEAD)" \
@@ -54,7 +53,7 @@ pnpm changelog:generate -- \
   --metadata packages/api/src/changelog/release.json
 ```
 
-The release workflows use `chart/valet-v*` and `v*` tags as cumulative released history. The previous released tag defines each comparison range. Tests cover two rolling builds, reruns, empty rolling builds, and promotion to a release.
+The release workflows use stable `vX.Y.Z` application tags as cumulative released history. Helm chart tags use `chart/valet-vX.Y.Z` and never define product checkpoints. The previous released tag defines each comparison range. Tests cover two rolling builds, reruns, empty rolling builds, and promotion to a release.
 
 The generator reads first-parent commit ranges. It uses commit subjects, explicit user-impact text, changed paths, and PR numbers from local Git history.
 
@@ -87,3 +86,6 @@ Each checkpoint groups entries by change type. Features appear first. Improvemen
 The page labels an unreleased checkpoint `Unreleased`. It keeps the build time, build SHA, build link, pull request links, and commit links available. Entry rows use a compact horizontal layout on wide screens and stack source links on narrow screens.
 
 The client stores the newest displayed checkpoint ID in local storage. The key includes the user ID. The page snapshots unread checkpoints before it updates storage. A replaced unreleased ID marks only the new unreleased checkpoint unread. Promotion recognizes a released checkpoint with the same SHA as already seen.
+
+Only application tags reachable from the build commit define changelog checkpoints. Legacy tags on other branches are excluded.
+The first application checkpoint includes the complete first-parent history. Until then, builds show this history as Unreleased.

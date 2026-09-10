@@ -184,10 +184,12 @@ export function replaceUnreleasedCheckpoint(manifest, checkpoint) {
   };
 }
 
-export function backfillTags({ repo, manifest, patterns }) {
+export function backfillTags({ repo, manifest, patterns, targetRef = "HEAD" }) {
   const refs = git(repo, [
     "tag",
     "--list",
+    "--merged",
+    targetRef,
     ...patterns,
     "--sort=creatordate",
     "--format=%(refname:short)%00%(creatordate:iso-strict)",
@@ -199,17 +201,17 @@ export function backfillTags({ repo, manifest, patterns }) {
     ? refs.split("\n").map((line) => {
         const [tag, releasedAt] = line.split("\0");
         return { tag, releasedAt };
-      }).filter(({ releasedAt }) => Date.parse(releasedAt) > baselineTime)
+      }).filter(({ tag, releasedAt }) => /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag) && Date.parse(releasedAt) > baselineTime)
     : [];
   let next = {
     schema: CHANGELOG_SCHEMA,
     generatedAt: baseline?.releasedAt ?? new Date(0).toISOString(),
     checkpoints: released,
   };
-  let previousSha = baseline?.releasedSha ?? (tags[0] ? git(repo, ["rev-parse", `${tags[0].tag}^`]) : null);
+  let previousSha = baseline?.releasedSha ?? null;
   for (const { tag, releasedAt } of tags) {
     const releaseSha = git(repo, ["rev-list", "-n", "1", tag]);
-    const version = tag.replace(/^chart\/valet-v/, "").replace(/^v/, "");
+    const version = tag.slice(1);
     const checkpoint = generateCheckpoint({
       repo,
       version,

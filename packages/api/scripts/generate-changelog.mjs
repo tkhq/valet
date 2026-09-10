@@ -25,7 +25,7 @@ const initial = existsSync(manifestPath)
   ? JSON.parse(readFileSync(manifestPath, "utf8"))
   : { schema: CHANGELOG_SCHEMA, generatedAt: new Date(0).toISOString(), checkpoints: [] };
 const patterns = options("--backfill-tags");
-let manifest = patterns.length ? backfillTags({ repo, manifest: initial, patterns }) : initial;
+let manifest = patterns.length ? backfillTags({ repo, manifest: initial, patterns, targetRef: option("--release-sha") ?? option("--unreleased-sha") ?? option("--artifact-sha") ?? "HEAD" }) : initial;
 
 const version = option("--version");
 const releaseSha = option("--release-sha");

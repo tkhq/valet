@@ -141,6 +141,41 @@ describe("changelog generation", () => {
     expect(released(manifest)[0].releasedAt).toBe("2026-01-01T01:00:01.000Z");
   });
 
+  it("ignores chart and non-release tags as product boundaries", () => {
+    const repo = repository();
+    add(repo, "README", "bootstrap", "chore: bootstrap");
+    add(repo, "app.ts", "one", "feat: first release");
+    tag(repo, "v1.0.0", "2026-01-01T00:00:00Z");
+    add(repo, "app.ts", "two", "fix: between releases");
+    tag(repo, "chart/valet-v9.0.0", "2026-01-02T00:00:00Z");
+    tag(repo, "v2.0.0-rc.1", "2026-01-02T00:00:00Z");
+    add(repo, "app.ts", "three", "feat: next release");
+    tag(repo, "v1.1.0", "2026-01-03T00:00:00Z");
+    const result = backfillTags({ repo, manifest: emptyManifest(), patterns: ["*"] });
+    expect(released(result).map((item) => item.version)).toEqual(["1.1.0", "1.0.0"]);
+    expect(released(result)[0].entries.map((entry) => entry.title)).toEqual([
+      "Between releases", "Next release",
+    ]);
+  });
+
+  it("excludes releases from other branches and includes the first release history", () => {
+    const repo = repository();
+    const firstSha = add(repo, "app.ts", "one", "feat: first feature");
+    const branch = run(repo, "branch", "--show-current");
+    run(repo, "checkout", "-b", "legacy");
+    add(repo, "app.ts", "legacy", "feat: legacy feature");
+    tag(repo, "v9.0.0", "2026-01-01T00:00:00Z");
+    run(repo, "checkout", branch);
+    const pending = backfillTags({ repo, manifest: emptyManifest(), patterns: ["v*"] });
+    expect(pending.checkpoints).toEqual([]);
+    add(repo, "app.ts", "two", "fix: second feature");
+    tag(repo, "v1.0.0", "2026-01-02T00:00:00Z");
+    const result = backfillTags({ repo, manifest: emptyManifest(), patterns: ["v*"] });
+    expect(released(result).map((item) => item.version)).toEqual(["1.0.0"]);
+    expect(released(result)[0].previousSha).toBeNull();
+    expect(released(result)[0].entries[0].sources.commitSha).toBe(firstSha);
+  });
+
   it("rebuilds cumulative history across two successive release tags", () => {
     const repo = repository();
     add(repo, "README", "bootstrap", "chore: bootstrap", "", "2025-12-01T10:00:00+09:00");

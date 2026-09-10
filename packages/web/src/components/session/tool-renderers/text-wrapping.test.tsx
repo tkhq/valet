@@ -42,7 +42,7 @@ describe("text-file tool output wrapping", () => {
 
   it("wraps edit diffs without removing added and removed markers", () => {
     const { container } = render(<DiffView before={LONG_TOKEN} after={`Long prose ${LONG_TOKEN}`} />);
-    const diffRows = container.querySelector(".font-mono > div")!;
+    const diffRows = container.querySelector<HTMLDivElement>(".font-mono > div")!;
 
     expectWrappedText(diffRows);
     expect(container.textContent).toContain("−");
