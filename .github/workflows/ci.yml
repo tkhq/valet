@@ -58,6 +58,9 @@ jobs:
       #   cd packages/worker && bun scripts/generate-plugin-registry.ts
       #   cd packages/client && npx tsc --noEmit
 
+      - name: Test application release workflow
+        run: node --test scripts/release/*.test.mjs
+
       - name: Generate release metadata for typecheck
         run: |
           node packages/api/scripts/generate-changelog.mjs \

@@ -1,0 +1,94 @@
+name: Release Application
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Application version bump (Helm charts release separately)
+        required: true
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: application-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag application release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Require dev-v2 workflow
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          if [[ "$WORKFLOW_REF" != refs/heads/dev-v2 ]]; then
+            echo '::error::Select dev-v2 when running the Release workflow.'
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compute application version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          marker="Valet application release run $GITHUB_RUN_ID"
+          existing=$(git tag --list 'valet/v*' --format='%(refname:short) %(contents:subject)' | awk -v marker="$marker" 'substr($0, index($0, " ") + 1) == marker { print $1 }')
+          if [[ -n "$existing" ]]; then
+            echo "tag=$existing" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$(node scripts/release/version.mjs "$BUMP")" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create tag and application release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          if ! git show-ref --verify --quiet "refs/tags/$TAG"; then
+            git tag -a "$TAG" -m "Valet application release run $GITHUB_RUN_ID"
+            git push origin "refs/tags/$TAG"
+          fi
+          previous=$(node scripts/release/version.mjs --previous "$TAG")
+          notes=()
+          if [[ -n "$previous" ]]; then notes=(--notes-start-tag "$previous"); fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            cat > "$RUNNER_TEMP/application-release-notes.md" <<'NOTES'
+          Valet application release. Native binaries appear when the CLI job completes.
+
+          1. Download the binary for your platform.
+          2. Run `chmod +x ./valet-<os>-<arch>`.
+          3. Run `./valet-<os>-<arch> serve`.
+
+          Windows users can run the Linux binary in WSL.
+          If macOS blocks a browser download, run `xattr -d com.apple.quarantine ./valet-darwin-<arch>`.
+          NOTES
+            gh release create "$TAG" --verify-tag --title "Valet ${TAG#valet/}" \
+              --generate-notes "${notes[@]}" --notes-file "$RUNNER_TEMP/application-release-notes.md"
+          fi
+          echo "Application release: $TAG" >> "$GITHUB_STEP_SUMMARY"
+  cli:
+    needs: release
+    uses: ./.github/workflows/release-cli.yml
+    with:
+      release_tag: ${{ needs.release.outputs.tag }}
+    secrets: inherit
+  docker:
+    needs: release
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      release_tag: ${{ needs.release.outputs.tag }}
+    secrets: inherit

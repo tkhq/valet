@@ -28,6 +28,14 @@ const manifest: ChangelogManifest = {
 };
 
 describe("changelog manifest", () => {
+  it("bundles only application release checkpoints", () => {
+    const parsed = parseChangelogManifest(bundledManifest);
+    for (const checkpoint of parsed.checkpoints) {
+      if (checkpoint.kind === "released") {
+        expect(checkpoint.releaseUrl).toBe(`https://github.com/tkhq/valet/releases/tag/valet%2Fv${checkpoint.version}`);
+      }
+    }
+  });
   it("publishes specific fallback copy instead of canned descriptions or raw internal subjects", () => {
     const parsed = parseChangelogManifest(bundledManifest);
     const entries = parsed.checkpoints.flatMap((checkpoint) => checkpoint.entries);

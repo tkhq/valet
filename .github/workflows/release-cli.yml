@@ -21,20 +21,30 @@ name: Release CLI
 # Apple Developer cert wired into this workflow (not done).
 #
 # Publish paths:
-#   - tag push (v*): versioned GitHub Release with all binaries attached.
+#   - tag push (valet/v*): versioned GitHub Release with all binaries attached.
 #   - merge to dev-v2: the same binaries replace the assets of a single
 #     rolling prerelease tagged `dev-v2-latest`, so the download URLs
 #     (…/releases/download/dev-v2-latest/valet-<os>-<arch>) stay stable.
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["valet/v*"]
     branches: [dev-v2]
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Immutable application tag to publish
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag/label for a manual build (no Release is published)"
+        description: "Unused label; select a version tag as the ref to publish"
         required: false
+
+env:
+  BUILD_REF: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+  BUILD_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: write # create the GitHub Release + upload assets
@@ -42,8 +52,8 @@ permissions:
 # Superseded dev-v2 builds are pointless (the rolling prerelease only keeps
 # the latest); never cancel a tag release build.
 concurrency:
-  group: release-cli-${{ github.ref }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/') }}
+  group: release-cli-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+  cancel-in-progress: ${{ inputs.release_tag == '' && startsWith(github.ref, 'refs/heads/') }}
 
 jobs:
   binaries:
@@ -63,6 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
 
       # pnpm version comes from package.json "packageManager".
@@ -81,24 +92,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Generate changelog artifact
-        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/dev-v2'
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/valet/v') || github.ref == 'refs/heads/dev-v2'
         run: |
           set -euo pipefail
+          build_sha=$(git rev-parse HEAD)
           common=(
-            --backfill-tags 'chart/valet-v*'
-            --backfill-tags 'v*'
-            --artifact-sha "$GITHUB_SHA"
+            --backfill-tags 'valet/v*'
+            --artifact-sha "$build_sha"
             --metadata packages/api/src/changelog/release.json
           )
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ "$BUILD_REF" == refs/tags/valet/v* ]]; then
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
-              --artifact-version "${GITHUB_REF_NAME#v}"
+              --artifact-version "${BUILD_TAG#valet/v}"
           else
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
-              --unreleased-sha "$GITHUB_SHA" \
-              --built-at "$(git show -s --format=%cI "$GITHUB_SHA")" \
+              --unreleased-sha "$build_sha" \
+              --built-at "$(git show -s --format=%cI "$build_sha")" \
               --build-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
               --artifact-version Unreleased
           fi
@@ -164,10 +175,16 @@ jobs:
           path: packages/api/dist/valet-*-*
           if-no-files-found: error
 
-      # Attach binaries to the Release (tag pushes only). Multiple matrix jobs
-      # append to the same tag's release.
+      # Reusable calls upload assets without replacing the application release notes.
+      - name: Attach application release binaries
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" packages/api/dist/valet-*-* --clobber
+
       - name: Publish to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag == '' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: packages/api/dist/valet-*-*
@@ -197,7 +214,7 @@ jobs:
       # release's "source code" links point at whatever commit first created
       # the tag — the body carries the actual SHA.
       - name: Publish rolling dev-v2 prerelease
-        if: github.ref == 'refs/heads/dev-v2'
+        if: ${{ inputs.release_tag == '' && github.ref == 'refs/heads/dev-v2' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: dev-v2-latest

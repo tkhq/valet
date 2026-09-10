@@ -18,7 +18,7 @@ name: Docker Images
 # Tags per publish:
 #   dev-v2            moving branch tag (convenience — do NOT pin deploys to it)
 #   sha-<shortsha>    immutable; what Helm deploys should pin
-#   vX.Y.Z + latest   on version-tag pushes
+#   vX.Y.Z + latest   on application-tag pushes
 #
 # The images must be public GHCR packages (first publish may need the
 # visibility flipped once in the package settings) — the chart wires no
@@ -27,16 +27,26 @@ name: Docker Images
 on:
   push:
     branches: [dev-v2]
-    tags: ["v*"]
+    tags: ["valet/v*"]
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Immutable application tag to publish
+        required: true
+        type: string
   workflow_dispatch:
+
+env:
+  BUILD_REF: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+  BUILD_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: docker-images-${{ github.ref }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/') }}
+  group: docker-images-${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+  cancel-in-progress: ${{ inputs.release_tag == '' && startsWith(github.ref, 'refs/heads/') }}
 
 jobs:
   build:
@@ -59,27 +69,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
 
       - name: Generate changelog artifact
-        if: matrix.image.name == 'valet-api' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/dev-v2')
+        if: matrix.image.name == 'valet-api' && (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/valet/v') || github.ref == 'refs/heads/dev-v2')
         run: |
           set -euo pipefail
+          build_sha=$(git rev-parse HEAD)
           common=(
-            --backfill-tags 'chart/valet-v*'
-            --backfill-tags 'v*'
-            --artifact-sha "$GITHUB_SHA"
+            --backfill-tags 'valet/v*'
+            --artifact-sha "$build_sha"
             --metadata packages/api/src/changelog/release.json
           )
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ "$BUILD_REF" == refs/tags/valet/v* ]]; then
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
-              --artifact-version "${GITHUB_REF_NAME#v}"
+              --artifact-version "${BUILD_TAG#valet/v}"
           else
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
-              --unreleased-sha "$GITHUB_SHA" \
-              --built-at "$(git show -s --format=%cI "$GITHUB_SHA")" \
+              --unreleased-sha "$build_sha" \
+              --built-at "$(git show -s --format=%cI "$build_sha")" \
               --build-url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
               --artifact-version Unreleased
           fi
@@ -134,7 +145,9 @@ jobs:
     steps:
       - name: Compute image name
         id: img
-        run: echo "name=ghcr.io/${OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "name=ghcr.io/${OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          echo "version=${BUILD_TAG#valet/}" >> "$GITHUB_OUTPUT"
         env:
           OWNER: ${{ github.repository_owner }}
 
@@ -161,10 +174,10 @@ jobs:
         with:
           images: ${{ steps.img.outputs.name }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
+            type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
+            type=raw,value=${{ steps.img.outputs.version }},enable=${{ startsWith(env.BUILD_TAG, 'valet/v') }}
             type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')) && !contains(inputs.release_tag || github.ref_name, '-') }}
 
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
