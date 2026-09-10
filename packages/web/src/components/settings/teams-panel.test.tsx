@@ -9,7 +9,7 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { OrgDirectoryUserWire } from "@valet/api/wire";
+import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 
 /** Renders a real anchor so `getByRole("link")` and href assertions work
  * without mounting a router. */
@@ -61,6 +61,10 @@ let origin: "local" | "config" | "idp" = "local";
 /** The org's team-sync gate. Off is the product default, so it is the default here. */
 let ssoTeamSync = false;
 
+let selectedTeamsOverride: TeamSummary[] | undefined;
+let selectedTeamsLoading = false;
+let selectedTeamsError: Error | null = null;
+
 const teamsData = () => ({
   teams: [
     {
@@ -105,7 +109,7 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 });
 
 vi.mock("~/api/settings", () => ({
-  useTeams: () => ({ data: teamsData(), isLoading: false, error: null }),
+  useTeams: () => ({ data: selectedTeamsOverride ? { teams: selectedTeamsOverride } : teamsData(), isLoading: selectedTeamsLoading, error: selectedTeamsError }),
   useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
   useOrg: () => ({
     data: { features: { organizations: true, ssoTeamSync } },
@@ -887,5 +891,89 @@ describe("TeamsPanel — team assistant link", () => {
     render(<TeamsPanel orgMembers={orgMembers} />);
     const link = screen.getByRole("link", { name: /Assistant/ });
     expect(link.getAttribute("href")).toBe("/chat?assistant=asst_team_1");
+  });
+});
+
+
+describe("TeamsPanel selected workspace", () => {
+  function team(id: string, name: string, role: "admin" | "member" = "admin"): TeamSummary {
+    return {
+      id, name, callerRole: role, orgId: "org_1", origin: "local", externalId: null,
+      createdAt: 1, memberCount: 2, defaultModel: null, defaultReasoning: null,
+    };
+  }
+
+  beforeEach(() => {
+    selectedTeamsOverride = [team("team_1", "Platform"), team("team_2", "Support")];
+    selectedTeamsLoading = false;
+    selectedTeamsError = null;
+    orgRole = "member";
+    origin = "local";
+    ssoTeamSync = false;
+    deleteTeamMutate.mockClear();
+    patchTeamMutate.mockClear();
+  });
+  afterEach(() => {
+    selectedTeamsOverride = undefined;
+    selectedTeamsLoading = false;
+    selectedTeamsError = null;
+  });
+
+  it("shows only the selected team, expanded, without creation controls", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_2" />);
+    expect(screen.getByRole("button", { name: "Collapse Support" })).toBeTruthy();
+    expect(screen.queryByText("Platform")).toBeNull();
+    expect(screen.queryByLabelText("New team name")).toBeNull();
+    fireEvent.focus(screen.getByRole("combobox", { name: "Default model" }));
+    fireEvent.click(screen.getByText("Sonnet 4.5"));
+    expect(patchTeamMutate).toHaveBeenCalledExactlyOnceWith({ id: "team_2", body: { defaultModel: "anthropic/claude-sonnet-4-5" } });
+  });
+
+  it("does not borrow admin permissions from another team", () => {
+    selectedTeamsOverride = [team("team_1", "Platform"), team("team_2", "Support", "member")];
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_2" />);
+    expect(screen.getByText("Support")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Support actions" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
+  });
+
+  it("retains org-admin controls for the selected team", () => {
+    orgRole = "admin";
+    selectedTeamsOverride = [team("team_2", "Support", "member")];
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_2" />);
+    expect(screen.getByRole("button", { name: "Support actions" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Default model" })).toBeTruthy();
+  });
+
+  it("does not fall back to another team when the selected team is unavailable", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="missing" />);
+    expect(screen.getByText(/This team is unavailable/)).toBeTruthy();
+    expect(screen.queryByText("Platform")).toBeNull();
+    expect(screen.queryByText("Support")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
+  });
+
+  it("hides cached mutation controls while loading or after a query error", () => {
+    selectedTeamsLoading = true;
+    const view = render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" />);
+    expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
+    selectedTeamsLoading = false;
+    selectedTeamsError = new Error("forbidden");
+    view.rerender(<TeamsPanel orgMembers={orgMembers} teamId="team_1" />);
+    expect(screen.getByText(/Failed to load teams/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
+  });
+
+  it("discards a pending deletion dialog when the selected workspace changes", async () => {
+    const user = userEvent.setup();
+    const view = render(<TeamsPanel key="team_1" orgMembers={orgMembers} teamId="team_1" />);
+    await user.click(screen.getByRole("button", { name: "Platform actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete team" }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    view.rerender(<TeamsPanel key="team_2" orgMembers={orgMembers} teamId="team_2" />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(deleteTeamMutate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Collapse Support" })).toBeTruthy();
   });
 });

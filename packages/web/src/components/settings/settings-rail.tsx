@@ -1,12 +1,13 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useOrg } from "~/api/settings";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { cn } from "~/lib/cn";
 
 /**
  * The settings shell's left rail (split-settings design, "Visual direction"
  * + "Routes & navigation"; amended 2026-08-28). Two small-caps groups:
- * **You** (always present) and **Organization** (shown once the `useOrg()`
- * query resolves to gate-on — hidden otherwise, never disabled, and
+ * **You** (personal workspace) or **Team** (selected team), plus
+ * **Organization** (shown once the `useOrg()` query resolves to gate-on — hidden otherwise, never disabled, and
  * rendered with no flash since it appears only once cached data arrives
  * rather than defaulting open then collapsing). An org admin sees every
  * Organization item; a plain member sees only Teams, because any member
@@ -18,6 +19,9 @@ import { cn } from "~/lib/cn";
  * `text-moss`, whichever comes later in the generated stylesheet wins
  * regardless of prop order, which silently dropped the moss active state.
  */
+
+export const TEAM_SETTINGS_PATH = "/settings/team";
+const TEAM_ITEMS = [{ to: TEAM_SETTINGS_PATH, label: "General" }];
 
 const YOU_ITEMS = [
   { to: "/settings/profile", label: "Profile" },
@@ -75,6 +79,7 @@ const MEMBER_ORGANIZATION_ITEMS = [
 ] as const;
 
 export function SettingsRail() {
+  const { teamId } = useWorkspaceScope();
   const orgQ = useOrg();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const orgAdmin = orgQ.data?.callerRole === "admin";
@@ -90,7 +95,11 @@ export function SettingsRail() {
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">
-      <RailGroup label="You" items={youItems} pathname={pathname} />
+      <RailGroup
+        label={teamId === undefined ? "You" : "Team"}
+        items={teamId === undefined ? youItems : TEAM_ITEMS}
+        pathname={pathname}
+      />
       {showOrganizationGroup && (
         <RailGroup label="Organization" items={organizationItems} pathname={pathname} />
       )}

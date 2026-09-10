@@ -130,11 +130,18 @@ const DELETE_DORMANT_MIRROR_NOTE =
  * `CONFIG_MANAGED_NOTE` states the half a reader cannot see — that a restart
  * puts the declared members back.
  */
-export function TeamsPanel({ orgMembers }: { orgMembers: OrgDirectoryUserWire[] }) {
+export function TeamsPanel({
+  orgMembers,
+  teamId,
+}: {
+  orgMembers: OrgDirectoryUserWire[];
+  /** Pin the panel to the selected workspace, without team creation. */
+  teamId?: string;
+}) {
   const teamsQ = useTeams();
   const meQ = useMe();
   const orgQ = useOrg();
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(teamId ?? null);
   // Mirrors the API's canMutateTeam gate: team admin of that team, or org
   // admin. The API still enforces; this only hides controls that would 404.
   const orgAdmin = meQ.data?.orgRole === "admin";
@@ -144,21 +151,27 @@ export function TeamsPanel({ orgMembers }: { orgMembers: OrgDirectoryUserWire[] 
   // live mirror anyway, so the worst case is a 409 the row reports, not a
   // change nobody expected.
   const mirroring = orgQ.data?.features.ssoTeamSync === true;
+  const teams = teamsQ.data?.teams.filter((team) => teamId === undefined || team.id === teamId) ?? [];
+  const ready = !teamsQ.isLoading && teamsQ.error == null;
 
   return (
     <div className="space-y-4">
-      <CreateTeamRow />
+      {teamId === undefined && <CreateTeamRow />}
 
       {teamsQ.isLoading && <LoadingRow />}
-      {teamsQ.error != null && <ErrorRow>Failed to load teams.</ErrorRow>}
+      {teamsQ.error != null && <ErrorRow>Failed to load teams. Reload the page to try again.</ErrorRow>}
 
-      {teamsQ.data && teamsQ.data.teams.length === 0 && (
-        <EmptyRow>No teams yet. Create one above.</EmptyRow>
+      {ready && teamsQ.data && teams.length === 0 && (
+        <EmptyRow>
+          {teamId === undefined
+            ? "No teams yet. Create one above."
+            : "This team is unavailable. Select another workspace or reload the page."}
+        </EmptyRow>
       )}
 
-      {teamsQ.data && teamsQ.data.teams.length > 0 && (
+      {ready && teamsQ.data && teams.length > 0 && (
         <div className="divide-y divide-line border-t border-line">
-          {teamsQ.data.teams.map((team) => (
+          {teams.map((team) => (
             <TeamRow
               key={team.id}
               team={team}

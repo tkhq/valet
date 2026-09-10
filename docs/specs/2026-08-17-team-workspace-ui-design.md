@@ -183,3 +183,14 @@ the same purpose. `/chat` still adopts through the assistant, unchanged.
 ### Team credential names (TKAI-436)
 
 The team credential list and its removal dialog use the shared integration display names. API calls still use service identifiers. Delegated credentials keep the Stop sharing action; direct credentials keep Disconnect.
+
+### Selected team settings (TKAI-397)
+
+In a team workspace, Settings replaces the You group with Team. General opens the selected team's existing controls.
+Profile, appearance, and other personal settings are omitted in team scope. Direct personal settings URLs redirect before their forms mount.
+Organization settings keep their existing routes and permission gates. Personal workspace settings remain unchanged.
+
+The team page reuses TeamsPanel with a selected team ID. It shows only that team, expanded, without the create-team form.
+Existing team-admin, org-admin, member, and managed-team restrictions apply. This change adds no roles or persona model.
+Switching workspace remounts the settings content, discarding drafts and confirmation dialogs before a different team can become their target.
+Unavailable teams show a recovery message instead of another team's controls.
