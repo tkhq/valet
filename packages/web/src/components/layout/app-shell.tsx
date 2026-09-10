@@ -166,7 +166,7 @@ export function AppShell({
               )}
             </>
           )}
-          <main className="flex-1 min-w-0 flex flex-col">{children}</main>
+          <main className="flex-1 min-w-0 min-h-0 flex flex-col">{children}</main>
         </div>
       </div>
     </SidebarControlsContext.Provider>

@@ -49,6 +49,18 @@ function renderShell() {
   );
 }
 
+describe("AppShell — layout", () => {
+  it("clamps the main flex item height", () => {
+    const { container } = render(
+      <AppShell topNav={<NavProbe />}>
+        <div>content</div>
+      </AppShell>,
+    );
+
+    expect(container.querySelector("main")?.classList.contains("min-h-0")).toBe(true);
+  });
+});
+
 describe("AppShell — sidebar controls", () => {
   it("tells the nav there is nothing to control when there is no sidebar", () => {
     render(
