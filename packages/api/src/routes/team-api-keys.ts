@@ -14,7 +14,7 @@ import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { apikey } from "../schema/index.js";
-import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { canAdministerTeam, getTeamInOrg, isTeamMember, lockTeamForOwnership } from "../services/teams.js";
 import { isOrgAdmin } from "../services/org.js";
 import { parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import type { CreateTeamApiKeyResponse, ListTeamApiKeysResponse, TeamApiKeySummary } from "../wire/types.js";
@@ -123,17 +123,38 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   if (!created?.key) {
     return c.json({ error: "Couldn't create the API key. Sign in again and retry." }, 500);
   }
-  const pin = JSON.stringify({ teamId, createdBy: user.id });
-  await db.update(apikey).set({ metadata: pin, teamId }).where(eq(apikey.id, created.id));
-  const stamped = await db
-    .select({ metadata: apikey.metadata, teamId: apikey.teamId })
-    .from(apikey)
-    .where(eq(apikey.id, created.id))
-    .limit(1);
-  const pinned =
-    stamped[0]?.teamId === teamId && teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId;
-  if (!pinned) {
-    await db.delete(apikey).where(eq(apikey.id, created.id));
+  let pinResult: "pinned" | "not-found" | "failed" = "failed";
+  try {
+    pinResult = await db.transaction(async (tx) => {
+      // Serialize the final pin with deleteTeam. All reads use tx: an outer
+      // database call here would deadlock PGlite's single writer.
+      await lockTeamForOwnership(tx, teamId);
+      const currentTeam = await getTeamInOrg(tx, user.orgId, teamId);
+      if (!currentTeam || !(await canAdministerTeam(tx, teamId, user.id))) {
+        return "not-found";
+      }
+
+      const pin = JSON.stringify({ teamId, createdBy: user.id });
+      await tx.update(apikey).set({ metadata: pin, teamId }).where(eq(apikey.id, created.id));
+      const stamped = await tx
+        .select({ metadata: apikey.metadata, teamId: apikey.teamId })
+        .from(apikey)
+        .where(eq(apikey.id, created.id))
+        .limit(1);
+      return stamped[0]?.teamId === teamId &&
+        teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId
+        ? "pinned"
+        : "failed";
+    });
+  } finally {
+    // better-auth minted outside this transaction. Clean up only after the
+    // transaction settles, including when a write or commit throws.
+    if (pinResult !== "pinned") {
+      await db.delete(apikey).where(eq(apikey.id, created.id));
+    }
+  }
+  if (pinResult === "not-found") return c.json({ error: "team not found" }, 404);
+  if (pinResult === "failed") {
     return c.json({ error: "Couldn't pin the API key to this team. Retry the create." }, 500);
   }
 
