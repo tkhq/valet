@@ -25,6 +25,16 @@ These Slack reports are candidates. They are not confirmed bugs or resolved work
 - Preferences that do not apply.
 - Runaway browser processes.
 
+## Daily delivery route
+
+- Run this digest from a daily shipped-work trigger.
+- Deduplicate each digest. Do not report the same shipped item more than once.
+- Post released user-impacting items in one `#proj-valet` thread parent.
+- Keep all released-item follow-up in that thread. Do not create a new parent for each item.
+- Send unreleased user-impacting items to Conner by direct message.
+- Do not send an empty digest. Do not send repetitive status messages.
+- This test artifact defines routing only. It does not configure a workflow.
+
 ## Risks and blockers
 
 - The parked triage run cannot provide a final report.
