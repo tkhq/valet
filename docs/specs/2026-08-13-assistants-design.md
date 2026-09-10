@@ -253,3 +253,13 @@ Channel bindings already carry `owner_type`/`owner_id`/`session_id`
 (`channel_bindings`), so binding a Slack channel to a specific assistant
 rather than to "the team's one assistant" needs no new column — only a
 `channelThreadFor` codec that is not hardcoded to DMs.
+
+
+## Legacy team cleanup (TKAI-449, September 10)
+
+Pre-update team assistants may be retired explicitly. Personal chats remain protected.
+The operator inventory joins team assistant ownership to sessions stamped `credential_owner_mode = actor`.
+It excludes current assistants and plain child sessions; age is not a deletion criterion.
+The existing session DELETE route accepts `retireLegacyTeam=true` to enforce that selection and refuse unsettled turns.
+No startup sweep deletes these records. Operators stop incoming work during cleanup and use
+`docs/guides/retire-legacy-team-assistants.md` for the dry run and explicit apply procedure.

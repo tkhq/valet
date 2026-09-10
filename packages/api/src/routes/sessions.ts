@@ -1494,6 +1494,20 @@ sessionsRouter.delete("/:id", async (c) => {
     );
   }
 
+  // Explicit operator cleanup only. The actor stamp identifies pre-update
+  // team assistants; a child with the same stamp is not an assistant.
+  if (c.req.query("retireLegacyTeam") === "true") {
+    if (
+      row.ownerType !== "team" || row.credentialOwnerMode !== "actor" ||
+      assistant?.ownerType !== "team" || assistant.ownerId !== row.ownerId
+    ) {
+      return c.json({ error: "not a legacy team assistant. Choose a session from the cleanup inventory." }, 400);
+    }
+    if ((await c.var.providers.engineStore.listUnsettledSubmissions(id)).length > 0) {
+      return c.json({ error: "a turn is running. Pause the assistant and wait for it to finish, then retry." }, 409);
+    }
+  }
+
   // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
   await engineHost.destroy(id).catch((err) => {
     console.error(`engineHost.destroy(${id}) failed:`, err);
