@@ -321,6 +321,21 @@ describe("pluginCatalogTools: list_tools", () => {
       "github.list_repositories",
       "linear.list_projects",
     ]);
+
+    const excluded = await listTool.execute(
+      { service: "linear", query: "projects OR milestones -updates" },
+      makeCtx(),
+    );
+    expect(ids(excluded)).toEqual([
+      "linear.list_projects",
+      "linear.list_milestones",
+    ]);
+    expect(ids(await listTool.execute({ query: "-updates" }, makeCtx()))).toEqual([]);
+
+    const bounded = ["projects", ...Array.from({ length: 15 }, (_, index) => `absent${index}`), "milestones"];
+    expect(ids(await listTool.execute({ service: "linear", query: bounded.join(" ") }, makeCtx()))).toEqual([
+      "linear.list_projects",
+    ]);
   });
 
   it("emits a warning when a service has no credential", async () => {

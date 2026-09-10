@@ -44,6 +44,7 @@ describe("threadMatchesSearch + filterThreads", () => {
     expect(threadMatchesSearch(threads[0]!, "ci triage")).toBe(true);
     expect(threadMatchesSearch(threads[1]!, "")).toBe(true);
     expect(threadMatchesSearch(threads[1]!, "triage")).toBe(false);
+    expect(threadMatchesSearch({ id: "t4", title: "Fix export", key: "web:d" }, "fix login")).toBe(false);
   });
   it("matches key and id for untitled threads", () => {
     expect(threadMatchesSearch(threads[2]!, "events")).toBe(true);

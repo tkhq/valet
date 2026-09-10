@@ -17,9 +17,9 @@
  * starting ANY session.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, ilike, inArray, not, or, sql, type SQL } from "drizzle-orm";
 import { validateSkillFrontmatter, BUILTIN_COMMAND_NAMES, type Principal, type SkillSource } from "@valet/engine";
-import { NotFoundError, tokenizeSearchQuery } from "@valet/shared";
+import { NotFoundError, parseSearchQuery } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
@@ -359,16 +359,16 @@ export async function listSkillsPage(
     );
   }
   if (filter.query !== undefined) {
-    const terms = tokenizeSearchQuery(filter.query);
-    if (terms.length > 0) {
-      conditions.push(
-        or(
-          ...terms.flatMap((term) => {
-            const pattern = containsPattern(term.text);
-            return [ilike(skills.name, pattern), ilike(skills.description, pattern)];
-          }),
-        ),
-      );
+    const parsed = parseSearchQuery(filter.query);
+    const termMatch = (text: string): SQL => {
+      const pattern = containsPattern(text);
+      return sql`(${ilike(skills.name, pattern)} or ${ilike(skills.description, pattern)})`;
+    };
+    if (parsed.positive.length === 0) {
+      conditions.push(sql`false`);
+    } else {
+      conditions.push(or(...parsed.positive.map((term) => termMatch(term.text))));
+      conditions.push(...parsed.negative.map((term) => not(termMatch(term.text))));
     }
   }
   if (cursor) {

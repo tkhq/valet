@@ -22,10 +22,12 @@ describe("matchesNeedle", () => {
     expect(matchesNeedle("x", [undefined, null])).toBe(false);
   });
 
-  it("OR-matches whitespace terms and preserves quoted phrases", () => {
-    expect(matchesNeedle("github slack", ["Slack"])).toBe(true);
-    expect(matchesNeedle('missing "code host"', ["GitHub", "Code Host"])).toBe(true);
-    expect(matchesNeedle('missing "code host"', ["GitHub", "Code and host"])).toBe(false);
+  it("requires every term across fields and preserves quoted phrases", () => {
+    expect(matchesNeedle("claude 3", ["GPT-3.5 Turbo", "OpenAI"])).toBe(false);
+    expect(matchesNeedle("fix login", ["Fix export flow"])).toBe(false);
+    expect(matchesNeedle("fix login", ["Fix authentication", "Login failures"])).toBe(true);
+    expect(matchesNeedle('github "code host"', ["GitHub", "Code Host"])).toBe(true);
+    expect(matchesNeedle('github "code host"', ["GitHub", "Code and host"])).toBe(false);
   });
 
   it("reports no match honestly", () => {

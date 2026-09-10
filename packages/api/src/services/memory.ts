@@ -18,12 +18,7 @@
 import { and, asc, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
-import {
-  hasExplicitSearchOperator,
-  NotFoundError,
-  tokenizeSearchQuery,
-  ValidationError,
-} from "@valet/shared";
+import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
 import { memoryFiles, teamMembers, type MemoryFileRow } from "../schema/index.js";
@@ -814,20 +809,26 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Builds an OR query from local search terms while preserving explicit
- * PostgreSQL web-search operators for callers that already use them. */
+/** Builds `(positive OR ...) AND NOT negative ...` from bounded terms. */
 function memoryTsQuery(query: string): SQL | null {
-  if (hasExplicitSearchOperator(query)) {
-    return sql`websearch_to_tsquery('english', ${query})`;
-  }
-  const terms = tokenizeSearchQuery(query);
-  if (terms.length === 0) return null;
-  const parts = terms.map((term) =>
-    term.quoted
-      ? sql`phraseto_tsquery('english', ${term.text})`
-      : sql`plainto_tsquery('english', ${term.text})`,
-  );
-  return sql`(${sql.join(parts, sql` || `)})`;
+  const parsed = parseSearchQuery(query);
+  if (parsed.positive.length === 0) return null;
+  const toTsQuery = (term: (typeof parsed.positive)[number]): SQL => {
+    const convert = (text: string): SQL =>
+      term.quoted
+        ? sql`phraseto_tsquery('english', ${text})`
+        : sql`plainto_tsquery('english', ${text})`;
+    const plain = convert(term.text);
+    // PostgreSQL keeps a numeric sign in the lexeme. Search both forms so
+    // `-32000` excludes content that contains `32000` or `-32000`.
+    return /^\d+$/.test(term.text)
+      ? sql`(${plain} || ${convert(`-${term.text}`)})`
+      : plain;
+  };
+  const positive = sql`(${sql.join(parsed.positive.map(toTsQuery), sql` || `)})`;
+  if (parsed.negative.length === 0) return positive;
+  const negative = parsed.negative.map((term) => sql`!!(${toTsQuery(term)})`);
+  return sql`(${positive} && ${sql.join(negative, sql` && `)})`;
 }
 
 /**
@@ -835,11 +836,11 @@ function memoryTsQuery(query: string): SQL | null {
  * B=description, C=path+tags, D=content — see the schema's comment on
  * `memoryFiles` and the migration) — Drizzle has no column definition for
  * it, so it's referenced by name through raw `sql` fragments below.
- * Local query parsing joins unquoted terms with OR and uses
- * `phraseto_tsquery` for quoted phrases. An unmatched opening quote is
- * ignored. Explicit web-search operators still use `websearch_to_tsquery`,
- * so existing structured queries keep their meaning. The invalid-query
- * catch below is a defensive backstop for genuine Postgres syntax errors.
+ * Local query parsing joins positive terms with OR, then excludes each
+ * negative term. It uses `phraseto_tsquery` for quoted phrases. The shared
+ * parser bounds and deduplicates terms before this function builds SQL.
+ * Uppercase `OR` is an optional separator. Only-negative queries return no
+ * results. The catch below handles genuine Postgres syntax errors.
  * Expired
  * rows (`expires < now`) are excluded. Read-union applies: results from team
  * scopes carry the virtual `team:{id}/` prefix.

@@ -308,7 +308,7 @@ export const memSearchTool = defineTool({
   parameters: Type.Object({
     query: Type.String({
       description:
-        "Search text. Unquoted terms use OR; quote an exact phrase. Explicit OR and -term operators are preserved.",
+        "Search text. Positive terms use OR. A leading - excludes a term. Uppercase OR is an optional separator. Quotes preserve a phrase. Only-negative queries return no results. Search uses the first 1,024 characters and 16 unique terms, with 128 characters per term.",
     }),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
   }),

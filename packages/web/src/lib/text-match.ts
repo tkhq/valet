@@ -1,12 +1,12 @@
-import { matchesSearchQuery } from "@valet/shared";
+import { matchesAllSearchTerms } from "@valet/shared";
 
 /**
- * The shared OR matcher behind client-side filter boxes. An empty query
- * matches everything, and quoted text stays one phrase.
+ * The shared narrowing matcher behind client-side filter boxes. Every term
+ * must match across the fields. An empty query matches everything.
  */
 export function matchesNeedle(
   query: string,
   haystack: ReadonlyArray<string | null | undefined>,
 ): boolean {
-  return matchesSearchQuery(query, haystack);
+  return matchesAllSearchTerms(query, haystack);
 }

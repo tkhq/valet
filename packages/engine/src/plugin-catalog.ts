@@ -1,11 +1,7 @@
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
-import {
-  matchesSearchQuery,
-  rankSearchResults,
-  tokenizeSearchQuery,
-} from "@valet/shared";
+import { matchesSearchQuery, parseSearchQuery, rankSearchResults } from "@valet/shared";
 import { builtinTools } from "./builtin-tools/index.js";
 import type {
   CredentialProvider,
@@ -767,7 +763,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       query: Type.Optional(
         Type.String({
           description:
-            "Case-insensitive search against name, id, and description. Unquoted terms use OR; quotes preserve a phrase.",
+            "Case-insensitive search against name, id, and description. Positive terms use OR. A leading - excludes a term. Uppercase OR is optional. Quotes preserve a phrase. Only-negative queries return no results. Search uses the first 1,024 characters and 16 unique terms, with 128 characters per term.",
         }),
       ),
       limit: Type.Optional(
@@ -781,18 +777,18 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
     execute: async (args, ctx): Promise<ToolResult> => {
       const a = args as { service?: string; query?: string; limit?: number };
       const limit = clamp(a.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
-      const queryTerms = tokenizeSearchQuery(a.query ?? "");
+      const query = parseSearchQuery(a.query ?? "");
       const actionFields = (action: PluginAction): string[] => [
         action.id,
         action.name,
         action.description,
       ];
       const matchesQuery = (action: PluginAction): boolean =>
-        matchesSearchQuery(queryTerms, actionFields(action));
+        matchesSearchQuery(query, actionFields(action));
 
       let entries = catalog.entries;
       if (a.service) entries = entries.filter((e) => e.service === a.service);
-      if (queryTerms.length > 0) entries = entries.filter((e) => matchesQuery(e.action));
+      if (query.hasInput) entries = entries.filter((e) => matchesQuery(e.action));
 
       const warnings: Array<{ service: string; reason: string }> = [];
 
@@ -805,7 +801,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         try {
           const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
           const dynEntries =
-            queryTerms.length > 0
+            query.hasInput
               ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
               : resolvedDyn.entries;
           entries = entries.concat(dynEntries);
@@ -859,8 +855,8 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         }
       }
 
-      if (queryTerms.length > 0) {
-        entries = rankSearchResults(queryTerms, entries, (entry) => actionFields(entry.action));
+      if (query.hasInput) {
+        entries = rankSearchResults(query, entries, (entry) => actionFields(entry.action));
       }
 
       const tools = entries.slice(0, limit).map((e) => {
