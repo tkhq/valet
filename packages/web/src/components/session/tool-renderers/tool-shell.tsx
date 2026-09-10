@@ -380,11 +380,14 @@ export function TruncatedText({
   text,
   maxLines = 12,
   numbered = false,
+  wrap = false,
   className,
 }: {
   text: string;
   maxLines?: number;
   numbered?: boolean;
+  /** Wrap text-file content without changing other tool output. */
+  wrap?: boolean;
   className?: string;
 }) {
   const [showAll, setShowAll] = useState(false);
@@ -395,7 +398,7 @@ export function TruncatedText({
 
   return (
     <div className={cn("font-mono text-[12px] leading-[1.55]", className)}>
-      <pre className="whitespace-pre overflow-x-auto">
+      <pre className={wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre overflow-x-auto"}>
         {visible.map((line, i) => (
           <div key={i} className="flex">
             {numbered && (

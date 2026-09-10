@@ -39,7 +39,7 @@ export const readRenderer: ToolRenderer = {
           {status === "running" ? (
             <div className="text-[11px] text-muted italic font-mono">reading…</div>
           ) : text ? (
-            <TruncatedText text={text} numbered maxLines={16} />
+            <TruncatedText text={text} numbered maxLines={16} wrap />
           ) : (
             <div className="text-[11px] text-muted italic font-mono">(empty file)</div>
           )}

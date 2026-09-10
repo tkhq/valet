@@ -87,7 +87,7 @@ export function DiffAdditions({
 
   return (
     <div className="font-mono text-[12px] leading-[1.55]">
-      <pre className="whitespace-pre overflow-x-auto py-1">
+      <pre className="whitespace-pre-wrap break-words py-1">
         {visible.map((line, i) => (
           <DiffLine key={i} kind="add" line={line} />
         ))}
