@@ -364,11 +364,13 @@ export async function listSkillsPage(
       const pattern = containsPattern(text);
       return sql`(${ilike(skills.name, pattern)} or ${ilike(skills.description, pattern)})`;
     };
-    if (parsed.positive.length === 0) {
-      conditions.push(sql`false`);
-    } else {
-      conditions.push(or(...parsed.positive.map((term) => termMatch(term.text))));
-      conditions.push(...parsed.negative.map((term) => not(termMatch(term.text))));
+    if (parsed.hasInput) {
+      if (parsed.positive.length === 0) {
+        conditions.push(sql`false`);
+      } else {
+        conditions.push(or(...parsed.positive.map((term) => termMatch(term.text))));
+        conditions.push(...parsed.negative.map((term) => not(termMatch(term.text))));
+      }
     }
   }
   if (cursor) {
