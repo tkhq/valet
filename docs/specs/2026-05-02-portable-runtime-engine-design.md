@@ -935,7 +935,7 @@ function actionBridgeTools(opts: ActionBridgeOptions): Promise<ToolDef[]>;
 `list_tools` accepts:
 
 - `service?: string` — filter by service name.
-- `query?: string` — match against action name, id, and description (case-insensitive substring).
+- `query?: string`: match against action name, id, and description. Positive terms use case-insensitive OR semantics. A leading `-` excludes a term after positive matching. Uppercase `OR` is an optional separator. Single-quoted and double-quoted text stays one exact substring phrase. Apostrophes inside words stay literal. Quotes at mid-token positions and unmatched quotes act as punctuation. A query with only exclusions returns no results. Search uses the first 1,024 query characters and 16 case-insensitively unique terms. Each term is limited to 128 characters. Duplicate terms do not increase rank or use the term limit. If a term is both positive and excluded, the exclusion wins. A structured id such as `linear.list_projects` stays one term.
 - `limit?: number` — cap results (default 50, max 200).
 
 It returns a structured payload: `{ service, id, name, description, riskLevel, params }` per action, plus per-service auth/availability warnings when credentials are missing or expired.

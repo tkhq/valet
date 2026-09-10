@@ -1,7 +1,7 @@
 /**
  * `searchFiles` contract (spec decision 9, NORMATIVE) — pinned independently
  * of the tsvector rewrite so a future backend swap (or a regression in the
- * `websearch_to_tsquery`/`ts_rank_cd` port) has to keep these behaviors, not
+ * local-query/`ts_rank_cd` implementation) has to keep these behaviors, not
  * just "some ranking that compiles". This mirrors what the old fts5-backed
  * implementation guaranteed (verifiable in git history at
  * `2d859633:packages/api/src/services/memory.test.ts`), re-asserted against
@@ -19,10 +19,10 @@
  *    replaced with inert control characters and consumed here, because the
  *    client renders the snippet as React nodes and must never be handed
  *    agent-authored HTML.
- *  - malformed query strings: `websearch_to_tsquery` is deliberately
- *    forgiving (unlike fts5's `MATCH`) and does not raise a Postgres syntax
- *    error for things like unbalanced quotes or bare operators — it
- *    degrades to a literal-term parse. The `ValidationError`-on-syntax-error
+ *  - local query syntax: bounded positive terms are OR alternatives, while
+ *    negative terms exclude matches. Quotes preserve phrases at token
+ *    boundaries. Uppercase `OR` is ignored as an optional separator. The
+ *    `ValidationError`-on-syntax-error
  *    path in `searchFiles` is a defensive backstop for genuine pg
  *    `42601`/`42804` errors; it is unreachable through query text (no known
  *    websearch-syntax input raises one) and deliberately untested — the
@@ -296,13 +296,120 @@ describe("searchFiles contract (spec decision 9)", () => {
     });
   });
 
+  describe("local OR query semantics", () => {
+    it("matches any unquoted whitespace-delimited term", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/projects.md", content: "Roadmap projects live here.\n" });
+      await writeFile(db, scope, { path: "notes/milestones.md", content: "Quarterly milestones live here.\n" });
+
+      expect(pathsOf(await searchFiles(db, scope, { query: "projects milestones absent" }))).toEqual([
+        "notes/milestones.md",
+        "notes/projects.md",
+      ]);
+    });
+
+    it("ranks a result matching more terms above single-term results", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/one.md", content: "A project summary.\n" });
+      await writeFile(db, scope, { path: "notes/two.md", content: "Project milestones summary.\n" });
+
+      const results = await searchFiles(db, scope, { query: "project milestones" });
+      expect(results.map((result) => result.path)).toEqual(["notes/two.md", "notes/one.md"]);
+      expect(results[0]?.rank).toBeGreaterThan(results[1]?.rank ?? 0);
+    });
+
+    it("keeps a quoted phrase together while OR-matching unquoted terms", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/phrase.md", content: "The release update is ready.\n" });
+      await writeFile(db, scope, { path: "notes/split.md", content: "Release notes contain an update.\n" });
+      await writeFile(db, scope, { path: "notes/other.md", content: "Milestones are ready.\n" });
+
+      const paths = pathsOf(await searchFiles(db, scope, { query: '"release update" milestones' }));
+      expect(paths).toContain("notes/phrase.md");
+      expect(paths).toContain("notes/other.md");
+      expect(paths).not.toContain("notes/split.md");
+    });
+
+    it("preserves apostrophes and recovers terms after an unmatched quote", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/conner.md", content: "Conner's project notes.\n" });
+      await writeFile(db, scope, { path: "notes/milestones.md", content: "Milestones only.\n" });
+
+      expect(pathsOf(await searchFiles(db, scope, { query: "Conner's" }))).toContain("notes/conner.md");
+      expect(pathsOf(await searchFiles(db, scope, { query: '"missing milestones' }))).toContain(
+        "notes/milestones.md",
+      );
+    });
+
+    it("treats uppercase OR as an optional separator", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/project.md", content: "Project only.\n" });
+      await writeFile(db, scope, { path: "notes/milestone.md", content: "Milestone only.\n" });
+
+      expect(pathsOf(await searchFiles(db, scope, { query: "project OR milestone" }))).toEqual([
+        "notes/milestone.md",
+        "notes/project.md",
+      ]);
+      await expect(searchFiles(db, scope, { query: "OR" })).resolves.toEqual([]);
+    });
+
+    it("OR-matches positive terms before applying negative terms", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/project.md", content: "Current project.\n" });
+      await writeFile(db, scope, { path: "notes/milestone.md", content: "Current milestone.\n" });
+      await writeFile(db, scope, { path: "notes/archived.md", content: "Archived project milestone.\n" });
+
+      expect(pathsOf(await searchFiles(db, scope, { query: "project milestone -archived" }))).toEqual([
+        "notes/milestone.md",
+        "notes/project.md",
+      ]);
+    });
+
+    it("supports negative numeric terms and makes only-negative queries empty", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/error.md", content: "Error 12000 happened.\n" });
+      await writeFile(db, scope, { path: "notes/code.md", content: "Error -32000 happened.\n" });
+      await writeFile(db, scope, { path: "notes/plain-code.md", content: "Error 32000 happened.\n" });
+
+      expect(pathsOf(await searchFiles(db, scope, { query: "error -32000" }))).toEqual([
+        "notes/error.md",
+      ]);
+      await expect(searchFiles(db, scope, { query: "-32000" })).resolves.toEqual([]);
+    });
+
+    it("bounds long queries on the real Postgres path without throwing", async () => {
+      const scope = scopeFor("u1");
+      const terms = Array.from({ length: 20 }, (_, index) => `marker${index}`);
+      await writeFile(db, scope, { path: "notes/first.md", content: `${terms[0]} only.\n` });
+      await writeFile(db, scope, { path: "notes/late.md", content: `${terms[19]} only.\n` });
+
+      await expect(searchFiles(db, scope, { query: terms.join(" ") })).resolves.toMatchObject([
+        { path: "notes/first.md" },
+      ]);
+      await expect(searchFiles(db, scope, { query: "x".repeat(10_000) })).resolves.toEqual([]);
+    });
+
+    it("handles apostrophe and mid-token quote forms without one-letter phrase matches", async () => {
+      const scope = scopeFor("u1");
+      await writeFile(db, scope, { path: "notes/music.md", content: "Rock and roll.\n" });
+      await writeFile(db, scope, { path: "notes/tis.md", content: "Tis the season.\n" });
+      await writeFile(db, scope, { path: "notes/bar.md", content: "Bar only.\n" });
+
+      expect(pathsOf(await searchFiles(db, scope, { query: "rock 'n' roll" }))).toEqual([
+        "notes/music.md",
+      ]);
+      expect(pathsOf(await searchFiles(db, scope, { query: "'tis" }))).toEqual(["notes/tis.md"]);
+      expect(pathsOf(await searchFiles(db, scope, { query: 'missing"bar' }))).toEqual(["notes/bar.md"]);
+    });
+  });
+
   describe("malformed query strings", () => {
-    it("websearch_to_tsquery is forgiving of unbalanced quotes — no ValidationError, degrades to a literal term", async () => {
+    it("the local parser is forgiving of unbalanced quotes", async () => {
       const scope = scopeFor("u1");
       await expect(searchFiles(db, scope, { query: '"unterminated' })).resolves.not.toThrow();
     });
 
-    it("websearch_to_tsquery is forgiving of a bare boolean-looking token", async () => {
+    it("the local parser is forgiving of bare boolean-looking tokens", async () => {
       const scope = scopeFor("u1");
       await expect(searchFiles(db, scope, { query: "AND OR -" })).resolves.not.toThrow();
     });
@@ -313,14 +420,9 @@ describe("searchFiles contract (spec decision 9)", () => {
       await expect(searchFiles(db, scope, { query: "" })).resolves.toEqual([]);
     });
 
-    // The ValidationError branch in `searchFiles` (genuine pg 42601/42804
-    // syntax-error codes) is documented as unreachable-by-design through
-    // `websearch_to_tsquery` — no query string this suite (or the old fts5
-    // suite it replaces) could construct exercises it. It stays as a
-    // defensive backstop rather than dead code: `websearch_to_tsquery`'s
-    // forgiving behavior isn't part of Postgres's stability contract, and
-    // some other future `sql` fragment in this file could raise a genuine
-    // syntax error. Asserted structurally instead of behaviorally.
+    // The ValidationError branch catches genuine pg 42601/42804 errors.
+    // The bounded query builder cannot produce those errors from text, so
+    // this suite asserts malformed text through its real behavior instead.
   });
 
   describe("relative ordering (decision 9 adversarial pairs)", () => {

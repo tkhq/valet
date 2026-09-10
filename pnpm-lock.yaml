@@ -428,6 +428,9 @@ importers:
       '@valet/sandbox-docker':
         specifier: workspace:*
         version: link:../sandbox-docker
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
       typebox:
         specifier: 1.3.7
         version: 1.3.7

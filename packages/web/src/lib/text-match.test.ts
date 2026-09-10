@@ -22,6 +22,14 @@ describe("matchesNeedle", () => {
     expect(matchesNeedle("x", [undefined, null])).toBe(false);
   });
 
+  it("requires every term across fields and preserves quoted phrases", () => {
+    expect(matchesNeedle("claude 3", ["GPT-3.5 Turbo", "OpenAI"])).toBe(false);
+    expect(matchesNeedle("fix login", ["Fix export flow"])).toBe(false);
+    expect(matchesNeedle("fix login", ["Fix authentication", "Login failures"])).toBe(true);
+    expect(matchesNeedle('github "code host"', ["GitHub", "Code Host"])).toBe(true);
+    expect(matchesNeedle('github "code host"', ["GitHub", "Code and host"])).toBe(false);
+  });
+
   it("reports no match honestly", () => {
     expect(matchesNeedle("slack", ["GitHub", "github"])).toBe(false);
   });

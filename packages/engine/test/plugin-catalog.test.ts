@@ -244,6 +244,100 @@ describe("pluginCatalogTools: list_tools", () => {
     faux.unregister();
   });
 
+  it("uses OR semantics for broad Linear queries and keeps exact searches precise", async () => {
+    const linearActions: PluginAction[] = [
+      {
+        id: "linear.list_projects",
+        name: "List projects",
+        description: "List projects in the workspace.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async () => ({ success: true }),
+      },
+      {
+        id: "linear.create_project_update",
+        name: "Create project update",
+        description: "Create project updates for a team.",
+        riskLevel: "medium",
+        parameters: Type.Object({}),
+        execute: async () => ({ success: true }),
+      },
+      {
+        id: "linear.list_milestones",
+        name: "List milestones",
+        description: "List roadmap milestones.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async () => ({ success: true }),
+      },
+    ];
+    const linear = makeDynamicPlugin("linear", async () => linearActions);
+    const github: ActionPlugin = {
+      service: "github",
+      actions: [
+        {
+          id: "github.list_repositories",
+          name: "List repositories",
+          description: "List repositories.",
+          riskLevel: "low",
+          parameters: Type.Object({}),
+          execute: async () => ({ success: true }),
+        },
+      ],
+    };
+    const [listTool] = pluginCatalogTools({ plugins: [github, linear] });
+    const ids = (result: { text: string }): string[] =>
+      (JSON.parse(result.text) as { tools: Array<{ tool_id: string }> }).tools.map(
+        (tool) => tool.tool_id,
+      );
+
+    const broad = await listTool.execute(
+      { service: "linear", query: "initiatives projects issues updates milestones" },
+      makeCtx(),
+    );
+    expect(ids(broad)).toEqual([
+      "linear.list_projects",
+      "linear.create_project_update",
+      "linear.list_milestones",
+    ]);
+
+    const exactId = await listTool.execute(
+      { service: "linear", query: "linear.list_projects" },
+      makeCtx(),
+    );
+    expect(ids(exactId)).toEqual(["linear.list_projects"]);
+
+    const exactName = await listTool.execute(
+      { service: "linear", query: '"create project update"' },
+      makeCtx(),
+    );
+    expect(ids(exactName)).toEqual(["linear.create_project_update"]);
+
+    const crossService = await listTool.execute(
+      { query: "projects repositories" },
+      makeCtx(),
+    );
+    expect(ids(crossService)).toEqual([
+      "github.list_repositories",
+      "linear.list_projects",
+    ]);
+
+    const excluded = await listTool.execute(
+      { service: "linear", query: "projects OR milestones -updates" },
+      makeCtx(),
+    );
+    expect(ids(excluded)).toEqual([
+      "linear.list_projects",
+      "linear.list_milestones",
+    ]);
+    expect(ids(await listTool.execute({ query: "-updates" }, makeCtx()))).toEqual([]);
+
+    const bounded = ["projects", ...Array.from({ length: 15 }, (_, index) => `absent${index}`), "milestones"];
+    expect(ids(await listTool.execute({ service: "linear", query: bounded.join(" ") }, makeCtx()))).toEqual([
+      "linear.list_projects",
+    ]);
+  });
+
   it("emits a warning when a service has no credential", async () => {
     const { plugin } = makeMockPlugin();
     const tools = pluginCatalogTools({ plugins: [plugin] });

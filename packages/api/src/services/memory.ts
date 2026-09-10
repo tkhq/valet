@@ -15,10 +15,10 @@
  * `moveFile`/`linksForFile` were originally behind this fence too; they
  * are now built (on the derived graph — still no stored links table).
  */
-import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Principal } from "@valet/engine";
-import { NotFoundError, ValidationError } from "@valet/shared";
+import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
 import { memoryFiles, teamMembers, type MemoryFileRow } from "../schema/index.js";
@@ -809,16 +809,39 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Builds `(positive OR ...) AND NOT negative ...` from bounded terms. */
+function memoryTsQuery(query: string): SQL | null {
+  const parsed = parseSearchQuery(query);
+  if (parsed.positive.length === 0) return null;
+  const toTsQuery = (term: (typeof parsed.positive)[number]): SQL => {
+    const convert = (text: string): SQL =>
+      term.quoted
+        ? sql`phraseto_tsquery('english', ${text})`
+        : sql`plainto_tsquery('english', ${text})`;
+    const plain = convert(term.text);
+    // PostgreSQL keeps a numeric sign in the lexeme. Search both forms so
+    // `-32000` excludes content that contains `32000` or `-32000`.
+    return /^\d+$/.test(term.text)
+      ? sql`(${plain} || ${convert(`-${term.text}`)})`
+      : plain;
+  };
+  const positive = sql`(${sql.join(parsed.positive.map(toTsQuery), sql` || `)})`;
+  if (parsed.negative.length === 0) return positive;
+  const negative = parsed.negative.map((term) => sql`!!(${toTsQuery(term)})`);
+  return sql`(${positive} && ${sql.join(negative, sql` && `)})`;
+}
+
 /**
  * `search_vector` is a `tsvector` GENERATED ALWAYS column (weights: A=title,
  * B=description, C=path+tags, D=content — see the schema's comment on
  * `memoryFiles` and the migration) — Drizzle has no column definition for
  * it, so it's referenced by name through raw `sql` fragments below.
- * `websearch_to_tsquery` parses forgivingly (unlike fts5's `MATCH`, it does
- * not raise a syntax error for something like an unbalanced quote — it
- * degrades to a literal-term search), so the invalid-query catch below is a
- * defensive backstop for genuine Postgres syntax errors, not a reachable
- * path for typical malformed user input the way it was under fts5. Expired
+ * Local query parsing joins positive terms with OR, then excludes each
+ * negative term. It uses `phraseto_tsquery` for quoted phrases. The shared
+ * parser bounds and deduplicates terms before this function builds SQL.
+ * Uppercase `OR` is an optional separator. Only-negative queries return no
+ * results. The catch below handles genuine Postgres syntax errors.
+ * Expired
  * rows (`expires < now`) are excluded. Read-union applies: results from team
  * scopes carry the virtual `team:{id}/` prefix.
  *
@@ -829,6 +852,8 @@ function errorMessage(err: unknown): string {
  * returned rows only, not for every row that matched.
  */
 export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchFilesParams): Promise<SearchResult[]> {
+  const tsQuery = memoryTsQuery(params.query);
+  if (!tsQuery) return [];
   const owners = await resolveReadableOwners(db, scope);
   const limit = params.limit ?? 20;
   const now = Date.now();
@@ -837,7 +862,6 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     ...owners.map((o) => and(eq(memoryFiles.ownerType, o.ownerType), eq(memoryFiles.ownerId, o.ownerId))),
   );
 
-  const tsQuery = sql`websearch_to_tsquery('english', ${params.query})`;
   const rankExpr = sql<number>`ts_rank_cd(search_vector, ${tsQuery})`;
   // `left(...)` bounds the work per row; `translate(...)` removes any
   // marker character the stored body already holds, so only ts_headline

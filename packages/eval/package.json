@@ -21,6 +21,7 @@
     "@valet/api": "workspace:*",
     "@valet/engine": "workspace:*",
     "@valet/sandbox-docker": "workspace:*",
+    "@valet/shared": "workspace:*",
     "typebox": "^1.3.7",
     "yaml": "^2.9.0"
   },
