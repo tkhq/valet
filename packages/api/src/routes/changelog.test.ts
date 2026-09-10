@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import bundledManifest from "../changelog/manifest.json";
 import type { GetChangelogResponse } from "../wire/types.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 
@@ -15,7 +16,10 @@ describe("GET /api/changelog", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as GetChangelogResponse;
     expect(body.manifest.schema).toBe("valet-changelog/v2");
-    expect(body.manifest.checkpoints[0]?.entries.length).toBeGreaterThan(0);
-    expect(body.artifact.checkpointId).toBe(body.manifest.checkpoints[0]?.id);
+    expect(body.manifest).toEqual(bundledManifest);
+    expect(body.artifact.checkpointId).toBe(body.manifest.checkpoints[0]?.id ?? null);
+    if (body.manifest.checkpoints.length === 0) {
+      expect(body.artifact.status).toBe("empty");
+    }
   });
 });
