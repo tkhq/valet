@@ -715,7 +715,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     },
     crashAt: opts.workflowCrashAt,
   });
-  workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };
+  workflowsDepsRef.current = {
+    db,
+    onePassword,
+    workflowStore,
+    workflowRunHost,
+    actionPluginByService,
+    plugins,
+    credentials: engineCredentials,
+  };
 
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
   // of the event dispatcher's workflow targets). `start()`/`stop()` from

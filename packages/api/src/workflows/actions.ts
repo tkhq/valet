@@ -31,6 +31,7 @@ import {
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "./service.js";
+import type { TeamServiceReadinessDeps } from "./team-service-readiness.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { appendRemovedEdgeHint, applyWorkflowPatch, type WorkflowEdgeRef } from "./patch.js";
 import {
@@ -168,6 +169,12 @@ function action<TParams extends TSchema>(parameters: TParams) {
  * It throws until provider wiring completes; actions only execute long
  * after boot, so callers never observe the window.
  */
+/** The credential reads the team arm gate makes before a schedule or a
+ * trigger arms (`team-service-readiness.ts#teamArmBlock`). */
+function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
+  return { db: deps.db, credentials: deps.credentials, plugins: deps.plugins ?? [], onePassword: deps.onePassword };
+}
+
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const listWorkflows = action(Type.Object({}))({
     id: "workflows.list_workflows",
@@ -763,8 +770,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await createWorkflowTrigger(
-        deps.db,
-        deps.plugins ?? [],
+        armDepsFrom(deps),
         owner,
         { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel },
       );
@@ -827,7 +833,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowSchedule(
-        getDeps().db,
+        armDepsFrom(getDeps()),
         owner,
         { workflowId: workflow_id, prompt, name, cron, timezone, input },
       );

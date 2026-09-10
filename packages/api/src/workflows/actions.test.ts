@@ -14,8 +14,9 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { teams, teamMembers, eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
+import { InMemoryCredentialStore } from "@valet/engine";
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -206,7 +207,12 @@ describe("DB-backed actions", () => {
     await buildAppQueryable(pglite).query(
       `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs RESTART IDENTITY CASCADE`,
     );
-    deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new StubRunHost() };
+    deps = {
+      db,
+      workflowStore: new InMemoryWorkflowStore(),
+      workflowRunHost: new StubRunHost(),
+      credentials: new InMemoryCredentialStore(),
+    };
   });
 
   async function seedWorkflow(): Promise<string> {
@@ -217,6 +223,48 @@ describe("DB-backed actions", () => {
     );
     return created.id;
   }
+
+  it("uses the configured org vault for agent schedules and event triggers", async () => {
+    await db.insert(teams).values({ id: "vault-team", orgId: "org1", name: "Vault team", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "vault-team", userId: "user1", role: "member" });
+    await db.insert(workflowDefinitions).values({
+      id: "vault-workflow", orgId: "org1", ownerType: "team", ownerId: "vault-team", name: "Vault workflow",
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "start", type: "trigger" },
+          { id: "tool", type: "tool", service: "linear", action: "list_issues", params: {} },
+        ],
+        edges: [{ from: "start", to: "tool" }],
+      },
+      createdAt: 1, updatedAt: 1,
+    });
+    deps.plugins = [githubPlugin];
+    const calls: string[] = [];
+    const unused = () => { throw new Error("unexpected vault method"); };
+    deps.onePassword = {
+      tokenConnected: unused, listVaults: unused, resolveReference: unused,
+      resolveCredential: unused, findCandidates: unused,
+      findCredentialForService: async (scope, owner, service) => {
+        expect(scope).toBe("org");
+        expect(owner.orgId).toBe("org1");
+        calls.push(service);
+        return "vault-secret";
+      },
+    };
+    const plugin = workflowsActionPlugin(() => deps);
+    for (const [id, args] of [
+      ["workflows.create_schedule", { workflow_id: "vault-workflow", name: "Nightly", cron: "0 3 * * *" }],
+      ["workflows.create_trigger", { workflow_id: "vault-workflow", name: "Opened", event_keys: ["github.pull_request.opened"] }],
+    ] as const) {
+      const action = plugin.actions.find((a) => a.id === id);
+      if (!action) throw new Error(`missing ${id}`);
+      expect(await action.execute(args, ctx())).toMatchObject({ success: true });
+    }
+    expect(calls).toEqual(["linear", "linear"]);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+  });
 
   it("create_webhook mints a hookId and a path-only url (no VALET_PUBLIC_URL in tests)", async () => {
     const workflowId = await seedWorkflow();
@@ -787,6 +835,7 @@ describe("update actions", () => {
       db,
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: new StubRunHost(),
+      credentials: new InMemoryCredentialStore(),
       plugins: [githubPlugin],
     };
 

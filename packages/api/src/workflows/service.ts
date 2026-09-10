@@ -4,6 +4,7 @@
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
+import type { OnePasswordService } from "../services/onepassword.js";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   resolveTriggerInput,
@@ -22,7 +23,7 @@ import {
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
-import type { ActionPlugin, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
@@ -68,6 +69,11 @@ export interface WorkflowServiceDeps {
   db: AppDb;
   workflowStore: WorkflowStore;
   workflowRunHost: RunHost;
+  /** The credential rows the team arm gate reads before a schedule or a
+   * trigger arms (`team-service-readiness.ts#teamArmBlock`). Required, so a
+   * caller cannot arm team work that no gate has judged. */
+  credentials: CredentialStore;
+  onePassword?: OnePasswordService;
   /** Plugin catalog index — enables save-time validation of tool nodes'
    * service/action pairs (validator env hook). Optional so tests that
    * exercise definition CRUD without a plugin catalog stay lightweight. */

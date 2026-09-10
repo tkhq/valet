@@ -13,6 +13,7 @@ import {
 } from "../schema/index.js";
 import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules, nextFireAt } from "./schedule-service.js";
 import { scheduledRunId } from "./scheduler.js";
+import { InMemoryCredentialStore } from "@valet/engine";
 
 describe("nextFireAt", () => {
   const base = Date.UTC(2026, 0, 15, 12, 30, 0); // 2026-01-15T12:30:00Z (Thursday)
@@ -64,6 +65,9 @@ describe("scheduledRunId", () => {
 
 describe("createWorkflowSchedule authorization", () => {
   let db: AppDb;
+  /** Arm-gate deps. Every workflow here is user-owned, so the team
+   * readiness gate never runs. */
+  const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), plugins: [] });
   let pglite: PGlite;
 
   beforeAll(async () => {
@@ -99,7 +103,7 @@ describe("createWorkflowSchedule authorization", () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
 
     const result = await createWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: "other-org-member", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
@@ -113,7 +117,7 @@ describe("createWorkflowSchedule authorization", () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
 
     const result = await createWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: "owner-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
@@ -141,7 +145,7 @@ describe("createWorkflowSchedule authorization", () => {
     });
 
     const result = await createWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: "member-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
@@ -200,7 +204,7 @@ describe("createWorkflowSchedule authorization", () => {
     await seedOrg();
 
     const result = await createWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: "plain-member", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
@@ -213,7 +217,7 @@ describe("createWorkflowSchedule authorization", () => {
     await seedOrg();
 
     const result = await createWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: "org-admin", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
@@ -246,7 +250,7 @@ describe("createWorkflowSchedule authorization", () => {
     });
 
     const result = await createWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: "outsider-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
@@ -257,6 +261,7 @@ describe("createWorkflowSchedule authorization", () => {
 
 describe("listWorkflowSchedules / deleteWorkflowSchedule owner scoping (TKAI-227)", () => {
   let db: AppDb;
+  const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), plugins: [] });
   let pglite: PGlite;
 
   beforeAll(async () => {
@@ -285,7 +290,7 @@ describe("listWorkflowSchedules / deleteWorkflowSchedule owner scoping (TKAI-227
       updatedAt: 1_000,
     });
     const created = await createWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: "owner-user", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );

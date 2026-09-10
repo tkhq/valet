@@ -649,6 +649,30 @@ describe("listWorkflowTemplateSummaries", () => {
  * accept, and connecting the service personally never changes it.
  */
 describe("listWorkflowTemplateSummaries in a team workspace", () => {
+  it("reports nested services and unreadable calls in team gallery summaries", async () => {
+    await seedTeam("nested-team", [OWNER.userId]);
+    await db.insert(workflowDefinitions).values({
+      id: "nested-child", orgId: OWNER.orgId, ownerType: "team", ownerId: "nested-team",
+      name: "Child", definition: sweepDefinition, createdAt: 1, updatedAt: 1,
+    });
+    const parent = (id: string, workflowId: string): WorkflowTemplate => ({
+      ...gmailSweep, id,
+      definition: definition(
+        [{ id: "start", type: "trigger" }, { id: "call", type: "workflow", workflowId }],
+        [{ from: "start", to: "call" }],
+      ),
+    });
+    const service = deps([{ ...gmailPlugin, templates: [parent("nested", "nested-child"), parent("missing", "gone")] }]);
+    const list = () => listWorkflowTemplateSummaries(service, OWNER, { teamId: "nested-team" });
+    const summaries = await list();
+    expect(summaries.find((s) => s.id === "nested")?.requires).toEqual([{ service: "gmail", connected: false }]);
+    expect(summaries.find((s) => s.id === "missing")?.blockers?.join(" ")).toContain("Reference a workflow this team owns");
+    await credentials.save({ type: "team", id: "nested-team" }, "gmail", { type: "oauth2", accessToken: "team-token" });
+    const ready = (await list()).find((s) => s.id === "nested");
+    expect(ready?.requires).toEqual([{ service: "gmail", connected: true }]);
+    expect(ready?.blockers).toEqual([]);
+  });
+
   it("reports a service the team holds as connected, though the caller has not connected it", async () => {
     await seedTeam("team-list-1", [OWNER.userId]);
     await credentials.save({ type: "team", id: "team-list-1" }, "gmail", {

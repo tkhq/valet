@@ -27,6 +27,7 @@
  * from the root whatever that setting holds. A source that sets a subpath and
  * expects it to hide `.valet/workflows` would be surprised, so say it here.
  */
+import type { WorkflowDefinition } from "@valet/workflow";
 import { and, eq, inArray } from "drizzle-orm";
 import { parse as parseYaml } from "yaml";
 import {
@@ -52,9 +53,13 @@ import {
   purgeWorkflowRows,
 } from "../../workflows/service.js";
 import { nextFireAt } from "../../workflows/schedule-service.js";
-import { teamServiceReadiness, type TeamServiceReadinessDeps } from "../../workflows/team-service-readiness.js";
+import {
+  teamArmRefusals,
+  teamServiceReadiness,
+  type TeamServiceReadinessDeps,
+} from "../../workflows/team-service-readiness.js";
 import type { OnePasswordService } from "../onepassword.js";
-import { toolNodesOf } from "../../workflows/tool-nodes.js";
+import { toolNodesOf, workflowCallsOf } from "../../workflows/tool-nodes.js";
 import { validateSubscriptionWrite } from "../../events/subscription-write.js";
 import type { SubscriptionFilter } from "../../events/match.js";
 import type { SkillTreeEntry } from "../skill-repo-reader.js";
@@ -254,6 +259,7 @@ class WorkflowPass implements CollectorPass {
      * deferred so the next poll checks them again at this commit. */
     const unchecked: string[] = [];
 
+    const incoming = new Map<string, { file: WorkflowFile; plan: TriggerPlan }>();
     for (const candidate of this.candidates) {
       const raw = text.get(candidate.path);
       if (raw === undefined) continue;
@@ -265,6 +271,26 @@ class WorkflowPass implements CollectorPass {
         continue;
       }
 
+      const plan = await planTriggers(db, this.plugins, source, parsed.file, candidate.path, now());
+      if (!plan.ok) {
+        warnings.push(...plan.errors.map((e) => `${candidate.path}: ${e}`));
+        continue;
+      }
+      incoming.set(candidate.path, { file: parsed.file, plan: plan.plan });
+    }
+    // Resolve this source against the complete validated commit, before writes.
+    // Invalid or unread files cannot certify a call against an older mirror.
+    const definitions = new Map<string, WorkflowDefinition | null>();
+    for (const row of existing) {
+      if (row.upstreamPath === null) continue;
+      // Partial scans delete nothing below, so unseen rows remain callable.
+      if (discovery === "directory-walk" && !upstream.has(row.upstreamPath)) continue;
+      definitions.set(row.id, incoming.get(row.upstreamPath)?.file.definition ?? null);
+    }
+
+    for (const candidate of this.candidates) {
+      const parsed = incoming.get(candidate.path);
+      if (!parsed) continue;
       // Decision 15: a triggered team run bills the team, so a team file
       // that declares a trigger over tool nodes arms only when the team can
       // act as every service those nodes name. Otherwise the file is
@@ -281,6 +307,7 @@ class WorkflowPass implements CollectorPass {
           { db, credentials: this.credentials, plugins: this.plugins, onePassword: this.onePassword },
           source,
           parsed.file,
+          definitions,
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -292,19 +319,7 @@ class WorkflowPass implements CollectorPass {
       }
       if (gated !== null) warnings.push(`${candidate.path}: ${gated}`);
 
-      // Decision 8's validation order: the cron and every filter are checked
-      // BEFORE anything is written, so a bad trigger fails its file and
-      // reports on the source row rather than arming something that can
-      // never fire. A gated file plans no triggers, which is what leaves
-      // them off.
-      const plan =
-        gated === null
-          ? await planTriggers(db, this.plugins, source, parsed.file, candidate.path, now())
-          : { ok: true as const, plan: NO_TRIGGERS };
-      if (!plan.ok) {
-        warnings.push(...plan.errors.map((e) => `${candidate.path}: ${e}`));
-        continue;
-      }
+      const plan = gated === null ? parsed.plan : NO_TRIGGERS;
 
       const name = parsed.file.name ?? candidate.name;
       const row = byPath.get(candidate.path);
@@ -327,7 +342,7 @@ class WorkflowPass implements CollectorPass {
           updatedAt: now(),
         });
         await snapshot(db, id, 1, name, parsed.file.definition, commitSha, now());
-        for (const keys of await armTriggers(db, source, id, plan.plan, now())) {
+        for (const keys of await armTriggers(db, source, id, plan, now())) {
           warnings.push(
             `${candidate.path} declares two event blocks for ${keys}. Valet armed the first and ignored the rest; give them different event keys, or merge their filters.`,
           );
@@ -343,7 +358,7 @@ class WorkflowPass implements CollectorPass {
       // The triggers reconcile on every pass, not only when the file moved:
       // they are rows another surface can change, and the file is the
       // authority for the ones it declares.
-      for (const keys of await armTriggers(db, source, row.id, plan.plan, now())) {
+      for (const keys of await armTriggers(db, source, row.id, plan, now())) {
         warnings.push(
           `${candidate.path} declares two event blocks for ${keys}. Valet armed the first and ignored the rest; give them different event keys, or merge their filters.`,
         );
@@ -789,21 +804,26 @@ async function teamTriggerGate(
   deps: TeamServiceReadinessDeps,
   source: ContentSourceRow,
   file: WorkflowFile,
+  definitions: ReadonlyMap<string, WorkflowDefinition | null>,
 ): Promise<string | null> {
   if (source.ownerType !== "team") return null;
   if (file.schedule === undefined && (file.events === undefined || file.events.length === 0)) {
     return null;
   }
-  if (toolNodesOf(file.definition).length === 0) return null;
+  // A call node carries tool nodes the team must fund too (TKAI-443), so a
+  // file whose only work is a call is still judged.
+  if (toolNodesOf(file.definition).length === 0 && workflowCallsOf(file.definition).length === 0) return null;
   const readiness = await teamServiceReadiness(deps, {
     orgId: source.orgId,
     teamId: source.ownerId,
     definition: file.definition,
+    definitions,
   });
-  if (readiness.blocked.length === 0) return null;
+  const refusals = teamArmRefusals(readiness);
+  if (refusals.length === 0) return null;
   // The readiness reasons are caller-neutral; the step that follows the fix
   // in THIS flow is the resync, and it is named once after them.
-  const reasons = readiness.blocked.map((b) => b.reason).join(" ");
+  const reasons = refusals.map((refusal) => refusal.reason).join(" ");
   return `this workflow declares a trigger over tool actions the team cannot act as yet, so Valet mirrored the workflow and left the trigger off. ${reasons} Valet arms it after you connect the service.`;
 }
 

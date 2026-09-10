@@ -76,7 +76,7 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
   const [open, setOpen] = useState(false);
   const missing = missingServices(template.requires);
   const unconfigured = unconfiguredServices(template.requires);
-  const ready = isInstallable(template.requires);
+  const ready = isInstallable(template.requires, template.blockers);
   const scope = useWorkspaceScope();
 
   return (
@@ -134,9 +134,13 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
 
       {/* Below the controls, not on them: an admin's job is not a button the
           reader can press. */}
-      {unconfigured.length > 0 && (
+      {unconfigured.length > 0 && !template.blockers?.length && (
         <p className="pt-2 text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>
       )}
+
+      {template.blockers?.map((reason) => (
+        <p key={reason} className="pt-2 text-xs leading-relaxed text-muted">{reason}</p>
+      ))}
 
       {/* Mounted only while open, so every open starts from the declared
           defaults with no error left over from a previous attempt. */}

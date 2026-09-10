@@ -55,10 +55,15 @@ import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { teamServiceReadiness, type TeamServiceReadiness } from "./team-service-readiness.js";
+import {
+  teamArmRefusals,
+  teamServiceReadiness,
+  withNextStep,
+  type TeamServiceReadiness,
+} from "./team-service-readiness.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
-import { toolNodesOf } from "./tool-nodes.js";
+import { toolNodesOf, workflowCallsOf } from "./tool-nodes.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
 // template-declared subscription and a hand-made one are held to one rule.
 // `trigger-service.ts` set the precedent for importing it from a service.
@@ -581,37 +586,10 @@ function readinessSignature(definition: WorkflowDefinition): string {
     // otherwise read as a different node's signature.
     return JSON.stringify([node.service, node.credential ?? "auto", owner, repo]);
   });
-  return JSON.stringify([...new Set(nodes)].sort());
-}
-
-/**
- * The credential services a team install of this definition could act as.
- *
- * `templateRequirements` keys a requirement by CREDENTIAL service
- * (`credentialService ?? service`, `credentialServiceFor`) while readiness
- * answers per TOOL service, so the mapping is made here. When two tool
- * services share one credential service, the requirement counts as
- * connected only while every one of them is ready: the requirement is a
- * single flag, and the install refuses on the first tool the team cannot
- * act as.
- */
-function teamConnectedServices(
-  definition: WorkflowDefinition,
-  actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
-  readiness: TeamServiceReadiness,
-): Set<string> {
-  const ready = new Set(readiness.ready);
-  const connected = new Set<string>();
-  const blocked = new Set<string>();
-  for (const node of toolNodesOf(definition)) {
-    const entry = actionPluginByService.get(node.service);
-    if (!entry) continue;
-    const { service } = credentialServiceFor(entry);
-    if (ready.has(node.service)) connected.add(service);
-    else blocked.add(service);
-  }
-  for (const service of blocked) connected.delete(service);
-  return connected;
+  // The callee's own tool nodes are part of the answer, so two definitions
+  // that call DIFFERENT workflows must not share one memoized readiness.
+  const calls = workflowCallsOf(definition).map((node) => node.workflowId);
+  return JSON.stringify([[...new Set(nodes)].sort(), [...new Set(calls)].sort()]);
 }
 
 export async function listWorkflowTemplateSummaries(
@@ -692,14 +670,27 @@ export async function listWorkflowTemplateSummaries(
         { orgId: caller.orgId, teamId, definition },
       );
     readinessBySignature.set(signature, pending);
+    const readiness = await pending;
+    // Map the whole closure to credential keys; any blocked alias wins.
+    const byService = new Map<string, WorkflowTemplateRequirement>();
+    const blocked = new Set(readiness.blocked.map((entry) => entry.service));
+    for (const toolService of [...readiness.ready, ...blocked]) {
+      const entry = deps.actionPluginByService.get(toolService);
+      const { service, dynamic } = entry
+        ? credentialServiceFor(entry)
+        : { service: toolService, dynamic: false };
+      const connected = !blocked.has(toolService) && byService.get(service)?.connected !== false;
+      byService.set(service, {
+        service,
+        connected,
+        ...(dynamic ? { dynamic: true } : {}),
+        ...(unavailable.has(service) ? { unconfigured: true } : {}),
+      });
+    }
     summaries.push({
       ...summary,
-      requires: templateRequirements(
-        definition,
-        deps.actionPluginByService,
-        teamConnectedServices(definition, deps.actionPluginByService, await pending),
-        unavailable,
-      ),
+      requires: [...byService.values()],
+      blockers: teamArmRefusals(readiness).map((refusal) => refusal.reason),
     });
   }
   return summaries;
@@ -888,9 +879,7 @@ function resolveInstallValues(
  * becomes the join.
  */
 function withInstallStep(reason: string): string {
-  return reason.endsWith(".")
-    ? `${reason.slice(0, -1)}, then install this template.`
-    : `${reason} Then install this template.`;
+  return withNextStep(reason, "install this template");
 }
 
 /**
@@ -960,7 +949,8 @@ export async function installWorkflowTemplate(
       { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
       { orgId: owner.orgId, teamId, definition: summarized.value.definition },
     );
-    if (readiness.blocked.length > 0) {
+    const refusals = teamArmRefusals(readiness);
+    if (refusals.length > 0) {
       // Each reason names who acts: a member connects a team credential, an
       // admin configures the App. A service the ORGANIZATION has not
       // configured is the personal path's case, and takes its message: the
@@ -968,10 +958,10 @@ export async function installWorkflowTemplate(
       // The readiness reason is caller-neutral (the repository sync reads
       // the same predicate), so the step that follows the fix in THIS flow
       // is added here.
-      const reasons = readiness.blocked.map((b) =>
-        unavailable.has(b.service)
-          ? `${b.service} is not configured for this organization, so this template cannot run yet. An admin sets it up in Settings → Organization.`
-          : withInstallStep(b.reason),
+      const reasons = refusals.map((refusal) =>
+        refusal.service !== undefined && unavailable.has(refusal.service)
+          ? `${refusal.service} is not configured for this organization, so this template cannot run yet. An admin sets it up in Settings → Organization.`
+          : withInstallStep(refusal.reason),
       );
       return { ok: false, code: "not_connected", error: reasons.join(" ") };
     }

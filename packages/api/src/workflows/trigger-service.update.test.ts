@@ -13,6 +13,12 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { InMemoryCredentialStore } from "@valet/engine";
+
+/** Arm-gate deps for the create calls. Every workflow in this file is
+ * user-owned, so the team readiness gate never runs. */
+const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), plugins: [githubPlugin] });
+
 
 let db: AppDb;
 let cleanup: () => Promise<void>;
@@ -43,7 +49,7 @@ afterAll(async () => {
 
 describe("updateWorkflowTrigger", () => {
   it("updates name/eventKeys/enabled and returns the summary", async () => {
-    const created = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
+    const created = await createWorkflowTrigger(armDeps(), OWNER, {
       workflowId: "wf_1",
       name: "original",
       eventKeys: ["github.pull_request.opened"],
@@ -63,7 +69,7 @@ describe("updateWorkflowTrigger", () => {
   });
 
   it("re-validates merged eventKeys/filters and 400s with the validator message", async () => {
-    const created = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
+    const created = await createWorkflowTrigger(armDeps(), OWNER, {
       workflowId: "wf_1",
       name: "to-invalidate",
       eventKeys: ["github.pull_request.opened"],
@@ -87,7 +93,7 @@ describe("updateWorkflowTrigger", () => {
     if (!missing.ok) expect(missing.status).toBe(404);
 
     // Cross-org: trigger exists under a different org
-    const created = await createWorkflowTrigger(db, [githubPlugin], OWNER, {
+    const created = await createWorkflowTrigger(armDeps(), OWNER, {
       workflowId: "wf_1",
       name: "cross-org trigger",
       eventKeys: ["github.pull_request.opened"],

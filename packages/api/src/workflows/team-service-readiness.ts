@@ -45,6 +45,11 @@
  * service whose org prerequisite is missing is blocked with the admin fix,
  * whatever the vault holds: the run would refuse it on every fire.
  *
+ * The nodes judged are the whole closure, not the definition's own: a
+ * `workflow` node runs the callee's nodes as this same team. A callee the
+ * team cannot read is reported as unverifiable rather than passed, because
+ * the run fails at the call node for the same reason.
+ *
  * A blocked service carries the reason so the caller can name the fix.
  * Every reason is caller-neutral and ends with a period: the install path
  * and the repository sync both read this predicate, and each adds the step
@@ -54,7 +59,9 @@
  */
 import type { CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
 import type { ToolNode, WorkflowDefinition } from "@valet/workflow";
+import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
+import { workflowDefinitions } from "../schema/index.js";
 import { credentialSecret } from "@valet/engine";
 import { CredentialReferenceBrokenError, TeamCredentialStore } from "../plugins/team-credential-store.js";
 import {
@@ -67,7 +74,7 @@ import { installationResolvesFor, isUsableGithubUserRow } from "../services/gith
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { connectModeFor, findCredentialDeclaration, orgProvidedServiceSet } from "../services/integration-availability.js";
 import { isTeamMember } from "../services/teams.js";
-import { toolNodesOf } from "./tool-nodes.js";
+import { toolNodeClosure } from "./tool-nodes.js";
 
 export interface TeamServiceReadinessDeps {
   db: AppDb;
@@ -84,9 +91,95 @@ export interface BlockedTeamService {
   reason: string;
 }
 
+/**
+ * A `workflow` call whose callee this team cannot read. The tool nodes
+ * behind it are unverifiable, and the run fails at the call node for the
+ * same reason, so it refuses an install or an arm the way a blocked
+ * service does.
+ */
+export interface UnverifiableWorkflowCall {
+  workflowId: string;
+  reason: string;
+}
+
 export interface TeamServiceReadiness {
   ready: string[];
   blocked: BlockedTeamService[];
+  unverifiable: UnverifiableWorkflowCall[];
+}
+
+export interface TeamReadinessRefusal {
+  /** The tool service, when a service is what the team cannot act as.
+   * Absent for a call whose definition the gate could not read. */
+  service?: string;
+  reason: string;
+}
+
+/**
+ * Every reason a team may not run this definition, blocked services and
+ * unreadable calls together. One reader, so a gate cannot answer on the
+ * services and silently forget the calls.
+ */
+export function teamArmRefusals(readiness: TeamServiceReadiness): TeamReadinessRefusal[] {
+  return [
+    ...readiness.blocked.map((entry) => ({ service: entry.service, reason: entry.reason })),
+    ...readiness.unverifiable.map((entry) => ({ reason: entry.reason })),
+  ];
+}
+
+/** A caller-neutral readiness reason with the calling flow's next step
+ * appended, so the reader is told what to do after the fix. */
+export function withNextStep(reason: string, step: string): string {
+  return reason.endsWith(".") ? `${reason.slice(0, -1)}, then ${step}.` : `${reason} Then ${step}.`;
+}
+
+/**
+ * Why a team may not arm a schedule or a trigger over this definition, or
+ * null when it may. `step` is the step that follows the fix in the calling
+ * flow, for example "create the schedule".
+ *
+ * Schedule and workflow-trigger creation share the readiness predicate
+ * used by template install and repository sync.
+ */
+export async function teamArmBlock(
+  deps: TeamServiceReadinessDeps,
+  opts: { orgId: string; teamId: string; definition: WorkflowDefinition; step: string },
+): Promise<string | null> {
+  const refusals = teamArmRefusals(await teamServiceReadiness(deps, opts));
+  if (refusals.length === 0) return null;
+  return refusals.map((refusal) => withNextStep(refusal.reason, opts.step)).join(" ");
+}
+
+/**
+ * The callee lookup a `workflow` node makes, as the run makes it:
+ * `engine-deps.ts#resolveWorkflow` matches the run owner's
+ * `{ownerType, ownerId}` exactly and answers null on a mismatch, the same
+ * as for a missing id.
+ */
+function teamWorkflowResolver(
+  db: AppDb,
+  teamId: string,
+  definitions?: ReadonlyMap<string, WorkflowDefinition | null>,
+) {
+  return async (workflowId: string): Promise<WorkflowDefinition | null> => {
+    const rows = await db
+      .select({ definition: workflowDefinitions.definition })
+      .from(workflowDefinitions)
+      .where(
+        and(
+          eq(workflowDefinitions.id, workflowId),
+          eq(workflowDefinitions.ownerType, "team"),
+          eq(workflowDefinitions.ownerId, teamId),
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    // The column is jsonb, so drizzle types it `unknown`. The dag validator
+    // ran before any definition reached the row.
+    if (!row) return null;
+    if (definitions?.has(workflowId)) return definitions.get(workflowId) ?? null;
+    return row.definition as WorkflowDefinition;
+  };
 }
 
 /**
@@ -228,11 +321,26 @@ async function unpinnedGithubGate(
 
 export async function teamServiceReadiness(
   deps: TeamServiceReadinessDeps,
-  opts: { orgId: string; teamId: string; definition: WorkflowDefinition },
+  opts: {
+    orgId: string;
+    teamId: string;
+    definition: WorkflowDefinition;
+    /** Sync-local definitions by ID. Exact owner authorization still uses the database. */
+    definitions?: ReadonlyMap<string, WorkflowDefinition | null>;
+  },
 ): Promise<TeamServiceReadiness> {
-  const nodes = toolNodesOf(opts.definition);
+  // A `workflow` node runs the callee's nodes as this same team, so its
+  // tool nodes are this team's to fund (TKAI-443).
+  const closure = await toolNodeClosure(opts.definition, teamWorkflowResolver(deps.db, opts.teamId, opts.definitions));
+  const nodes = closure.nodes;
+  const unverifiable: UnverifiableWorkflowCall[] = closure.unresolved.map((workflowId) => ({
+    workflowId,
+    reason:
+      `This workflow calls workflow ${JSON.stringify(workflowId)}, which does not exist or belongs to ` +
+      `another owner, so the call fails on every run. Reference a workflow this team owns, or remove the call.`,
+  }));
   const services = [...new Set(nodes.map((node) => node.service))];
-  if (services.length === 0) return { ready: [], blocked: [] };
+  if (services.length === 0) return { ready: [], blocked: [], unverifiable };
   const credentialFree = credentialFreeServices(deps.plugins);
 
   // A team row is read through the same decorator a run resolves it with,
@@ -366,5 +474,5 @@ export async function teamServiceReadiness(
       reason: unpinnedReason ?? `Connect ${service} for this team.`,
     });
   }
-  return { ready, blocked };
+  return { ready, blocked, unverifiable };
 }

@@ -114,6 +114,20 @@ describe("TemplateGallery", () => {
     expect(screen.getByText(/check that the server is running, then reload/i)).toBeTruthy();
   });
 
+  it("disables Install and shows the fix for an unverifiable nested call", () => {
+    const reason = "Reference a workflow this team owns, or remove the call.";
+    teamId = "team-1";
+    templatesQuery.data = { templates: [{ ...memorySweep, blockers: [reason] }] };
+    render(<TemplateGallery />);
+    expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
+    expect(screen.getByText(reason)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText(reason)).toBeTruthy();
+    expect(dialog.getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
+    expect(installMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("shows what a template does, what it touches, and when it runs", () => {
     templatesQuery.data = { templates: [memorySweep] };
     render(<TemplateGallery />);
@@ -190,6 +204,22 @@ describe("TemplateGallery", () => {
           "Slack is not configured for this organization. An admin can set this up in Settings → Organization.",
         ),
       ).toBeTruthy();
+    });
+
+    it("prefers detailed blockers without duplicating setup copy or losing App pin details", () => {
+      const setup = "slack is not configured for this organization. Ask an admin to configure Slack.";
+      const appPin = "github pins the GitHub App, but this organization has no App configured. An admin sets it up in Settings → Organization.";
+      templatesQuery.data = { templates: [{ ...needsSlackSetup, blockers: [setup, appPin] }] };
+      render(<TemplateGallery />);
+
+      expect(screen.getAllByText(/slack is not configured/i)).toHaveLength(1);
+      expect(screen.getByText(appPin)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+      const dialog = within(screen.getByRole("dialog"));
+      expect(dialog.getAllByText(/slack is not configured/i)).toHaveLength(1);
+      expect(dialog.getByText(appPin)).toBeTruthy();
+      expect(dialog.getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
     });
 
     it("offers no install, because the first run would fail on the missing token", () => {

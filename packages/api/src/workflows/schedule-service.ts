@@ -7,8 +7,10 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { CronExpressionParser } from "cron-parser";
+import type { WorkflowDefinition } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowSchedules } from "../schema/index.js";
+import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
 import {
   canAccessTriggerRow,
   canAccessTriggerRowInScope,
@@ -86,8 +88,15 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
   };
 }
 
+/**
+ * A schedule arms unattended work, so creating one needs the credential
+ * reads `teamArmBlock` makes, not the database alone. The deps are
+ * required rather than optional: an optional bag is a gate every new
+ * caller can forget, which is how the install gate and this path came to
+ * disagree (TKAI-444).
+ */
 export async function createWorkflowSchedule(
-  db: AppDb,
+  deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
   input: {
     /** Exactly one of `workflowId` (start a run) or `prompt` (prompt the
@@ -114,6 +123,7 @@ export async function createWorkflowSchedule(
   },
   now = Date.now(),
 ): Promise<{ ok: true; schedule: WorkflowScheduleSummary } | { ok: false; error: string }> {
+  const db = deps.db;
   const timezone = input.timezone ?? "UTC";
   const next = nextFireAt(input.cron, timezone, now);
   if (!next.ok) return next;
@@ -165,6 +175,20 @@ export async function createWorkflowSchedule(
       owned.ownerType === "org"
         ? { ownerType: "user", ownerId: owner.userId }
         : { ownerType: owned.ownerType, ownerId: owned.ownerId };
+    // A scheduled team run bills the team, so it resolves the TEAM's
+    // credentials. Refuse here rather than arm a schedule that fails on
+    // every fire; the person is present and can act on the reason now.
+    if (owned.ownerType === "team") {
+      const blocked = await teamArmBlock(deps, {
+        orgId: owner.orgId,
+        teamId: owned.ownerId,
+        // jsonb, so drizzle types the column `unknown`; the dag validator
+        // ran before any definition reached the row.
+        definition: owned.definition as WorkflowDefinition,
+        step: "create the schedule",
+      });
+      if (blocked) return { ok: false, error: blocked };
+    }
   } else if (input.teamId) {
     // Orchestrator-prompt schedule created in a team workspace: the team owns
     // it, so `deliverToOrchestrator` fires the team's assistant. Membership is

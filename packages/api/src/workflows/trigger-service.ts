@@ -11,8 +11,10 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
+import type { WorkflowDefinition } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
+import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
 import { catalogForService } from "../events/ingest.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
@@ -67,16 +69,23 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
   };
 }
 
+/**
+ * A trigger arms unattended work, so creating one needs the credential
+ * reads `teamArmBlock` makes, not the database and the registry alone. The
+ * deps are required rather than optional: an optional bag is a gate every
+ * new caller can forget, which is how the install gate and this path came
+ * to disagree (TKAI-444).
+ */
 export async function createWorkflowTrigger(
-  db: AppDb,
-  plugins: ValetPlugin[],
+  deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
   input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
+  const db = deps.db;
   const target = { kind: "workflow" as const, workflowId: input.workflowId };
   const write = await validateSubscriptionWrite(
     db,
-    plugins,
+    deps.plugins,
     { name: input.name, eventKeys: input.eventKeys, filters: input.filters ?? [], target },
     { creatorUserId: owner.userId, anyChannel: input.anyChannel === true, matchChanged: true },
   );
@@ -92,6 +101,21 @@ export async function createWorkflowTrigger(
   // workflows only.
   const owned = await armableDefinitionRow(db, owner, input.workflowId);
   if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
+
+  // An event-fired team run bills the team, so it resolves the TEAM's
+  // credentials. Refuse here rather than arm a trigger that fails on every
+  // event; the person is present and can act on the reason now.
+  if (owned.ownerType === "team") {
+    const blocked = await teamArmBlock(deps, {
+      orgId: owner.orgId,
+      teamId: owned.ownerId,
+      // jsonb, so drizzle types the column `unknown`; the dag validator ran
+      // before any definition reached the row.
+      definition: owned.definition as WorkflowDefinition,
+      step: "create the trigger",
+    });
+    if (blocked) return { ok: false, error: blocked };
+  }
 
   const now = Date.now();
   const inserted = await db

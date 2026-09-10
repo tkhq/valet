@@ -18,6 +18,7 @@ import {
 } from "../workflows/service.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
+import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
 import {
   createWorkflowSchedule,
   deleteWorkflowSchedule,
@@ -51,6 +52,13 @@ export const workflowTriggersRouter = new Hono<AppEnv>();
  * keeps reaching them after the creating admin leaves. */
 function ownerFrom(c: Context<AppEnv>): WorkflowOwner {
   return { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal };
+}
+
+/** The credential reads the team arm gate makes before a schedule or a
+ * trigger arms (`workflows/team-service-readiness.ts#teamArmBlock`). */
+function armDeps(c: Context<AppEnv>): TeamServiceReadinessDeps {
+  const { db, engineCredentials, plugins, onePassword } = c.var.providers;
+  return { db, credentials: engineCredentials, plugins, onePassword };
 }
 
 const CRON_HINT = ' Use 5 fields, for example "0 9 * * 1-5" (09:00 on weekdays).';
@@ -180,7 +188,7 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     teamId = created.owner.type === "team" ? created.owner.id : undefined;
   }
 
-  const result = await createWorkflowSchedule(db, owner, {
+  const result = await createWorkflowSchedule(armDeps(c), owner, {
     name: body.name,
     cron: body.cron,
     timezone: body.timezone,
@@ -249,7 +257,7 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  const result = await createWorkflowTrigger(db, plugins, owner, {
+  const result = await createWorkflowTrigger(armDeps(c), owner, {
     workflowId: body.workflowId,
     name: body.name,
     eventKeys: body.eventKeys,

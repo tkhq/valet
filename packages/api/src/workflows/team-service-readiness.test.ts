@@ -8,11 +8,11 @@ import type { ValetPlugin } from "@valet/engine";
 import type { WorkflowDefinition } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { githubInstallations, teamMembers } from "../schema/index.js";
+import { githubInstallations, teamMembers, workflowDefinitions } from "../schema/index.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { UNGRANTED_TEAM_OP_REF } from "../services/team-onepassword-grant.js";
-import { teamServiceReadiness } from "./team-service-readiness.js";
+import { teamArmRefusals, teamServiceReadiness } from "./team-service-readiness.js";
 
 const ORG = "org-1";
 const TEAM = "team-1";
@@ -599,5 +599,137 @@ describe("teamServiceReadiness", () => {
 
     expect(result.ready).toEqual([]);
     expect(result.blocked.map((b) => b.service)).toEqual(["gmail"]);
+  });
+  // ── A called workflow's tool nodes (TKAI-443) ──────────────────────────
+  //
+  // A `workflow` node runs the callee's nodes as the SAME owner, so a
+  // service the callee names is a service the team must be able to act as.
+  // Judged on the parent's own nodes alone, the install passes and the run
+  // fails at the child, which is what the gate exists to prevent.
+
+  /** Stores `definition` as a workflow owned by `owner`, and returns its id. */
+  async function storeWorkflow(
+    id: string,
+    definition: WorkflowDefinition,
+    owner: { ownerType: "user" | "team" | "org"; ownerId: string } = { ownerType: "team", ownerId: TEAM },
+  ): Promise<string> {
+    await db.insert(workflowDefinitions).values({
+      id,
+      orgId: ORG,
+      ownerType: owner.ownerType,
+      ownerId: owner.ownerId,
+      name: id,
+      definition,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    return id;
+  }
+
+  /** A parent whose only work is a call to `calleeId`. */
+  function callerDefinition(calleeId: string): WorkflowDefinition {
+    return {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "call", type: "workflow", workflowId: calleeId },
+      ],
+      edges: [{ from: "start", to: "call" }],
+    };
+  }
+
+  it("blocks a service only the called workflow names", async () => {
+    await storeWorkflow("wf_callee", toolDefinition("linear"));
+
+    const result = await teamServiceReadiness(deps([linearPlugin]), {
+      orgId: ORG,
+      teamId: TEAM,
+      definition: callerDefinition("wf_callee"),
+    });
+
+    expect(result.ready).toEqual([]);
+    expect(result.blocked).toEqual([{ service: "linear", reason: "Connect linear for this team." }]);
+  });
+
+  it("reads a called workflow the team holds a credential for as ready", async () => {
+    await storeWorkflow("wf_callee", toolDefinition("linear"));
+    await credentials.save({ type: "team", id: TEAM }, "linear", { type: "api_key", apiKey: "k" });
+
+    const result = await teamServiceReadiness(deps([linearPlugin]), {
+      orgId: ORG,
+      teamId: TEAM,
+      definition: callerDefinition("wf_callee"),
+    });
+
+    expect(result.ready).toEqual(["linear"]);
+    expect(result.blocked).toEqual([]);
+    expect(result.unverifiable).toEqual([]);
+  });
+
+  it("expands a call made from a foreach body", async () => {
+    await storeWorkflow("wf_callee", toolDefinition("linear"));
+
+    const result = await teamServiceReadiness(deps([linearPlugin]), {
+      orgId: ORG,
+      teamId: TEAM,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "start", type: "trigger" },
+          {
+            id: "loop",
+            type: "foreach",
+            items: "{{trigger.data.items}}",
+            body: { id: "each", type: "workflow", workflowId: "wf_callee" },
+          },
+        ],
+        edges: [{ from: "start", to: "loop" }],
+      },
+    });
+
+    expect(result.blocked.map((b) => b.service)).toEqual(["linear"]);
+  });
+
+  // `resolveWorkflow` answers null for a definition another owner holds, so
+  // the run fails at the call node. The gate must not arm what the run
+  // refuses on every fire.
+  it("refuses a call to a workflow the team does not own", async () => {
+    await storeWorkflow("wf_other", toolDefinition("linear"), { ownerType: "team", ownerId: "team-2" });
+
+    const result = await teamServiceReadiness(deps([linearPlugin]), {
+      orgId: ORG,
+      teamId: TEAM,
+      definition: callerDefinition("wf_other"),
+    });
+
+    expect(result.unverifiable).toEqual([
+      {
+        workflowId: "wf_other",
+        reason:
+          'This workflow calls workflow "wf_other", which does not exist or belongs to another owner, so the ' +
+          "call fails on every run. Reference a workflow this team owns, or remove the call.",
+      },
+    ]);
+  });
+
+  it("gathers blocked services and unreadable calls into one refusal list", async () => {
+    await storeWorkflow("wf_callee", toolDefinition("linear"));
+
+    const result = await teamServiceReadiness(deps([linearPlugin]), {
+      orgId: ORG,
+      teamId: TEAM,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "start", type: "trigger" },
+          { id: "call", type: "workflow", workflowId: "wf_callee" },
+          { id: "gone", type: "workflow", workflowId: "wf_gone" },
+        ],
+        edges: [{ from: "start", to: "call" }],
+      },
+    });
+
+    expect(teamArmRefusals(result).map((r) => r.service)).toEqual(["linear", undefined]);
+    expect(teamArmRefusals(result)).toHaveLength(2);
   });
 });
