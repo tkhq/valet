@@ -203,7 +203,10 @@ describe("DELETE /api/sessions/:id — assistant guard", () => {
     )[0];
     expect(retired?.archivedAt).not.toBeNull();
     expect(retired?.isDefault).toBe(false);
+    expect((await del(api, "orchestrator:team:team_legacy?retireLegacyTeam=true")).status).toBe(200);
+    expect(destroy).toHaveBeenCalledTimes(4);
   });
+
   it("legacy cleanup refuses a plain personal chat", async () => {
     api = await bootTestApi();
     await seedSession(api, { id: "personal-kept", owner: { type: "user", id: "local-user" } });
