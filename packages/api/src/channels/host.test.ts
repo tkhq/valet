@@ -16,9 +16,10 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { eventDropLog, userIdentityLinks } from "../schema/index.js";
+import { eventDropLog, userIdentityLinks, users } from "../schema/index.js";
 import { linkIdentity, mintLinkCode } from "./identity-links.js";
 import { ChannelHost } from "./host.js";
+import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const ORG_ID = "local-org";
@@ -266,6 +267,58 @@ describe("ChannelHost.handleUpdate", () => {
     expect(fakeTransport.sent[0]?.message.markdown).toMatch(/invalid or expired/i);
     const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
     expect(links).toHaveLength(0);
+  });
+
+  it.each(["m", null])("uses current defaults for a new DM thread when the model is %s", async (model) => {
+    faux.setResponses([fauxAssistantMessage("ok"), fauxAssistantMessage("ok")]);
+    await testDb.appDb.insert(users).values({
+      id: USER_ID, email: "channel-model@example.com", name: "Channel user",
+      defaultModel: "claude-opus-4-5", defaultReasoning: "high",
+    });
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, { type: "user", id: USER_ID }, {
+      actorUserId: USER_ID, orgId: ORG_ID,
+    });
+    const oldThread = await session.createThread("fake:old");
+    await testDb.appDb.update(users).set({ defaultModel: model, defaultReasoning: null }).where(eq(users.id, USER_ID));
+    const resolver = vi.spyOn(engineHost, "resolveFreshThreadSettings");
+
+    await host.handleUpdate("fake", inbound());
+
+    const thread = await session.threadByKey("fake:99");
+    expect(thread?.modelId()).toBe(model ?? "s");
+    expect(thread?.reasoning()).toBeUndefined();
+    if (!thread) throw new Error("Expected the channel thread to exist");
+    expect(await engineStore.getThread(session.id, thread.id)).toMatchObject({ model: model ?? "s", reasoning: "off" });
+    expect(oldThread.modelId()).toBe("claude-opus-4-5");
+    expect(session.options.modelSpec).toBe("claude-opus-4-5");
+    await testDb.appDb.update(users).set({ defaultModel: "l" }).where(eq(users.id, USER_ID));
+    await host.handleUpdate("fake", inbound());
+    expect((await session.threadByKey("fake:99"))?.modelId()).toBe(model ?? "s");
+    expect(resolver).toHaveBeenCalledTimes(1);
+    await vi.waitFor(async () => {
+      expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0);
+    });
+  });
+
+  it("concurrent channel and event deliveries share one durable thread", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, {
+      actorUserId: USER_ID, orgId: ORG_ID,
+    });
+    await Promise.all([
+      host.handleUpdate("fake", inbound({ dispatchId: "concurrent-dm-1" })),
+      deliverToAssistantThread({ db: testDb.appDb, engineHost }, {
+        orgId: ORG_ID, owner: { type: "user", id: USER_ID }, actorUserId: USER_ID,
+        threadKey: "fake:99", dispatchId: "concurrent-event",
+        signal: { kind: "signal", signalType: "fake.message", body: "event", attributes: {} },
+        mismatchReason: "event_target_mismatch",
+      }),
+    ]);
+    const threads = (await engineStore.listThreads(session.id)).filter((thread) => thread.key === "fake:99");
+    expect(threads).toHaveLength(1);
+    expect((await session.threadByKey("fake:99"))?.id).toBe(threads[0]?.id);
   });
 
   it("preserves origin, sender, and attachments on direct-message ingress", async () => {

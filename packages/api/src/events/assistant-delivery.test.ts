@@ -8,7 +8,8 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { createAssistant, loadAssistant } from "../assistants/service.js";
-import { eventDropLog } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { assistants, users, eventDropLog } from "../schema/index.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 
 const ORG = "org-1";
@@ -65,6 +66,39 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     body,
     attributes: {},
     origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const },
+  });
+
+  it("uses the current assistant default for new Slack threads after restore", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const assistant = await createAssistant(testDb.appDb, ORG, OWNER, "Channel assistant");
+    await testDb.appDb.update(assistants).set({ model: "claude-opus-4-5", reasoning: "high" }).where(eq(assistants.id, assistant.id));
+    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const oldThread = await session.createThread("slack:C1:old", { model: "claude-sonnet-4-5", reasoning: "low" });
+    await testDb.appDb.update(assistants).set({ model: "m", reasoning: "low" }).where(eq(assistants.id, assistant.id));
+    // An org assistant must not inherit the member who delivered the event.
+    await testDb.appDb.insert(users).values({ id: USER, email: "event-model@example.com", name: "Event user", defaultModel: "l" });
+    engineHost.evictAll();
+
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER,
+      threadKey: "slack:C1:1.2", signal: channelSignal("first"),
+      dispatchId: "model-first", mismatchReason: "event_target_mismatch",
+    });
+    const restored = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
+    expect((await restored.threadByKey("slack:C1:1.2"))?.reasoning()).toBe("low");
+    expect(restored.threadById(oldThread.id)?.modelId()).toBe("claude-sonnet-4-5");
+    expect(restored.options.modelSpec).toBe("claude-opus-4-5");
+
+    await testDb.appDb.update(assistants).set({ model: null, reasoning: null }).where(eq(assistants.id, assistant.id));
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER,
+      threadKey: "slack:C1:next", signal: channelSignal("next"),
+      dispatchId: "model-next", mismatchReason: "event_target_mismatch",
+    });
+    expect((await restored.threadByKey("slack:C1:next"))?.modelId()).toBe("s");
+    expect((await restored.threadByKey("slack:C1:next"))?.toThreadData().reasoning).toBe("off");
+    expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
   });
 
   it("prepends the fetched thread transcript on the first turn in a channel thread", async () => {

@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { users } from "../schema/index.js";
+import { users, teams } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 describe("EngineHost default model", () => {
@@ -156,4 +156,86 @@ describe("EngineHost default model", () => {
 
     expect(settings).toEqual({ model: "m", reasoning: "low" });
   });
+
+  it("retries fresh thread creation after persistence fails without exposing an unpersisted thread", async () => {
+    api = await bootTestApi();
+    const { engineHost, engineStore } = api.providers;
+    const session = await defaultAssistantSessionFor(api.providers,
+      { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const save = vi.spyOn(engineStore, "saveThread").mockRejectedValueOnce(new Error("test write failure"));
+    await expect(engineHost.ensureFreshThread(session, "slack:retry", meta)).rejects.toThrow("test write failure");
+    expect(await session.threadByKey("slack:retry")).toBeNull();
+    const thread = await engineHost.ensureFreshThread(session, "slack:retry", meta);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(await engineStore.getThread(session.id, thread.id)).toMatchObject({ model: "s", reasoning: "off" });
+  });
+
+  it("shares pending thread persistence across concurrent callers", async () => {
+    api = await bootTestApi();
+    const { engineHost, engineStore } = api.providers;
+    const session = await defaultAssistantSessionFor(api.providers,
+      { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    let release = () => {};
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const originalSave = engineStore.saveThread.bind(engineStore);
+    const save = vi.spyOn(engineStore, "saveThread").mockImplementation(async (...args) => {
+      await barrier;
+      return originalSave(...args);
+    });
+    const first = engineHost.ensureFreshThread(session, "slack:concurrent", meta);
+    const second = engineHost.ensureFreshThread(session, "slack:concurrent", meta);
+    try {
+      await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+      expect(await session.threadByKey("slack:concurrent")).toBeNull();
+    } finally {
+      release();
+    }
+    const [one, two] = await Promise.all([first, second]);
+    expect(one).toBe(two);
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps live and restored thread pins when current default resolution fails", async () => {
+    api = await bootTestApi();
+    const { engineHost } = api.providers;
+    const providers = api.providers;
+    const wake = () => defaultAssistantSessionFor(providers,
+      { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const session = await wake();
+    await session.setReasoning("high");
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const thread = await engineHost.ensureFreshThread(session, "slack:existing", meta);
+    await thread.setModel("claude-sonnet-4-5");
+    const resolver = vi.spyOn(engineHost, "resolveFreshThreadSettings").mockRejectedValue(new Error("default unavailable"));
+    expect(await engineHost.ensureFreshThread(session, "slack:existing", meta)).toBe(thread);
+    engineHost.evictAll();
+    const restored = await wake();
+    const existing = await engineHost.ensureFreshThread(restored, "slack:existing", meta);
+    expect(existing.modelId()).toBe("claude-sonnet-4-5");
+    expect(existing.toThreadData().reasoning).toBe("off");
+    expect(existing.reasoning()).toBeUndefined();
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it("uses changed team defaults instead of the delivering member's defaults", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await db.insert(teams).values({
+      id: "model-team", orgId: "local-org", name: "Model team", createdAt: Date.now(),
+      defaultModel: "claude-opus-4-5", defaultReasoning: "high",
+    });
+    const session = await defaultAssistantSessionFor(api.providers,
+      { type: "team", id: "model-team" }, { actorUserId: "local-user", orgId: "local-org" });
+    await db.update(users).set({ defaultModel: "l", defaultReasoning: "high" }).where(eq(users.id, "local-user"));
+    await db.update(teams).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(teams.id, "model-team"));
+    const thread = await engineHost.ensureFreshThread(session, "slack:team", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    expect(thread.modelId()).toBe("m");
+    expect(thread.reasoning()).toBe("low");
+    expect(session.options.modelSpec).toBe("claude-opus-4-5");
+  });
+
 });

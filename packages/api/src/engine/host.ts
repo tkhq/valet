@@ -23,6 +23,7 @@ import {
   type SessionData,
   type SessionStartRef,
   type SessionStore,
+  type Thread,
   type StoredCredential,
   type ResolvedModel,
   type PolicyResolver,
@@ -664,6 +665,7 @@ export class EngineHost {
    * same key). De-duping in-flight calls collapses the race.
    */
   private inflight = new Map<string, Promise<Session>>();
+  private threadCreations = new WeakMap<Session, Map<string, Promise<Thread>>>();
   /** Bumped by `evictCache`. A build captures the epoch when it starts and
    * refuses to cache (rebuilds instead) when it changed mid-build — without
    * this, a PATCH that lands while `buildAssistantSession` is between its
@@ -3266,6 +3268,33 @@ export class EngineHost {
       settings.default;
     if (!isReasoningLevel(level)) return undefined;
     return clampToMax(level, settings.max);
+  }
+
+  /**
+   * Reuse an existing thread or persist current defaults for a new one.
+   * Channel ingress and event delivery share this guard because they can
+   * reach the same thread while its first creation awaits persistence.
+   */
+  async ensureFreshThread(session: Session, key: string, meta: SessionMeta, actorUserId = meta.userId): Promise<Thread> {
+    const existing = await session.threadByKey(key);
+    if (existing) return existing;
+    let pending = this.threadCreations.get(session);
+    if (!pending) {
+      pending = new Map();
+      this.threadCreations.set(session, pending);
+    }
+    const inflight = pending.get(key);
+    if (inflight) return inflight;
+    const creation = (async () => {
+      const settings = await this.resolveFreshThreadSettings(session.id, meta, actorUserId);
+      return session.createThread(key, settings);
+    })();
+    pending.set(key, creation);
+    try {
+      return await creation;
+    } finally {
+      pending.delete(key);
+    }
   }
 
   /**

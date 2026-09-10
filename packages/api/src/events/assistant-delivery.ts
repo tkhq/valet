@@ -154,7 +154,11 @@ async function deliverToAssistantThreadInner(
     });
     throw new Error(`delivery refused: assistant org mismatch (${data.orgId} != ${args.orgId})`);
   }
-  const thread = session.thread(args.threadKey);
+  const thread = await deps.engineHost.ensureFreshThread(session, args.threadKey, {
+    userId: data.userId,
+    orgId: data.orgId,
+    workspace: data.workspace,
+  }, args.actorUserId);
   let signal = args.signal;
   // On the assistant's FIRST turn in a channel thread, prepend the thread's
   // earlier messages so it participates in the group conversation with full

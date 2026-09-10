@@ -1022,7 +1022,11 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = session.thread(threadKey);
+    const thread = await this.deps.engineHost.ensureFreshThread(session, threadKey, {
+      userId,
+      orgId,
+      workspace: session.options.workspace,
+    });
 
     let text = event.text ?? "";
     const attachments: PromptAttachment[] = [];

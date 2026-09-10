@@ -38,6 +38,14 @@ A shared team assistant omits the actor's personal default, as it does during se
 
 The new thread persists the selected model spec. A tier selection persists its tier token, not the current concrete target. This keeps tier remapping effective at run time. The new thread persists an explicit reasoning level only when the effective source or default supplies one.
 
+### Channel thread defaults
+
+Direct channel messages, mentions, and followed messages use fresh defaults when the target thread does not exist. They have no source thread, so `keep_current` does not copy the historical session model.
+
+The host persists model and reasoning before prompt submission. Concurrent channel and event deliveries share one creation operation per session and thread key. Failed creation remains retryable.
+
+Existing threads retain their pins after preference changes and session restore. Shared assistants keep owner-scoped defaults. Cleared reasoning persists as `off`.
+
 ### Selected model labels
 
 Closed model controls show the resolved model name. They do not show the tier label as the selected value.
