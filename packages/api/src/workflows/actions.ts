@@ -5,6 +5,7 @@
  * create, inspect, and run dag/v1 workflows conversationally. Every result
  * carries the ids (`workflowId`/`runId`) the web chat renderer fetches by.
  */
+import { ValetError } from "@valet/shared";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import type {
@@ -16,6 +17,7 @@ import type {
 import {
   addAggregateNode,
   cancelWorkflowRun,
+  copyWorkflowDefinition,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
   getWorkflowDefinition,
@@ -176,6 +178,31 @@ function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
 }
 
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
+  const copyToTeam = action(Type.Object({
+    workflow_id: Type.String(), team_id: Type.String(), name: Type.String(),
+  }))({
+    id: "workflows.copy_to_team",
+    name: "Copy workflow to team",
+    description: "Copy an explicit personal workflow JSON graph into a team under a new name. Requires membership. Returns the destination ID. Leaves the original and its triggers unchanged. Copies no schedules, event triggers, webhook secrets, credentials or nested workflows. Referenced IDs stay unchanged and may need remapping before team use.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, team_id, name }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      if (ctx.owner && (ctx.owner.type !== "user" || ctx.owner.id !== owner.userId)) {
+        return { success: false, error: "Copy personal workflows from your personal assistant." };
+      }
+      try {
+        const copy = await copyWorkflowDefinition(getDeps(), owner, workflow_id, { teamId: team_id, name });
+        if (!copy) return { success: false, error: "Personal workflow not found. Check the source workflow ID." };
+        return { success: true, data: { workflowId: copy.id, teamId: copy.ownerId, name: copy.name,
+          note: "Copied graph only. Referenced IDs are unchanged; check team access before running or adding triggers." } };
+      } catch (err) {
+        if (err instanceof ValetError) return { success: false, error: err.message };
+        throw err;
+      }
+    },
+  });
+
   const listWorkflows = action(Type.Object({}))({
     id: "workflows.list_workflows",
     name: "List workflows",
@@ -1047,6 +1074,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Create, inspect, and run Valet DAG workflows (dag/v1 definitions: nodes + edges).",
     actions: [
+      copyToTeam,
       listWorkflows,
       getWorkflow,
       saveWorkflow,

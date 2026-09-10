@@ -507,6 +507,25 @@ workflowsRouter.put("/:id", async (c) => {
  * the file keeps the original, and the copy is an ordinary workflow the
  * editor can save.
  */
+workflowsRouter.post("/:id/copy-to-team", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("teamId" in body) || typeof body.teamId !== "string" || !body.teamId.trim() ||
+      !("name" in body) || typeof body.name !== "string") {
+    return c.json({ error: "Provide a destination teamId and a new workflow name." }, 400);
+  }
+  const principal = requirePrincipal(c);
+  if (!principal) return c.json({ error: "unauthorized" }, 401);
+  const destination = await resolveCreateOwner({
+    principal, authVia: c.var.authVia, bodyTeamId: body.teamId, userId: owner.userId,
+    isTeamMember: (teamId) => isTeamMember(deps.db, teamId, owner.userId),
+  });
+  if (!destination.ok) return c.json({ error: destination.error }, destination.status);
+  const copy = await copyWorkflowDefinition(deps, owner, c.req.param("id"), { teamId: body.teamId, name: body.name });
+  if (!copy) return c.json({ error: "workflow not found" }, 404);
+  return c.json(copy, 201);
+});
+
 workflowsRouter.post("/:id/copy", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const copy = await copyWorkflowDefinition(deps, owner, c.req.param("id"));

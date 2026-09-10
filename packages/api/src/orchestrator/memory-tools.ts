@@ -349,6 +349,39 @@ function asMoveResultBody(body: unknown): MoveResultBody | null {
   return { file: { path: body.file.path, version }, referencersUpdated, warnings: body.warnings };
 }
 
+export const artifactCopyToTeamTool = defineTool({
+  name: "artifact_copy_to_team",
+  description: "Copy the current content of an explicitly selected personal artifact into a team. Requires membership. Creates a new org-visible link and never overwrites a destination. Does not copy comments, history, public access or source-session links. The original remains unchanged.",
+  parameters: Type.Object({ artifactId: Type.String(), teamId: Type.String(), key: Type.String() }),
+  execute: async (args, ctx) => {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return memoryRequest(new URL("/api/artifacts/copy-to-team", cfg.apiBaseUrl), {
+      method: "POST", headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
+      body: JSON.stringify(args),
+    }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
+  },
+});
+
+export const memCopyToTeamTool = defineTool({
+  name: "mem_copy_to_team",
+  description: "Save an existing personal memory file into a team by copying its exact content and metadata. Requires team membership and team memory write authority. Never deletes the source or overwrites a destination. Links remain unchanged; copy only the explicit file requested by the user.",
+  parameters: Type.Object({
+    from: Type.String({ description: "Existing personal memory path to copy." }),
+    to: Type.String({ description: "New destination path in team memory. Must not exist." }),
+    teamId: Type.String({ description: "Explicit destination team ID." }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return memoryRequest(new URL("/api/memory/copy-to-team", cfg.apiBaseUrl), {
+      method: "POST",
+      headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
+      body: JSON.stringify(args),
+    }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
+  },
+});
+
 export const memMoveTool = defineTool({
   name: "mem_move",
   description:
@@ -703,6 +736,8 @@ export function buildMemoryTools(): ToolDef[] {
     memReadTool,
     memSearchTool,
     memMoveTool,
+    memCopyToTeamTool,
+    artifactCopyToTeamTool,
     memLinksTool,
     memShareTool,
     artifactPublishTool,

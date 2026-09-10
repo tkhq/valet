@@ -21,8 +21,8 @@ import type { Principal } from "@valet/engine";
 import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
-import { memoryFiles, teamMembers, type MemoryFileRow } from "../schema/index.js";
-import { listTeamsForUser } from "./teams.js";
+import { memoryFiles, teamMembers, teams, type MemoryFileRow } from "../schema/index.js";
+import { listTeamsForUser, canAdministerTeam, lockTeamForOwnership } from "./teams.js";
 import {
   assertWritablePath,
   normalizePath,
@@ -657,6 +657,42 @@ export async function readOwnFile(db: AppDb, scope: MemoryScope, path: string): 
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, normalized)))
     .limit(1);
   return rows[0] ?? null;
+}
+
+/** Copy an explicit personal file into team memory without rewriting its body. */
+export async function copyFileToTeam(
+  db: AppDb,
+  scope: MemoryScope,
+  input: { from: string; to: string; teamId: string },
+): Promise<MemoryFileRow> {
+  if (scope.owner.type !== "user" || scope.owner.id !== scope.actorUserId) {
+    throw new ValidationError("Copy personal memory from your personal assistant or workspace.");
+  }
+  const source = await readOwnFile(db, scope, input.from);
+  if (!source) throw new NotFoundError("memory file", input.from);
+  const path = normalizePath(input.to);
+  assertWritablePath(path);
+  return db.transaction(async (tx) => {
+    await lockTeamForOwnership(tx, input.teamId);
+    if (!(await isTeamMember(tx, input.teamId, scope.actorUserId))) {
+      throw new NotFoundError("team", input.teamId);
+    }
+    if (!(await canAdministerTeam(tx, input.teamId, scope.actorUserId))) {
+      throw new ValidationError("Ask a team admin to copy this file into team memory.");
+    }
+    const [team] = await tx.select().from(teams).where(eq(teams.id, input.teamId)).limit(1);
+    if (!team) throw new NotFoundError("team", input.teamId);
+    const now = Date.now();
+    const [file] = await tx.insert(memoryFiles).values({
+      ...source,
+      ownerType: "team", ownerId: team.id, path, orgId: team.orgId,
+      actorUserId: scope.actorUserId, sourceSessionId: "", version: 1,
+      sourceId: null, upstreamPath: null, contentSha: null,
+      createdAt: now, updatedAt: now,
+    }).onConflictDoNothing().returning();
+    if (!file) throw new ValidationError("Destination memory file already exists. Choose another path.");
+    return file;
+  });
 }
 
 // ─── listFiles ─────────────────────────────────────────────────────────
