@@ -8,6 +8,7 @@ import type {
   WorkflowNodePermissionWire,
 } from "@valet/api/wire";
 import {
+  downloadWorkflowFile,
   useAllowWorkflowPermissions,
   useStartRun,
   useUpdateWorkflow,
@@ -314,6 +315,15 @@ function WorkflowEditorPane({
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
                 Version history
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => {
+                  void downloadWorkflowFile(workflowId).catch((err) => {
+                    console.error(err);
+                  });
+                }}
+              >
+                Download
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
