@@ -56,6 +56,9 @@ const VALID_DEFINITION = {
   edges: [{ from: "trigger", to: "stop" }],
 };
 
+const TEAM_ID_FILTER_ERROR =
+  "teamId is not supported here. Filter by owner with ownerType=team and ownerId=<team id>.";
+
 /** A `RunHost` stub that records every call instead of driving anything. */
 class StubRunHost implements RunHost {
   started: Array<{ runId: string; params: unknown; owner?: { ownerType: string; ownerId: string } }> = [];
@@ -304,6 +307,46 @@ describe("GET /api/workflows?ownerType=&ownerId=", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("ownerType must be 'user', 'team' or 'org'.");
+  });
+
+  // `teamId` scopes the sibling listings (`/api/templates`,
+  // `/api/credentials`), so a client reaches for it here too. This route used
+  // to accept it and filter on nothing, which read as the whole union
+  // presented as one team's workflows.
+  it("400s a teamId filter instead of returning an unfiltered list", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?teamId=${team.id}`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; workflows?: unknown };
+    expect(body.error).toBe(TEAM_ID_FILTER_ERROR);
+    expect(body.workflows).toBeUndefined();
+  });
+
+  it("400s teamId beside a valid owner pair rather than choosing one of them", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await createWorkflow(api.baseUrl, "personal");
+    await createTeamWorkflow(api.baseUrl, team.id, "team-owned");
+
+    const res = await fetch(
+      `${api.baseUrl}/api/workflows?ownerType=user&ownerId=local-user&teamId=${team.id}`,
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(TEAM_ID_FILTER_ERROR);
+  });
+
+  it("reads an empty teamId as unset, so a client that always sends the field still lists", async () => {
+    api = await bootTestApi();
+    await createWorkflow(api.baseUrl, "personal");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows?teamId=`);
+    expect(res.status).toBe(200);
+    const { workflows } = (await res.json()) as ListWorkflowsResponse;
+    expect(workflows.map((w) => w.name)).toEqual(["personal"]);
   });
 });
 
@@ -1996,6 +2039,18 @@ describe("GET /api/workflows/runs", () => {
 
     const ok = await fetch(`${api.baseUrl}/api/workflows/runs?since=0`);
     expect(ok.status).toBe(200);
+  });
+
+  it("400s a teamId filter, the same answer the definitions list gives", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    await seedRun(api, created.id, "wfrun_team_filter");
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs?teamId=team_platform`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; runs?: unknown };
+    expect(body.error).toBe(TEAM_ID_FILTER_ERROR);
+    expect(body.runs).toBeUndefined();
   });
 });
 
