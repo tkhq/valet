@@ -188,6 +188,71 @@ describe("workflow collector", () => {
       .orderBy(workflowDefinitions.upstreamPath);
   }
 
+  it.each([false, true])("judges a parent before its changed callee in the same sync (initial ready: %s)", async (initialReady) => {
+    const childPath = ".valet/workflows/z-child.yaml";
+    const child = (ready: boolean) => JSON.stringify({
+      valet: "workflow/v1",
+      definition: ready ? GRAPH : {
+        version: "dag/v1",
+        nodes: [
+          { id: "start", type: "trigger" },
+          { id: "tool", type: "tool", service: "linear", action: "list_issues", params: {} },
+        ],
+        edges: [{ from: "start", to: "tool" }],
+      },
+    });
+    const repo: FakeRepo = { sha: "c1", files: { [childPath]: child(initialReady) } };
+    const f = serve(repo);
+    const id = await teamSource();
+    await serviceFor(f).syncOnce(id);
+    const childId = (await mirrored())[0].id;
+    repo.files[".valet/workflows/a-parent.yaml"] = JSON.stringify({
+      valet: "workflow/v1",
+      definition: {
+        version: "dag/v1",
+        nodes: [{ id: "start", type: "trigger" }, { id: "call", type: "workflow", workflowId: childId }],
+        edges: [{ from: "start", to: "call" }],
+      },
+      schedule: { name: "Parent", cron: "0 3 * * *" },
+    });
+    repo.sha = "c2";
+    await serviceFor(f).syncOnce(id);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(initialReady ? 1 : 0);
+    repo.files[childPath] = child(!initialReady);
+    repo.sha = "c3";
+    await serviceFor(f).syncOnce(id);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(initialReady ? 0 : 1);
+  });
+
+  it.each(["removed", "invalid", "unreadable", "bad-trigger", "other-owner"])("does not certify a referenced %s file using its old definition", async (state) => {
+    const path = ".valet/workflows/z-child.yaml";
+    const repo: FakeRepo = { sha: "c1", files: { [path]: workflowYaml("Child") } };
+    const f = serve(repo);
+    const id = await teamSource();
+    await serviceFor(f).syncOnce(id);
+    const childId = (await mirrored())[0].id;
+    repo.files[".valet/workflows/a-parent.yaml"] = JSON.stringify({
+      valet: "workflow/v1",
+      definition: {
+        version: "dag/v1",
+        nodes: [{ id: "start", type: "trigger" }, { id: "call", type: "workflow", workflowId: childId }],
+        edges: [{ from: "start", to: "call" }],
+      },
+      schedule: { name: "Parent", cron: "0 3 * * *" },
+    });
+    if (state === "removed") delete repo.files[path];
+    if (state === "invalid") repo.files[path] = "valet: [";
+    if (state === "unreadable") repo.unreadable = [path];
+    if (state === "bad-trigger") repo.files[path] += "schedule: { name: bad, cron: nope }\n";
+    if (state === "other-owner") {
+      await db.update(workflowDefinitions).set({ ownerType: "user", ownerId: "u1" }).where(eq(workflowDefinitions.id, childId));
+    }
+    repo.sha = "c2";
+    const outcome = await serviceFor(f).syncOnce(id);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+    expect(outcome?.warnings.join(" ")).toContain("Reference a workflow this team owns");
+  });
+
   it("mirrors a workflow file from each root, owned by the source's team", async () => {
     const f = serve({
       sha: "c1",

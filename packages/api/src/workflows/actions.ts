@@ -172,7 +172,7 @@ function action<TParams extends TSchema>(parameters: TParams) {
 /** The credential reads the team arm gate makes before a schedule or a
  * trigger arms (`team-service-readiness.ts#teamArmBlock`). */
 function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
-  return { db: deps.db, credentials: deps.credentials, plugins: deps.plugins ?? [] };
+  return { db: deps.db, credentials: deps.credentials, plugins: deps.plugins ?? [], onePassword: deps.onePassword };
 }
 
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {

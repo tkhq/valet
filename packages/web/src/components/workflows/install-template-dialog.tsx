@@ -116,7 +116,7 @@ export function InstallTemplateDialog({
   const scheduled = template.schedule !== null;
   const missing = missingServices(template.requires);
   const unconfigured = unconfiguredServices(template.requires);
-  const installable = isInstallable(template.requires);
+  const installable = isInstallable(template.requires, template.blockers);
 
   async function submit() {
     setError(null);
@@ -220,6 +220,10 @@ export function InstallTemplateDialog({
                 {missingNote(missing, scope.teamId)}
               </p>
             )}
+            {template.blockers?.map((reason) => (
+              <p key={reason} className="text-xs leading-relaxed text-muted">{reason}</p>
+            ))}
+
             {unconfigured.length > 0 && (
               <p className="text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>
             )}

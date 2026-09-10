@@ -717,6 +717,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   });
   workflowsDepsRef.current = {
     db,
+    onePassword,
     workflowStore,
     workflowRunHost,
     actionPluginByService,

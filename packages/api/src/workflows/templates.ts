@@ -592,36 +592,6 @@ function readinessSignature(definition: WorkflowDefinition): string {
   return JSON.stringify([[...new Set(nodes)].sort(), [...new Set(calls)].sort()]);
 }
 
-/**
- * The credential services a team install of this definition could act as.
- *
- * `templateRequirements` keys a requirement by CREDENTIAL service
- * (`credentialService ?? service`, `credentialServiceFor`) while readiness
- * answers per TOOL service, so the mapping is made here. When two tool
- * services share one credential service, the requirement counts as
- * connected only while every one of them is ready: the requirement is a
- * single flag, and the install refuses on the first tool the team cannot
- * act as.
- */
-function teamConnectedServices(
-  definition: WorkflowDefinition,
-  actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
-  readiness: TeamServiceReadiness,
-): Set<string> {
-  const ready = new Set(readiness.ready);
-  const connected = new Set<string>();
-  const blocked = new Set<string>();
-  for (const node of toolNodesOf(definition)) {
-    const entry = actionPluginByService.get(node.service);
-    if (!entry) continue;
-    const { service } = credentialServiceFor(entry);
-    if (ready.has(node.service)) connected.add(service);
-    else blocked.add(service);
-  }
-  for (const service of blocked) connected.delete(service);
-  return connected;
-}
-
 export async function listWorkflowTemplateSummaries(
   deps: TemplateServiceDeps,
   caller: { userId: string; orgId: string },
@@ -700,14 +670,27 @@ export async function listWorkflowTemplateSummaries(
         { orgId: caller.orgId, teamId, definition },
       );
     readinessBySignature.set(signature, pending);
+    const readiness = await pending;
+    // Map the whole closure to credential keys; any blocked alias wins.
+    const byService = new Map<string, WorkflowTemplateRequirement>();
+    const blocked = new Set(readiness.blocked.map((entry) => entry.service));
+    for (const toolService of [...readiness.ready, ...blocked]) {
+      const entry = deps.actionPluginByService.get(toolService);
+      const { service, dynamic } = entry
+        ? credentialServiceFor(entry)
+        : { service: toolService, dynamic: false };
+      const connected = !blocked.has(toolService) && byService.get(service)?.connected !== false;
+      byService.set(service, {
+        service,
+        connected,
+        ...(dynamic ? { dynamic: true } : {}),
+        ...(unavailable.has(service) ? { unconfigured: true } : {}),
+      });
+    }
     summaries.push({
       ...summary,
-      requires: templateRequirements(
-        definition,
-        deps.actionPluginByService,
-        teamConnectedServices(definition, deps.actionPluginByService, await pending),
-        unavailable,
-      ),
+      requires: [...byService.values()],
+      blockers: teamArmRefusals(readiness).map((refusal) => refusal.reason),
     });
   }
   return summaries;

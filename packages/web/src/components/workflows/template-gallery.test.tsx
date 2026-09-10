@@ -114,6 +114,20 @@ describe("TemplateGallery", () => {
     expect(screen.getByText(/check that the server is running, then reload/i)).toBeTruthy();
   });
 
+  it("disables Install and shows the fix for an unverifiable nested call", () => {
+    const reason = "Reference a workflow this team owns, or remove the call.";
+    teamId = "team-1";
+    templatesQuery.data = { templates: [{ ...memorySweep, blockers: [reason] }] };
+    render(<TemplateGallery />);
+    expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
+    expect(screen.getByText(reason)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText(reason)).toBeTruthy();
+    expect(dialog.getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
+    expect(installMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("shows what a template does, what it touches, and when it runs", () => {
     templatesQuery.data = { templates: [memorySweep] };
     render(<TemplateGallery />);

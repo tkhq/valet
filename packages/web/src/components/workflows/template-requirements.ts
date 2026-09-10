@@ -32,8 +32,8 @@ export function unconfiguredServices(requires: WorkflowTemplateRequirement[]): s
   return requires.filter((r) => r.unconfigured === true).map((r) => displayName(r.service));
 }
 
-export function isInstallable(requires: WorkflowTemplateRequirement[]): boolean {
-  return missingServices(requires).length === 0 && unconfiguredServices(requires).length === 0;
+export function isInstallable(requires: WorkflowTemplateRequirement[], blockers: string[] = []): boolean {
+  return blockers.length === 0 && missingServices(requires).length === 0 && unconfiguredServices(requires).length === 0;
 }
 
 /** One sentence for the services an admin has to set up, worded like the

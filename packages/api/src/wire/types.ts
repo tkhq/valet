@@ -2382,6 +2382,8 @@ export interface WorkflowTemplateSummary {
   steps: string[];
   schedule: WorkflowTemplateSchedule | null;
   requires: WorkflowTemplateRequirement[];
+  /** Team readiness refusals, including calls whose definitions cannot be verified. */
+  blockers?: string[];
   inputs: WorkflowTemplateInput[];
   /**
    * Limits the installer must know BEFORE installing — a step whose action

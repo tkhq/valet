@@ -156,7 +156,11 @@ export async function teamArmBlock(
  * `{ownerType, ownerId}` exactly and answers null on a mismatch, the same
  * as for a missing id.
  */
-function teamWorkflowResolver(db: AppDb, teamId: string) {
+function teamWorkflowResolver(
+  db: AppDb,
+  teamId: string,
+  definitions?: ReadonlyMap<string, WorkflowDefinition | null>,
+) {
   return async (workflowId: string): Promise<WorkflowDefinition | null> => {
     const rows = await db
       .select({ definition: workflowDefinitions.definition })
@@ -172,7 +176,9 @@ function teamWorkflowResolver(db: AppDb, teamId: string) {
     const row = rows[0];
     // The column is jsonb, so drizzle types it `unknown`. The dag validator
     // ran before any definition reached the row.
-    return row ? (row.definition as WorkflowDefinition) : null;
+    if (!row) return null;
+    if (definitions?.has(workflowId)) return definitions.get(workflowId) ?? null;
+    return row.definition as WorkflowDefinition;
   };
 }
 
@@ -315,11 +321,17 @@ async function unpinnedGithubGate(
 
 export async function teamServiceReadiness(
   deps: TeamServiceReadinessDeps,
-  opts: { orgId: string; teamId: string; definition: WorkflowDefinition },
+  opts: {
+    orgId: string;
+    teamId: string;
+    definition: WorkflowDefinition;
+    /** Sync-local definitions by ID. Exact owner authorization still uses the database. */
+    definitions?: ReadonlyMap<string, WorkflowDefinition | null>;
+  },
 ): Promise<TeamServiceReadiness> {
   // A `workflow` node runs the callee's nodes as this same team, so its
   // tool nodes are this team's to fund (TKAI-443).
-  const closure = await toolNodeClosure(opts.definition, teamWorkflowResolver(deps.db, opts.teamId));
+  const closure = await toolNodeClosure(opts.definition, teamWorkflowResolver(deps.db, opts.teamId, opts.definitions));
   const nodes = closure.nodes;
   const unverifiable: UnverifiableWorkflowCall[] = closure.unresolved.map((workflowId) => ({
     workflowId,
