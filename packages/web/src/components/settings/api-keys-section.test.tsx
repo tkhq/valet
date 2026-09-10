@@ -14,6 +14,8 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import type { OrgDirectoryResponse, TeamApiKeySummary } from "@valet/api/wire";
 
 const createTeamKeyMutate = vi.fn();
+const createTeamKeyTarget = vi.fn();
+const createPersonalKeyMutate = vi.fn();
 
 /** The fields `PersonalApiKeyRow` reads off a better-auth key summary. */
 type PersonalKeyStub = {
@@ -54,6 +56,10 @@ vi.mock("~/api/settings", () => ({
           callerRole: "admin",
           defaultModel: null,
         },
+        {
+          id: "team_2", orgId: "org_1", name: "Support", origin: "local", externalId: null,
+          createdAt: 1, memberCount: 2, callerRole: "admin", defaultModel: null,
+        },
       ],
     },
     isLoading: false,
@@ -69,10 +75,17 @@ vi.mock("~/api/settings", () => ({
 
 vi.mock("~/api/api-keys", () => ({
   useApiKeys: () => ({ data: personalKeys, isLoading: false, error: null }),
-  useCreateApiKey: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useCreateApiKey: () => ({ mutate: createPersonalKeyMutate, isPending: false, error: null }),
   useRevokeApiKey: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useTeamApiKeys: () => ({ data: teamKeys, isLoading: false, error: null }),
-  useCreateTeamApiKey: () => ({ mutate: createTeamKeyMutate, isPending: false, error: null }),
+  useCreateTeamApiKey: (teamId: string) => ({
+    mutate: (name: string, options: unknown) => {
+      createTeamKeyTarget(teamId, name);
+      createTeamKeyMutate(name, options);
+    },
+    isPending: false,
+    error: null,
+  }),
   useRevokeTeamApiKey: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
 
@@ -80,7 +93,16 @@ vi.mock("~/lib/use-copy", () => ({
   useCopyToClipboard: () => ({ copied: false, copy: vi.fn() }),
 }));
 
+vi.mock("@tanstack/react-router", () => ({
+  createFileRoute: () => (config: unknown) => config,
+  useRouterState: () => "/settings/api-keys",
+  Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
+  Navigate: ({ to }: { to: string }) => <div data-testid="redirect">{to}</div>,
+  Outlet: () => <ApiKeysSection />,
+}));
+
 import { ApiKeysSection } from "./api-keys-section";
+import { SettingsLayout } from "~/routes/settings";
 
 function Wrapper({ children }: { children: ReactNode }) {
   return <div>{children}</div>;
@@ -193,5 +215,32 @@ describe("ApiKeysSection — personal workspace", () => {
     expect(screen.getByText("Laptop script")).toBeTruthy();
     expect(screen.queryByText(/Created by/)).toBeNull();
     expect(screen.queryByText("Creator not recorded")).toBeNull();
+  });
+});
+
+
+describe("API keys in contextual settings", () => {
+  it("keeps real team controls reachable and resets the draft before changing team", () => {
+    scope = { key: "team_1", teamId: "team_1" };
+    teamKeys = [];
+    personalKeys = [];
+    createTeamKeyTarget.mockClear();
+    createPersonalKeyMutate.mockClear();
+    const view = render(<SettingsLayout />);
+    expect(screen.getByRole("link", { name: "API keys" }).getAttribute("href")).toBe("/settings/api-keys");
+    expect(screen.queryByTestId("redirect")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Platform draft" } });
+    scope = { key: "team_2", teamId: "team_2" };
+    view.rerender(<SettingsLayout />);
+    expect(screen.getByLabelText("Key name")).toHaveProperty("value", "");
+    expect(screen.queryByText("Platform")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Support CI" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(createTeamKeyTarget).toHaveBeenCalledExactlyOnceWith("team_2", "Support CI");
+    expect(createPersonalKeyMutate).not.toHaveBeenCalled();
+    scope = { key: "user", teamId: undefined };
+    view.rerender(<SettingsLayout />);
+    expect(screen.queryByTestId("redirect")).toBeNull();
+    expect(screen.getByLabelText("Key name")).toHaveProperty("value", "");
   });
 });
