@@ -43,6 +43,7 @@ import {
 } from "~/api/settings";
 import { ModelCombobox } from "~/components/settings/model-combobox";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
+import { displayName } from "~/components/integrations/display-name";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { curatedForCatalogId } from "~/lib/models";
 import { isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
@@ -386,14 +387,19 @@ function TeamRow({
  * sharing". A direct row holds the team's own secret, and dropping it deletes
  * that secret. Calling both "Disconnect" read as though it would take a
  * member's personal connection away with it.
+ *
+ * Both targets name the service through `displayName`. `row.service` is the
+ * wire id, and spelling it raw made one credential read "Linear" on
+ * Integrations and in every API refusal, and "linear" here.
  */
 function removalLabels(
   row: CredentialSummary,
   teamName: string,
 ): { action: string; pending: string; target: string } {
+  const service = displayName(row.service);
   return row.delegatedFrom
-    ? { action: "Stop sharing", pending: "Stopping…", target: `${row.service} with ${teamName}` }
-    : { action: "Disconnect", pending: "Disconnecting…", target: `${row.service} from ${teamName}` };
+    ? { action: "Stop sharing", pending: "Stopping…", target: `${service} with ${teamName}` }
+    : { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` };
 }
 
 /**
@@ -420,11 +426,12 @@ function TeamCredentials({
   const dialogLabels = removing ? removalLabels(removing, team.name) : null;
 
   function removalNote(row: CredentialSummary): string {
-    const loss = `Sessions and workflows that run as ${team.name} lose access to ${row.service}.`;
+    const service = displayName(row.service);
+    const loss = `Sessions and workflows that run as ${team.name} lose access to ${service}.`;
     return row.delegatedFrom
       ? `${loss} This removes the team's link only. ${nameFor(row.delegatedFrom)} keeps their own ` +
-          `${row.service} connection and can share it with the team again from Integrations.`
-      : `${loss} This deletes the credential stored on the team. Connect ${row.service} again from ` +
+          `${service} connection and can share it with the team again from Integrations.`
+      : `${loss} This deletes the credential stored on the team. Connect ${service} again from ` +
           `Integrations to give the team access back.`;
   }
 
@@ -442,7 +449,7 @@ function TeamCredentials({
           return (
             <li key={row.service} className="flex items-center justify-between gap-2 py-1">
               <div className="min-w-0">
-                <p className="truncate text-sm text-ink">{row.service}</p>
+                <p className="truncate text-sm text-ink">{displayName(row.service)}</p>
                 <p className="text-xs text-muted">
                   {row.delegatedFrom
                     ? `Shared by ${nameFor(row.delegatedFrom)}`
