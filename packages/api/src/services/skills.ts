@@ -734,6 +734,10 @@ export function rowToSkillSource(row: SkillRow): SkillSource {
     description: row.description,
     content: row.content,
     source: row.origin === "repo" ? "repo" : "user",
+    key: `stored:${row.id}`,
+    storedSkillId: row.id,
+    contentSha: row.contentSha,
+    origin: row.origin,
     ...(invocation ? { invocation } : {}),
     ...(argHint ? { argHint } : {}),
   };

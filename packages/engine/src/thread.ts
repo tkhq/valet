@@ -112,7 +112,11 @@ import type {
   ResolvedModel,
   SessionEntry,
   SignalContent,
+  SkillContextAttributionFact,
+  SkillInvocationFact,
+  SkillInvocationPath,
   SkillInvokeOptions,
+  SkillSource,
   SettlePatchRef,
   SubmissionOutcome,
   SubmissionResult,
@@ -440,6 +444,8 @@ export class Thread {
    * conservative behavior we want — the sandbox may have been rebuilt.
    */
   private readonly fileReadHashes = new Map<string, string>();
+  /** Skill bodies that remain in this thread's live LLM context. */
+  private readonly activeSkillInvocations = new Map<string, SkillInvocationFact>();
   /** Previous turn's cache snapshot for break classification (TKAI-320). */
   private prevCacheSnapshot: CacheTurnSnapshot | undefined;
   /**
@@ -610,7 +616,20 @@ export class Thread {
       return this.submitCollect(content, opts);
     }
 
-    const prepared = this.prepareSubmissionContent(content, opts);
+    const skillFact = opts.skillInvocation
+      ? this.buildSkillInvocationFact(
+          opts.skillInvocation.skill,
+          opts.skillInvocation.path,
+          promptText(content),
+          opts.author?.id ?? null,
+        )
+      : undefined;
+    const prepared = this.prepareSubmissionContent(content, {
+      ...opts,
+      metadata: skillFact
+        ? { ...opts.metadata, skillInvocation: skillFact }
+        : opts.metadata,
+    });
 
     const item = this.buildQueueItem(prepared.content, {
       dispatchId: prepared.dispatchId,
@@ -637,6 +656,7 @@ export class Thread {
       item,
       effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
     );
+    if (skillFact && wasAdmitted) await this.persistSkillInvocation(skillFact);
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
     }
@@ -1100,7 +1120,89 @@ export class Thread {
       role: undefined, // role not currently part of SkillInvokeOptions; see types.ts
       resultSchema: opts.resultSchema,
       metadata: { skill: name, syntheticFrom: "skill" },
+      skillInvocation: { skill, path: "host_thread_skill" },
     });
+  }
+
+  private replaceActiveSkillInvocations(entries: readonly SessionEntry[]): void {
+    this.activeSkillInvocations.clear();
+    for (const fact of skillInvocationsInContext(entries)) {
+      this.activeSkillInvocations.set(fact.id, fact);
+    }
+  }
+
+  private buildSkillInvocationFact(
+    skill: SkillSource,
+    path: SkillInvocationPath,
+    injectedText: string,
+    invokerUserId: string | null,
+    id = uid("ski"),
+  ): SkillInvocationFact {
+    return {
+      id,
+      createdAt: Date.now(),
+      sessionId: this.session.id,
+      threadId: this.id,
+      invokerUserId,
+      invocationEntryId: null,
+      path,
+      skillKey: skill.key ?? `${skill.source ?? "repo"}:${skill.name}`,
+      skillName: skill.name,
+      storedSkillId: skill.storedSkillId ?? null,
+      pluginName: skill.pluginName ?? null,
+      origin: skill.origin ?? (skill.source === "plugin" ? "plugin" : skill.source === "repo" ? "repo" : "local"),
+      contentSha: skill.contentSha ?? `unversioned:${skill.content.length}`,
+      injectedCharacters: injectedText.length,
+      estimatedBodyTokens: estimateTokens(injectedText),
+    };
+  }
+
+  private async persistSkillInvocation(fact: SkillInvocationFact): Promise<void> {
+    try {
+      await this.session.options.skillTelemetry?.recordInvocation(fact);
+    } catch (err) {
+      console.error("skill invocation telemetry write failed:", err);
+    }
+  }
+
+  private async recordModelToolSkillInvocation(
+    skill: SkillSource,
+    path: "model_tool",
+    injectedText: string,
+    toolCallId: string,
+  ): Promise<SkillInvocationFact> {
+    const fact = this.buildSkillInvocationFact(
+      skill,
+      path,
+      injectedText,
+      this.runningItem?.author?.id ?? null,
+      `ski:${this.session.id}:${this.id}:${toolCallId}`,
+    );
+    await this.persistSkillInvocation(fact);
+    this.activeSkillInvocations.set(fact.id, fact);
+    return fact;
+  }
+
+  private async persistSkillContextAttributions(): Promise<void> {
+    const sink = this.session.options.skillTelemetry;
+    if (!sink || this.activeSkillInvocations.size === 0) return;
+    const requestId = uid("llm");
+    const createdAt = Date.now();
+    const facts: SkillContextAttributionFact[] = [...this.activeSkillInvocations.values()].map(
+      (invocation) => ({
+        skillInvocationId: invocation.id,
+        llmRequestId: requestId,
+        sessionId: this.session.id,
+        threadId: this.id,
+        createdAt,
+        estimatedSkillTokens: invocation.estimatedBodyTokens,
+      }),
+    );
+    try {
+      await sink.recordContextAttributions(facts);
+    } catch (err) {
+      console.error("skill context attribution telemetry write failed:", err);
+    }
   }
 
   async abort(): Promise<void> {
@@ -1846,6 +1948,7 @@ export class Thread {
    * the toolResult message before continuing.
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
+    this.replaceActiveSkillInvocations(entries);
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
@@ -3158,6 +3261,7 @@ export class Thread {
       // of toolResult emission (no callId is ever answered twice).
       const entries = await store.getEntries(this.session.id, this.id);
       const resumeModel = this.effectiveModelLenient();
+      this.replaceActiveSkillInvocations(entries);
       this.agent.state.messages = entriesToAgentMessages(
         entries,
         {
@@ -3580,6 +3684,10 @@ export class Thread {
     // `agent.state.messages` across subsequent turns: the LLM sees the image
     // on every downstream call, not just the turn it was uploaded on.
     const { text, attachments } = await this.appendUserEntry(item);
+    const queuedSkillFact = item.metadata?.skillInvocation;
+    if (isSkillInvocationFact(queuedSkillFact)) {
+      this.activeSkillInvocations.set(queuedSkillFact.id, queuedSkillFact);
+    }
 
     // Build the AgentTool list with closures over this turn's ToolContext.
     this.agent.state.tools = this.buildTools();
@@ -4222,6 +4330,7 @@ export class Thread {
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
       const updatedEntries = await store.getEntries(session.id, this.id);
+      this.replaceActiveSkillInvocations(updatedEntries);
       this.agent.state.messages = entriesToAgentMessages(
         updatedEntries,
         {
@@ -4344,8 +4453,9 @@ export class Thread {
       // Defaults, not overrides (TKAI-319): anything pi-agent-core forwards
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
-      streamFn: (model, context, options) =>
-        streamSimple(model, {
+      streamFn: async (model, context, options) => {
+        await this.persistSkillContextAttributions();
+        return streamSimple(model, {
           ...context,
           systemPrompt: this.modelSystemPrompt(context.systemPrompt, model),
         }, {
@@ -4378,7 +4488,8 @@ export class Thread {
             this.reasoningDisabled ? undefined : this.session.options.sampling?.reasoning,
           ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
-        }),
+        });
+      },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {
@@ -4461,6 +4572,8 @@ export class Thread {
       cwd: session.options.workspace,
       credentials: session.credentialProvider(),
       sandbox: session.sandbox,
+      recordSkillInvocation: (skill, path, injectedText) =>
+        this.recordModelToolSkillInvocation(skill, path, injectedText, toolCallId),
       fileReads: {
         get: (path) => this.fileReadHashes.get(path),
         record: (path, contentHash) => this.fileReadHashes.set(path, contentHash),
@@ -4749,6 +4862,10 @@ export class Thread {
               ? (event.result as Record<string, unknown>)
               : {};
           part.result = { ...structured, text: resultText };
+          const skillFact = this.activeSkillInvocations.get(
+            `ski:${this.session.id}:${this.id}:${event.toolCallId}`,
+          );
+          if (skillFact) part.skillInvocation = skillFact;
         }
         // The next LLM round begins once tool results are in — re-stamp the
         // synthesized round start so llm.generate covers its full wait.
@@ -5463,6 +5580,43 @@ export function attachmentsToImageBlocks(
     blocks.push({ type: "image", data: imageData, mimeType: att.mimeType });
   }
   return blocks;
+}
+
+function isSkillInvocationFact(value: unknown): value is SkillInvocationFact {
+  if (!value || typeof value !== "object") return false;
+  const fact = value as Record<string, unknown>;
+  return (
+    typeof fact.id === "string" &&
+    typeof fact.skillKey === "string" &&
+    typeof fact.skillName === "string" &&
+    typeof fact.estimatedBodyTokens === "number"
+  );
+}
+
+/** Return skill bodies that are still present in the active transcript. */
+export function skillInvocationsInContext(
+  entries: readonly SessionEntry[],
+): SkillInvocationFact[] {
+  let covered = new Set<string>();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type === "compaction") {
+      covered = new Set(entry.coveredEntryIds);
+      break;
+    }
+  }
+  const facts: SkillInvocationFact[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message" || covered.has(entry.id)) continue;
+    const promptFact = entry.metadata?.skillInvocation;
+    if (isSkillInvocationFact(promptFact)) facts.push(promptFact);
+    for (const part of entry.parts ?? []) {
+      if (part.type === "tool_call" && !part.elided && part.skillInvocation) {
+        facts.push(part.skillInvocation);
+      }
+    }
+  }
+  return facts;
 }
 
 export function entriesToAgentMessages(

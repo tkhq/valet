@@ -15,6 +15,7 @@ import type {
   UsageBucket,
   UsageDrillItem,
   UsageSessionRow,
+  SkillUsageBreakdown,
   UsageSummaryResponse,
   UsageUseCase,
   UsageWindow,
@@ -155,6 +156,77 @@ function toBucket(r: BucketRow | undefined): UsageBucket {
   };
 }
 
+function skillScopeWhere(scope: UsageScope): SQL {
+  const orgId = sql`COALESCE(s.org_id, d.org_id)`;
+  const ownerType = sql`COALESCE(s.owner_type, r.owner_type)`;
+  const ownerId = sql`COALESCE(s.owner_id, r.owner_id)`;
+  const userId = sql`CASE
+    WHEN s.id IS NOT NULL THEN s.user_id
+    WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '')
+  END`;
+  const base = sql`${orgId} = ${scope.orgId}`;
+  switch (scope.scope) {
+    case "team":
+      return sql`${base} AND ${ownerType} = 'team' AND ${ownerId} = ${scope.teamId}`;
+    case "me":
+      return sql`${base} AND ${userId} = ${scope.userId}`;
+    case "org":
+      return base;
+  }
+}
+
+interface SkillBreakdownRow {
+  skill_key: string;
+  skill_name: string;
+  origin: "plugin" | "local" | "repo";
+  plugin_name: string | null;
+  invocations: unknown;
+  unique_invokers: unknown;
+  unassigned_invocations: unknown;
+  attributed_context_tokens: unknown;
+  carrying_calls: unknown;
+}
+
+async function getSkillBreakdown(
+  db: AppDb,
+  since: number,
+  scope: UsageScope,
+): Promise<SkillUsageBreakdown[]> {
+  const where = skillScopeWhere(scope);
+  const result = (await db.execute(sql`
+    SELECT si.skill_key, si.skill_name, si.origin, si.plugin_name,
+           COUNT(DISTINCT si.id) FILTER (WHERE si.created_at >= ${since}) AS invocations,
+           COUNT(DISTINCT si.invoker_user_id) FILTER (WHERE si.created_at >= ${since}) AS unique_invokers,
+           COUNT(DISTINCT si.id) FILTER (
+             WHERE si.created_at >= ${since} AND si.invoker_user_id IS NULL
+           ) AS unassigned_invocations,
+           COALESCE(SUM(sca.estimated_skill_tokens) FILTER (WHERE sca.created_at >= ${since}), 0)
+             AS attributed_context_tokens,
+           COUNT(DISTINCT sca.llm_request_id) FILTER (WHERE sca.created_at >= ${since})
+             AS carrying_calls
+    FROM skill_invocations si
+    LEFT JOIN skill_context_attributions sca ON sca.skill_invocation_id = si.id
+    LEFT JOIN agent_sessions s ON s.id = si.session_id
+    LEFT JOIN workflow_runs r
+      ON si.session_id LIKE 'wf:%' AND r.id = split_part(si.session_id, ':', 2)
+    LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
+    WHERE ${where} AND (si.created_at >= ${since} OR sca.created_at >= ${since})
+    GROUP BY si.skill_key, si.skill_name, si.origin, si.plugin_name
+    ORDER BY invocations DESC, si.skill_name ASC
+  `)) as { rows: SkillBreakdownRow[] };
+  return result.rows.map((row) => ({
+    skillKey: row.skill_key,
+    name: row.skill_name,
+    origin: row.origin,
+    ...(row.plugin_name ? { pluginName: row.plugin_name } : {}),
+    invocations: toNum(row.invocations),
+    uniqueInvokers: toNum(row.unique_invokers),
+    unassignedInvocations: toNum(row.unassigned_invocations),
+    attributedContextTokens: toNum(row.attributed_context_tokens),
+    carryingCalls: toNum(row.carrying_calls),
+  }));
+}
+
 // ── Breakdown ────────────────────────────────────────────────────────────────
 
 /** All-use-case spend for a window: totals, by use case, by model, by day, and
@@ -166,7 +238,7 @@ export async function getUsageBreakdown(
   const since = Date.now() - opts.windowMs;
   const where = scopeWhere("", since, opts.scope);
 
-  const [byUseCase, byModel, byDay, totals, byUser] = await Promise.all([
+  const [byUseCase, byModel, byDay, totals, byUser, skillBreakdown] = await Promise.all([
     db.execute(sql`SELECT use_case, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY use_case`) as Promise<{ rows: (BucketRow & { use_case: string })[] }>,
     db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
     // `floor` truncates the day index deterministically whether Postgres infers
@@ -180,6 +252,7 @@ export async function getUsageBreakdown(
         // dropping it made Σ byUser < totalCostUsd.
         (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
       : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
+    getSkillBreakdown(db, since, opts.scope),
   ]);
 
   const total = toBucket(totals.rows[0]);
@@ -206,6 +279,7 @@ export async function getUsageBreakdown(
     totalCacheWriteTokens: total.cacheWriteTokens,
     totalTurns: total.turns,
     unpricedTurns: total.unpricedTurns,
+    skillBreakdown,
     byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
     byModel: byModel.rows.map((r) => ({ model: r.model, ...toBucket(r) })),
     byUser: byUserOut,

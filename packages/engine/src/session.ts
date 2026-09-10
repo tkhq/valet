@@ -809,7 +809,8 @@ export class Session {
         const opts2 = outcome.skill
           ? {
               ...opts,
-              metadata: { ...opts.metadata, skill: outcome.skill.name, skillArgs: outcome.skill.args },
+              metadata: { ...opts.metadata, skill: outcome.skill.source.name, skillArgs: outcome.skill.args },
+              skillInvocation: { skill: outcome.skill.source, path: outcome.skill.path },
             }
           : opts;
         return thread.submitPrompt(withText(content, outcome.text), opts2);

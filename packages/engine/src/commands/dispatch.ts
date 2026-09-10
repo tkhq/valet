@@ -1,6 +1,7 @@
 import { buildSkillBlock } from "@valet/shared";
 import { parseCommandArgs, substituteArgs } from "./args.js";
 import type { CommandRegistry } from "./registry.js";
+import type { SkillSource } from "../types.js";
 import type { ResolvedCommand } from "./types.js";
 
 export type DispatchOutcome =
@@ -9,13 +10,10 @@ export type DispatchOutcome =
       kind: "expand";
       text: string;
       /**
-       * Set for a context-invocation skill: the skill name and the raw
-       * args the user typed. Callers stamp these onto the submission's
-       * metadata so clients can render the expansion as a skill card
-       * without re-parsing the text. Absent for prompt-invocation skills —
-       * their expansion IS the user's message and renders as prose.
+       * Identifies either skill expansion for telemetry. Context skills also
+       * use the raw args to render a skill card. Prompt skills render as prose.
        */
-      skill?: { name: string; args: string };
+      skill?: { source: SkillSource; args: string; path: "slash_context" | "slash_prompt" };
     }
   | { kind: "execute"; resolved: ResolvedCommand; args: string[]; raw: string };
 
@@ -54,12 +52,16 @@ export function dispatchCommand(text: string, registry: CommandRegistry): Dispat
       const { skill } = resolved;
       if (skill.invocation === "prompt") {
         const args = parseCommandArgs(raw);
-        return { kind: "expand", text: substituteArgs(skill.content, args) };
+        return {
+          kind: "expand",
+          text: substituteArgs(skill.content, args),
+          skill: { source: skill, args: raw, path: "slash_prompt" },
+        };
       }
       return {
         kind: "expand",
         text: buildSkillBlock(skill.name, skill.content, raw),
-        skill: { name: skill.name, args: raw },
+        skill: { source: skill, args: raw, path: "slash_context" },
       };
     }
 

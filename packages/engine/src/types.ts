@@ -331,6 +331,11 @@ export interface PromptOptions {
   role?: string;
   resultSchema?: TSchema;
   metadata?: Record<string, unknown>;
+  /** Trusted engine/host metadata for one slash-expanded skill prompt. */
+  skillInvocation?: {
+    skill: SkillSource;
+    path: "host_thread_skill" | "slash_context" | "slash_prompt";
+  };
   /** Idempotent admission key. Re-submitting the same dispatchId returns the existing submission. */
   dispatchId?: string;
   /**
@@ -394,6 +399,8 @@ export type MessagePart =
        * `result` — their original output is gone.
        */
       elided?: boolean;
+      /** Durable skill invocation identity for context attribution. */
+      skillInvocation?: SkillInvocationFact;
     }
   | { type: "attachment"; attachment: ToolAttachment }
   | { type: "error"; message: string; code?: string };
@@ -675,6 +682,12 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /** Record a model-tool skill invocation in the current thread. */
+  recordSkillInvocation?: (
+    skill: SkillSource,
+    path: "model_tool",
+    injectedText: string,
+  ) => Promise<SkillInvocationFact>;
   /**
    * Per-thread record of the model's file reads, backing the
    * read-before-write staleness gate (TKAI-318). `get` returns the content
@@ -2068,6 +2081,16 @@ export interface SkillSource {
   /** Spec field. A map of text keys to text values, for properties the
    * spec itself does not define. */
   metadata?: Record<string, string>;
+  /** Stable source-qualified identity used by usage telemetry. */
+  key?: string;
+  /** Immutable stored-row identity. Present only for local and repo skills. */
+  storedSkillId?: string;
+  /** Plugin manifest name. Present only for plugin skills. */
+  pluginName?: string;
+  /** SHA-256 of the injected body. */
+  contentSha?: string;
+  /** Product-facing source label. */
+  origin?: "plugin" | "local" | "repo";
   /** Spec field `allowed-tools`, in camelCase: a space-separated list of
    * pre-approved tools. Experimental in the spec, and Valet does not act
    * on it yet. */
@@ -2078,6 +2101,44 @@ export interface SkillSource {
   invocation?: "context" | "prompt";
   /** Autocomplete hint for the first argument, e.g. "<topic> [audience]". */
   argHint?: string;
+}
+
+export type SkillInvocationPath =
+  | "model_tool"
+  | "host_thread_skill"
+  | "slash_context"
+  | "slash_prompt";
+
+export interface SkillInvocationFact {
+  id: string;
+  createdAt: number;
+  sessionId: string;
+  threadId: string;
+  invokerUserId: string | null;
+  invocationEntryId: string | null;
+  path: SkillInvocationPath;
+  skillKey: string;
+  skillName: string;
+  storedSkillId: string | null;
+  pluginName: string | null;
+  origin: "plugin" | "local" | "repo";
+  contentSha: string;
+  injectedCharacters: number;
+  estimatedBodyTokens: number;
+}
+
+export interface SkillContextAttributionFact {
+  skillInvocationId: string;
+  llmRequestId: string;
+  sessionId: string;
+  threadId: string;
+  createdAt: number;
+  estimatedSkillTokens: number;
+}
+
+export interface SkillTelemetrySink {
+  recordInvocation(fact: SkillInvocationFact): Promise<void>;
+  recordContextAttributions(facts: SkillContextAttributionFact[]): Promise<void>;
 }
 
 export interface SkillInvokeOptions {
@@ -2197,6 +2258,8 @@ export interface CreateSessionOptions {
   credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
   /** Resolve the assistant identity used by provider-specific outbound actions. */
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
+  /** Optional durable skill usage telemetry sink supplied by the host. */
+  skillTelemetry?: SkillTelemetrySink;
   /**
    * Optional host-provided org-policy resolver. Absent === the engine's
    * built-in fallback: `call_tool` derives approval from each action's

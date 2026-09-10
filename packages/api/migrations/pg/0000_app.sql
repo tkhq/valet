@@ -582,6 +582,42 @@ CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
 --> statement-breakpoint
+CREATE TABLE "skill_invocations" (
+  "id" text PRIMARY KEY NOT NULL,
+  "created_at" bigint NOT NULL,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "invoker_user_id" text,
+  "invocation_entry_id" text,
+  "path" text NOT NULL,
+  "skill_key" text NOT NULL,
+  "skill_name" text NOT NULL,
+  "stored_skill_id" text,
+  "plugin_name" text,
+  "origin" text NOT NULL,
+  "content_sha" text NOT NULL,
+  "injected_characters" integer NOT NULL,
+  "estimated_body_tokens" integer NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "skill_invocations_org_created" ON "skill_invocations" ("org_id","created_at");
+--> statement-breakpoint
+CREATE INDEX "skill_invocations_session_thread_created" ON "skill_invocations" ("session_id","thread_id","created_at");
+--> statement-breakpoint
+CREATE INDEX "skill_invocations_skill_created" ON "skill_invocations" ("skill_key","created_at");
+--> statement-breakpoint
+CREATE TABLE "skill_context_attributions" (
+  "skill_invocation_id" text NOT NULL,
+  "llm_request_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  "estimated_skill_tokens" integer NOT NULL,
+  CONSTRAINT "skill_context_attributions_skill_invocation_id_llm_request_id_pk"
+    PRIMARY KEY("skill_invocation_id","llm_request_id")
+);
+--> statement-breakpoint
 CREATE TABLE "skill_sources" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,

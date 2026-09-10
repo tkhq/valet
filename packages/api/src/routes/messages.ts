@@ -748,7 +748,7 @@ export async function submitSessionPrompt(
   // as a skill card without re-parsing the text.
   const skillMetadata =
     outcome?.kind === "expand" && outcome.skill
-      ? { skill: outcome.skill.name, skillArgs: outcome.skill.args }
+      ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
 
   let receipt;
@@ -763,6 +763,9 @@ export async function submitSessionPrompt(
         : await thread.submitPrompt(withAttachments(promptText), {
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
             ...(skillMetadata ? { metadata: skillMetadata } : {}),
+            ...(outcome?.kind === "expand" && outcome.skill
+              ? { skillInvocation: { skill: outcome.skill.source, path: outcome.skill.path } }
+              : {}),
             ...(author ? { author } : {}),
           });
   } catch (err) {

@@ -57,7 +57,7 @@ describe("dispatchCommand", () => {
       expect(o.text).toBe(buildSkillBlock("review", reviewSkill.content, "src/"));
       // The skill stamp lets callers put the invocation on the submission's
       // metadata so clients render a card without re-parsing the text.
-      expect(o.skill).toEqual({ name: "review", args: "src/" });
+      expect(o.skill).toEqual({ source: reviewSkill, args: "src/", path: "slash_context" });
     }
   });
 
@@ -72,9 +72,11 @@ describe("dispatchCommand", () => {
     if (o.kind === "expand") {
       expect(o.text).toBe("Summarize auth today. Audience: the team.");
       expect(o.text).not.toContain("<skill");
-      // Prompt skills expand to the user's own message — never stamped,
-      // never rendered as a card.
-      expect(o.skill).toBeUndefined();
+      expect(o.skill).toEqual({
+        source: promptSkill,
+        args: 'auth "the team"',
+        path: "slash_prompt",
+      });
     }
   });
 

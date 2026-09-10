@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * Host-side providers for the slash-command subsystem (slash-commands plan,
  * Task 10; skills-as-commands plan, Task 4). These adapt app data (Drizzle, the
@@ -88,6 +89,9 @@ function parseRepoPromptSkills(stdout: string): SkillSource[] {
       ...(fm.argHint ? { argHint: fm.argHint } : {}),
       content,
       source: "repo",
+      key: `repo:${name}`,
+      contentSha: createHash("sha256").update(content).digest("hex"),
+      origin: "repo",
       invocation: fm.invocation === "context" ? "context" : "prompt",
     });
   }

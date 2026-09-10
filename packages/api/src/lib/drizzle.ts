@@ -170,6 +170,43 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "skill_invocations table",
+    probe: { kind: "table", table: "skill_invocations" },
+    sql: `CREATE TABLE IF NOT EXISTS "skill_invocations" (
+      "id" text PRIMARY KEY NOT NULL, "created_at" bigint NOT NULL,
+      "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+      "invoker_user_id" text, "invocation_entry_id" text, "path" text NOT NULL,
+      "skill_key" text NOT NULL, "skill_name" text NOT NULL, "stored_skill_id" text,
+      "plugin_name" text, "origin" text NOT NULL, "content_sha" text NOT NULL,
+      "injected_characters" integer NOT NULL, "estimated_body_tokens" integer NOT NULL
+    )`,
+  },
+  {
+    describe: "skill_invocations_org_created index",
+    probe: { kind: "index", index: "skill_invocations_org_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "skill_invocations_org_created" ON "skill_invocations" ("org_id","created_at")',
+  },
+  {
+    describe: "skill_invocations_session_thread_created index",
+    probe: { kind: "index", index: "skill_invocations_session_thread_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "skill_invocations_session_thread_created" ON "skill_invocations" ("session_id","thread_id","created_at")',
+  },
+  {
+    describe: "skill_invocations_skill_created index",
+    probe: { kind: "index", index: "skill_invocations_skill_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "skill_invocations_skill_created" ON "skill_invocations" ("skill_key","created_at")',
+  },
+  {
+    describe: "skill_context_attributions table",
+    probe: { kind: "table", table: "skill_context_attributions" },
+    sql: `CREATE TABLE IF NOT EXISTS "skill_context_attributions" (
+      "skill_invocation_id" text NOT NULL, "llm_request_id" text NOT NULL,
+      "session_id" text NOT NULL, "thread_id" text NOT NULL, "created_at" bigint NOT NULL,
+      "estimated_skill_tokens" integer NOT NULL,
+      PRIMARY KEY("skill_invocation_id","llm_request_id")
+    )`,
+  },
+  {
     describe: "orgs.allow_personal_installations column",
     probe: { kind: "column", table: "orgs", column: "allow_personal_installations" },
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_personal_installations" boolean NOT NULL DEFAULT true',

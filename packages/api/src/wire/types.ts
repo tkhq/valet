@@ -3509,6 +3509,20 @@ export interface UsageBucket {
  * org (org-admin only), or one team (team-member only, needs `teamId=`). */
 export type UsageScopeName = "me" | "org" | "team";
 
+/** Aggregated usage for one stable skill identity across all revisions. */
+export interface SkillUsageBreakdown {
+  skillKey: string;
+  name: string;
+  origin: "plugin" | "local" | "repo";
+  pluginName?: string;
+  invocations: number;
+  uniqueInvokers: number;
+  unassignedInvocations: number;
+  /** Estimated skill-body tokens carried across model requests. */
+  attributedContextTokens: number;
+  carryingCalls: number;
+}
+
 /** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
  * across ALL use cases (engine sessions + workflows + proxy), from the single
  * `cost_entries` definition. `scope=org` (org-admin only) covers every member.
@@ -3527,6 +3541,7 @@ export interface UsageBreakdownResponse {
   totalTurns: number;
   unpricedTurns: number;
   byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
+  skillBreakdown: SkillUsageBreakdown[];
   byModel: (UsageBucket & { model: string | null })[];
   /** Org scope always; team scope when the caller administers the team. */
   byUser?: (UsageBucket & { userId: string; name: string })[];
