@@ -90,6 +90,10 @@ This replaces the per-user requirement gate in `installWorkflowTemplate` (`templ
 
 If that spec spells any of the three differently, this spec adapts at one call site each. Half 1 has no dependency on it and ships on its own.
 
+### Workflow list filters (TKAI-437)
+
+The workflow list and cross-workflow run list reject a nonempty `teamId` query parameter. Callers must use `ownerType=team` and `ownerId` to filter by team. Empty values remain equivalent to an omitted filter.
+
 ## Reconciliation with in-flight work
 
 **PR #151 `feat/rbac-permissions` (open, last touched 2026-07-30, 57 files, +2649/-312) — supersede its spec-only half; do not block on the branch.**
@@ -243,8 +247,3 @@ Recorded 2026-09-06. The design shipped as the stacked series PRs #572 to #591. 
 17. **An unpinned github node is ready through an App installation.** Decision 15 lists the App among the ready conditions only for a node that pins `credential: "app"`. The invoker's team branch (`plugins/action-invoker.ts`) serves an unpinned github node the same way after the team row misses: the installation for the node's `owner` parameter, or the org's sole installation. Readiness refused those nodes with the generic connect message, so a team template on a sole-installation org could not be installed. What shipped adds `installationResolvesFor` to `services/github-tokens.ts`, the same rule as `resolveInstallationApiToken` without a mint, and readiness treats an unpinned github node as ready when it holds for that node's literal `owner`. A templated owner is known only at fire time and is checked as absent. A `"user"` pin stays on the team row. An App that cannot pick an installation for the node is blocked with a reason naming the mismatch: the owner with no installation, or several installations and no owner parameter. No App, or an App with no installation recorded, keeps the plain connect reason, because the helper reads the installations table as it stands and does not run the lazy sync, which needs the App signing key a readiness caller does not hold. Recorded 2026-09-07.
 
 18. **An adopted row collects workflows only.** Decision 13 copies `repo_full_name`, `ref`, and `subpath` from each org workflow source into the new team's row and says nothing about `kinds`. What shipped copied the org source's kinds verbatim, so an org source that collected skills and workflows together gave every new team a team-owned mirror of every org skill, and one that collected templates gave the team's gallery a second copy of every org template, each with its own poll of the repository. The adopted row now carries `kinds: ["workflows"]`. An org source that collects skills or templates already publishes them org-wide (`docs/specs/2026-08-24-workflows-mvp-design.md`, the template scope rule), so nothing a team could reach is lost. Recorded 2026-09-07.
-
-
-### Workflow list filters (TKAI-437)
-
-The workflow list and cross-workflow run list reject a nonempty `teamId` query parameter. Callers must use `ownerType=team` and `ownerId` to filter by team. Empty values remain equivalent to an omitted filter.
