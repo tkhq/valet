@@ -40,6 +40,7 @@ export function ArtifactsPage() {
 }
 
 function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
+  const me = useMe();
   const [cursors, setCursors] = useState<string[]>([]);
   const listQ = useArtifacts(owner, { limit: 50, cursor: currentCursor(cursors) });
   const loading = listQ.isLoading;
@@ -64,7 +65,7 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
           {!loading && !listQ.error && artifacts.length > 0 && (
             <div className="divide-y divide-line border-t border-line">
               {artifacts.map((artifact) => (
-                <ArtifactRow key={artifact.id} artifact={artifact} />
+                <ArtifactRow key={artifact.id} artifact={artifact} canManage={!me.error && (me.data?.orgRole === "admin" || me.data?.id === artifact.actorUserId)} />
               ))}
             </div>
           )}
@@ -87,7 +88,7 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
   );
 }
 
-function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
+function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canManage: boolean }) {
   // Per-row instance: `useCopyToClipboard`'s "Copied" flash is component
   // state, and each row needs its own so copying one doesn't flash every
   // row in the list.
@@ -132,7 +133,7 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
           >
             {copied ? "Copied" : "Copy link"}
           </button>
-          <button
+          {canManage && <button
             type="button"
             disabled={revoke.isPending}
             onClick={() => {
@@ -145,7 +146,7 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
             className="text-xs text-danger-500 hover:underline disabled:pointer-events-none disabled:opacity-50"
           >
             {revoke.isPending ? "Revoking…" : "Revoke"}
-          </button>
+          </button>}
         </div>
       </div>
       {/* A failed revoke reports in BOTH places on purpose. The dialog
@@ -156,7 +157,7 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
       {revoke.error != null && !confirmRevoke && (
         <p className="mt-1 text-xs text-danger-500">{errorText(revoke.error)}</p>
       )}
-      <ConfirmDialog
+      {canManage && <ConfirmDialog
         open={confirmRevoke}
         onOpenChange={setConfirmRevoke}
         title={`Revoke the link to ${artifact.title}?`}
@@ -168,7 +169,7 @@ function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
         onConfirm={() =>
           revoke.mutate({ id: artifact.id }, { onSuccess: () => setConfirmRevoke(false) })
         }
-      />
+      />}
     </div>
   );
 }

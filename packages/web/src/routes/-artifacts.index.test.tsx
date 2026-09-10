@@ -57,9 +57,10 @@ const useArtifactsMock = vi.fn();
 let owner: OwnerFilter | undefined = { ownerType: "user", ownerId: "u-1" };
 let listError: Error | null = null;
 let listLoading = false;
+let orgRole = "member";
 let identityError: Error | null = null;
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
-vi.mock("~/api/settings", () => ({ useMe: () => ({ error: identityError }) }));
+vi.mock("~/api/settings", () => ({ useMe: () => ({ error: identityError, data: { id: "u-1", orgRole } }) }));
 
 vi.mock("@tanstack/react-router", () => ({
   // `params` is spread as a real prop (an object), not through `...rest`,
@@ -121,6 +122,7 @@ beforeEach(() => {
   listError = null;
   listLoading = false;
   identityError = null;
+  orgRole = "member";
   revokePending = false;
   revokeError = null;
   revokeMutate.mockReset();
@@ -289,4 +291,16 @@ describe("ArtifactsPage", () => {
     const button = screen.getByRole("button", { name: "Revoking…" });
     expect(button.hasAttribute("disabled")).toBe(true);
   });
+});
+
+
+it("shows colleague artifacts without offering unauthorized revoke", () => {
+  owner = { ownerType: "team", ownerId: "team-a" };
+  artifactsData = { artifacts: [{ ...mine, actorUserId: "colleague" }] };
+  const view = renderPage();
+  expect(screen.getByText("Deploy report")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+  orgRole = "admin";
+  view.rerender(<ArtifactsPage />);
+  expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
 });

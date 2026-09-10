@@ -384,3 +384,5 @@ The gallery caches each owner and page separately. A workspace change resets the
 Public token reads, link visibility, publishing, and sharer-or-admin management permissions do not change. Team membership grants list access, not permission to revoke a colleague's artifact. No schema migration is required.
 
 Validation covers owner versus actor filtering, member access, nonmember refusal, foreign owners, membership removal, cursor boundaries, revoked rows, and workspace pagination reset. Existing public-link and personal-access suites remain part of the targeted checks.
+
+The gallery offers Revoke only to the publishing user or an organization admin, matching the management API.
