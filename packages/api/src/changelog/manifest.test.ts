@@ -32,7 +32,7 @@ describe("changelog manifest", () => {
     const parsed = parseChangelogManifest(bundledManifest);
     for (const checkpoint of parsed.checkpoints) {
       if (checkpoint.kind === "released") {
-        expect(checkpoint.releaseUrl).toBe(`https://github.com/tkhq/valet/releases/tag/v${checkpoint.version}`);
+        expect(checkpoint.releaseUrl).toBe(`https://github.com/tkhq/valet/releases/tag/valet%2Fv${checkpoint.version}`);
       }
     }
   });

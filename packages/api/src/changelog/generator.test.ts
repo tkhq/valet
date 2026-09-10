@@ -145,12 +145,13 @@ describe("changelog generation", () => {
     const repo = repository();
     add(repo, "README", "bootstrap", "chore: bootstrap");
     add(repo, "app.ts", "one", "feat: first release");
-    tag(repo, "v1.0.0", "2026-01-01T00:00:00Z");
+    tag(repo, "valet/v1.0.0", "2026-01-01T00:00:00Z");
     add(repo, "app.ts", "two", "fix: between releases");
     tag(repo, "chart/valet-v9.0.0", "2026-01-02T00:00:00Z");
-    tag(repo, "v2.0.0-rc.1", "2026-01-02T00:00:00Z");
+    tag(repo, "v99.0.0", "2026-01-02T00:00:00Z");
+    tag(repo, "valet/v2.0.0-rc.1", "2026-01-02T00:00:00Z");
     add(repo, "app.ts", "three", "feat: next release");
-    tag(repo, "v1.1.0", "2026-01-03T00:00:00Z");
+    tag(repo, "valet/v1.1.0", "2026-01-03T00:00:00Z");
     const result = backfillTags({ repo, manifest: emptyManifest(), patterns: ["*"] });
     expect(released(result).map((item) => item.version)).toEqual(["1.1.0", "1.0.0"]);
     expect(released(result)[0].entries.map((entry) => entry.title)).toEqual([
@@ -164,13 +165,13 @@ describe("changelog generation", () => {
     const branch = run(repo, "branch", "--show-current");
     run(repo, "checkout", "-b", "legacy");
     add(repo, "app.ts", "legacy", "feat: legacy feature");
-    tag(repo, "v9.0.0", "2026-01-01T00:00:00Z");
+    tag(repo, "valet/v9.0.0", "2026-01-01T00:00:00Z");
     run(repo, "checkout", branch);
-    const pending = backfillTags({ repo, manifest: emptyManifest(), patterns: ["v*"] });
+    const pending = backfillTags({ repo, manifest: emptyManifest(), patterns: ["valet/v*"] });
     expect(pending.checkpoints).toEqual([]);
     add(repo, "app.ts", "two", "fix: second feature");
-    tag(repo, "v1.0.0", "2026-01-02T00:00:00Z");
-    const result = backfillTags({ repo, manifest: emptyManifest(), patterns: ["v*"] });
+    tag(repo, "valet/v1.0.0", "2026-01-02T00:00:00Z");
+    const result = backfillTags({ repo, manifest: emptyManifest(), patterns: ["valet/v*"] });
     expect(released(result).map((item) => item.version)).toEqual(["1.0.0"]);
     expect(released(result)[0].previousSha).toBeNull();
     expect(released(result)[0].entries[0].sources.commitSha).toBe(firstSha);
@@ -180,14 +181,14 @@ describe("changelog generation", () => {
     const repo = repository();
     add(repo, "README", "bootstrap", "chore: bootstrap", "", "2025-12-01T10:00:00+09:00");
     const firstSha = add(repo, "app.ts", "one", "feat: first release (#1)", "", "2030-01-01T10:00:00+09:00");
-    tag(repo, "v1.0.0", "2026-01-01T09:00:00+09:00");
-    const first = backfillTags({ repo, manifest: emptyManifest(), patterns: ["v*"] });
+    tag(repo, "valet/v1.0.0", "2026-01-01T09:00:00+09:00");
+    const first = backfillTags({ repo, manifest: emptyManifest(), patterns: ["valet/v*"] });
     expect(released(first).map((item) => item.version)).toEqual(["1.0.0"]);
     expect(released(first)[0].releasedAt).toBe("2026-01-01T00:00:00.000Z");
 
     const secondSha = add(repo, "app.ts", "two", "fix: second release (#2)", "", "2020-01-01T10:00:00-07:00");
-    tag(repo, "v1.1.0", "2025-12-31T18:00:01-07:00");
-    const second = backfillTags({ repo, manifest: emptyManifest(), patterns: ["v*"] });
+    tag(repo, "valet/v1.1.0", "2025-12-31T18:00:01-07:00");
+    const second = backfillTags({ repo, manifest: emptyManifest(), patterns: ["valet/v*"] });
     expect(released(second).map((item) => item.version)).toEqual(["1.1.0", "1.0.0"]);
     expect(second.checkpoints[0]).toMatchObject({
       releasedAt: "2026-01-01T01:00:01.000Z",
@@ -195,7 +196,7 @@ describe("changelog generation", () => {
       previousSha: firstSha,
     });
 
-    const rebuiltFromBaseline = backfillTags({ repo, manifest: first, patterns: ["v*"] });
+    const rebuiltFromBaseline = backfillTags({ repo, manifest: first, patterns: ["valet/v*"] });
     expect(rebuiltFromBaseline).toEqual(second);
   });
 
@@ -203,8 +204,8 @@ describe("changelog generation", () => {
     const repo = repository();
     add(repo, "README", "bootstrap", "chore: bootstrap", "", "2025-12-01T10:00:00Z");
     const releasedSha = add(repo, "app.ts", "release", "feat: released feature (#1)");
-    tag(repo, "v1.0.0", "2026-01-01T00:00:00Z");
-    const released = backfillTags({ repo, manifest: emptyManifest(), patterns: ["v*"] });
+    tag(repo, "valet/v1.0.0", "2026-01-01T00:00:00Z");
+    const released = backfillTags({ repo, manifest: emptyManifest(), patterns: ["valet/v*"] });
 
     const firstBuildSha = add(repo, "app.ts", "build one", "feat: rolling feature (#2)");
     const firstBuild = generateUnreleasedCheckpoint({
@@ -240,8 +241,8 @@ describe("changelog generation", () => {
       "Rolling fix",
     ]);
 
-    tag(repo, "v1.1.0", "2026-01-04T00:00:00Z");
-    const promoted = backfillTags({ repo, manifest: secondRolling, patterns: ["v*"] });
+    tag(repo, "valet/v1.1.0", "2026-01-04T00:00:00Z");
+    const promoted = backfillTags({ repo, manifest: secondRolling, patterns: ["valet/v*"] });
     expect(promoted.checkpoints.map((item) => item.kind)).toEqual(["released", "released"]);
     expect(promoted.checkpoints[0]).toMatchObject({
       version: "1.1.0",

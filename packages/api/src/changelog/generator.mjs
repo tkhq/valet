@@ -201,7 +201,7 @@ export function backfillTags({ repo, manifest, patterns, targetRef = "HEAD" }) {
     ? refs.split("\n").map((line) => {
         const [tag, releasedAt] = line.split("\0");
         return { tag, releasedAt };
-      }).filter(({ tag, releasedAt }) => /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag) && Date.parse(releasedAt) > baselineTime)
+      }).filter(({ tag, releasedAt }) => /^valet\/v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag) && Date.parse(releasedAt) > baselineTime)
     : [];
   let next = {
     schema: CHANGELOG_SCHEMA,
@@ -211,7 +211,7 @@ export function backfillTags({ repo, manifest, patterns, targetRef = "HEAD" }) {
   let previousSha = baseline?.releasedSha ?? null;
   for (const { tag, releasedAt } of tags) {
     const releaseSha = git(repo, ["rev-list", "-n", "1", tag]);
-    const version = tag.slice(1);
+    const version = tag.slice("valet/v".length);
     const checkpoint = generateCheckpoint({
       repo,
       version,

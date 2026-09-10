@@ -21,14 +21,14 @@ name: Release CLI
 # Apple Developer cert wired into this workflow (not done).
 #
 # Publish paths:
-#   - tag push (v*): versioned GitHub Release with all binaries attached.
+#   - tag push (valet/v*): versioned GitHub Release with all binaries attached.
 #   - merge to dev-v2: the same binaries replace the assets of a single
 #     rolling prerelease tagged `dev-v2-latest`, so the download URLs
 #     (…/releases/download/dev-v2-latest/valet-<os>-<arch>) stay stable.
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["valet/v*"]
     branches: [dev-v2]
   workflow_call:
     inputs:
@@ -92,19 +92,19 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Generate changelog artifact
-        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/dev-v2'
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/valet/v') || github.ref == 'refs/heads/dev-v2'
         run: |
           set -euo pipefail
           build_sha=$(git rev-parse HEAD)
           common=(
-            --backfill-tags 'v*'
+            --backfill-tags 'valet/v*'
             --artifact-sha "$build_sha"
             --metadata packages/api/src/changelog/release.json
           )
-          if [[ "$BUILD_REF" == refs/tags/v* ]]; then
+          if [[ "$BUILD_REF" == refs/tags/valet/v* ]]; then
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
-              --artifact-version "${BUILD_TAG#v}"
+              --artifact-version "${BUILD_TAG#valet/v}"
           else
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \

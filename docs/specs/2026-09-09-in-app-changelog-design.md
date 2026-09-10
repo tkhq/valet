@@ -45,7 +45,7 @@ Use this command to generate a rolling checkpoint:
 
 ```bash
 pnpm changelog:generate -- \
-  --backfill-tags 'v*' \
+  --backfill-tags 'valet/v*' \
   --unreleased-sha HEAD \
   --built-at "$(git show -s --format=%cI HEAD)" \
   --artifact-version Unreleased \
@@ -53,7 +53,7 @@ pnpm changelog:generate -- \
   --metadata packages/api/src/changelog/release.json
 ```
 
-The release workflows use stable `vX.Y.Z` application tags as cumulative released history. Helm chart tags use `chart/valet-vX.Y.Z` and never define product checkpoints. The previous released tag defines each comparison range. Tests cover two rolling builds, reruns, empty rolling builds, and promotion to a release.
+The release workflows use stable `valet/vX.Y.Z` application tags as cumulative released history. Helm chart tags use `chart/valet-vX.Y.Z` and never define product checkpoints. The previous released tag defines each comparison range. Tests cover two rolling builds, reruns, empty rolling builds, and promotion to a release.
 
 The generator reads first-parent commit ranges. It uses commit subjects, explicit user-impact text, changed paths, and PR numbers from local Git history.
 

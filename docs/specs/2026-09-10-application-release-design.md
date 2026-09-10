@@ -1,7 +1,7 @@
 # Application releases
 
 The manual Release Application workflow releases the `dev-v2` commit selected when the run starts. Its `bump` input accepts `major`, `minor`, or `patch`.
-It finds the highest stable `vX.Y.Z` tag across the repository. It increments the selected component and resets lower components.
+It finds the highest stable `valet/vX.Y.Z` tag across the repository. It increments the selected component and resets lower components.
 Chart tags use `chart/valet-vX.Y.Z`. Chart versions remain independent of application versions.
 
 The workflow creates an annotated application tag and a GitHub Release with generated notes. Concurrent release runs share one concurrency group. Tag annotations store the run ID so failed-job retries reuse the allocated version.
@@ -20,7 +20,7 @@ The committed manifest is rebuilt from application tags to remove historical cha
 4. If a publisher fails, rerun failed jobs from that run.
 
 Use the Release Application workflow from `dev-v2`. The default branch still contains the legacy workflow.
-The first application release starts from `v0.0.0` when no stable application tags exist.
+The first application release starts from `valet/v0.0.0` when no stable application tags exist.
 Generated release notes start at the previous application tag. Chart tags do not control the notes range.
 Helm releases continue through Release Helm Chart with the version from `deploy/chart/valet/Chart.yaml`.
 Application releases do not change the chart version or deploy a cluster.
@@ -31,3 +31,6 @@ Only application tags reachable from the build commit define changelog checkpoin
 The first application checkpoint includes the complete first-parent history. Until then, builds show this history as Unreleased.
 
 The committed manifest is an empty seed. Source builds show an empty changelog until artifact generation runs.
+
+Docker images use `vX.Y.Z` tags within the `valet-api` and `valet-sandbox` repositories. OCI tags cannot contain slashes.
+Legacy `vX.Y.Z` tags do not affect application version allocation. A first minor release creates `valet/v0.1.0`.

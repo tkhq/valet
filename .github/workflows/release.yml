@@ -45,7 +45,7 @@ jobs:
           BUMP: ${{ inputs.bump }}
         run: |
           marker="Valet application release run $GITHUB_RUN_ID"
-          existing=$(git tag --list 'v*' --format='%(refname:short) %(contents:subject)' | awk -v marker="$marker" 'substr($0, index($0, " ") + 1) == marker { print $1 }')
+          existing=$(git tag --list 'valet/v*' --format='%(refname:short) %(contents:subject)' | awk -v marker="$marker" 'substr($0, index($0, " ") + 1) == marker { print $1 }')
           if [[ -n "$existing" ]]; then
             echo "tag=$existing" >> "$GITHUB_OUTPUT"
           else
@@ -76,7 +76,7 @@ jobs:
           Windows users can run the Linux binary in WSL.
           If macOS blocks a browser download, run `xattr -d com.apple.quarantine ./valet-darwin-<arch>`.
           NOTES
-            gh release create "$TAG" --verify-tag --title "Valet $TAG" \
+            gh release create "$TAG" --verify-tag --title "Valet ${TAG#valet/}" \
               --generate-notes "${notes[@]}" --notes-file "$RUNNER_TEMP/application-release-notes.md"
           fi
           echo "Application release: $TAG" >> "$GITHUB_STEP_SUMMARY"

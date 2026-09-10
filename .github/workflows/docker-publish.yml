@@ -18,7 +18,7 @@ name: Docker Images
 # Tags per publish:
 #   dev-v2            moving branch tag (convenience — do NOT pin deploys to it)
 #   sha-<shortsha>    immutable; what Helm deploys should pin
-#   vX.Y.Z + latest   on version-tag pushes
+#   vX.Y.Z + latest   on application-tag pushes
 #
 # The images must be public GHCR packages (first publish may need the
 # visibility flipped once in the package settings) — the chart wires no
@@ -27,7 +27,7 @@ name: Docker Images
 on:
   push:
     branches: [dev-v2]
-    tags: ["v*"]
+    tags: ["valet/v*"]
   workflow_call:
     inputs:
       release_tag:
@@ -73,19 +73,19 @@ jobs:
           fetch-depth: 0
 
       - name: Generate changelog artifact
-        if: matrix.image.name == 'valet-api' && (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/dev-v2')
+        if: matrix.image.name == 'valet-api' && (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/valet/v') || github.ref == 'refs/heads/dev-v2')
         run: |
           set -euo pipefail
           build_sha=$(git rev-parse HEAD)
           common=(
-            --backfill-tags 'v*'
+            --backfill-tags 'valet/v*'
             --artifact-sha "$build_sha"
             --metadata packages/api/src/changelog/release.json
           )
-          if [[ "$BUILD_REF" == refs/tags/v* ]]; then
+          if [[ "$BUILD_REF" == refs/tags/valet/v* ]]; then
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
-              --artifact-version "${BUILD_TAG#v}"
+              --artifact-version "${BUILD_TAG#valet/v}"
           else
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
@@ -145,7 +145,9 @@ jobs:
     steps:
       - name: Compute image name
         id: img
-        run: echo "name=ghcr.io/${OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "name=ghcr.io/${OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          echo "version=${BUILD_TAG#valet/}" >> "$GITHUB_OUTPUT"
         env:
           OWNER: ${{ github.repository_owner }}
 
@@ -173,8 +175,7 @@ jobs:
           images: ${{ steps.img.outputs.name }}
           tags: |
             type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
-            type=ref,event=tag,enable=${{ inputs.release_tag == '' }}
-            type=raw,value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+            type=raw,value=${{ steps.img.outputs.version }},enable=${{ startsWith(env.BUILD_TAG, 'valet/v') }}
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')) && !contains(inputs.release_tag || github.ref_name, '-') }}
 

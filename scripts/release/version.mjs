@@ -10,8 +10,8 @@ function compare(a, b) {
 }
 
 function stableVersions(tags) {
-  return tags.filter((tag) => /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag))
-    .map((tag) => tag.slice(1).split('.').map(BigInt)).sort(compare);
+  return tags.filter((tag) => /^valet\/v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag))
+    .map((tag) => tag.slice("valet/v".length).split('.').map(BigInt)).sort(compare);
 }
 
 export function nextVersion(tags, bump) {
@@ -20,14 +20,14 @@ export function nextVersion(tags, bump) {
   const latest = stableVersions(tags).at(-1) ?? [0n, 0n, 0n];
   latest[index] += 1n;
   for (let i = index + 1; i < 3; i++) latest[i] = 0n;
-  return `v${latest.join('.')}`;
+  return `valet/v${latest.join('.')}`;
 }
 
 export function previousVersion(tags, tag) {
   const target = stableVersions([tag])[0];
-  if (!target) throw new Error('Use a stable vX.Y.Z application tag.');
+  if (!target) throw new Error('Use a stable valet/vX.Y.Z application tag.');
   const previous = stableVersions(tags).filter((version) => compare(version, target) < 0).at(-1);
-  return previous ? `v${previous.join('.')}` : '';
+  return previous ? `valet/v${previous.join('.')}` : '';
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
