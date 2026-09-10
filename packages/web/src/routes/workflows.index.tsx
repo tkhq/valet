@@ -376,6 +376,11 @@ function TriggersTab() {
 }
 
 function RunsTab() {
+  const owner = useListOwner();
+  return <ScopedRunsTab key={`${owner?.ownerType}:${owner?.ownerId}`} />;
+}
+
+function ScopedRunsTab() {
   // The Runs tab is a workspace list like the others: without the switcher's
   // owner it shows the caller's runs plus every team's, ignoring the scope.
   const owner = useListOwner();
@@ -399,16 +404,13 @@ function RunsTab() {
   if (error) {
     return <div className="text-sm text-danger-500">Failed to load runs.</div>;
   }
-  if (runs.length === 0) {
-    return (
-      <div className="text-sm text-muted">
-        No runs yet. Run a workflow from the Workflows tab.
-      </div>
-    );
-  }
-
   return (
     <div>
+      {runs.length === 0 && (
+        <div className="text-sm text-muted">
+          No runs yet. Run a workflow from the Workflows tab.
+        </div>
+      )}
       <ul className="space-y-2">
         {runs.map((r) => (
           <li key={r.runId}>

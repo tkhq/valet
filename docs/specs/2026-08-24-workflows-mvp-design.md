@@ -401,3 +401,14 @@ RBAC vocabulary. Decision 10 uses the direct `isTeamMember` and `canAdministerTe
 ### Download filenames
 
 Workflow downloads use an ASCII filename fallback and a UTF-8 `filename*` parameter when the upstream name needs encoding. The web download action prefers the UTF-8 name. Unicode, quotes, and control characters cannot enter a response header unescaped.
+
+## Changelog
+
+### 2026-09-10: Task 10 review fixes (#560)
+
+- Mirrored editors disable palette actions, node movement, connections, keyboard deletion, and inspector controls. Selection and pan/zoom remain available.
+- Read-only mode discards local edits and does not block navigation with an unsaved-change warning.
+- The Runs tab resets pagination when the workspace owner changes. Empty later pages retain Previous.
+- Repository kind selections reset when the owner or admin permission changes. Submission excludes disabled kinds.
+- Team sources permit workflows and templates for team admins and org admins, matching the server gate.
+- Workflow list and detail responses include the source ref. File links encode that ref and each path segment; unpinned sources use HEAD.

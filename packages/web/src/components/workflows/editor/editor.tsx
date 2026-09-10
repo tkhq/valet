@@ -102,11 +102,17 @@ export interface EditorProps {
   /** Per-node policy predictions for the canvas cards, keyed by node id.
    * The page owns the query (it is per stored workflow, not per draft). */
   gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">;
-  /** A mirrored workflow is edited in its file. Hide Save and the JSON hatch. */
+  /** A mirrored workflow is edited in its file. Disable definition changes
+   * and hide Save and the JSON hatch. */
   readOnly?: boolean;
 }
 
-export function Editor({
+export function Editor(props: EditorProps) {
+  // A change in edit permission starts a fresh draft from the server.
+  return <EditorDraft key={String(props.readOnly === true)} {...props} />;
+}
+
+function EditorDraft({
   initialDefinition,
   onSave,
   saving,
@@ -135,11 +141,11 @@ export function Editor({
   // and the editor must not treat its own write as somebody else's edit.
   const savedRef = useRef<string | null>(null);
 
-  const effectiveDirty = dirty || externalDirty === true;
+  const effectiveDirty = !readOnly && (dirty || externalDirty === true);
 
   useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
+    onDirtyChange?.(!readOnly && dirty);
+  }, [dirty, readOnly, onDirtyChange]);
 
   /** Replace the draft with the server's definition. */
   const adoptServerDefinition = useCallback((next: WorkflowDefinition) => {
@@ -196,6 +202,7 @@ export function Editor({
     : undefined;
 
   function mutate(next: WorkflowDefinition) {
+    if (readOnly) return;
     setDefinition(next);
     setDirty(true);
   }
@@ -278,6 +285,7 @@ export function Editor({
   }
 
   async function handleSave() {
+    if (readOnly) return;
     setSaveError(null);
     try {
       await onSave(definition);
@@ -307,6 +315,7 @@ export function Editor({
   // before the switch must not put a second editor for one step on screen.
   const inspector = jsonMode ? null : selectedNode ? (
     <Inspector
+      readOnly={readOnly}
       key={selectedNode.id}
       node={selectedNode}
       onChange={(patch) => handleNodeChange(selectedNode.id, patch)}
@@ -315,6 +324,7 @@ export function Editor({
     />
   ) : selectedEdge && selectedEdgeSourceType ? (
     <EdgeInspector
+      readOnly={readOnly}
       key={selectedEdge.id}
       edge={selectedEdge}
       sourceNodeType={selectedEdgeSourceType}
@@ -396,15 +406,16 @@ export function Editor({
       <ValidationBanner errors={errors} />
 
       <div className="flex min-h-0 flex-1">
-        {jsonMode ? (
+        {jsonMode && !readOnly ? (
           <div className="min-w-0 flex-1 overflow-y-auto p-3">
             <JsonDefinitionEditor definition={definition} onApply={handleApplyJson} />
           </div>
         ) : (
           <>
-            <Palette onAdd={handleAddNode} />
+            <Palette onAdd={handleAddNode} disabled={readOnly} />
             <div className="min-w-0 flex-1">
               <Canvas
+                readOnly={readOnly}
                 flow={flow}
                 errorNodeIds={errorNodeIds}
                 gateByNodeId={gateByNodeId}

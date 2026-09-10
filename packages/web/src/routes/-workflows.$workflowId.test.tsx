@@ -311,11 +311,11 @@ describe("WorkflowEditorPage", () => {
   it("renders a mirrored workflow read-only, with a copy and a file link", () => {
     Object.assign(workflowData, {
       origin: "repo",
-      upstream: { repoFullName: "tkhq/automation", path: ".valet/workflows/nightly.yaml" },
+      upstream: { repoFullName: "tkhq/automation", ref: "release/v2", path: ".valet/workflows/nightly.yaml" },
     });
     render(<WorkflowEditorPage workflowId="wf_1" />);
     expect(screen.getByTestId("mirrored-banner")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "tkhq/automation:.valet/workflows/nightly.yaml" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "tkhq/automation:.valet/workflows/nightly.yaml" }).getAttribute("href")).toBe("https://github.com/tkhq/automation/blob/release%2Fv2/.valet/workflows/nightly.yaml");
     expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect((screen.getByLabelText("Workflow name") as HTMLInputElement).readOnly).toBe(true);

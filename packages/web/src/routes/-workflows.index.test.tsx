@@ -16,7 +16,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { WorkflowDefinitionSummary } from "@valet/api/wire";
+import type { WorkflowDefinitionSummary, ListAllWorkflowRunsResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
 
 // Annotated rather than inferred: the empty-list case reassigns `workflows`
@@ -42,7 +42,7 @@ const workflowsData: { workflows: WorkflowDefinitionSummary[] } = {
       ownerType: "team",
       ownerId: "team_1",
       origin: "repo",
-      upstream: { repoFullName: "tkhq/automation", path: ".valet/workflows/nightly.yaml" },
+      upstream: { repoFullName: "tkhq/automation", ref: "release/v2", path: ".valet/workflows/nightly.yaml" },
     },
   ],
 };
@@ -72,7 +72,8 @@ const triggersData = {
   ],
 };
 
-const allRunsData = {
+const runsQuery = vi.fn();
+const allRunsData: ListAllWorkflowRunsResponse = {
   nextCursor: "cursor_2",
   runs: [
     {
@@ -152,7 +153,10 @@ vi.mock("~/api/workflows", () => ({
   useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
   useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
   useWorkflowTriggers: () => ({ data: triggersData, isLoading: false, error: null }),
-  useAllWorkflowRuns: () => ({ data: allRunsData, isLoading: false, error: null }),
+  useAllWorkflowRuns: (...args: unknown[]) => {
+    runsQuery(...args);
+    return { data: { ...allRunsData }, isLoading: false, error: null };
+  },
   useUpdateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUpdateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useDeleteSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -170,16 +174,22 @@ vi.mock("~/components/workflows/template-gallery", () => ({
 }));
 
 import { WorkflowsIndexPage } from "./workflows.index";
-import { PERSONAL, WorkspaceScopeProvider } from "~/lib/workspace-scope";
+import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
 
 /** `workspace` selects the workspace the page is being read in — what the
  * nav's switcher sets. Seeded through localStorage, which is where the real
  * scope lives. */
+function SwitchWorkspace() {
+  const scope = useWorkspaceScope();
+  return <button onClick={() => scope.setKey("team_1")}>Switch workspace</button>;
+}
+
 function renderPage(workspace = PERSONAL) {
   window.localStorage.setItem("valet:workspace", workspace);
   return render(
     <TooltipProvider>
       <WorkspaceScopeProvider>
+        <SwitchWorkspace />
         <WorkflowsIndexPage />
       </WorkspaceScopeProvider>
     </TooltipProvider>,
@@ -196,6 +206,37 @@ beforeEach(() => {
 });
 
 describe("WorkflowsIndexPage", () => {
+  it("resets the runs cursor before querying a different workspace", () => {
+    searchState = { tab: "runs" };
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(runsQuery).toHaveBeenLastCalledWith({ ownerType: "user", ownerId: "u-1" }, { cursor: "cursor_2" });
+    runsQuery.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
+    expect(runsQuery).toHaveBeenCalledWith({ ownerType: "team", ownerId: "team_1" }, undefined);
+    expect(runsQuery.mock.calls.every((call) => call[1] === undefined)).toBe(true);
+    expect(screen.getByText("Page 1")).toBeTruthy();
+  });
+
+  it("retains Previous when a later runs page is empty", () => {
+    searchState = { tab: "runs" };
+    renderPage();
+    const savedRuns = allRunsData.runs;
+    allRunsData.runs = [];
+    const savedCursor = allRunsData.nextCursor;
+    delete allRunsData.nextCursor;
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      expect(screen.getByText(/No runs yet/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Previous" })).toMatchObject({ disabled: false });
+      fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+      expect(runsQuery).toHaveBeenLastCalledWith({ ownerType: "user", ownerId: "u-1" }, undefined);
+    } finally {
+      allRunsData.runs = savedRuns;
+      allRunsData.nextCursor = savedCursor;
+    }
+  });
+
   it("renders each workflow definition's name as a link to its editor page", () => {
     renderPage();
     const link = screen.getByText("Deploy pipeline").closest("a");

@@ -13,7 +13,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { ListSkillSourcesResponse, SkillSourceSummary } from "@valet/api/wire";
+import type { ListSkillSourcesResponse, SkillSourceSummary, ListTeamsResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
 
 function source(over: Partial<SkillSourceSummary> = {}): SkillSourceSummary {
@@ -46,7 +46,7 @@ const listQuery = vi.fn();
 let addState = { isPending: false, error: null as Error | null };
 let syncState = { isPending: false, error: null as Error | null, data: undefined as { excluded: number; discovered: number } | undefined };
 let removeState = { isPending: false, error: null as Error | null };
-let teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "member" as const }] };
+let teamsData: ListTeamsResponse = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, defaultModel: null, createdAt: 1, memberCount: 2, callerRole: "member" as const }] };
 let orgCallerRole: "admin" | "member" = "admin";
 
 vi.mock("~/api/skill-sources", () => ({
@@ -102,9 +102,15 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 });
 
 import { RepoSourcesPanel, type SourcesOwner } from "./repo-sources-panel";
-import { PERSONAL, WorkspaceScopeProvider } from "~/lib/workspace-scope";
+import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
 
 const onCursorsChange = vi.fn();
+
+function SwitchWorkspace() {
+  const scope = useWorkspaceScope();
+  return <button onClick={() => scope.setKey(scope.teamId ? PERSONAL : "team_1")}>Switch workspace</button>;
+}
+
 
 /** `workspace` selects the workspace the panel is being read in — the same
  * thing the nav's switcher sets. It is seeded through localStorage because
@@ -118,6 +124,7 @@ function renderPanel(
   return render(
     <TooltipProvider>
       <WorkspaceScopeProvider>
+        <SwitchWorkspace />
         <RepoSourcesPanel
           {...(props.owner === undefined ? {} : { owner: props.owner })}
           {...(props.readOnly === undefined ? {} : { readOnly: props.readOnly })}
@@ -144,7 +151,7 @@ describe("RepoSourcesPanel", () => {
     onCursorsChange.mockReset();
     orgCallerRole = "admin";
     teamsData = {
-      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "member" }],
+      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, defaultModel: null, createdAt: 1, memberCount: 2, callerRole: "member" }],
     };
   });
 
@@ -232,9 +239,43 @@ describe("RepoSourcesPanel", () => {
     expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills", kinds: ["skills"] });
   });
 
+  it("allows an org admin who is a team member to import privileged kinds", () => {
+    renderPanel("team_1");
+    fireEvent.click(screen.getByRole("button", { name: "Import from GitHub" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "workflows" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "templates" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "tkhq/automation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/automation", teamId: "team_1", kinds: ["skills", "workflows", "templates"] });
+  });
+
+  it("clears privileged selections when switching from a team to personal scope", () => {
+    renderPanel("team_1");
+    fireEvent.click(screen.getByRole("button", { name: "Import from GitHub" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "workflows" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "templates" }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
+    expect(screen.getByRole("checkbox", { name: "workflows" })).toMatchObject({ checked: false, disabled: true });
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "tkhq/automation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/automation", kinds: ["skills"] });
+  });
+
+  it("clears privileged selections when admin permission is revoked", () => {
+    const view = renderPanel("team_1");
+    fireEvent.click(screen.getByRole("button", { name: "Import from GitHub" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "workflows" }));
+    orgCallerRole = "member";
+    view.rerender(<TooltipProvider><WorkspaceScopeProvider><SwitchWorkspace /><RepoSourcesPanel cursors={[]} onCursorsChange={onCursorsChange} /></WorkspaceScopeProvider></TooltipProvider>);
+    expect(screen.getByRole("checkbox", { name: "workflows" })).toMatchObject({ checked: false, disabled: true });
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "tkhq/automation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/automation", teamId: "team_1", kinds: ["skills"] });
+  });
+
   it("lets a team admin tick workflows and sends the kinds", () => {
     teamsData = {
-      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "admin" }],
+      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, defaultModel: null, createdAt: 1, memberCount: 2, callerRole: "admin" }],
     };
     renderPanel("team_1");
     fireEvent.click(screen.getByRole("button", { name: /import/i }));

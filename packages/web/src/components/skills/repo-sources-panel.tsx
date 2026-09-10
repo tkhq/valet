@@ -103,12 +103,18 @@ export function RepoSourcesPanel({
   const isOrgAdmin = org.data?.callerRole === "admin";
   const orgPinned = owner?.type === "org";
   const teamRole = teams.data?.teams.find((t) => t.id === workspace.teamId)?.callerRole;
-  const canPickPrivileged = orgPinned ? isOrgAdmin : workspace.teamId !== undefined && teamRole === "admin";
+  const canPickPrivileged = orgPinned ? isOrgAdmin : workspace.teamId !== undefined && (teamRole === "admin" || isOrgAdmin);
+  const kindScope = `${owner?.type ?? "workspace"}:${owner?.id ?? workspace.teamId ?? "personal"}:${canPickPrivileged}`;
+  const [previousKindScope, setPreviousKindScope] = useState(kindScope);
+  if (previousKindScope !== kindScope) {
+    setPreviousKindScope(kindScope);
+    setKinds(["skills"]);
+  }
   const privilegedReason = orgPinned
     ? "Only an org admin can collect workflows or templates for the organization."
     : workspace.teamId === undefined
       ? "A personal source cannot collect workflows or templates. Add the repository as a team source."
-      : "Only a team admin can collect workflows or templates.";
+      : "Only a team or org admin can collect workflows or templates.";
 
   function toggleKind(kind: ContentKind) {
     if (PRIVILEGED_KINDS.has(kind) && !canPickPrivileged) return;
@@ -121,7 +127,8 @@ export function RepoSourcesPanel({
     e.preventDefault();
     const value = repo.trim();
     if (value.length === 0) return;
-    const selected = kinds.length > 0 ? kinds : (["skills"] as ContentKind[]);
+    const allowed = kinds.filter((kind) => canPickPrivileged || !PRIVILEGED_KINDS.has(kind));
+    const selected: ContentKind[] = allowed.length > 0 ? allowed : ["skills"];
     add.mutate(
       owner?.type === "org"
         ? { repo: value, ownerType: "org", kinds: selected }

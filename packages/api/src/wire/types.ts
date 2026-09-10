@@ -1866,10 +1866,10 @@ export interface WorkflowDefinitionSummary {
    * read-only here: every write path refuses it with 409, and the editor
    * offers a copy instead. Absent means `local`. */
   origin?: "local" | "repo";
-  /** Where the file is, on a `repo` workflow: `owner/repo` and the
-   * repo-relative path. The list badges the row with it, and the editor
-   * links to it. */
-  upstream?: { repoFullName: string; path: string };
+  /** The repository, source ref, and repo-relative file path. An empty ref
+   * selects the default branch. The list badges the row with this source,
+   * and the editor links to its file. */
+  upstream?: { repoFullName: string; ref: string; path: string };
 }
 
 export interface CreateWorkflowRequest {

@@ -1,3 +1,5 @@
+import type { WorkflowDefinitionSummary } from "@valet/api/wire";
+import { blobUrl } from "~/lib/blob-url";
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal, ShieldAlert } from "lucide-react";
@@ -133,7 +135,7 @@ function WorkflowEditorPane({
   initialName: string;
   initialDefinition: WorkflowDefinition;
   origin?: "local" | "repo";
-  upstream?: { repoFullName: string; path: string };
+  upstream?: WorkflowDefinitionSummary["upstream"];
   update: UpdateWorkflowMutation;
   startRun: ReturnType<typeof useStartRun>;
   runsQuery: {
@@ -362,7 +364,7 @@ function WorkflowEditorPane({
           This workflow is mirrored from{" "}
           {upstream ? (
             <a
-              href={`https://github.com/${upstream.repoFullName}/blob/HEAD/${upstream.path}`}
+              href={blobUrl({ repoFullName: upstream.repoFullName, repoRef: upstream.ref || "HEAD" }, upstream.path, null) ?? undefined}
               target="_blank"
               rel="noreferrer"
               className="font-mono underline underline-offset-2"

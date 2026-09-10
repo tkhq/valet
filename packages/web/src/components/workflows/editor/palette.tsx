@@ -8,10 +8,11 @@ import { ADDABLE_NODE_TYPES, NODE_META, type AddableDagNodeType } from "../edito
 import { NODE_ICON } from "./node-icon";
 
 export interface PaletteProps {
+  disabled?: boolean;
   onAdd: (type: AddableDagNodeType) => void;
 }
 
-export function Palette({ onAdd }: PaletteProps) {
+export function Palette({ onAdd, disabled = false }: PaletteProps) {
   return (
     <div
       aria-label="Add node"
@@ -26,6 +27,7 @@ export function Palette({ onAdd }: PaletteProps) {
           <button
             key={type}
             type="button"
+            disabled={disabled}
             title={meta.description}
             onClick={() => onAdd(type)}
             className="flex items-center gap-2 rounded border border-line px-2 py-1.5 text-left text-xs font-medium text-ink transition-colors hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
