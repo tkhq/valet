@@ -339,6 +339,21 @@ cannot work because the active model is intentionally not persisted. Tracking
 only `model_switched` also misses queue-item and role model overrides that are
 already active when a client connects.
 
+## Amendment (TKAI-440): merge bounded REST message tails by overlap
+
+The messages route reads one extra entry when a client sets a limit. If the
+extra entry exists, the route returns the requested ordered tail and sets
+`hasMore` to true. `hasMore` means older entries exist before the returned
+window.
+
+The web stream store treats a response with `hasMore` as a bounded tail. It
+keeps the current prefix before the first message id that overlaps the tail.
+It replaces the overlapping suffix with the REST tail. If no row overlaps,
+the tail replaces the thread. The store keeps only rows marked `optimistic`
+or `streaming` after that tail. REST confirmation
+removes a client row with the same message id or queue item id. A complete
+response replaces canonical rows for the thread.
+
 ## Out of scope
 
 - DAG exploration UI (roll back / roll forward across compaction boundaries).
