@@ -15,6 +15,7 @@ import {
   deleteSkill,
   listSkillSourcesFor,
   listSkills,
+  listSkillsPage,
   ownedSkillRow,
   rowToSkillSource,
   SkillNameConflictError,
@@ -117,6 +118,16 @@ describe("stored skills service", () => {
     await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
     const theirs = await listSkills(db, owner("u2"));
     expect(theirs.map((s) => s.name)).toEqual(["ours"]);
+  });
+
+  it("treats empty query values as no service-level filter", async () => {
+    await createSkill(db, owner("u1"), { name: "alpha", description: "First.", content: BODY });
+    await createSkill(db, owner("u1"), { name: "beta", description: "Second.", content: BODY });
+
+    for (const query of ["", "   "]) {
+      const page = await listSkillsPage(db, owner("u1"), undefined, { query }, 50, undefined);
+      expect(page.rows.map((skill) => skill.name)).toEqual(["alpha", "beta"]);
+    }
   });
 
   it("rejects a second skill with the same name in one owner scope", async () => {
