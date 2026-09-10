@@ -224,7 +224,7 @@ export function InstallTemplateDialog({
               <p key={reason} className="text-xs leading-relaxed text-muted">{reason}</p>
             ))}
 
-            {unconfigured.length > 0 && (
+            {unconfigured.length > 0 && !template.blockers?.length && (
               <p className="text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>
             )}
           </div>

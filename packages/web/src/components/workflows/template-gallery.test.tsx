@@ -206,6 +206,22 @@ describe("TemplateGallery", () => {
       ).toBeTruthy();
     });
 
+    it("prefers detailed blockers without duplicating setup copy or losing App pin details", () => {
+      const setup = "slack is not configured for this organization. Ask an admin to configure Slack.";
+      const appPin = "github pins the GitHub App, but this organization has no App configured. An admin sets it up in Settings → Organization.";
+      templatesQuery.data = { templates: [{ ...needsSlackSetup, blockers: [setup, appPin] }] };
+      render(<TemplateGallery />);
+
+      expect(screen.getAllByText(/slack is not configured/i)).toHaveLength(1);
+      expect(screen.getByText(appPin)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Use template" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+      const dialog = within(screen.getByRole("dialog"));
+      expect(dialog.getAllByText(/slack is not configured/i)).toHaveLength(1);
+      expect(dialog.getByText(appPin)).toBeTruthy();
+      expect(dialog.getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
+    });
+
     it("offers no install, because the first run would fail on the missing token", () => {
       templatesQuery.data = { templates: [needsSlackSetup] };
       render(<TemplateGallery />);

@@ -134,7 +134,7 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
 
       {/* Below the controls, not on them: an admin's job is not a button the
           reader can press. */}
-      {unconfigured.length > 0 && (
+      {unconfigured.length > 0 && !template.blockers?.length && (
         <p className="pt-2 text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>
       )}
 
