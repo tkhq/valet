@@ -3,7 +3,7 @@
  * `ChannelHost`):
  * - `channelOriginResolver` — a channel event whose transport can derive a
  *   thread key gets a `ChannelOrigin` (thread key + the triggering message ts +
- *   the addressed reply mode), so the assistant's reply routes back to the
+ *   the addressed state), so an explicit assistant reply routes back to the
  *   conversation and it can react to the message. A non-channel event resolves
  *   to `null`.
  * - `channelMessageNormalizer` — resolves the sender's display name and cleans
@@ -27,7 +27,7 @@ export function channelOriginResolver(
     const threadKey = transport?.threadKeyFromEvent?.(eventKey, payload) ?? null;
     if (!threadKey) return null;
     const messageTs = transport?.messageTsFromEvent?.(eventKey, payload) ?? undefined;
-    // A dispatched channel event is an addressed mention, so its reply auto-posts.
+    // A dispatched channel event is an addressed mention.
     return { channelType: service, threadKey, reply: "auto", ...(messageTs ? { messageTs } : {}) };
   };
 }

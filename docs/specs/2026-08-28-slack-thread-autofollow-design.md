@@ -28,22 +28,17 @@ bot on every line.
 
 ## Design
 
-### 1. Two reply modes, keyed by how the message arrived
+### 1. Two attention modes with hybrid replies
 
-- **Addressed** — a direct @-mention (or a DM). The assistant auto-replies, as
-  it does today. A direct address deserves an answer.
-- **Overheard** — a message in a thread the bot follows, with no mention. The
-  message is delivered as something the assistant **observes**. It replies only
-  if it chooses to, through an action. The default is silence. No auto-reply
-  fires for an overheard turn, so there is no double-post.
+- **Addressed**: a direct mention or DM. The host posts the first assistant
+  text once. Later updates use `reply_to_origin`.
+- **Overheard**: a message in a followed thread without a mention. The assistant
+  stays silent unless it can add something useful. It uses
+  `reply_to_origin` or `react_to_origin` when it chooses to participate.
 
-The mode rides on the signal's origin: `ChannelOrigin.reply: "auto" | "manual"`
-(default `"auto"`; overheard sets `"manual"`). `ChannelOrigin` also gains
-`messageTs` — the specific message that triggered the turn — so the bot can
-react to it.
-
-`ChannelHost.deliverAssistantMessage` reads the finishing turn's origin (via
-`originFromEntries`) and skips the auto-post when `reply === "manual"`.
+The mode rides on `ChannelOrigin.reply: "auto" | "manual"`. The `auto` value
+enables one automatic first reply. The `manual` value keeps the turn silent
+unless an explicit Slack action posts or reacts.
 
 ### 2. The follow record
 
@@ -206,7 +201,7 @@ follow the persona's "answer by name". These fixes make one inbound view:
   shared `enrichSlackText`, which the transcript also uses.
 - `ChannelTransport.messageTsFromEvent` gives `channelOriginResolver` the
   triggering message ts, so a mention's `ChannelOrigin` carries `messageTs` and
-  `react_to_origin` has a target. The resolver also stamps `reply: "auto"`.
+  `react_to_origin` has a target. The resolver stamps `reply: "auto"` to mark the turn as addressed.
 - `renderSignalEnvelope` renders `addressed="true"|"false"` from the origin's
   reply mode, so the agent tells an addressed mention (answer normally) from an
   overheard follow (reply only via `reply_to_origin`) without guessing.
@@ -237,32 +232,6 @@ digest. A redelivery whose recomputed body differs from the first delivery
 (the cursor advanced, so the prefix is gone) hits the dispatchId content
 check; the follow-router swallows that `ConflictError` as a clean dedup.
 
-### Dropped-reply feedback (TKAI-284, added 2026-09-01)
-
-Two feedback paths in `ChannelHost.deliverAssistantMessage`, both submitting a
-`channel.reply_dropped` signal onto the turn's own thread with
-`attributes.feedback` set and a manual-reply origin:
-
-- An overheard turn whose final message was swallowed, when the turn delivered
-  no channel response (no successful `reply_to_origin`, `react_to_origin`,
-  `send_message`, `dm_owner`, or `dm_user`): one note per thread (durable
-  dispatchId `feedback:overheard-dropped:{threadId}`), so a dropped reply is
-  recoverable but a deliberately silent assistant is not nagged into
-  over-participation (TKAI-293).
-- An addressed auto-post whose TEXT send threw: one note per failed message
-  (`feedback:reply-failed:{messageId}`), naming the error and the corrective
-  action. A partial failure (text posted, an attachment did not) drop-logs
-  only — the reply reached the thread, and a note would invite a duplicate.
-
-The note renders under its own `delivery_failure` envelope tag (the persona
-names it), because its manual origin stamps `addressed="false"` and the
-overheard guidance would otherwise read it as ignorable chatter. Loop guard: a
-feedback-triggered turn never generates further feedback
-(`turnPromptIsFeedback` reads the prompt's `attributes.feedback`), the manual
-origin keeps the recovery turn off the auto-post path, and the engine's
-overheard-digest coalescing skips feedback signals so the guard cannot be
-buried in a digest.
-
 ### First-turn seed hardening (TKAI-284, added 2026-09-01)
 
 `deliverToAssistantThread` serializes deliveries per assistant thread with an
@@ -283,8 +252,8 @@ admit and claim. Two rapid mentions on one new thread seed the transcript once.
 
 ## Testing
 
-- Origin `reply`/`messageTs` round-trip; `deliverAssistantMessage` skips
-  auto-post for `reply: "manual"`.
+- Origin `reply`/`messageTs` round-trip. Addressed turns post only the first
+  assistant text. Overheard turns stay internal without an explicit action.
 - Dispatcher writes a `followed_threads` row for a follow-enabled mention;
   writes none when `follow` is off.
 - Follow-router: a threaded channel message on a followed thread delivers to the
@@ -318,7 +287,7 @@ admit and claim. Two rapid mentions on one new thread seed the transcript once.
 One project, one PR onto `dev-v2` (after the thread-binding fix lands), built in
 this order:
 
-1. `ChannelOrigin.reply` + `messageTs`; auto-post suppression for `manual`.
+1. `ChannelOrigin.reply` + `messageTs`; explicit action delivery for both modes.
 2. `reply_to_origin` + `react_to_origin` actions + `ToolContext.origin`.
 3. `followed_threads` table + follow flag + dispatcher write.
 4. The follow-router consumer + overheard delivery + persona guidance.

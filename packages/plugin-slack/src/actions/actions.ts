@@ -970,7 +970,7 @@ const replyToOrigin = action(Type.Object({
   id: 'slack.reply_to_origin',
   name: 'Reply to Origin',
   description:
-    'Reply in the Slack thread this message came from. Use it to answer an overheard message, or to send a follow-up on an addressed turn (only your first message posts automatically). No channel or thread id is needed.',
+    'Reply in the Slack thread this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const o = await resolveSlackOrigin(ctx);
@@ -983,6 +983,45 @@ const replyToOrigin = action(Type.Object({
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
     return { success: true, data: { channel: o.channelId, ts: data.ts } };
+  },
+});
+
+const replyFileToOrigin = action(Type.Object({
+    path: Type.String({ minLength: 1, description: 'Sandbox path of the file to upload.' }),
+    name: Type.Optional(Type.String({
+      minLength: 1,
+      description: 'Displayed filename. Defaults to the path basename.',
+    })),
+    mime_type: Type.Optional(Type.String({
+      minLength: 1,
+      description: 'File MIME type. Defaults to application/octet-stream.',
+    })),
+    caption: Type.Optional(Type.String({ description: 'Optional message posted with the file.' })),
+  }))({
+  id: 'slack.reply_file_to_origin',
+  name: 'Reply with File to Origin',
+  description:
+    'Upload a sandbox file to the Slack thread this turn came from. Use it for generated images, documents, and other file results. No channel or thread id is needed.',
+  riskLevel: 'medium',
+  execute: async (args, ctx) => {
+    const o = await resolveSlackOrigin(ctx);
+    if ('error' in o) return { success: false, error: o.error };
+    const stat = await ctx.sandbox.stat(args.path);
+    if (!stat.isFile) {
+      return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
+    }
+    const data = await ctx.sandbox.readBinary(args.path);
+    const name = args.name ?? args.path.split('/').filter(Boolean).at(-1) ?? 'file';
+    const api = new SlackApi(o.token);
+    const { uploadUrl, fileId } = await api.getUploadUrlExternal(name, data.byteLength);
+    await api.uploadToUrl(uploadUrl, data, args.mime_type ?? 'application/octet-stream');
+    await api.completeUploadExternal({
+      fileId,
+      channelId: o.channelId,
+      threadTs: o.threadTs,
+      initialComment: args.caption,
+    });
+    return { success: true, data: { channel: o.channelId, fileId } };
   },
 });
 
@@ -1127,6 +1166,7 @@ export const slackPlugin: ActionPlugin = {
     getReactions,
     sendMessage,
     replyToOrigin,
+    replyFileToOrigin,
     reactToOrigin,
     updateMessage,
     deleteMessage,

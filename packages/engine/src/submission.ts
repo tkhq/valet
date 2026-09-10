@@ -58,9 +58,11 @@ export function isSignalContent(content: PromptContent): content is SignalConten
 
 /**
  * The coalesce key for a queued overheard signal, or `undefined` when the
- * content does not coalesce. Only a channel signal with `reply: "manual"` —
- * an overheard message in a followed thread, the `addressed="false"`
- * envelope — coalesces. The key is the origin thread key, so only messages
+ * content does not coalesce. Only a channel message signal with
+ * `reply: "manual"` — an overheard message in a followed thread, the
+ * `addressed="false"` envelope — coalesces. Internal signals such as
+ * `child.settled` stay independent so their metadata remains intact.
+ * The key is the origin thread key, so only messages
  * overheard in the SAME external thread merge into one digest (TKAI-297).
  * A delivery-feedback signal (`attributes.feedback`, e.g. "your reply was not
  * posted") never coalesces: it is a correction addressed to the agent, not an
@@ -71,7 +73,7 @@ export function isSignalContent(content: PromptContent): content is SignalConten
  * block to one sender.
  */
 export function overheardCoalesceKey(content: PromptContent): string | undefined {
-  if (!isSignalContent(content)) return undefined;
+  if (!isSignalContent(content) || !content.signalType.endsWith(".message")) return undefined;
   if (content.origin?.reply !== "manual") return undefined;
   if (content.attributes?.feedback !== undefined) return undefined;
   if (content.attributes?.rehydrated !== undefined) return undefined;
@@ -173,9 +175,8 @@ export function renderSignalEnvelope(
   // (`slack:C1:1.2`), so it reads as a compact origin for the model.
   if (signal.origin !== undefined) {
     attrs.origin = signal.origin.threadKey;
-    // Tell the agent whether it was addressed (a mention/DM, reply auto-posts)
-    // or is overhearing a followed thread (reply only via reply_to_origin), so
-    // it does not answer into the void or double-post.
+    // Tell the agent whether it was addressed or is overhearing a followed
+    // thread. Both cases require an explicit channel action to post.
     attrs.addressed = signal.origin.reply === "manual" ? "false" : "true";
   }
 
