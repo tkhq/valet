@@ -178,3 +178,8 @@ keyed on the owner, so a manual switch afterward is not overridden, and it
 waits for the data (owner `undefined` → no-op). The session page reads
 `GetSessionResponse.owner`; the run detail response gained an `owner` field for
 the same purpose. `/chat` still adopts through the assistant, unchanged.
+
+
+### Team credential names (TKAI-436)
+
+The team credential list and its removal dialog use the shared integration display names. API calls still use service identifiers. Delegated credentials keep the Stop sharing action; direct credentials keep Disconnect.

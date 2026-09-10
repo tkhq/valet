@@ -688,10 +688,10 @@ describe("TeamsPanel — team credentials", () => {
       },
     ];
     openTeam();
-    expect(screen.getByText("linear")).toBeTruthy();
+    expect(screen.getByText("Linear")).toBeTruthy();
     expect(screen.getByText("Shared by Two · broken")).toBeTruthy();
     expect(screen.getByText("Broken")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Stop sharing linear with Platform" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop sharing Linear with Platform" })).toBeTruthy();
   });
 
   it("hides the removal control from a plain member", () => {
@@ -701,7 +701,7 @@ describe("TeamsPanel — team credentials", () => {
     ];
     openTeam();
     expect(screen.getByText("Stored on the team")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Disconnect linear from Platform" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disconnect Linear from Platform" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Stop sharing/ })).toBeNull();
   });
 });
@@ -715,8 +715,8 @@ describe("TeamsPanel — team credentials", () => {
  */
 describe("TeamsPanel — removing a team credential", () => {
   /** linear is stored on the team. slack is shared by Two. */
-  const DIRECT = "Disconnect linear from Platform";
-  const SHARED = "Stop sharing slack with Platform";
+  const DIRECT = "Disconnect Linear from Platform";
+  const SHARED = "Stop sharing Slack with Platform";
 
   beforeEach(() => {
     callerRole = "admin";
@@ -760,7 +760,17 @@ describe("TeamsPanel — removing a team credential", () => {
     openTeam();
     const dialog = await clickRemove(DIRECT);
     expect(disconnectMutate).not.toHaveBeenCalled();
-    expect(within(dialog).getByText("Disconnect linear from Platform?")).toBeTruthy();
+    expect(within(dialog).getByText("Disconnect Linear from Platform?")).toBeTruthy();
+  });
+
+  it("spells the service the way Integrations does, in the title and the note", async () => {
+    // The dialog named the raw service id three times, so one credential read
+    // "Linear" on Integrations and in every API refusal, and "linear" here.
+    openTeam();
+    const dialog = await clickRemove(DIRECT);
+    expect(within(dialog).getByText("Disconnect Linear from Platform?")).toBeTruthy();
+    expect(within(dialog).getByText(/lose access to Linear\./)).toBeTruthy();
+    expect(within(dialog).queryByText(/linear/)).toBeNull();
   });
 
   it("names the row that was clicked, not the first row", async () => {
@@ -768,8 +778,8 @@ describe("TeamsPanel — removing a team credential", () => {
     // state. A single boolean would name whichever row rendered first.
     openTeam();
     const dialog = await clickRemove(SHARED);
-    expect(within(dialog).getByText("Stop sharing slack with Platform?")).toBeTruthy();
-    expect(within(dialog).queryByText("Disconnect linear from Platform?")).toBeNull();
+    expect(within(dialog).getByText("Stop sharing Slack with Platform?")).toBeTruthy();
+    expect(within(dialog).queryByText("Disconnect Linear from Platform?")).toBeNull();
   });
 
   it("calls a delegated row Stop sharing, and says the delegator keeps theirs", async () => {
@@ -778,13 +788,13 @@ describe("TeamsPanel — removing a team credential", () => {
     // this action "Stop sharing" (`integrations/share-with-team.test.tsx`).
     openTeam();
     expect(screen.getByRole("button", { name: SHARED }).textContent).toBe("Stop sharing");
-    expect(screen.queryByRole("button", { name: "Disconnect slack from Platform" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disconnect Slack from Platform" })).toBeNull();
 
     const dialog = await clickRemove(SHARED);
     expect(within(dialog).getByRole("button", { name: "Stop sharing" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Disconnect" })).toBeNull();
     expect(within(dialog).getByText(/removes the team's link only/)).toBeTruthy();
-    expect(within(dialog).getByText(/Two keeps their own slack connection/)).toBeTruthy();
+    expect(within(dialog).getByText(/Two keeps their own Slack connection/)).toBeTruthy();
   });
 
   it("keeps Disconnect for the team's own credential, and says how to get it back", async () => {
@@ -795,7 +805,7 @@ describe("TeamsPanel — removing a team credential", () => {
     expect(within(dialog).getByRole("button", { name: "Disconnect" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Stop sharing" })).toBeNull();
     expect(within(dialog).getByText(/deletes the credential stored on the team/)).toBeTruthy();
-    expect(within(dialog).getByText(/Connect linear again from Integrations/)).toBeTruthy();
+    expect(within(dialog).getByText(/Connect Linear again from Integrations/)).toBeTruthy();
   });
 
   it("confirming removes with the team scope and id", async () => {
