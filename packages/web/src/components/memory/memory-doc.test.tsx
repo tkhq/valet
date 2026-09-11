@@ -4,8 +4,8 @@
  * tree entry, frontmatter never shown raw, and the "Ask {name} to update
  * this" footer seeds the composer-prefill store before navigating.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { ApiError, api, type OwnerFilter } from "~/api/client";
@@ -572,6 +572,84 @@ describe("MemoryDoc team scope (TKAI-262)", () => {
     teams.mockRestore();
     org.mockRestore();
     write.mockRestore();
+  });
+});
+
+describe("MemoryDoc resource lifetime", () => {
+  const personal: OwnerFilter = { ownerType: "user", ownerId: "owner-a" };
+  const transitions: { name: string; path: string; owner: OwnerFilter; from?: OwnerFilter }[] = [
+    { name: "path", path: "notes/other.md", owner: personal },
+    { name: "owner ID", path: "notes/source.md", owner: { ownerType: "user", ownerId: "owner-b" } },
+    { name: "team owner", path: "notes/source.md", from: { ownerType: "team", ownerId: "team-a" }, owner: { ownerType: "team", ownerId: "team-b" } },
+    { name: "owner type", path: "notes/source.md", owner: { ownerType: "team", ownerId: "owner-a" } },
+  ];
+  beforeEach(() => {
+    docMock.mockImplementation((path: string, owner?: OwnerFilter) => ({
+      isLoading: false, error: null,
+      data: { ...renderedDoc("body"), file: { ...renderedDoc("body").file,
+        path, title: path, content: `${owner?.ownerId}:${path}` } },
+    }));
+    vi.spyOn(api, "listTeams").mockResolvedValue({ teams: [] });
+    vi.spyOn(api, "getOrg").mockResolvedValue({ ...orgFixture, callerRole: "admin" });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function mount(startingOwner = personal) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const onDeleted = vi.fn();
+    const pane = (path = "notes/source.md", owner = startingOwner) => (
+      <QueryClientProvider client={client}>
+        <MemoryDoc path={path} owner={owner} onNavigateToChat={vi.fn()} onDeleted={onDeleted} />
+      </QueryClientProvider>
+    );
+    const view = render(pane());
+    return { ...view, pane, client, onDeleted };
+  }
+
+  it.each(transitions)("drops the old draft when $name changes", async ({ path, owner, from }) => {
+    const write = vi.spyOn(api, "writeMemoryDoc").mockResolvedValue({});
+    const view = mount(from);
+    fireEvent.click(await screen.findByText("Edit"));
+    fireEvent.change(screen.getByLabelText("Memory content"), { target: { value: "Private draft for the old file" } });
+    view.rerender(view.pane(path, owner));
+    expect(screen.queryByLabelText("Memory content")).toBeNull();
+    expect(write).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByText("Edit"));
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Memory content" }).value).toBe(`${owner.ownerId}:${path}`);
+  });
+
+  it.each(transitions)("drops the delete confirmation when $name changes", async ({ path, owner, from }) => {
+    const remove = vi.spyOn(api, "deleteMemoryDoc").mockResolvedValue({});
+    const view = mount(from);
+    fireEvent.click(await screen.findByText("Delete"));
+    view.rerender(view.pane(path, owner));
+    await screen.findByText("Delete");
+    expect(screen.queryByText("Confirm delete")).toBeNull();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it.each(transitions)("keeps old delete completion from navigating after $name changes", async ({ path, owner, from }) => {
+    let finishDelete = () => {};
+    const pending = new Promise<void>((resolve) => { finishDelete = resolve; });
+    const remove = vi.spyOn(api, "deleteMemoryDoc").mockImplementation(async () => { await pending; return {}; });
+    const view = mount(from);
+    const invalidate = vi.spyOn(view.client, "invalidateQueries");
+    fireEvent.click(await screen.findByText("Delete"));
+    fireEvent.click(screen.getByText("Confirm delete"));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("notes/source.md", from ?? personal));
+    view.rerender(view.pane(path, owner));
+    await act(async () => { finishDelete(); await pending; });
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["memory", "tree"] }));
+    expect(view.onDeleted).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading").textContent).toContain(path);
+  });
+
+  it("preserves the draft when an equivalent owner object is rendered again", () => {
+    const view = mount();
+    fireEvent.click(screen.getByText("Edit"));
+    fireEvent.change(screen.getByLabelText("Memory content"), { target: { value: "Keep this draft" } });
+    view.rerender(view.pane("notes/source.md", { ...personal }));
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Memory content" }).value).toBe("Keep this draft");
   });
 });
 

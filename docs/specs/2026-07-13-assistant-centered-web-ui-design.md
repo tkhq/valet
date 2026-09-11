@@ -82,6 +82,14 @@ a write, so a plain team member sees Export but not Import — the same authorit
 the doc pane's edit/pin/delete already enforce. Sharing and the "Ask {name} to
 update this" prefill stay personal-only (`mem_share` refuses team paths in v1).
 
+Amended 2026-09-11: **memory editor state belongs to one resource.** `MemoryDoc`
+keys its contents by owner type, owner ID, and path for every consumer.
+Changing any key part discards the unsaved draft and closes delete confirmations.
+Rendering the same resource again preserves its draft.
+A pending delete still refreshes caches when it completes. It invokes the
+navigation callback only while the original resource remains mounted.
+This prevents an old completion from navigating away from a newly opened file.
+
 ### `/sessions` and `/sessions/$sessionId` — standalone sessions
 
 - The list shows **standalone sessions only** (owner user, purpose `interactive`; children and orchestrators excluded). "New session" dialog lives here. Framing copy: this is the space for direct/automation sessions.
