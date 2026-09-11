@@ -38,7 +38,7 @@ const DEFAULT_STORAGE = "1Gi";
 const FULL_PROFILE_COMMAND = [
   "sh",
   "-c",
-  "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+  "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
 ];
 
 export const WORKSPACE_VOLUME_NAME = "workspace";
@@ -333,7 +333,7 @@ export function buildSandboxManifest(
       container.command = [
         "sh",
         "-c",
-        "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
       ];
     }
   }
