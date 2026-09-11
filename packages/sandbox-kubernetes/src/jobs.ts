@@ -323,7 +323,7 @@ export async function execJobInPod(
   // user unless the caller asked for root.
   const result = await execInPod(deps, podName, kickoff, opts?.privileged ? { privileged: true } : undefined);
   if (result.exitCode !== 0) {
-    throw new Error(`execJob kickoff failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+    throw new Error(`execJob kickoff failed (exit ${result.exitCode}): ${result.stderr.trim() || "no diagnostic output"}. Check the sandbox pod status before retrying.`);
   }
   return { execId };
 }
@@ -335,8 +335,8 @@ export function parseJobStatus(statusText: string): { status: "running" | "done"
   if (trimmed === "unknown") return { status: "failed" };
   if (trimmed === "running") return { status: "running" };
   const exitCode = Number(trimmed);
-  if (!Number.isFinite(exitCode)) {
-    throw new Error(`pollJob: unexpected status marker ${JSON.stringify(statusText)}`);
+  if (!/^\d+$/.test(trimmed) || exitCode > 255) {
+    throw new Error(`pollJob: unexpected status marker ${JSON.stringify(statusText)}. Check the sandbox pod status before retrying.`);
   }
   return { status: "done", exitCode };
 }
@@ -419,6 +419,9 @@ export function decodeUtf8HoldingTail(buf: Buffer): { text: string; deliveredByt
  */
 export async function pollJobInPod(deps: ExecDeps, podName: string, execId: string, offset: number): Promise<JobPoll> {
   const result = await execInPod(deps, podName, pollCommand(execId, offset));
+  if (result.exitCode !== 0) {
+    throw new Error(`pollJob failed (exit ${result.exitCode}): ${result.stderr.trim() || "no diagnostic output"}. Check the sandbox pod status before retrying.`);
+  }
   const { status, exitCode } = parseJobStatus(result.stderr);
   if (status === "failed") {
     return { status, output: "", nextOffset: offset };

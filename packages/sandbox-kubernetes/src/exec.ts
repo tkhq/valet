@@ -124,22 +124,22 @@ export interface ExecStatus {
   };
 }
 
-/**
- * Pure translation of the k8s exec status channel into a plain exit code.
- * `status: "Success"` → 0. A `Failure` with an `ExitCode` cause → that
- * code, parsed. Any other `Failure` shape (no `ExitCode` cause — e.g. the
- * command itself couldn't be started) → 1, matching Node's own convention
- * for "process didn't report a code" (see sandbox-docker's `code ?? (sig ?
- * 128 : 1)`).
- */
+/** Return the process exit code, or preserve Kubernetes exec rejection diagnostics. */
 export function exitCodeFromStatus(status: ExecStatus): number {
   if (status.status === "Success") return 0;
-  const cause = status.details?.causes?.find((c) => c.reason === "ExitCode");
-  if (cause?.message !== undefined) {
-    const parsed = Number(cause.message);
-    if (Number.isFinite(parsed)) return parsed;
+  const code = status.details?.causes?.find((cause) => cause.reason === "ExitCode")?.message;
+  if (code === undefined || !/^\d+$/.test(code) || Number(code) < 1 || Number(code) > 255) {
+    throw new PodExecStatusError(status);
   }
-  return 1;
+  return Number(code);
+}
+
+/** Kubernetes rejected exec without reporting a valid process exit code. */
+export class PodExecStatusError extends Error {
+  constructor(readonly status: ExecStatus) {
+    super(`Kubernetes exec failed: ${[status.reason, status.message].filter(Boolean).join(": ") || "no process exit status"}. Check the sandbox pod status before retrying.`);
+    this.name = "PodExecStatusError";
+  }
 }
 
 // ── Narrow client interface (real k8s.Exec adapts to this; tests fake it) ──

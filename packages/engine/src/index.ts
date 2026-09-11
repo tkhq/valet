@@ -18,6 +18,7 @@ export {
   WorkspaceProvisioningError,
   SandboxSupersededError,
   SandboxUnavailableError,
+  SandboxEvictedError,
   SandboxStartupError,
   SandboxPreparationError,
 } from "./errors.js";

@@ -174,3 +174,5 @@ export {
   type ReadPodLogParams,
   type SandboxBatchJobsApi,
 } from "./buildkit-job.js";
+
+export { sandboxEvictionApiAdapter, type SandboxEvictionApi } from "./eviction.js";

@@ -287,3 +287,9 @@ describe("incompleteUtf8TailLength / decodeUtf8HoldingTail (pollJobInPod's byte-
     expect(text).toBe("����");
   });
 });
+
+describe("invalid status markers", () => {
+  it.each(["", "  ", "1.2", "-1", "0x10", "1e2", "256"])("rejects %j", (marker) => {
+    expect(() => parseJobStatus(marker)).toThrow("status marker");
+  });
+});

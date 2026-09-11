@@ -247,3 +247,16 @@ export class SandboxUnavailableError extends Error {
     this.name = "SandboxUnavailableError";
   }
 }
+
+/** A provider confirmed that the sandbox was evicted. Never replay the failed command. */
+export class SandboxEvictedError extends Error {
+  readonly code = "sandbox_evicted";
+
+  constructor(readonly reason: string, readonly detail: string) {
+    const action = /storage|docker-state|disk/i.test(detail)
+      ? "Increase the sandbox storage allocation or reduce retained Docker data."
+      : "Check the eviction reason and adjust sandbox resources.";
+    super(`[sandbox_evicted] Sandbox evicted (${reason}): ${detail}. ${action} Check command side effects before retrying after sandbox recovery.`);
+    this.name = "SandboxEvictedError";
+  }
+}

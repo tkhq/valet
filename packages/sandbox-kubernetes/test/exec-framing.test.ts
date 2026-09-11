@@ -204,11 +204,11 @@ describe("exitCodeFromStatus", () => {
     ).toBe(127);
   });
 
-  it("falls back to 1 for a Failure with no ExitCode cause", () => {
-    expect(exitCodeFromStatus({ status: "Failure", reason: "some other reason" })).toBe(1);
+  it("rejects a Failure with no ExitCode cause", () => {
+    expect(() => exitCodeFromStatus({ status: "Failure", reason: "some other reason" })).toThrow("some other reason");
   });
 
-  it("falls back to 1 when causes is empty", () => {
-    expect(exitCodeFromStatus({ status: "Failure", details: { causes: [] } })).toBe(1);
+  it("rejects a failure when causes is empty", () => {
+    expect(() => exitCodeFromStatus({ status: "Failure", details: { causes: [] } })).toThrow("no process exit status");
   });
 });

@@ -6,6 +6,7 @@ import {
   WorkspaceProvisioningError,
   SandboxSupersededError,
   SandboxUnavailableError,
+  SandboxEvictedError,
   type AttachmentStatus,
   type Sandbox,
   type SandboxCapabilities,
@@ -580,4 +581,25 @@ describe("SandboxAttachment", () => {
 
     consoleErrorSpy.mockRestore();
   });
+});
+
+it("preserves confirmed eviction and invalidates without replaying", async () => {
+  const provider = new FakeProvider();
+  const attachment = new SandboxAttachment(provider, {});
+  const wrapper = new PolicySandbox(attachment);
+  const sb = makeFakeSandbox("evicted");
+  const error = new SandboxEvictedError("Evicted", "docker-state exceeded 8Gi");
+  sb.exec.mockRejectedValue(error);
+  const d = provider.nextDeferred();
+  const result = wrapper.exec("side-effect");
+  d.resolve(sb);
+  await expect(result).rejects.toBe(error);
+  expect(sb.exec).toHaveBeenCalledTimes(1);
+  expect(attachment.current()).not.toBe(sb);
+  expect(attachment.current()?.exec).not.toHaveBeenCalled();
+  expect(attachment.isSuperseded(1)).toBe(true);
+  expect(error.message).toContain("Sandbox evicted");
+  expect(error.message).toContain("docker-state exceeded 8Gi");
+  expect(error.message).toContain("Increase");
+  await attachment.destroy();
 });

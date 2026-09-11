@@ -124,7 +124,7 @@ Three additive changes to the manifest builder and provider config:
    request caps how many sandbox pods the scheduler stacks onto one node
    (`nodeAllocatableEphemeral / request`). The limit makes the kubelet evict
    one runaway sandbox instead of the node failing. Defaults: request `2Gi`,
-   limit `8Gi` — env-overridable via
+   limit `30Gi` (increased from `8Gi` on 2026-09-10). Override these through
    `VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST` /
    `VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT` (`"0"` disables a side), chart
    values `sandbox.ephemeralStorageRequest` / `sandbox.ephemeralStorageLimit`.
@@ -216,3 +216,15 @@ resource requests or PVC provisioning.
 - In-sandbox services (VS Code/VNC/gateway) — the service-JWT primitives from the auth pass wait for that pass.
 - Cloudflare adapters (future direction; DB story already compatible via Hyperdrive+Neon).
 - Network policies / pod security admission hardening beyond namespace isolation (recorded as a prod-readiness follow-up).
+
+## Eviction diagnostics (2026-09-10)
+
+The provider checks pod status before each command and after failures. Confirmed eviction reports `Sandbox evicted` with the Kubernetes reason and corrective action.
+
+After pod deletion, the provider checks namespace events from the last ten minutes. Events must match the pod name and known UID. A healthy replacement pod does not inherit an earlier eviction. The API role has namespace-scoped `events:list` access.
+
+`PolicySandbox` preserves the typed eviction error and invalidates the attachment. It never replays the failed command. Users must check command side effects before retrying.
+
+Each active job retains its kickoff pod name and UID. Polling and cancellation check that identity before using a replacement pod. Terminal results, cancellation, and rejected polls release the retained identity.
+
+An exec failure without a valid process exit code preserves the Kubernetes status reason and message. Job polling rejects a failed exec before parsing its marker. Empty, malformed, or out-of-range markers cannot report success. Ordinary command exit codes remain command results when eviction evidence is absent.
