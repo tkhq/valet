@@ -58,9 +58,6 @@ const deleteTeamReset = vi.fn(() => {
 let callerRole: "admin" | "member" | null = "member";
 let orgRole: "admin" | "member" = "member";
 let origin: "local" | "config" | "idp" = "local";
-/** The org's team-sync gate. Off is the product default, so it is the default here. */
-let ssoTeamSync = false;
-
 let selectedTeamsOverride: TeamSummary[] | undefined;
 let selectedTeamsLoading = false;
 let selectedTeamsError: Error | null = null;
@@ -111,11 +108,6 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: selectedTeamsOverride ? { teams: selectedTeamsOverride } : teamsData(), isLoading: selectedTeamsLoading, error: selectedTeamsError }),
   useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
-  useOrg: () => ({
-    data: { features: { organizations: true, ssoTeamSync } },
-    isLoading: false,
-    error: null,
-  }),
   useTeamMembers: () => ({
     data: {
       members: [
@@ -238,11 +230,7 @@ function openTeam() {
   return view;
 }
 
-/**
- * A mirrored team hides its controls only while the sync actually runs. The
- * gate is the org's `ssoTeamSync` feature, so the same row reads two ways.
- */
-describe("TeamsPanel — mirrored teams follow the team-sync gate", () => {
+describe("TeamsPanel — identity-provider provenance", () => {
   beforeEach(() => {
     callerRole = "admin";
     orgRole = "admin";
@@ -251,25 +239,11 @@ describe("TeamsPanel — mirrored teams follow the team-sync gate", () => {
 
   afterEach(() => {
     origin = "local";
-    ssoTeamSync = false;
   });
 
-  it("hides the controls while team sync is on", () => {
-    ssoTeamSync = true;
+  it("shows provenance and keeps manual membership controls", () => {
     openTeam();
     expect(screen.getByText("Identity provider")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
-  });
-
-  it("returns the controls, and says why, while team sync is off", () => {
-    // Nothing reasserts this team any more, so a hidden control would leave
-    // a team nobody can change. The badge and the note are what stop that
-    // reading as "this team was never mirrored".
-    ssoTeamSync = false;
-    openTeam();
-    expect(screen.getByText("Identity provider (paused)")).toBeTruthy();
-    expect(screen.getByText(/team sync is off/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Add member/ })).toBeTruthy();
   });
@@ -369,6 +343,10 @@ describe("TeamsPanel role gating", () => {
     expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Remove One/ })).toBeNull();
+    // Both roster roles render as badges, never dropdown triggers. This
+    // includes the caller's own row, so the UI offers no self-promotion path.
+    expect(screen.queryByRole("button", { name: "Admin" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Member" })).toBeNull();
   });
 
   it("shows mutation controls to a team admin", () => {
@@ -377,6 +355,7 @@ describe("TeamsPanel role gating", () => {
     openTeam();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Add member/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Member" })).toBeTruthy();
   });
 
   it("shows mutation controls to an org admin who is not on the team", () => {
@@ -384,6 +363,7 @@ describe("TeamsPanel role gating", () => {
     orgRole = "admin";
     openTeam();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Member" })).toBeTruthy();
   });
 });
 
@@ -909,7 +889,6 @@ describe("TeamsPanel selected workspace", () => {
     selectedTeamsError = null;
     orgRole = "member";
     origin = "local";
-    ssoTeamSync = false;
     deleteTeamMutate.mockClear();
     patchTeamMutate.mockClear();
   });

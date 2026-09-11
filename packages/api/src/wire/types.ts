@@ -1722,6 +1722,21 @@ export interface ListTeamsResponse {
   teams: TeamSummary[];
 }
 
+/** An eligible team suggestion. Identity-provider group paths stay server-side. */
+export interface SuggestedTeamSummary {
+  id: string;
+  name: string;
+  memberCount: number;
+}
+
+export interface ListSuggestedTeamsResponse {
+  teams: SuggestedTeamSummary[];
+}
+
+export interface JoinSuggestedTeamResponse {
+  joined: true;
+}
+
 export interface ListTeamMembersResponse {
   members: TeamMemberSummary[];
 }

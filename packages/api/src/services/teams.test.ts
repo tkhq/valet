@@ -18,10 +18,10 @@ import {
 import { reapTeamWorkflows } from "../workflows/service.js";
 import {
   addMember,
+  canAdministerTeam,
   ConfigManagedTeamError,
   createTeam,
   deleteTeam,
-  IdpManagedTeamError,
   isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
@@ -36,7 +36,6 @@ import {
   TeamNameConflictError,
   TeamOwnsWorkflowsError,
 } from "./teams.js";
-import { setOrgFeatures } from "./org.js";
 import { createAssistant, findDefaultAssistant } from "../assistants/service.js";
 
 async function seedUser(db: AppDb, id: string, orgId: string) {
@@ -184,6 +183,28 @@ describe("teams service", () => {
 
     const teams = await listTeamsForUser(db, "u2");
     expect(teams.map((t) => t.id)).toContain(team.id);
+  });
+
+  it("canAdministerTeam admits only team admins or org admins", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+
+    expect(await canAdministerTeam(db, team.id, "u1")).toBe(true);
+    expect(await canAdministerTeam(db, team.id, "u2")).toBe(false);
+
+    await db.update(orgMembers).set({ role: "admin" }).where(
+      and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, "u3")),
+    );
+    // Recovery override applies even when the org admin is not on the team.
+    expect(await canAdministerTeam(db, team.id, "u3")).toBe(true);
+  });
+
+  it("a global operator without either membership role cannot administer a team", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+    await db.update(users).set({ role: "admin" }).where(eq(users.id, "u2"));
+
+    expect(await canAdministerTeam(db, team.id, "u2")).toBe(false);
   });
 
   it("setRole promotes/demotes a member", async () => {
@@ -579,18 +600,7 @@ describe("teams service", () => {
     );
   });
 
-  describe("identity-provider-managed teams", () => {
-    /**
-     * Seeds a team the way the login-time sync does: `origin: "idp"`, the
-     * full group path, and member rows written straight to the table.
-     * `createTeam` always writes `local`, so it cannot produce one.
-     *
-     * `ssoTeamSync` is turned on with it, because `origin` alone no longer
-     * locks the row. The lock exists so a hand edit is not undone at the
-     * next sign-in, so it holds only while a sync actually runs — see
-     * `isLiveIdpMirror`. The dormant half is tested at the end of this
-     * block.
-     */
+  describe("identity-provider-backed teams", () => {
     async function seedIdpTeam(): Promise<string> {
       const id = "team_idp";
       await db.insert(teams).values({
@@ -603,103 +613,30 @@ describe("teams service", () => {
       });
       await db.insert(teamMembers).values({ teamId: id, userId: "u1", role: "admin" });
       await db.insert(teamMembers).values({ teamId: id, userId: "u2", role: "member" });
-      await setOrgFeatures(db, orgId, { ssoTeamSync: true });
       return id;
     }
 
-    it("addMember refuses, and names the group in the message", async () => {
+    it("is never a live login-managed mirror", async () => {
       const teamId = await seedIdpTeam();
-      await expect(addMember(db, { teamId, userId: "u3", role: "member" })).rejects.toThrow(
-        IdpManagedTeamError,
-      );
-      // The message must name the group to change, not just state a refusal.
-      await expect(addMember(db, { teamId, userId: "u3", role: "member" })).rejects.toThrow(/\/platform/);
-      expect(await listTeamMembers(db, teamId)).toHaveLength(2);
+      const rows = await db.select().from(teams).where(eq(teams.id, teamId));
+      expect(await isLiveIdpMirror(db, rows[0]!)).toBe(false);
     });
 
-    it("setRole refuses", async () => {
+    it("keeps manual membership edits available", async () => {
       const teamId = await seedIdpTeam();
-      await expect(setRole(db, { teamId, userId: "u2", role: "admin" })).rejects.toThrow(
-        IdpManagedTeamError,
-      );
+      await addMember(db, { teamId, userId: "u3", role: "member" });
+      await setRole(db, { teamId, userId: "u2", role: "admin" });
+      await removeMember(db, { teamId, userId: "u3" });
+
       const members = await listTeamMembers(db, teamId);
-      expect(members.find((m) => m.userId === "u2")?.role).toBe("member");
+      expect(members).toHaveLength(2);
+      expect(members.find((member) => member.userId === "u2")?.role).toBe("admin");
     });
 
-    it("removeMember refuses", async () => {
+    it("can be deleted without a login sync recreating it", async () => {
       const teamId = await seedIdpTeam();
-      await expect(removeMember(db, { teamId, userId: "u2" })).rejects.toThrow(IdpManagedTeamError);
-      expect(await listTeamMembers(db, teamId)).toHaveLength(2);
-    });
-
-    it("deleteTeam refuses and the team survives", async () => {
-      const teamId = await seedIdpTeam();
-      await expect(deleteTeam(db, { teamId })).rejects.toThrow(IdpManagedTeamError);
-      expect(await listTeamsForUser(db, "u1")).toHaveLength(1);
-    });
-
-    it("the guard reads origin, not the name — a local team of the same name is untouched", async () => {
-      // The refusal must key on provenance alone. A local team that happens
-      // to share a mirrored team's name keeps every capability, or the sync
-      // would silently freeze teams it does not own.
-      await seedIdpTeam();
-      // A second org, because `teams_org_name` blocks the same name twice in
-      // one org.
-      await db.insert(orgs).values({ id: "org2", name: "Org2", createdAt: Date.now() });
-      await seedUser(db, "u8", "org2");
-      await seedUser(db, "u9", "org2");
-      const local = await createTeam(db, { orgId: "org2", name: "platform", creatorUserId: "u9" });
-
-      await addMember(db, { teamId: local.id, userId: "u8", role: "member" });
-      await setRole(db, { teamId: local.id, userId: "u8", role: "admin" });
-      await removeMember(db, { teamId: local.id, userId: "u8" });
-      expect(await listTeamMembers(db, local.id)).toHaveLength(1);
-
-      await deleteTeam(db, { teamId: local.id });
-      expect(await listTeamsForUser(db, "u9")).toHaveLength(0);
-    });
-
-    describe("with team sync off", () => {
-      /** The same row, in an org whose `ssoTeamSync` gate is off. */
-      async function seedDormantMirror(): Promise<string> {
-        const teamId = await seedIdpTeam();
-        await setOrgFeatures(db, orgId, { ssoTeamSync: false });
-        return teamId;
-      }
-
-      it("is not a live mirror, although the row still says idp", async () => {
-        const teamId = await seedDormantMirror();
-        const rows = await db.select().from(teams).where(eq(teams.id, teamId));
-        expect(rows[0]?.origin).toBe("idp");
-        expect(await isLiveIdpMirror(db, rows[0]!)).toBe(false);
-      });
-
-      it("takes membership edits again, because no sign-in will undo them", async () => {
-        const teamId = await seedDormantMirror();
-
-        await addMember(db, { teamId, userId: "u3", role: "member" });
-        await setRole(db, { teamId, userId: "u2", role: "admin" });
-        await removeMember(db, { teamId, userId: "u3" });
-
-        const members = await listTeamMembers(db, teamId);
-        expect(members).toHaveLength(2);
-        expect(members.find((m) => m.userId === "u2")?.role).toBe("admin");
-      });
-
-      it("can be deleted by hand, so nobody is left with a team they cannot remove", async () => {
-        const teamId = await seedDormantMirror();
-        await deleteTeam(db, { teamId });
-        expect(await listTeamsForUser(db, "u1")).toHaveLength(0);
-      });
-
-      it("locks again the moment the gate goes back on", async () => {
-        const teamId = await seedDormantMirror();
-        await addMember(db, { teamId, userId: "u3", role: "member" });
-
-        await setOrgFeatures(db, orgId, { ssoTeamSync: true });
-
-        await expect(removeMember(db, { teamId, userId: "u3" })).rejects.toThrow(IdpManagedTeamError);
-      });
+      await deleteTeam(db, { teamId });
+      expect(await listTeamsForUser(db, "u1")).toEqual([]);
     });
   });
 

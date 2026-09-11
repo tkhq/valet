@@ -463,21 +463,11 @@ export const messages = pgTable(
 // creator-auto-admin live in service code (`services/teams.ts`), inside one
 // transaction — not expressible as table constraints.
 //
-// `origin` records where a row came from, as `skills.origin` does below. It
-// names the ONE writer of that row's `team_members`:
-//
-//   `idp`    mirrors an identity-provider group. The login-time sync
-//            (`services/team-sync.ts`) owns its membership, and it removes as
-//            well as adds — that is what offboarding means.
-//   `config` is declared in `valet.yaml`. The boot reconciler
-//            (`services/config-reconcile.ts`) asserts the declared members and
-//            never deletes one, so the file cannot take access away.
-//   `local`  belongs to the people who made it in Valet. Only the team routes
-//            write it.
-//
-// No row has two writers, so no membership has two opinions and nothing can
-// oscillate between boot and login. Every sync write is scoped by
-// `origin = 'idp'`; every reconciler write is scoped by `origin = 'config'`.
+// `origin` records where a row came from, as `skills.origin` does below.
+// An `idp` row can receive explicit join suggestions, but login does not
+// write its membership. A `config` row is declared in `valet.yaml`; the boot
+// reconciler asserts its declared members and never removes one. A `local`
+// row was created in Valet. The team routes manage membership for all rows.
 //
 // `external_id` holds the full group path (`/platform`). The path is what the
 // token claim carries, it survives a realm re-import, and it stays legible in
@@ -533,6 +523,21 @@ export const teamMembers = pgTable(
   (t) => [
     primaryKey({ columns: [t.teamId, t.userId] }),
     index("team_members_user").on(t.userId),
+  ],
+);
+
+// Current identity-provider eligibility for an explicit team join. The row
+// stores no group path. The team row owns that sensitive mapping.
+export const teamJoinEligibilities = pgTable(
+  "team_join_eligibilities",
+  {
+    teamId: text("team_id").notNull(),
+    userId: text("user_id").notNull(),
+    observedAt: bigint("observed_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.userId] }),
+    index("team_join_eligibilities_user").on(t.userId),
   ],
 );
 
@@ -2053,6 +2058,7 @@ export type SessionThreadRow = typeof sessionThreads.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type TeamRow = typeof teams.$inferSelect;
 export type TeamMemberRow = typeof teamMembers.$inferSelect;
+export type TeamJoinEligibilityRow = typeof teamJoinEligibilities.$inferSelect;
 export type AssistantRow = typeof assistants.$inferSelect;
 export type ChildWatchRow = typeof childWatches.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;

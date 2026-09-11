@@ -170,6 +170,21 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "team_join_eligibilities table",
+    probe: { kind: "table", table: "team_join_eligibilities" },
+    sql: `CREATE TABLE IF NOT EXISTS "team_join_eligibilities" (
+      "team_id" text NOT NULL,
+      "user_id" text NOT NULL,
+      "observed_at" bigint NOT NULL,
+      PRIMARY KEY("team_id", "user_id")
+    )`,
+  },
+  {
+    describe: "team_join_eligibilities_user index",
+    probe: { kind: "index", index: "team_join_eligibilities_user" },
+    sql: 'CREATE INDEX IF NOT EXISTS "team_join_eligibilities_user" ON "team_join_eligibilities" ("user_id")',
+  },
+  {
     describe: "skill_invocations table",
     probe: { kind: "table", table: "skill_invocations" },
     sql: `CREATE TABLE IF NOT EXISTS "skill_invocations" (

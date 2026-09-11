@@ -23,6 +23,7 @@ import {
   orgMembers,
   skills,
   contentSources,
+  teamJoinEligibilities,
   teamMembers,
   teams,
   workflowDefinitions,
@@ -31,7 +32,7 @@ import {
   type TeamRow,
 } from "../schema/index.js";
 import { resolveDefaultAssistant, retireAssistant } from "../assistants/service.js";
-import { getOrgFeatures, isOrgAdmin } from "./org.js";
+import { isOrgAdmin } from "./org.js";
 import {
   adoptedTeamSourceRow,
   deleteMirroredContent,
@@ -218,12 +219,13 @@ async function countAdmins(db: AppQueryable, teamId: string): Promise<number> {
  * colliding with its own group by name (`services/team-sync.ts`).
  */
 export async function isLiveIdpMirror(
-  db: AppQueryable,
-  team: { orgId: string; origin: TeamRow["origin"] },
+  _db: AppQueryable,
+  _team: { orgId: string; origin: TeamRow["origin"] },
 ): Promise<boolean> {
-  if (team.origin !== "idp") return false;
-  const features = await getOrgFeatures(db, team.orgId);
-  return features.ssoTeamSync;
+  // Explicit join retired login-time membership sync.
+  // Keep this compatibility seam until the headless config fields are
+  // removed, but no identity-provider team is live-managed now.
+  return false;
 }
 
 /**
@@ -672,22 +674,8 @@ export interface DeleteTeamOptions {
  * repositories it tracks. When `reapOwnedWorkflows` is passed, team-owned
  * workflows go with the team unless a run is unsettled. Without that
  * callback, the delete still refuses while any team-owned workflow exists.
- * Rejects on a team that is a LIVE mirror of an identity-provider group.
- *
- * A live mirror is refused because deletion here does not reach the source.
- * The group stays in the identity provider, so the next sign-in recreates the
- * team — but the skills and tracked repositories this function removes do not
- * come back. Deleting the group in the identity provider empties the team
- * instead, and destroys nothing the sync cannot rebuild.
- *
- * A DORMANT mirror — the same row with `ssoTeamSync` off — is deleted. The
- * refusal above is about a sync that is running, and no sync is running. To
- * refuse here as well would leave the operator a row they can neither empty
- * nor remove for as long as the gate stays off, which is the state
- * `isLiveIdpMirror` exists to end. The cost is real and it belongs to the
- * person who confirms the delete: if the gate goes back on, the group builds
- * the team again with no skills and no sources. The confirm dialog says so
- * (`packages/web/src/components/settings/teams-panel.tsx`).
+ * Identity-provider-backed teams are deletable because login does not create
+ * or reconcile them. `isLiveIdpMirror` remains a compatibility seam.
  *
  * Skills are removed rather than blocking, because a skill is a document,
  * not a running thing — there is nothing to cancel first. They must go
@@ -770,6 +758,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     // unreachable forever. It is not an open door. The auth ladder already
     // reads a key whose team is gone as invalid.
     await tx.delete(apikey).where(eq(apikey.teamId, opts.teamId));
+    await tx.delete(teamJoinEligibilities).where(eq(teamJoinEligibilities.teamId, opts.teamId));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

@@ -24,15 +24,10 @@
  * 404, same as a caller outside the org — existence-hiding applies to
  * authz, not just org membership.
  *
- * Origin-gated: DELETE /:id and the three /members routes refuse a team
- * whose `origin` is `idp` WHILE the org's `ssoTeamSync` feature gate is on.
- * Such a team mirrors an identity-provider group, and the login-time sync
- * owns it. With the gate off no sync runs, so the same team is a dormant
- * mirror and the four routes work on it again — see `isLiveIdpMirror`
- * (`services/teams.ts`). PATCH /:id is deliberately NOT origin-gated: the
- * identity provider owns membership and `valet.yaml` declares members, but
- * `default_model` is Valet-local state neither source ever writes, so no
- * sync can undo it.
+ * Identity-provider-backed teams keep their provenance, but login does not
+ * own their membership. The normal administration gate controls their team
+ * and membership mutations. `isLiveIdpMirror` remains as a compatibility
+ * seam while old headless configuration fields remain accepted.
  *
  * A `config` team — declared in `valet.yaml` — is gated for DELETE only. The
  * file asserts its declared members at each boot but never removes anybody,
@@ -61,6 +56,7 @@ import {
   type TeamRow,
 } from "../schema/index.js";
 import { listWorkflowSources } from "../services/content-sources.js";
+import { joinEligibleTeam, listSuggestedTeams } from "../services/team-join-eligibility.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
@@ -101,6 +97,8 @@ import type {
   EnsureOrchestratorResponse,
   GetTeamChildrenResponse,
   TeamChildSummary,
+  JoinSuggestedTeamResponse,
+  ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   PatchTeamResponse,
@@ -165,28 +163,7 @@ function isTeamRole(v: unknown): v is TeamRole {
   return v === "admin" || v === "member";
 }
 
-/**
- * Builds the refusal body for a mutation on a team that mirrors an
- * identity-provider group, or null when the team is Valet's own.
- *
- * The status is 409, not 403 and not 404. The caller has already passed both
- * the org gate and the team-admin gate, and the team plainly exists — what
- * stops the write is the team's own state, exactly like `team_name_conflict`
- * and `team_owns_workflows` above it. 403 in this API means "your role is too
- * low", which is not the problem and would send an admin looking for a
- * permission to grant. 404 is reserved for cross-org and unauthorized
- * callers, where hiding existence is the point; here the caller may see the
- * team, so a 404 would be a lie they cannot act on.
- *
- * The message comes from `IdpManagedTeamError`, the same class the service
- * throws, so the route and the service never word the fix differently.
- *
- * `isLiveIdpMirror` is what decides, not `origin` alone. A mirror whose org
- * has `ssoTeamSync` off is dormant: nothing reasserts it, so refusing the
- * mutation would leave a team nobody can change. Asking the service keeps
- * the route and the service on ONE rule — a route that tested `origin` here
- * would refuse writes the service is willing to make.
- */
+/** Compatibility refusal for any future live external team writer. */
 async function idpManagedRefusal(
   db: AppEnv["Variables"]["providers"]["db"],
   row: TeamRow,
@@ -267,6 +244,31 @@ teamsRouter.get("/", async (c) => {
     teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id))),
   };
   return c.json(body);
+});
+
+// ── Explicit identity-provider join suggestions ──────────────────────────
+
+teamsRouter.get("/suggestions", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const body: ListSuggestedTeamsResponse = {
+    teams: await listSuggestedTeams(db, user.orgId, user.id),
+  };
+  return c.json(body);
+});
+
+teamsRouter.post("/:id/join", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const joined = await joinEligibleTeam(db, {
+    orgId: user.orgId,
+    userId: user.id,
+    teamId: c.req.param("id"),
+  });
+  if (!joined) return c.json({ error: "team not found" }, 404);
+  return c.json({ joined: true } satisfies JoinSuggestedTeamResponse);
 });
 
 // ── Orchestrator (get-or-create) ────────────────────────────────────────────

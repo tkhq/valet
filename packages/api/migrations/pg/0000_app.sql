@@ -298,6 +298,15 @@ CREATE TABLE "team_members" (
 --> statement-breakpoint
 CREATE INDEX "team_members_user" ON "team_members" ("user_id");
 --> statement-breakpoint
+CREATE TABLE "team_join_eligibilities" (
+	"team_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"observed_at" bigint NOT NULL,
+	PRIMARY KEY("team_id", "user_id")
+);
+--> statement-breakpoint
+CREATE INDEX "team_join_eligibilities_user" ON "team_join_eligibilities" ("user_id");
+--> statement-breakpoint
 CREATE TABLE "assistants" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,

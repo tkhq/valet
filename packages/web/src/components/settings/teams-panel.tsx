@@ -31,7 +31,6 @@ import {
   useDeleteTeam,
   useMe,
   useModels,
-  useOrg,
   usePatchTeam,
   useRemoveTeamMember,
   useSetTeamMemberRole,
@@ -47,32 +46,6 @@ import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { curatedForCatalogId } from "~/lib/models";
 import { isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
 import { reasoningLabelFor } from "~/lib/reasoning";
-
-/**
- * Says why a mirrored team has no controls, in the same words the API uses
- * when it refuses the same change. A reader must not have to press a button
- * to find out that it cannot work.
- */
-function idpManagedNote(externalId: string | null): string {
-  const source = externalId ? `identity provider group ${externalId}` : "your identity provider";
-  return `Membership comes from ${source}. Add or remove people there, then ask them to sign in again.`;
-}
-
-/**
- * Says what a team that WAS mirrored is now, while team sync is off.
- *
- * A reader who finds these controls working again needs to know two things
- * the row cannot show: nothing updates this membership any more, and turning
- * the setting back on hands the membership back to the identity provider.
- * Without the second half, an edit made here looks permanent.
- */
-function idpDormantNote(externalId: string | null): string {
-  const source = externalId ? `group ${externalId}` : "an identity provider group";
-  return (
-    `This team came from ${source}, and team sync is off, so nothing updates its membership. ` +
-    `You can edit it here. If you turn team sync back on, the identity provider owns this membership again.`
-  );
-}
 
 /**
  * Says what a declared team's controls do and do not survive.
@@ -93,14 +66,6 @@ const DELETE_TEAM_NOTE =
   "Org members themselves are not affected.";
 
 /**
- * The half a paused mirror's delete does not say on its own. The group is
- * still in the identity provider, so this delete removes the Valet side only.
- */
-const DELETE_DORMANT_MIRROR_NOTE =
-  "This team came from an identity provider group. If you turn team sync back on, the group creates " +
-  "the team again with no skills and no skill sources.";
-
-/**
  * Organization · Teams — the first-ever teams management UI over the
  * existing `/api/teams` router. List with inline create, per-team expand
  * revealing the member roster + add/remove/role-toggle, and delete-via-
@@ -108,19 +73,9 @@ const DELETE_DORMANT_MIRROR_NOTE =
  * against the org directory (`useOrgDirectory()`, member-visible) since
  * `TeamMemberSummary` on the wire is only `{userId, role}`.
  *
- * A team with `origin === "idp"` mirrors an identity-provider group, and the
- * API refuses every mutation on it. This panel therefore renders none of
- * those controls — no delete, no role menu, no remove, no add — rather than
- * disabling them, and shows `idpManagedNote` where they would have been. A
- * disabled control the reader cannot explain is worse than no control.
- * Creating a team is untouched: every team made here is `local`.
- *
- * That holds only while the org's `ssoTeamSync` feature is ON. With it off,
- * no login sync runs, the API accepts the same four mutations again
- * (`isLiveIdpMirror`, packages/api/src/services/teams.ts), and this panel
- * returns the controls. The row keeps a badge and `idpDormantNote`, because
- * a team that silently stopped tracking its group is the one thing a reader
- * cannot work out from what is on screen.
+ * A team with `origin === "idp"` keeps its provenance badge, but its
+ * membership is managed here. Login only refreshes join eligibility and
+ * never changes a team or membership.
  *
  * A team with `origin === "config"` is declared in `valet.yaml`, and it is
  * deliberately treated differently. The file only asserts members, so the
@@ -139,17 +94,10 @@ export function TeamsPanel({
 }) {
   const teamsQ = useTeams();
   const meQ = useMe();
-  const orgQ = useOrg();
   const [expanded, setExpanded] = useState<string | null>(teamId ?? null);
   // Mirrors the API's canMutateTeam gate: team admin of that team, or org
   // admin. The API still enforces; this only hides controls that would 404.
   const orgAdmin = meQ.data?.orgRole === "admin";
-  // Whether an `idp` team is a LIVE mirror. Off is the default, and it is
-  // also what an unloaded org query reads as — which shows the controls for
-  // a moment. That is the safe way round: the API refuses a mutation on a
-  // live mirror anyway, so the worst case is a 409 the row reports, not a
-  // change nobody expected.
-  const mirroring = orgQ.data?.features.ssoTeamSync === true;
   const teams = teamsQ.data?.teams.filter((team) => teamId === undefined || team.id === teamId) ?? [];
   const ready = !teamsQ.isLoading && teamsQ.error == null;
 
@@ -176,7 +124,6 @@ export function TeamsPanel({
               team={team}
               orgMembers={orgMembers}
               canMutate={orgAdmin || team.callerRole === "admin"}
-              mirroring={mirroring}
               open={expanded === team.id}
               onToggle={() => setExpanded((cur) => (cur === team.id ? null : team.id))}
             />
@@ -240,14 +187,12 @@ function TeamRow({
   team,
   orgMembers,
   canMutate,
-  mirroring,
   open,
   onToggle,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
-  mirroring: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -255,20 +200,8 @@ function TeamRow({
   const deleteTeam = useDeleteTeam();
   const assistantsQ = useAssistants();
   const assistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", team.id);
-  // `managed` is a LIVE mirror, which is the only state that hides controls.
-  // `dormant` is the same row with team sync off: it explains itself, but it
-  // keeps every control.
-  const managed = team.origin === "idp" && mirroring;
-  const dormant = team.origin === "idp" && !mirroring;
+  const idpBacked = team.origin === "idp";
   const declared = team.origin === "config";
-
-  // A dormant mirror gets one extra sentence. Its group still exists in the
-  // identity provider, so this delete is not final in the way the reader
-  // expects: turning team sync back on builds the team again, empty, and the
-  // skills and skill sources deleted here do not come back with it.
-  const deleteDescription = dormant
-    ? `${DELETE_TEAM_NOTE} ${DELETE_DORMANT_MIRROR_NOTE}`
-    : DELETE_TEAM_NOTE;
 
   return (
     <div className="py-3">
@@ -285,20 +218,9 @@ function TeamRow({
             aria-hidden
           />
           <span className="truncate text-sm font-medium text-ink">{team.name}</span>
-          {managed && (
-            // `title` carries the reason to a reader who never expands the
-            // row. The expanded body states it in full, so this is a second
-            // channel, not the only one.
-            <Badge variant="accent" className="shrink-0" title={idpManagedNote(team.externalId)}>
+          {idpBacked && (
+            <Badge variant="neutral" className="shrink-0">
               Identity provider
-            </Badge>
-          )}
-          {dormant && (
-            // `neutral`, like the declared team's: the controls work, so it
-            // must not read as locked. The word "paused" is what separates
-            // it from a team that never came from a group at all.
-            <Badge variant="neutral" className="shrink-0" title={idpDormantNote(team.externalId)}>
-              Identity provider (paused)
             </Badge>
           )}
           {declared && (
@@ -332,7 +254,7 @@ function TeamRow({
             declared one, because the next boot would recreate a declared team
             empty. Delete is the only item here, and an empty menu is worse
             than no menu. */}
-        {canMutate && !managed && !declared && (
+        {canMutate && !declared && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -363,15 +285,10 @@ function TeamRow({
 
       {open && (
         <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
-          <TeamDefaults team={team} canMutate={canMutate} managed={managed} />
+          <TeamDefaults team={team} canMutate={canMutate} />
           <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
           <TeamOnePasswordRefs team={team} canMutate={canMutate} />
-          <TeamMembers
-            team={team}
-            orgMembers={orgMembers}
-            canMutate={canMutate}
-            mirroring={mirroring}
-          />
+          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />
         </div>
       )}
 
@@ -379,7 +296,7 @@ function TeamRow({
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
         title={`Delete ${team.name}?`}
-        description={deleteDescription}
+        description={DELETE_TEAM_NOTE}
         confirmLabel="Delete team"
         pendingLabel="Deleting…"
         pending={deleteTeam.isPending}
@@ -488,11 +405,9 @@ function TeamOnePasswordRefs({
 function TeamDefaults({
   team,
   canMutate,
-  managed,
 }: {
   team: TeamSummary;
   canMutate: boolean;
-  managed: boolean;
 }) {
   const patchTeam = usePatchTeam();
   // Same label chain as ModelCombobox (tier label, then curated label, then
@@ -553,7 +468,6 @@ function TeamDefaults({
         New sessions started in this team's workspace use this model and reasoning level. A
         member's personal default wins for sessions that member starts. Existing sessions keep
         their settings, including the team assistant if anyone has already opened it.
-        {managed && " The identity provider owns this team's membership; the defaults are set here."}
       </p>
       {patchTeam.error != null && (
         <p className="text-xs text-danger-500">{errorText(patchTeam.error)}</p>
@@ -566,17 +480,13 @@ function TeamMembers({
   team,
   orgMembers,
   canMutate,
-  mirroring,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
-  mirroring: boolean;
 }) {
   const teamId = team.id;
   const teamName = team.name;
-  const managed = team.origin === "idp" && mirroring;
-  const dormant = team.origin === "idp" && !mirroring;
   const declared = team.origin === "config";
   const membersQ = useTeamMembers(teamId);
   const setRole = useSetTeamMemberRole();
@@ -590,12 +500,6 @@ function TeamMembers({
 
   return (
     <div className="space-y-2">
-      {/* Sits above the roster, where the add/remove controls would be, so a
-          reader finds the reason in the place they look for the control. The
-          declared note sits in the same place although its controls stay:
-          they work, and what the reader needs is how long the change lasts. */}
-      {managed && <p className="pt-1 text-xs text-muted">{idpManagedNote(team.externalId)}</p>}
-      {dormant && <p className="pt-1 text-xs text-muted">{idpDormantNote(team.externalId)}</p>}
       {declared && <p className="pt-1 text-xs text-muted">{CONFIG_MANAGED_NOTE}</p>}
 
       {membersQ.isLoading && <LoadingRow label="Loading members…" className="py-2 text-xs" />}
@@ -615,11 +519,7 @@ function TeamMembers({
             <span className="min-w-0 flex-1 truncate text-sm text-ink">
               {identity?.name ?? identity?.email ?? member.userId}
             </span>
-            {managed || !canMutate ? (
-              // Read-only in two cases. Managed: the role follows the
-              // identity provider's sub-group, so it is a fact to read here,
-              // not a control. Without mutate rights: the API would 404 the
-              // change anyway.
+            {!canMutate ? (
               <Badge variant={member.role === "admin" ? "accent" : "neutral"}>
                 {member.role === "admin" ? "Admin" : "Member"}
               </Badge>
@@ -665,7 +565,7 @@ function TeamMembers({
         );
       })}
 
-      {canMutate && !managed && (
+      {canMutate && (
         <>
           <AddMemberPicker
             teamName={teamName}

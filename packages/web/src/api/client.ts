@@ -131,6 +131,8 @@ import type {
   DeleteSkillSourceResponse,
   SkillResponse,
   DeleteSkillResponse,
+  JoinSuggestedTeamResponse,
+  ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   DeleteTeamOnePasswordRefsResponse,
@@ -1186,6 +1188,10 @@ export const api = {
 
   // teams (org membership structure — first UI over the existing router)
   listTeams: () => request<ListTeamsResponse>("GET", "/teams"),
+  listSuggestedTeams: () =>
+    request<ListSuggestedTeamsResponse>("GET", "/teams/suggestions"),
+  joinSuggestedTeam: (id: string) =>
+    request<JoinSuggestedTeamResponse>("POST", `/teams/${encodeURIComponent(id)}/join`),
   createTeam: (body: CreateTeamRequest) =>
     request<CreateTeamResponse>("POST", "/teams", body),
   patchTeam: (id: string, body: PatchTeamRequest) =>

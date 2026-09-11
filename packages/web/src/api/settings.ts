@@ -26,9 +26,11 @@ import type {
   GetModelTiersResponse,
   GetOrgReasoningResponse,
   GetSlackAppResponse,
+  JoinSuggestedTeamResponse,
   ListAssistantsResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
+  ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   MeResponse,
@@ -102,6 +104,7 @@ export const qkSettings = {
   approvedModels: () => ["settings", "approvedModels"] as const,
   orgReasoning: () => ["settings", "orgReasoning"] as const,
   teams: () => ["settings", "teams"] as const,
+  suggestedTeams: () => ["settings", "teams", "suggestions"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
   teamOnePasswordRefs: (teamId: string) => ["settings", "teams", teamId, "onepassword-refs"] as const,
   githubApp: () => ["settings", "githubApp"] as const,
@@ -238,6 +241,14 @@ export function useTeams(opts?: Partial<UseQueryOptions<ListTeamsResponse>>) {
     // Same rule as `useOrg`: read by the workspace clause on every list
     // page; team mutations already invalidate this key.
     staleTime: 60_000,
+    ...opts,
+  });
+}
+
+export function useSuggestedTeams(opts?: Partial<UseQueryOptions<ListSuggestedTeamsResponse>>) {
+  return useQuery<ListSuggestedTeamsResponse>({
+    queryKey: qkSettings.suggestedTeams(),
+    queryFn: () => api.listSuggestedTeams(),
     ...opts,
   });
 }
@@ -503,6 +514,18 @@ export function usePatchOrgReasoning() {
  */
 export function teamCreateQueryKeys() {
   return [qkSettings.teams(), qkAssistants.list()] as const;
+}
+
+export function useJoinSuggestedTeam() {
+  const qc = useQueryClient();
+  return useMutation<JoinSuggestedTeamResponse, Error, string>({
+    mutationFn: (teamId) => api.joinSuggestedTeam(teamId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.suggestedTeams() });
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
+      qc.invalidateQueries({ queryKey: qkAssistants.list() });
+    },
+  });
 }
 
 export function useCreateTeam() {
