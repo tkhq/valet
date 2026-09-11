@@ -11,13 +11,24 @@ cgroup_user_can_write() {
 cgroup_mkdir() { mkdir -p "$1"; }
 cgroup_move_pid() { printf '%s\n' "$2" > "$1"; }
 cgroup_enable() { printf '%s\n' "$2" > "$1"; }
-delegation_error() { printf 'Error: %s\n' "$1" >&2; return 1; }
+cgroup_has_members() { local member; IFS= read -r member < "$1" && [ -n "$member" ]; }
+cgroup_pid_exists() { [ -d "/proc/$1" ]; }
+cgroup_has_pid() {
+  local member
+  while IFS= read -r member; do [ "$member" = "$2" ] && return 0; done < "$1"
+  return 1
+}
+delegation_error() {
+  printf 'Error: %s Correct the valet-docker RuntimeClass or rebuild the sandbox image, then recreate the sandbox.\n' "$1" >&2
+  return 1
+}
 
 has_word() { case " $1 " in *" $2 "*) return 0;; *) return 1;; esac; }
 
 establish_cgroup_topology() {
   local root=$1 user=$2 manager="$1/init" services="$1/init/services"
   local controllers enabled uid gid target pid pass
+  local -a pids
   [ -d "$manager" ] && [ ! -L "$manager" ] || delegation_error \
     "The required cgroup manager /init is missing or unsafe. Recreate the sandbox with the valet-docker RuntimeClass." || return 1
   for target in cgroup.controllers cgroup.procs cgroup.threads cgroup.subtree_control; do
@@ -44,15 +55,18 @@ establish_cgroup_topology() {
   # cgroup.procs moves all threads in a process. Use shell builtins so this
   # helper does not create a new direct member while it evacuates itself.
   for pass in {1..10}; do
-    while IFS= read -r pid; do
-      if [ -n "$pid" ] && ! cgroup_move_pid "$services/cgroup.procs" "$pid"; then
-        delegation_error "Cannot move process $pid from /init to /init/services. Recreate the sandbox."; return 1
+    mapfile -t pids < "$manager/cgroup.procs"
+    for pid in "${pids[@]}"; do
+      if [ -n "$pid" ] && ! cgroup_move_pid "$services/cgroup.procs" "$pid" \
+        && cgroup_pid_exists "$pid" && cgroup_has_pid "$manager/cgroup.procs" "$pid"; then
+        delegation_error "Cannot move live process $pid from /init to /init/services."; return 1
       fi
-    done < "$manager/cgroup.procs"
-    [ ! -s "$manager/cgroup.procs" ] && [ ! -s "$manager/cgroup.threads" ] && break
+    done
+    ! cgroup_has_members "$manager/cgroup.procs" \
+      && ! cgroup_has_members "$manager/cgroup.threads" && break
     [ "$pass" -lt 10 ] && sleep 0.1
   done
-  if [ -s "$manager/cgroup.procs" ] || [ -s "$manager/cgroup.threads" ]; then
+  if cgroup_has_members "$manager/cgroup.procs" || cgroup_has_members "$manager/cgroup.threads"; then
     delegation_error "Processes keep entering /init. Use the Valet PID 1 service topology, then recreate the sandbox."; return 1
   fi
 

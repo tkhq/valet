@@ -26,13 +26,16 @@ install_fake_cgroup() {
   cgroup_stat() { [ "$1" = "$tree/init/services" ] && echo 0:0 || echo "$UID_GID"; }
   cgroup_chown() { printf '%s\n' "$*" >> "$TMP/chown"; }
   cgroup_user_can_write() { :; }
+  cgroup_pid_exists() { [ -d "/proc/$1" ]; }
   cgroup_move_pid() {
     printf '%s\n' "$2" >> "$moves"
     sed -i "/^$2$/d" "$tree/init/cgroup.procs" "$tree/init/cgroup.threads"
   }
   cgroup_enable() {
-    [ ! -s "$tree/init/cgroup.procs" ] && [ ! -s "$tree/init/cgroup.threads" ] \
-      || fail "controllers enabled before /init was empty"
+    if cgroup_has_members "$tree/init/cgroup.procs" \
+      || cgroup_has_members "$tree/init/cgroup.threads"; then
+      fail "controllers enabled before /init was empty"
+    fi
     printf '%s\n' "$2" >> "$enable_log"
     tr -d '+' <<<"$2" | tr ' ' '\n' | sed '/^$/d' | paste -sd' ' > "$tree/init/cgroup.subtree_control"
     cp "$tree/init/cgroup.subtree_control" "$tree/init/services/cgroup.controllers"
@@ -42,6 +45,11 @@ run_fails() {
   local name=$1; shift
   if establish_cgroup_topology "$@" 2> "$TMP/$name.err"; then fail "$name was accepted"; fi
 }
+
+# Kernfs reports size zero for populated cgroup files. Inspect content instead.
+fifo=$TMP/kernfs-members; mkfifo "$fifo"; printf '42\n' > "$fifo" & writer=$!
+if [ -s "$fifo" ] || ! cgroup_has_members "$fifo"; then fail "size-zero members were missed"; fi
+wait "$writer"
 
 # Move only direct /init processes, then enable all available controllers.
 tree=$TMP/success; make_tree "$tree"; printf '1\n10\n20\n' > "$tree/init/cgroup.procs"
@@ -65,10 +73,25 @@ arrival=0; cgroup_move_pid() {
   if [ "$arrival" -eq 0 ]; then echo 2 > "$tree/init/cgroup.procs"; arrival=1; fi
 }
 establish_cgroup_topology "$tree" "$USER_NAME"; [ "$(cat "$moves")" = $'1\n2' ] || fail "arrival not moved"
+
+# An exited PID can make the migration write fail. Rescan without failing.
+tree=$TMP/exited; make_tree "$tree"; echo 41 > "$tree/init/cgroup.procs"; install_fake_cgroup "$tree"
+cgroup_move_pid() {
+  printf '%s\n' "$2" >> "$moves"; sed -i "/^$2$/d" "$tree/init/cgroup.procs"
+  if [ "$2" = 41 ]; then echo 42 > "$tree/init/cgroup.procs"; return 1; fi
+}
+cgroup_pid_exists() { [ "$1" != 41 ]; }
+establish_cgroup_topology "$tree" "$USER_NAME"
+[ "$(cat "$moves")" = $'41\n42' ] || fail "PID disappearance did not rescan"
+
+tree=$TMP/live-failure; make_tree "$tree"; echo 43 > "$tree/init/cgroup.procs"; install_fake_cgroup "$tree"
+cgroup_move_pid() { return 1; }; cgroup_pid_exists() { return 0; }
+run_fails live-move "$tree" "$USER_NAME"; contains "$TMP/live-move.err" 'Cannot move live process 43'
+
 tree=$TMP/busy; make_tree "$tree"; echo 1 > "$tree/init/cgroup.procs"; install_fake_cgroup "$tree"
 cgroup_move_pid() { echo 1 > "$tree/init/cgroup.procs"; }
 run_fails busy "$tree" "$USER_NAME"; contains "$TMP/busy.err" 'Processes keep entering /init'
-[ ! -s "$enable_log" ] || fail "controllers enabled for a busy manager"
+! cgroup_has_members "$enable_log" || fail "controllers enabled for a busy manager"
 
 # Existing empty services is idempotent. Foreign and unsafe paths fail closed.
 tree=$TMP/idempotent; make_tree "$tree"; install_fake_cgroup "$tree"
@@ -102,6 +125,18 @@ for item in cgroup.procs cgroup.threads cgroup.subtree_control; do
   contains "$TMP/$item.err" "required cgroup file /init/$item is missing"
 done
 
+# Delegation failures remain fail-closed and actionable.
+tree=$TMP/delegation; make_tree "$tree"; install_fake_cgroup "$tree"
+cgroup_chown() { return 1; }; run_fails chown "$tree" "$USER_NAME"
+contains "$TMP/chown.err" 'Cannot delegate /sys/fs/cgroup/init'
+install_fake_cgroup "$tree"; bad_owner="$tree/init/cgroup.threads"; cgroup_stat() {
+  if [ "$1" = "$tree/init/services" ]; then echo 0:0; elif [ "$1" = "$bad_owner" ]; then echo 999:999; else echo "$UID_GID"; fi
+}
+run_fails ownership "$tree" "$USER_NAME"
+contains "$TMP/ownership.err" 'ownership check failed for /init/cgroup.threads'
+install_fake_cgroup "$tree"; cgroup_user_can_write() { return 1; }
+run_fails writable "$tree" "$USER_NAME"; contains "$TMP/writable.err" "is not writable by $USER_NAME"
+
 # The disabled gate and local rootless branch do not call the helper.
 VALET_SANDBOX_DOCKER=0 bash "$ROOT/start-docker.sh"
 contains "$ROOT/Dockerfile.sandbox-k8s" 'COPY docker/cgroup-delegation.sh /cgroup-delegation.sh'
@@ -118,4 +153,5 @@ for profile in headless full; do
   expected=1; [ "$profile" = full ] && expected=42
   [ "$status" -eq "$expected" ] || fail "$profile returned $status instead of $expected"
 done
+for error in "$TMP"/*.err; do contains "$error" 'valet-docker RuntimeClass'; done
 echo "cgroup delegation tests passed"

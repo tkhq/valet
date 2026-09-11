@@ -204,14 +204,14 @@ root. Consequences:
     process, or an `EBUSY` result stops startup with a corrective error.
   - Ownership: Valet delegates only `/init`, `cgroup.procs`,
     `cgroup.threads`, and `cgroup.subtree_control` to UID 1500. The
-    `services` leaf stays owned by mapped root. UID 1500 cannot change
-    service limits or kill root-owned services through cgroup files.
-    It can create a sibling below `/init` and move its own process there.
-    Cgroup v2 requires write access to the destination and the common
-    ancestor, not the source `services` leaf. The kernel cgroup v2
-    documentation specifies this containment rule in "Delegation".
-    Process permission checks prevent UID 1500 from moving mapped-root
-    processes.
+    `services` leaf stays owned by mapped root for stable process placement,
+    not as a protection boundary. Cgroup v2 does not check target process
+    credentials during migration. UID 1500 can move PID 1 or another
+    root-owned service through `/init/cgroup.procs` into an owned sibling.
+    It can then freeze, kill, or throttle that service. UID 1500 can also
+    disable manager subtree controllers or repopulate `/init`. This access
+    permits self-denial of service inside the sandbox. It does not permit
+    movement across the private cgroup namespace or changes to outer limits.
   - Service placement: PID 1, the startup chain, dockerd, containerd, and
     gateway services inherit `/init/services`. Kubernetes exec commands
     are expected to join PID 1's cgroup, as observed in the target cluster.
