@@ -254,8 +254,23 @@ describe("slack_user.send_dm", () => {
     expect(mocks.slackFetch).toHaveBeenNthCalledWith(2, "chat.postMessage", "xoxp-fake", {
       channel: "D9",
       text: "hello (as me)",
+      mrkdwn: true,
     });
     expect(result.data).toMatchObject({ ok: true, ts: "1.0", channel: "D9" });
+  });
+
+  it("preserves Slack-native spans in deliberate user messages", async () => {
+    mocks.slackFetch
+      .mockResolvedValueOnce(slackOk({ channel: { id: "D9" } }))
+      .mockResolvedValueOnce(slackOk({ ts: "1.0", channel: "D9" }));
+
+    await run("slack_user.send_dm", { user: "U2", text: "Hi <@U123>" }, ctxWithToken());
+
+    expect(mocks.slackFetch).toHaveBeenLastCalledWith("chat.postMessage", "xoxp-fake", {
+      channel: "D9",
+      text: "Hi <@U123>",
+      mrkdwn: true,
+    });
   });
 
   it("surfaces a reconnect error if the user token has been revoked", async () => {

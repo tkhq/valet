@@ -12,6 +12,7 @@ import { checkPrivateChannelAccess } from "./channel-access.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
+import { markdownToSlackMrkdwn } from "../transport/format.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -301,14 +302,15 @@ async function openAndSendDM(
   const openData = (await openRes.json()) as { ok: boolean; error?: string; channel?: { id?: string } };
   if (!openData.ok || !openData.channel?.id) return slackError(openRes, openData);
 
-  const body: Record<string, unknown> = { channel: openData.channel.id, text };
+  const formattedText = markdownToSlackMrkdwn(text, { preserveSlackNativeSpans: true });
+  const body: Record<string, unknown> = { channel: openData.channel.id, text: formattedText, mrkdwn: true };
 
   // For long messages, use blocks so Slack doesn't split into separate threads.
   // Prefers markdown blocks (native table/formatting support), falls back to
   // section blocks for very long messages (> 12K).
   if (text.length > SLACK_TEXT_LIMIT) {
-    body.blocks = buildContentBlocks(text, text);
-    body.text = text.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+    body.blocks = buildContentBlocks(text, formattedText);
+    body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
 
   const { res, data } = await postActionMessage(token, body, ctx);
@@ -843,9 +845,9 @@ const getReactions = action(Type.Object({
 
 const sendMessage = action(Type.Object({
     channel: Type.String({ description: 'Channel ID (C...) or channel name with # prefix (e.g. #proj-valet). Use list_channels to find IDs.' }),
-    text: Type.String({ description: 'Message body. Supports Slack mrkdwn formatting (bold: *text*, italic: _text_, code: `code`, links: <url|label>).' }),
+    text: Type.String({ description: 'Message body in CommonMark. Valet converts it to Slack mrkdwn. Use **bold**, *italic*, ~~strike~~, [text](url), and backticks for code.' }),
     thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply under an existing message. Use the ts value returned by a previous send_message call (e.g. "1780887543.189519").' })),
-    blocks: Type.Optional(Type.String({ description: 'Block Kit JSON array as a string for rich formatting. When provided, text is used as the notification fallback only.' })),
+    blocks: Type.Optional(Type.String({ description: 'Block Kit JSON array as a string. Each mrkdwn element must use Slack mrkdwn. Markdown blocks use CommonMark. When provided, text is the notification fallback.' })),
     unfurl_links: Type.Optional(Type.Boolean({ description: 'Whether Slack shows link-preview "unfurls" for URLs in the message. Omit to keep Slack\'s default (previews on). Set false to suppress link previews — e.g. when posting a batch of Linear/GitHub/Jira links you do not want each to expand into a card.' })),
     unfurl_media: Type.Optional(Type.Boolean({ description: 'Whether Slack unfurls media (images, video, rich media) linked in the message. Omit to keep Slack\'s default (on). Set false alongside unfurl_links to fully suppress embeds.' })),
   }))({
@@ -887,14 +889,18 @@ const sendMessage = action(Type.Object({
     const denied = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
     if (denied) return denied;
 
-    const body: Record<string, unknown> = { channel: channelId, text: p.text };
+    const formattedText = markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true });
+    const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
     if (p.thread_ts) body.thread_ts = p.thread_ts;
 
     let userBlocks: Record<string, unknown>[] | undefined;
     if (p.blocks) {
       try {
         const parsed = JSON.parse(p.blocks);
-        if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array' };
+        if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array. Provide a JSON array of Block Kit objects.' };
+        if (parsed.some((block) => typeof block !== 'object' || block === null || Array.isArray(block))) {
+          return { success: false, error: 'blocks must contain only Block Kit objects. Replace each non-object element and retry.' };
+        }
         userBlocks = parsed as Record<string, unknown>[];
       } catch {
         return { success: false, error: 'blocks must be valid JSON array, e.g. [{"type":"section","text":{"type":"mrkdwn","text":"*bold*"}}]' };
@@ -914,13 +920,13 @@ const sendMessage = action(Type.Object({
       const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
       const contentBlocks = userBlocks
         ? userBlocks.slice(0, blockBudget)
-        : buildContentBlocks(p.text, p.text, blockBudget);
+        : buildContentBlocks(p.text, formattedText, blockBudget);
       if (hasAttribution) {
         contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
       }
       body.blocks = contentBlocks;
       if (needsLongBlocks) {
-        body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+        body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
       }
     } else if (userBlocks) {
       body.blocks = userBlocks;
@@ -965,7 +971,7 @@ async function resolveSlackOrigin(
 }
 
 const replyToOrigin = action(Type.Object({
-    text: Type.String({ description: 'The reply text (Slack markdown).' }),
+    text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
   }))({
   id: 'slack.reply_to_origin',
   name: 'Reply to Origin',
@@ -978,7 +984,8 @@ const replyToOrigin = action(Type.Object({
     const { res, data } = await postActionMessage(o.token, {
       channel: o.channelId,
       thread_ts: o.threadTs,
-      text: args.text,
+      text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
+      mrkdwn: true,
     }, ctx);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
@@ -1020,6 +1027,7 @@ const replyFileToOrigin = action(Type.Object({
       channelId: o.channelId,
       threadTs: o.threadTs,
       initialComment: args.caption,
+      preserveSlackNativeSpans: true,
     });
     return { success: true, data: { channel: o.channelId, fileId } };
   },
@@ -1054,7 +1062,7 @@ const reactToOrigin = action(Type.Object({
 const updateMessage = action(Type.Object({
     channel: Type.String({ description: 'Channel ID (C..., or D... for DMs) returned when the message was sent. Channel names are not accepted — use the ID from the send result.' }),
     ts: Type.String({ description: 'Timestamp (ts) of the message to edit, as returned by send_message / reply_to_origin / dm_owner / dm_user (e.g. "1780887543.189519").' }),
-    text: Type.String({ description: 'New message body — fully replaces the previous content. Supports Slack mrkdwn (bold: *text*, italic: _text_, code: `code`, links: <url|label>). Send a single space to blank a message you cannot delete.' }),
+    text: Type.String({ description: 'New message body in CommonMark. Valet converts it to Slack mrkdwn. Send a single space to blank a message you cannot delete.' }),
   }))({
   id: 'slack.update_message',
   name: 'Update Message',
@@ -1074,10 +1082,16 @@ const updateMessage = action(Type.Object({
     // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
     // previously block-formatted (long) message down to short text must not leave
     // the stale blocks rendering.
-    const body: Record<string, unknown> = { channel: args.channel, ts: args.ts, text: args.text, parse: 'none' };
+    const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
+    const body: Record<string, unknown> = {
+      channel: args.channel,
+      ts: args.ts,
+      text: formattedText,
+      parse: 'none',
+    };
     if (args.text.length > SLACK_TEXT_LIMIT) {
-      body.blocks = buildContentBlocks(args.text, args.text);
-      body.text = args.text.slice(0, SLACK_TEXT_LIMIT);
+      body.blocks = buildContentBlocks(args.text, formattedText);
+      body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
     } else {
       body.blocks = [];
     }

@@ -44,6 +44,16 @@ describe("markdownToSlackMrkdwn", () => {
     expect(markdownToSlackMrkdwn("**a** and **b**")).toBe("*a* and *b*");
   });
 
+  it("converts bold at the start, mid-line, and next to punctuation", () => {
+    expect(markdownToSlackMrkdwn("**Start** then **middle** and (**end**)."))
+      .toBe("*Start* then *middle* and (*end*).");
+  });
+
+  it("converts nested bold and italic emphasis", () => {
+    expect(markdownToSlackMrkdwn("**bold and *italic***, then ***both***"))
+      .toBe("*bold and _italic_*, then *_both_*");
+  });
+
   // ─── Italic ──────────────────────────────────────────────────────────
 
   it("converts *italic* to _italic_", () => {
@@ -52,6 +62,10 @@ describe("markdownToSlackMrkdwn", () => {
 
   it("preserves _italic_ as _italic_", () => {
     expect(markdownToSlackMrkdwn("_hello_")).toBe("_hello_");
+  });
+
+  it("converts a single-character italic span", () => {
+    expect(markdownToSlackMrkdwn("*x*")).toBe("_x_");
   });
 
   // ─── Mixed Bold + Italic ─────────────────────────────────────────────
@@ -106,6 +120,32 @@ describe("markdownToSlackMrkdwn", () => {
     expect(markdownToSlackMrkdwn("> quoted text")).toBe("> quoted text");
   });
 
+  it("converts headings and leaves lists readable", () => {
+    expect(markdownToSlackMrkdwn("# Heading\n- item\n1. first")).toBe("*Heading*\n- item\n1. first");
+  });
+
+  it("converts headings that contain multiple bold spans", () => {
+    expect(markdownToSlackMrkdwn("# **A** and **B**")).toBe("*A* and *B*");
+  });
+
+  it("converts headings that combine bold text and plain text", () => {
+    expect(markdownToSlackMrkdwn("# **Bold** heading")).toBe("*Bold* heading");
+  });
+
+  it("converts links inside bold text", () => {
+    expect(markdownToSlackMrkdwn("See **[PR #631](https://github.com/tkhq/valet/pull/631)** for details"))
+      .toBe("See *<https://github.com/tkhq/valet/pull/631|PR #631>* for details");
+  });
+
+  it("converts strikethrough", () => {
+    expect(markdownToSlackMrkdwn("~~strike~~")).toBe("~strike~");
+  });
+
+  it("does not treat math and intraword underscores as emphasis", () => {
+    expect(markdownToSlackMrkdwn("5 * 3 = 15 and 2 * 4 = 8")).toBe("5 * 3 = 15 and 2 * 4 = 8");
+    expect(markdownToSlackMrkdwn("my__var__x")).toBe("my__var__x");
+  });
+
   // ─── Plain Text ──────────────────────────────────────────────────────
 
   it("returns plain text unchanged", () => {
@@ -155,6 +195,23 @@ describe("markdownToSlackMrkdwn", () => {
     expect(result).toContain("text");
   });
 
+  it("converts the daily developer digest", () => {
+    const digest = [
+      "**Valet Daily Developer Digest: Unreleased Change**",
+      "**Change:** fix(integrations): follow the selected team workspace",
+      "**User Impact:** ...",
+      "**Owner:** xBalbinus",
+      "**PR:** https://github.com/tkhq/valet/pull/631",
+    ].join("\n");
+    expect(markdownToSlackMrkdwn(digest)).toBe([
+      "*Valet Daily Developer Digest: Unreleased Change*",
+      "*Change:* fix(integrations): follow the selected team workspace",
+      "*User Impact:* ...",
+      "*Owner:* xBalbinus",
+      "*PR:* https://github.com/tkhq/valet/pull/631",
+    ].join("\n"));
+  });
+
   describe("control-sequence escaping (injection safety)", () => {
     it("neutralizes a mass-ping <!channel> in literal text", () => {
       const result = markdownToSlackMrkdwn("Heads up <!channel> deploying now");
@@ -169,11 +226,39 @@ describe("markdownToSlackMrkdwn", () => {
     });
 
     it("escapes a raw link-spoof <url|label> but keeps real markdown links", () => {
-      expect(markdownToSlackMrkdwn("<https://evil.example|Slack Support>")).toBe(
-        "&lt;https://evil.example|Slack Support>",
-      );
-      // A genuine [text](url) still converts to a real Slack link.
-      expect(markdownToSlackMrkdwn("[docs](https://example.com)")).toBe("<https://example.com|docs>");
+      expect(markdownToSlackMrkdwn("<https://evil.example|Slack Support>"))
+        .toBe("&lt;https://evil.example|Slack Support>");
+      expect(markdownToSlackMrkdwn("[docs](https://example.com)"))
+        .toBe("<https://example.com|docs>");
+    });
+
+    it("preserves deliberate Slack-native spans for actions", () => {
+      const options = { preserveSlackNativeSpans: true };
+      expect(markdownToSlackMrkdwn("<@U0123> <@W0123> <#C0456|general> <!subteam^S123|@team>", options))
+        .toBe("<@U0123> <@W0123> <#C0456|general> <!subteam^S123|@team>");
+      expect(markdownToSlackMrkdwn("<!channel> <!here> <!everyone>", options))
+        .toBe("&lt;!channel> &lt;!here> &lt;!everyone>");
+    });
+
+
+    it("preserves nested broadcast text in native span labels", () => {
+      const options = { preserveSlackNativeSpans: true };
+      expect(markdownToSlackMrkdwn("<@U123|<!channel>", options)).toBe("<@U123|<!channel>");
+      expect(markdownToSlackMrkdwn("<https://x.com|hi <!channel>", options))
+        .toBe("<https://x.com|hi <!channel>");
+    });
+
+    it("strips a forged bold placeholder NUL sequence", () => {
+      expect(markdownToSlackMrkdwn("forge \x00BD7\x00 and text")).toBe("forge BD7 and text");
+    });
+
+    it("strips a forged native-span placeholder NUL sequence", () => {
+      expect(markdownToSlackMrkdwn("own text \x00SN0\x00 here")).toBe("own text SN0 here");
+    });
+
+    it("does not replay a native span into a forged placeholder", () => {
+      expect(markdownToSlackMrkdwn("<@U9> then forged \x00SN0\x00", { preserveSlackNativeSpans: true }))
+        .toBe("<@U9> then forged SN0");
     });
 
     it("escapes ampersands in literal text", () => {

@@ -6,7 +6,7 @@ import type {
   PluginActionContext,
   PluginActionResult,
 } from "@valet/engine";
-import { slimMessage } from "@valet/plugin-slack/actions";
+import { markdownToSlackMrkdwn, slimMessage } from "@valet/plugin-slack/actions";
 import { isRevokedError, notConnectedError, reconnectError, slackFetch, slackGet } from "./api.js";
 
 /**
@@ -443,7 +443,8 @@ const sendDm = action(
     }
     const postRes = await slackFetch("chat.postMessage", token, {
       channel: openData.channel.id,
-      text: p.text,
+      text: markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true }),
+      mrkdwn: true,
     });
     if (!postRes.ok) return readSlackError(postRes);
     const postData = (await postRes.json()) as {
@@ -460,10 +461,10 @@ const sendDm = action(
 const postMessage = action(
   Type.Object({
     channel: Type.String({ description: "Channel ID (C…/G…) or user ID (U…) for a DM." }),
-    text: Type.String({ description: "Message text. Supports Slack mrkdwn formatting." }),
+    text: Type.String({ description: "Message text in CommonMark. Valet converts it to Slack mrkdwn." }),
     thread_ts: Type.Optional(Type.String({ description: "Post as a threaded reply." })),
     blocks: Type.Optional(
-      Type.String({ description: "Block Kit JSON array as a string for rich formatting." }),
+      Type.String({ description: "Block Kit JSON array. Each mrkdwn element must use Slack mrkdwn. Markdown blocks use CommonMark." }),
     ),
   }),
 )({
@@ -475,7 +476,11 @@ const postMessage = action(
   execute: async (p, ctx) => {
     const token = await getUserToken(ctx);
     if (!token) return { success: false, error: notConnectedError() };
-    const body: Record<string, unknown> = { channel: p.channel, text: p.text };
+    const body: Record<string, unknown> = {
+      channel: p.channel,
+      text: markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true }),
+      mrkdwn: true,
+    };
     if (p.thread_ts) body.thread_ts = p.thread_ts;
     if (p.blocks) {
       try {
@@ -588,7 +593,7 @@ const uploadFile = action(
       files: [p.title ? { id: urlData.file_id, title: p.title } : { id: urlData.file_id }],
     };
     if (channelId) completeBody.channel_id = channelId;
-    if (p.initial_comment) completeBody.initial_comment = p.initial_comment;
+    if (p.initial_comment) completeBody.initial_comment = markdownToSlackMrkdwn(p.initial_comment, { preserveSlackNativeSpans: true });
 
     const doneRes = await slackFetch("files.completeUploadExternal", token, completeBody);
     if (!doneRes.ok) return readSlackError(doneRes);
