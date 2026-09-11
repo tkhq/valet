@@ -673,6 +673,18 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '124.567', channel: 'C1' } });
   });
 
+  it('send_message converts CommonMark in supplied mrkdwn blocks', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    const blocks = JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: '**digest title**' } }]);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '125.677', channel: 'C1' }));
+
+    await action('slack.send_message').execute({ channel: 'C1', text: 'fallback', blocks }, pluginCtx());
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.blocks[0].text.text).toBe('*digest title*');
+  });
+
   it('send_message supports optional blocks for rich formatting', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     const blocks = JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: '*bold*' } }]);
@@ -685,7 +697,7 @@ describe('slack actions', () => {
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(body.blocks).toEqual(JSON.parse(blocks));
+    expect(body.blocks).toEqual([{ type: 'section', text: { type: 'mrkdwn', text: '_bold_' } }]);
     expect(result).toEqual({ success: true, data: { ts: '125.678', channel: 'C1' } });
   });
 

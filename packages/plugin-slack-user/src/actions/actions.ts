@@ -6,7 +6,7 @@ import type {
   PluginActionContext,
   PluginActionResult,
 } from "@valet/engine";
-import { markdownToSlackMrkdwn, slimMessage } from "@valet/plugin-slack/actions";
+import { formatSlackBlocks, markdownToSlackMrkdwn, slimMessage } from "@valet/plugin-slack/actions";
 import { isRevokedError, notConnectedError, reconnectError, slackFetch, slackGet } from "./api.js";
 
 /**
@@ -484,7 +484,12 @@ const postMessage = action(
     if (p.thread_ts) body.thread_ts = p.thread_ts;
     if (p.blocks) {
       try {
-        body.blocks = JSON.parse(p.blocks);
+        const blocks = JSON.parse(p.blocks);
+        body.blocks = Array.isArray(blocks)
+          ? formatSlackBlocks(blocks.filter((block): block is Record<string, unknown> =>
+            typeof block === "object" && block !== null && !Array.isArray(block),
+          ))
+          : blocks;
       } catch {
         return { success: false, error: "blocks must be valid JSON" };
       }

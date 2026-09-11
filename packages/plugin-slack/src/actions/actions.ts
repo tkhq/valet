@@ -12,7 +12,7 @@ import { checkPrivateChannelAccess } from "./channel-access.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
-import { markdownToSlackMrkdwn } from "../transport/format.js";
+import { formatSlackBlocks, markdownToSlackMrkdwn } from "../transport/format.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -898,7 +898,7 @@ const sendMessage = action(Type.Object({
       try {
         const parsed = JSON.parse(p.blocks);
         if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array' };
-        userBlocks = parsed as Record<string, unknown>[];
+        userBlocks = formatSlackBlocks(parsed as Record<string, unknown>[]);
       } catch {
         return { success: false, error: 'blocks must be valid JSON array, e.g. [{"type":"section","text":{"type":"mrkdwn","text":"*bold*"}}]' };
       }

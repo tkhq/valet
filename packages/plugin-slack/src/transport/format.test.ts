@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
+import { formatSlackBlocks, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 
 describe("neutralizeSlackMentions", () => {
   it("defuses every broadcast sequence", () => {
@@ -26,6 +26,18 @@ describe("neutralizeSlackMentions", () => {
 
   it("leaves an autolinked URL alone", () => {
     expect(neutralizeSlackMentions("<https://example.com>")).toBe("<https://example.com>");
+  });
+});
+
+describe("formatSlackBlocks", () => {
+  it("converts mrkdwn elements but preserves CommonMark markdown blocks", () => {
+    expect(formatSlackBlocks([
+      { type: "section", text: { type: "mrkdwn", text: "**bold**" } },
+      { type: "markdown", text: "**bold**" },
+    ])).toEqual([
+      { type: "section", text: { type: "mrkdwn", text: "*bold*" } },
+      { type: "markdown", text: "**bold**" },
+    ]);
   });
 });
 

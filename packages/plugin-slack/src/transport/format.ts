@@ -63,6 +63,33 @@ export function escapeMrkdwn(text: string): string {
  * (notification fallback) and as a fallback for section blocks when messages
  * exceed the markdown block cumulative limit.
  */
+/** Convert every mrkdwn text element in a Block Kit payload. Markdown blocks
+ * use CommonMark, so they are left unchanged. */
+export function formatSlackBlocks(blocks: Record<string, unknown>[]): Record<string, unknown>[] {
+  return blocks.map(formatSlackBlock);
+}
+
+function formatSlackBlock(block: Record<string, unknown>): Record<string, unknown> {
+  const formatted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(block)) {
+    if (Array.isArray(value)) {
+      formatted[key] = value.map((item) =>
+        typeof item === "object" && item !== null && !Array.isArray(item)
+          ? formatSlackBlock(item as Record<string, unknown>)
+          : item,
+      );
+    } else if (typeof value === "object" && value !== null) {
+      formatted[key] = formatSlackBlock(value as Record<string, unknown>);
+    } else {
+      formatted[key] = value;
+    }
+  }
+  if (block.type === "mrkdwn" && typeof block.text === "string") {
+    formatted.text = markdownToSlackMrkdwn(block.text);
+  }
+  return formatted;
+}
+
 export function markdownToSlackMrkdwn(text: string): string {
   // Extract fenced code blocks first to protect them from formatting transforms
   // AND from the escaping below — Slack renders code literally and does not
