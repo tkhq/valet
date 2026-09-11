@@ -1,12 +1,15 @@
 import { Navigate, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { SettingsRail, TEAM_SETTINGS_PATH, isTeamSettingsPath } from "~/components/settings/settings-rail";
+import { SettingsRail, TEAM_SETTINGS_PATH } from "~/components/settings/settings-rail";
 
 /**
  * `/settings` layout shell (split-settings design, decision 1): left rail +
  * routed section content via `<Outlet/>`. Reached via the gear icon in the
- * top nav. `/settings` itself has no content of its own — it redirects to
- * `/settings/profile` in personal scope and `/settings/team` in team scope.
+ * top nav. `/settings` itself redirects to `/settings/profile`.
+ *
+ * A selected team adds team settings to the rail. It does not replace personal
+ * settings or redirect personal and organization routes. This keeps the team
+ * selection while a person moves between settings sections.
  */
 export const Route = createFileRoute("/settings")({
   component: SettingsLayout,
@@ -15,15 +18,9 @@ export const Route = createFileRoute("/settings")({
 export function SettingsLayout() {
   const { teamId, key } = useWorkspaceScope();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const settings = pathname === "/settings" || pathname.startsWith("/settings/");
-  const organization = pathname === "/settings/organization" || pathname.startsWith("/settings/organization/");
-  // Do not mount a personal form under a team label, even for one render.
-  // The layout can still render while navigation leaves settings.
-  const redirectTo = settings && teamId !== undefined && !organization && !isTeamSettingsPath(pathname)
-    ? TEAM_SETTINGS_PATH
-    : teamId === undefined && pathname === TEAM_SETTINGS_PATH
-      ? "/settings/profile"
-      : undefined;
+  const redirectTo = teamId === undefined && pathname === TEAM_SETTINGS_PATH
+    ? "/settings/profile"
+    : undefined;
 
   return (
     <div className="flex-1 overflow-y-auto">

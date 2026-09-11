@@ -31,7 +31,7 @@ skills: [loadSkillFromMarkdown(skillMd, "plugin", "github")];
 
 There is no directory scanner. Each plugin names the file it loads, so a new skill needs an explicit line in the plugin manifest.
 
-`packages/plugin-valet/skills/using-valet/SKILL.md` ships product research rules. `mergedSkillSources` (`packages/api/src/plugins/assemble.ts:139-149`) gives a bundled skill precedence over a stored or synced skill with the same name. For `using-valet`, this precedence is deliberate: the core bundled skill is canonical.
+`packages/plugin-valet/skills/using-valet/SKILL.md` ships product research rules. `mergedSkillSources` (`packages/api/src/plugins/assemble.ts`) gives a bundled skill precedence over a stored or synced skill with the same name. For `using-valet`, this precedence is deliberate: the core bundled skill is canonical.
 
 ## Frontmatter
 
@@ -89,7 +89,7 @@ The table splits the markdown in two: `content` holds the body, and `frontmatter
 
 `origin` says where a stored skill came from: `local` for one written in the product, `repo` for one synced from a repository. Only `local` skills can be edited here. A `repo` skill belongs to its repository, and an edit here would be overwritten by the next sync.
 
-Access follows workflow definitions exactly (`packages/api/src/services/skills.ts`): your own rows, plus the rows of every team you belong to, with membership re-read on every call. A row another owner holds is reported as not found, never as forbidden, so an owned row and a missing row stay indistinguishable.
+Access follows workflow definitions (`packages/api/src/services/skills.ts`): your own rows, the rows of every team you belong to, and org-library rows. Membership is re-read on every call. A row another owner holds is reported as not found, never as forbidden, so an owned row and a missing row stay indistinguishable.
 
 A UNIQUE index on `(org_id, owner_type, owner_id, name)` stops two stored skills sharing a name inside one owner scope.
 
@@ -104,7 +104,7 @@ A UNIQUE index on `(org_id, owner_type, owner_id, name)` stops two stored skills
 | `buildChildSession` | `opts.owner` | The child's own principal, copied from its parent. |
 | `buildWorkflowSession` | `opts.owner` | The run's principal, copied from the workflow definition at start time. |
 
-A `user` principal reads its own skills plus its teams' skills. A `team` or `org` principal reads only that team's or org's skills, so one member's personal skills never appear in a session other members read.
+A `user` principal reads its own skills, its teams' skills, and org-library skills. A `team` principal reads team skills followed by org-library skills. A team skill shadows an org skill with the same name. An `org` principal reads only org skills. A team or org session never reads a member's personal skills.
 
 ## Two skills, one name
 
@@ -113,7 +113,7 @@ A skill name is a lookup key, so only one skill can hold a name. A repeated name
 - Two PLUGINS shipping one skill name THROWS. We ship the plugins, so a repeated name is a build-time bug and must be loud.
 - A STORED skill that repeats a name is SHADOWED. The row stays, and it drops out of the assembled set. It never throws: no session builder has a try/catch, so a throw would stop that person from starting any session at all.
 
-Precedence: a plugin skill wins over a stored skill, and a personal skill wins over a team skill. `partitionByName` (`packages/api/src/plugins/assemble.ts`) applies the rule, and `/api/skills` calls the same function, so the rows the page marks `shadowed` are the rows a session drops. The Skills tab shows the warning on the card and on the skill's own page, and names the fix: rename a `local` skill on its own page, and rename a `repo` skill where it came from.
+Precedence: a plugin skill wins over a stored skill. For a user session, personal wins over team, then org. For a team session, team wins over org. `partitionByName` (`packages/api/src/plugins/assemble.ts`) applies the rule, and `/api/skills` calls the same function, so the rows the page marks `shadowed` are the rows a session drops. The Skills tab shows the warning on the card and on the skill's own page, and names the fix: rename a `local` skill on its own page, and rename a `repo` skill where it came from.
 
 ## Authoring
 

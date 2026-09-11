@@ -685,8 +685,8 @@ export async function deleteSkill(
  *   - `user` — that person's own skills, then the skills of every team they
  *     belong to, then the org-library skills. The same union `listSkills`
  *     returns, deduped user > team > org (first name wins).
- *   - `team` — that team's skills only. A team-owned session is shared, so
- *     one member's personal skills must not appear in it.
+ *   - `team` — that team's skills, then the org-library skills. A team-owned
+ *     session is shared, so one member's personal skills must not appear in it.
  *   - `org`  — that org's own skills only.
  *
  * A repeated name keeps the FIRST row and drops the rest. It never throws:
@@ -715,17 +715,29 @@ async function rowsForPrincipal(db: AppDb, principal: Principal, orgId: string):
   if (principal.type === "user") {
     return listSkills(db, { userId: principal.id, orgId });
   }
-  return db
+
+  const rows = await db
     .select()
     .from(skills)
     .where(
       and(
         eq(skills.orgId, orgId),
-        eq(skills.ownerType, principal.type),
-        eq(skills.ownerId, principal.id),
+        principal.type === "team"
+          ? or(
+              and(eq(skills.ownerType, "team"), eq(skills.ownerId, principal.id)),
+              and(eq(skills.ownerType, "org"), eq(skills.ownerId, orgId)),
+            )
+          : and(eq(skills.ownerType, "org"), eq(skills.ownerId, principal.id)),
       ),
     )
     .orderBy(asc(skills.name));
+
+  if (principal.type === "org") return rows;
+  // A team copy shadows an org-library skill with the same command name.
+  return [
+    ...rows.filter((row) => row.ownerType === "team"),
+    ...rows.filter((row) => row.ownerType === "org"),
+  ];
 }
 
 /** A row as the engine sees it. `source` records where the markdown came

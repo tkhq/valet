@@ -17,6 +17,8 @@ import { describe, expect, it, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { createSkill } from "../services/skills.js";
+import { createTeam } from "../services/teams.js";
+import { createAssistant, ensureAssistantSession } from "../assistants/service.js";
 import { orgs, skills } from "../schema/index.js";
 import type {
   CreateSessionResponse,
@@ -56,6 +58,94 @@ async function getCommands(baseUrl: string, sessionId: string): Promise<ListComm
 }
 
 describe("GET /api/sessions/:id/commands", () => {
+  async function createOrgReviewSkill(): Promise<void> {
+    if (!api) throw new Error("test API is not running");
+    await createSkill(api.providers.db, OWNER, {
+      ownerType: "org",
+      isOrgAdmin: true,
+      origin: "repo",
+      name: "basic-code-review",
+      description: "Standard pull request review process.",
+      content: "# Basic code review\n\nReview the pull request.\n",
+    });
+  }
+
+  it("lists the org basic-code-review skill for a team orchestrator", async () => {
+    api = await bootTestApi();
+    await createOrgReviewSkill();
+    await createSkill(api.providers.db, OWNER, {
+      name: "personal-notes",
+      description: "Personal review notes.",
+      content: "# Personal\n",
+    });
+    const team = await createTeam(api.providers.db, {
+      orgId: OWNER.orgId,
+      name: "Reviewers",
+      creatorUserId: OWNER.userId,
+    });
+    const built = await ensureAssistantSession(
+      { db: api.providers.db, engineHost: api.providers.engineHost },
+      team.defaultAssistant,
+      { actorUserId: OWNER.userId, orgId: OWNER.orgId },
+    );
+
+    const { commands } = await getCommands(api.baseUrl, built.session.id);
+    expect(commands.find((item) => item.name === "skill:basic-code-review")).toMatchObject({
+      name: "skill:basic-code-review",
+      source: "skill",
+    });
+    expect(commands.some((item) => item.name === "basic-code-review")).toBe(false);
+    expect(commands.some((item) => item.name === "skill:personal-notes")).toBe(false);
+  });
+
+  it("adds the bare basic-code-review alias only when the org enables it", async () => {
+    api = await bootTestApi();
+    await createOrgReviewSkill();
+    await api.providers.db
+      .update(orgs)
+      .set({ bareSkillCommands: true })
+      .where(eq(orgs.id, OWNER.orgId));
+    const team = await createTeam(api.providers.db, {
+      orgId: OWNER.orgId,
+      name: "Reviewers",
+      creatorUserId: OWNER.userId,
+    });
+    const built = await ensureAssistantSession(
+      { db: api.providers.db, engineHost: api.providers.engineHost },
+      team.defaultAssistant,
+      { actorUserId: OWNER.userId, orgId: OWNER.orgId },
+    );
+
+    const { commands } = await getCommands(api.baseUrl, built.session.id);
+    expect(commands.some((item) => item.name === "skill:basic-code-review")).toBe(true);
+    expect(commands.find((item) => item.name === "basic-code-review")).toMatchObject({ source: "skill" });
+  });
+
+  it("keeps basic-code-review out when a team assistant allowlist excludes it", async () => {
+    api = await bootTestApi();
+    await createOrgReviewSkill();
+    const team = await createTeam(api.providers.db, {
+      orgId: OWNER.orgId,
+      name: "Reviewers",
+      creatorUserId: OWNER.userId,
+    });
+    const assistant = await createAssistant(
+      api.providers.db,
+      OWNER.orgId,
+      { type: "team", id: team.id },
+      "Restricted",
+      { behavior: { skills: { mode: "allowlist", names: ["another-skill"] } } },
+    );
+    const built = await ensureAssistantSession(
+      { db: api.providers.db, engineHost: api.providers.engineHost },
+      assistant,
+      { actorUserId: OWNER.userId, orgId: OWNER.orgId },
+    );
+
+    const { commands } = await getCommands(api.baseUrl, built.session.id);
+    expect(commands.some((item) => item.name === "skill:basic-code-review")).toBe(false);
+  });
+
   // Task 4: a stored prompt skill reaches a session through `sessionExtras`
   // and registers as `skill:<name>`.
   it("lists a stored prompt skill as skill:<name> with source 'skill'", async () => {

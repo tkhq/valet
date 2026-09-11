@@ -5,9 +5,10 @@ import { cn } from "~/lib/cn";
 
 /**
  * The settings shell's left rail (split-settings design, "Visual direction"
- * + "Routes & navigation"; amended 2026-08-28). Two small-caps groups:
- * **You** (personal workspace) or **Team** (selected team), plus
- * **Organization** (shown once the `useOrg()` query resolves to gate-on — hidden otherwise, never disabled, and
+ * + "Routes & navigation"; amended 2026-08-28). The **You** group is always
+ * present. A selected team adds a **Team** group without hiding personal
+ * settings. **Organization** is shown once the `useOrg()` query resolves to
+ * gate-on — hidden otherwise, never disabled, and
  * rendered with no flash since it appears only once cached data arrives
  * rather than defaulting open then collapsing). An org admin sees every
  * Organization item; a plain member sees only Teams, because any member
@@ -25,11 +26,6 @@ const TEAM_ITEMS = [
   { to: TEAM_SETTINGS_PATH, label: "General" },
   { to: "/settings/api-keys", label: "API keys" },
 ];
-
-/** Keep the team rail and the layout's route allowlist in agreement. */
-export function isTeamSettingsPath(pathname: string): boolean {
-  return TEAM_ITEMS.some((item) => item.to === pathname);
-}
 
 const YOU_ITEMS = [
   { to: "/settings/profile", label: "Profile" },
@@ -100,14 +96,16 @@ export function SettingsRail() {
   // the gate on, an admin finds Models in the Organization group, and a
   // plain member gets no Models link at all (see MODELS_ITEM's comment).
   const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
+  // API keys follow the selected workspace. Show that shared route in the
+  // Team group while a team is selected, not under both owners at once.
+  const visibleYouItems = teamId === undefined
+    ? youItems
+    : youItems.filter((item) => item.to !== "/settings/api-keys");
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">
-      <RailGroup
-        label={teamId === undefined ? "You" : "Team"}
-        items={teamId === undefined ? youItems : TEAM_ITEMS}
-        pathname={pathname}
-      />
+      <RailGroup label="You" items={visibleYouItems} pathname={pathname} />
+      {teamId !== undefined && <RailGroup label="Team" items={TEAM_ITEMS} pathname={pathname} />}
       {showOrganizationGroup && (
         <RailGroup label="Organization" items={organizationItems} pathname={pathname} />
       )}
