@@ -2286,8 +2286,7 @@ export const githubTemplates: WorkflowTemplate[] = [
     id: "github.daily-dev-digest",
     name: "Daily development digest",
     description:
-      "Every weekday morning, collect the reviews waiting on you, your own open pull requests, and the " +
-      "issues assigned to you, then send one ranked digest to your orchestrator.",
+      "Get a ranked digest of pending reviews, open pull requests, and assigned issues in your orchestrator.",
     category: "digest",
     apps: ["github", "claude"],
     steps: [
@@ -2298,8 +2297,8 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Send the digest to your orchestrator.",
     ],
     caveats: [
-      "Reads GitHub as you, not as the installed GitHub App. Connect your personal GitHub account first.",
-      "Covers only work that names you. It does not scan whole repositories.",
+      "Uses a GitHub user credential, not the installed App. Connect your account for personal runs or configure a team GitHub credential for team runs.",
+      "Covers work assigned to or authored by the connected GitHub account, plus requests for its review. It does not scan whole repositories.",
     ],
     definition: dailyDevDigest,
     schedule: {
@@ -2313,8 +2312,7 @@ export const githubTemplates: WorkflowTemplate[] = [
     id: "github.stale-pull-request-nudge",
     name: "Weekly nudge on quiet pull requests",
     description:
-      "Once a week, find your open pull requests with no activity for five days and ask you what to do " +
-      "with them. The run stays silent in a week when nothing has gone quiet.",
+      "Get an orchestrator nudge about open pull requests with no activity for five days. Stays silent when none are stale.",
     category: "nudge",
     apps: ["github", "claude"],
     steps: [
@@ -2324,7 +2322,7 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Ask your orchestrator to raise the stale ones with you.",
     ],
     caveats: [
-      "Reads GitHub as you, not as the installed GitHub App. Connect your personal GitHub account first.",
+      "Uses a GitHub user credential, not the installed App. Connect your account for personal runs or configure a team GitHub credential for team runs.",
       "The nudge only reports. It never comments on a pull request and never closes one.",
     ],
     definition: stalePullRequestNudge,
@@ -2339,9 +2337,7 @@ export const githubTemplates: WorkflowTemplate[] = [
     id: "github.pull-request-review",
     name: "Review a pull request when a comment asks for it",
     description:
-      "When a pull request comment contains the mention you choose at install, read the pull request " +
-      "and its diff, then post one review with the findings anchored to the lines they belong to. " +
-      "Nothing runs on a push: a review starts only when somebody asks for one.",
+      "Post a pull request review with inline findings when a comment contains your chosen mention.",
     category: "review",
     apps: ["github", "claude"],
     steps: [
@@ -2354,7 +2350,7 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Move the findings into the review body when the inline comments cannot be posted.",
     ],
     caveats: [
-      "Installing it arms its own trigger, scoped to the repository and the mention you name. The repository is matched as owner/name exactly, and the mention is matched case-sensitively inside the comment text — a typo in either arms a trigger that never fires and reports nothing. Your organization also needs a GitHub App installed on that repository, or no webhook arrives at all.",
+      "Installing it arms its own trigger for the repository and mention you name. Match the repository as owner/name exactly; the mention is case-sensitive within comment text. Typos silently prevent runs. Install the organization GitHub App on that repository to receive webhooks. Reviews start from comments, not pushes.",
       "It posts as the installed GitHub App, never approves (COMMENT or REQUEST_CHANGES only), and skips anything past 60 changed files or 120,000 diff bytes with a one-line note instead. Findings are capped at 20 per review and anchored to changed lines; when GitHub rejects an inline anchor, the same findings post in the review body instead.",
       "Anyone who can comment on the repository can start a review by writing the mention, and the review reads only the diff and the pull request's own text, which its author controls — so treat REQUEST_CHANGES as one reviewer's opinion, not a merge gate, especially on a public repo.",
     ],
@@ -2379,11 +2375,7 @@ export const githubTemplates: WorkflowTemplate[] = [
     rank: 1,
     name: "Assign reviewers to a pull request",
     description:
-      "Picks reviewers for a pull request from CODEOWNERS, writes them into the assignees field, and pings each " +
-      "one on Slack. Add a roster CSV to get more: team membership, PTO and working-hours checks, and Slack ids. " +
-      "When an assignee declines in a comment, it swaps in the next best candidate on its own.\n\n" +
-      "It needs GitHub, Google Calendar, and Slack connected on your own account. Install it, then add its " +
-      "GitHub triggers yourself — it runs on pull request and comment events, not on a schedule or by hand.",
+      "Assign reviewers from CODEOWNERS and notify them on Slack when roster details are available. Replace assignees who decline in a comment.",
     category: "review",
     apps: ["github", "google_calendar", "slack", "claude"],
     steps: [
@@ -2398,10 +2390,10 @@ export const githubTemplates: WorkflowTemplate[] = [
       "Write the updated list, reply on the pull request naming the replacement, and DM the new assignee and the author.",
     ],
     caveats: [
-      "Installing it arms two triggers scoped to the repository you name, matched as owner/name exactly — a typo arms triggers that never fire and report nothing. The comment trigger fires on every comment in that repository, issues included, because GitHub offers no filter to separate them; a comment on an issue ends the run as a success that did nothing.",
+      "Installing it arms two triggers for the repository you name, matched as owner/name exactly. Typos silently prevent runs. It runs on pull request and comment events, not a schedule or manual runs. The comment trigger also receives issue comments; those runs finish successfully without changes.",
       "The roster is optional. Without one, reviewers come from CODEOWNERS directly — which only works for a plain @handle: a @org/team token names a group nothing here can resolve into people, and it is reported rather than assigned. A roster is what buys you team membership, PTO checking, working hours and Slack DMs.",
       "The roster is the only source of group membership, working hours, calendars and Slack ids — nothing here can read a GitHub team or a timezone on its own. A decline is a model's judgment on one comment, not a keyword match; read the reply it posts on the pull request to confirm what it did.",
-      `It reads and writes GitHub as you, not as an installed application, and assigning replaces the whole assignees field — a pull request that already has one is left alone. It assigns at most ${MAX_ASSIGNEES} people and checks at most ${MAX_CANDIDATES} calendars per run; anything past those caps is reported, never guessed at.`,
+      `Requires a personal or team GitHub user credential, Google Calendar, and Slack; Slack can use the organization connection. It does not use the GitHub App. Assignment replaces all assignees, so it skips pull requests already assigned. It assigns at most ${MAX_ASSIGNEES} people and checks ${MAX_CANDIDATES} calendars per run; excess candidates are reported, never guessed at.`,
     ],
     definition: assignReviewers,
     // Two subscriptions rather than one with every key, so the comment

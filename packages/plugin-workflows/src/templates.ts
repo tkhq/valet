@@ -422,10 +422,7 @@ export const workflowTemplates: WorkflowTemplate[] = [
     id: "workflows.nightly-memory-sweep",
     name: "Nightly memory sweep",
     description:
-      "Every night, your orchestrator audits a rotating slice of its memory: it verifies facts, merges " +
-      "duplicates, enriches metadata, grows the link graph between files, distills old journals, and " +
-      "logs every change. It needs no integration, and it reads the ones you have connected to verify " +
-      "facts.",
+      "Verify and tidy a rotating slice of memory, merge duplicates, and distill old journals. Log changes and report anything that needs your review.",
     category: "maintenance",
     apps: ["claude"],
     steps: [
@@ -454,8 +451,7 @@ export const workflowTemplates: WorkflowTemplate[] = [
     id: "workflows.daily-triage-digest",
     name: "Daily triage digest",
     description:
-      "Every weekday morning, read GitHub, Linear, and your joined Slack channels, then send one ranked " +
-      "digest to your orchestrator.",
+      "Get one ranked digest of GitHub reviews, Linear issues, and Slack activity in your orchestrator.",
     category: "digest",
     apps: ["github", "linear", "slack", "claude"],
     steps: [
@@ -467,9 +463,9 @@ export const workflowTemplates: WorkflowTemplate[] = [
     ],
     caveats: [
       "Reads up to 12 Slack channels per run. The digest reports how many were left out.",
-      "Slack and Linear must be connected on your own account — a workflow run cannot see an org-wide connection.",
+      "Connect Linear for the workflow workspace. Slack can use the organization connection; team runs use configured team credentials and permitted organization fallbacks.",
       "Linear tools resolve when the run starts, so a renamed Linear tool fails on the first run, not at install.",
-      "Reads GitHub as you, not as the installed GitHub App.",
+      "Uses a GitHub user credential, not the installed App: your account for personal runs, or the configured team credential for team runs.",
     ],
     definition: dailyTriageDigest,
     schedule: {
@@ -483,8 +479,7 @@ export const workflowTemplates: WorkflowTemplate[] = [
     id: "workflows.meeting-prep",
     name: "Weekly meeting prep",
     description:
-      "Once a week, gather what is worth raising live — decisions needed, blockers, risks to a date, and " +
-      "finished work — from GitHub, Linear, and threaded Slack discussions.",
+      "Get a meeting brief with decisions, blockers, risks, and completed work from GitHub, Linear, and Slack.",
     category: "digest",
     apps: ["github", "linear", "slack", "claude"],
     steps: [
@@ -496,9 +491,9 @@ export const workflowTemplates: WorkflowTemplate[] = [
     ],
     caveats: [
       "Reads up to 12 Slack channels per run. The brief reports how many were left out.",
-      "Slack and Linear must be connected on your own account — a workflow run cannot see an org-wide connection.",
+      "Connect Linear for the workflow workspace. Slack can use the organization connection; team runs use configured team credentials and permitted organization fallbacks.",
       "Linear tools resolve when the run starts, so a renamed Linear tool fails on the first run, not at install.",
-      "Reads GitHub as you, not as the installed GitHub App.",
+      "Uses a GitHub user credential, not the installed App: your account for personal runs, or the configured team credential for team runs.",
     ],
     definition: meetingPrep,
     schedule: {
@@ -512,8 +507,7 @@ export const workflowTemplates: WorkflowTemplate[] = [
     id: "workflows.batch-over-rows",
     name: "Run one instruction over a batch",
     description:
-      "Apply a single instruction to every row of a list — account tiering, vertical tagging, drafting one " +
-      "artifact per customer — then summarize the batch. Runs on demand, up to 100 rows.",
+      "Apply one instruction to each row, then summarize the results. Runs on demand for up to 100 rows.",
     category: "batch",
     apps: ["claude"],
     steps: [
