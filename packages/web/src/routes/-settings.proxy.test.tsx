@@ -25,22 +25,14 @@ vi.mock("@tanstack/react-router", () => ({
 
 let teamId: string | undefined;
 vi.mock("~/lib/workspace-scope", () => ({ useWorkspaceScope: () => ({ teamId }) }));
-const createKeyMutate = vi.fn();
+const createKeyMutate = vi.fn<(name: string, opts: { onSuccess: (key: { key: string }) => void }) => void>();
 const personalKeyHook = vi.fn();
 const teamCreate = vi.fn<(target: string, name: string, opts: { onSuccess: (key: { name: string; key: string }) => void }) => void>();
-const revoke = vi.fn();
 let teamRole: "admin" | "member" = "admin";
 let teamError: Error | null = null;
 let keysError: Error | null = null;
 let createError: Error | null = null;
 let teamLoading = false;
-vi.mock("~/components/workspace-clause", () => ({
-  CreateScopeLine: () => <p>Team workspace</p>,
-  useActiveWorkspace: () => undefined,
-  workspaceName: () => "Team",
-}));
-
-
 vi.mock("~/api/api-keys", () => ({
   useCreateApiKey: () => { personalKeyHook(); return ({
     mutate: createKeyMutate,
@@ -50,7 +42,6 @@ vi.mock("~/api/api-keys", () => ({
   }); },
   useTeamApiKeys: (target: string) => ({ data: [{ id: `${target}-key`, name: `${target} shared key`, start: "vlt_123", createdAt: 1, lastRequest: null, createdBy: null }], isLoading: false, error: keysError }),
   useCreateTeamApiKey: (target: string) => ({ mutate: (name: string, opts: { onSuccess: (key: { name: string; key: string }) => void }) => teamCreate(target, name, opts), isPending: false, error: createError }),
-  useRevokeTeamApiKey: (target: string) => ({ mutate: (id: string) => revoke(target, id), isPending: false, error: null }),
 }));
 
 let settingsResult: {
@@ -78,6 +69,7 @@ vi.mock("~/api/proxy-usage", () => ({
 let orgData: {
   data: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined;
   isLoading: boolean;
+  error?: Error;
 } = {
   data: { callerRole: "admin", features: { organizations: false } },
   isLoading: false,
@@ -175,135 +167,128 @@ describe("SettingsProxyPage — org mode (read-only ProxyGovernance)", () => {
 });
 
 
-describe("SettingsProxyPage in a team workspace", () => {
-  beforeEach(() => {
-    teamId = "team-1";
-    orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
-  });
-
-  it("shows shared team keys and setup without personal keys or governance mutations", () => {
-    render(<SettingsProxyPage />);
-    expect(screen.getByText("Platform proxy")).toBeTruthy();
-    expect(screen.getByText("team-1 shared key")).toBeTruthy();
-    expect(screen.getByText(/export ANTHROPIC_AUTH_TOKEN=TEAM_API_KEY/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Create" })).toBeTruthy();
-    expect(screen.queryByRole("switch")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Create proxy key" })).toBeNull();
-    expect(personalKeyHook).not.toHaveBeenCalled();
-  });
-
-  it("lets members use setup but keeps create and revoke admin-only", () => {
-    teamRole = "member";
-    render(<SettingsProxyPage />);
-    expect(screen.getByText("team-1 shared key")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Create" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
-    expect(screen.getByText(/export ANTHROPIC_AUTH_TOKEN=TEAM_API_KEY/)).toBeTruthy();
-  });
-
-  it("allows organization admins to manage team keys without changing proxy governance here", () => {
-    teamRole = "member";
-    orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
-    render(<SettingsProxyPage />);
-    expect(screen.getByRole("button", { name: "Create" })).toBeTruthy();
-    expect(screen.queryByRole("switch")).toBeNull();
-  });
-
-  it("clears drafts and late key reveals when switching teams or returning to personal", () => {
-    const { rerender } = render(<SettingsProxyPage />);
-    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Proxy" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    expect(teamCreate).toHaveBeenCalledWith("team-1", "Proxy", expect.anything());
-    teamId = "team-2";
-    rerender(<SettingsProxyPage />);
-    expect(screen.getByLabelText<HTMLInputElement>("Key name").value).toBe("");
-    teamCreate.mock.calls[0][2].onSuccess({ name: "Old team", key: "vlt_old_secret" });
-    expect(screen.queryByText("vlt_old_secret")).toBeNull();
-    expect(screen.queryByText("team-1 shared key")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Support proxy" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    expect(teamCreate).toHaveBeenLastCalledWith("team-2", "Support proxy", expect.anything());
-    teamId = undefined;
-    rerender(<SettingsProxyPage />);
+describe("shared personal and team onboarding", () => {
+  it.each(["personal", "team"])("%s follows create, reveal, actual-key snippets, run, and create another", (scope) => {
+    teamId = scope === "team" ? "team-1" : undefined;
+    const { container } = render(<SettingsProxyPage />);
+    expect(screen.getByRole("heading", { name: "Proxy" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /Step 2.*Create your key/ })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Team API keys" })).toBeNull();
+    expect(screen.queryByText(/TEAM_API_KEY/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    if (scope === "team") {
+      expect(teamCreate).toHaveBeenCalledWith("team-1", "proxy-key", expect.anything());
+      expect(personalKeyHook).not.toHaveBeenCalled();
+      act(() => teamCreate.mock.calls[0][2].onSuccess({ name: "proxy-key", key: "vlt_new_key" }));
+    } else {
+      expect(teamCreate).not.toHaveBeenCalled();
+      act(() => createKeyMutate.mock.calls[0][1].onSuccess({ key: "vlt_new_key" }));
+    }
+    expect(screen.getByText("Your proxy key is shown once. Store it now.")).toBeTruthy();
+    expect(screen.getByText(/export ANTHROPIC_AUTH_TOKEN=vlt_new_key/)).toBeTruthy();
+    expect(screen.getByText(/export VALET_KEY=vlt_new_key/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /Step 3.*Configure your tool/ })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /Step 4.*Run it/ })).toBeTruthy();
+    expect(screen.getByText('codex exec "hello"')).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Settings → API keys" }).getAttribute("href")).toBe("/settings/api-keys");
+    fireEvent.click(screen.getByRole("button", { name: "Create another key" }));
+    expect(container.textContent).not.toContain("vlt_new_key");
     expect(screen.getByRole("button", { name: "Create proxy key" })).toBeTruthy();
-    expect(screen.queryByText("team-2 shared key")).toBeNull();
   });
 
-  it("explains disabled governance and pass-through setup without loading personal credentials", () => {
+  it("keeps members read-only and org governance read-only even for admins", () => {
+    teamId = "team-1";
+    teamRole = "member";
+    orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
+    const { rerender } = render(<SettingsProxyPage />);
+    expect(screen.getByRole("button", { name: "Create proxy key" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    expect(teamCreate).not.toHaveBeenCalled();
+    expect(personalKeyHook).not.toHaveBeenCalled();
+    expect(screen.getByText(/A team or organization admin must create/)).toBeTruthy();
+    expect(screen.queryByRole("switch")).toBeNull();
+    orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
+    rerender(<SettingsProxyPage />);
+    expect(screen.getByRole("button", { name: "Create proxy key" })).toHaveProperty("disabled", false);
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("uses the real new team key in pass-through snippets while preserving organization mode", () => {
+    teamId = "team-1";
     settingsResult = { data: { enabled: false, mode: "passthrough" }, isLoading: false };
     render(<SettingsProxyPage />);
-    expect(screen.getByText(/Ask an organization admin to enable/)).toBeTruthy();
-    expect(screen.getByText(/Use an approved provider key/)).toBeTruthy();
-    expect(screen.getByText(/export ANTHROPIC_API_KEY=<approved-anthropic-key>/)).toBeTruthy();
-    expect(personalKeyHook).not.toHaveBeenCalled();
+    expect(screen.getByText("Gateway: Off · Pass-through mode")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    act(() => teamCreate.mock.calls[0][2].onSuccess({ name: "proxy-key", key: "vlt_pass" }));
+    expect(screen.getByText(/export ANTHROPIC_AUTH_TOKEN=vlt_pass/)).toBeTruthy();
+    expect(screen.getByText(/http_headers =.*vlt_pass/)).toBeTruthy();
+    expect(screen.getByText(/export OPENAI_API_KEY=<approved-openai-key>/)).toBeTruthy();
+    expect(screen.getByText(/An admin must enable/)).toBeTruthy();
   });
 
-  it("blocks setup while loading, on errors, and when the selected team is unavailable", () => {
+  it("discards revealed secrets and delayed responses across team and personal switches", () => {
+    teamId = "team-1";
+    const { container, rerender } = render(<SettingsProxyPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    const first = teamCreate.mock.calls[0][2].onSuccess;
+    act(() => first({ name: "proxy-key", key: "vlt_first" }));
+    teamId = "team-2";
+    rerender(<SettingsProxyPage />);
+    expect(container.textContent).not.toContain("vlt_first");
+    act(() => first({ name: "proxy-key", key: "vlt_late_first" }));
+    expect(container.textContent).not.toContain("vlt_late_first");
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    expect(teamCreate).toHaveBeenLastCalledWith("team-2", "proxy-key", expect.anything());
+    teamId = undefined;
+    rerender(<SettingsProxyPage />);
+    act(() => teamCreate.mock.calls[1][2].onSuccess({ name: "proxy-key", key: "vlt_late_second" }));
+    expect(container.textContent).not.toContain("vlt_late_second");
+    expect(screen.getByRole("button", { name: "Create proxy key" })).toBeTruthy();
+  });
+
+  it.each(["role", "keys", "teams", "org", "settings"])("clears secrets and ignores delayed creation after %s access loss", (failure) => {
+    teamId = "team-1";
+    orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
+    const { container, rerender } = render(<SettingsProxyPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    const success = teamCreate.mock.calls[0][2].onSuccess;
+    act(() => success({ name: "proxy-key", key: "vlt_secret" }));
+    if (failure === "role") teamRole = "member";
+    if (failure === "keys") keysError = new Error("Denied");
+    if (failure === "teams") teamError = new Error("Denied");
+    if (failure === "org") orgData.error = new Error("Denied");
+    if (failure === "settings") settingsResult.error = new Error("Denied");
+    rerender(<SettingsProxyPage />);
+    act(() => success({ name: "proxy-key", key: "vlt_late" }));
+    expect(container.textContent).not.toContain("vlt_secret");
+    expect(container.textContent).not.toContain("vlt_late");
+    if (failure === "role") expect(screen.getByRole("button", { name: "Create proxy key" })).toHaveProperty("disabled", true);
+    else expect(screen.getByRole("alert").textContent).toContain("Reload");
+    teamRole = "admin";
+    keysError = null;
+    teamError = null;
+    orgData.error = undefined;
+    settingsResult.error = undefined;
+    rerender(<SettingsProxyPage />);
+    expect(container.textContent).not.toContain("vlt_secret");
+    expect(container.textContent).not.toContain("vlt_late");
+    expect(screen.getByRole("button", { name: "Create proxy key" })).toBeTruthy();
+  });
+
+  it("handles loading and missing teams without creating personal keys", () => {
+    teamId = "team-1";
     teamLoading = true;
     const { rerender } = render(<SettingsProxyPage />);
     expect(screen.getByRole("status")).toBeTruthy();
-    expect(screen.queryByLabelText("Key name")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create proxy key" })).toBeNull();
     teamLoading = false;
-    teamError = new Error("Offline");
-    rerender(<SettingsProxyPage />);
-    expect(screen.getByRole("alert").textContent).toContain("Reload");
-    teamError = null;
-    teamId = "missing";
+    teamId = "gone";
     rerender(<SettingsProxyPage />);
     expect(screen.getByRole("alert").textContent).toContain("Select another workspace");
-    expect(screen.queryByLabelText("Key name")).toBeNull();
-  });
-});
-
-
-describe("team key access changes", () => {
-  beforeEach(() => {
-    teamId = "team-1";
-    orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
+    expect(personalKeyHook).not.toHaveBeenCalled();
   });
 
-  it("clears secrets and drafts on a key authorization error even with cached roles and rows", () => {
-    const { rerender } = render(<SettingsProxyPage />);
-    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Shared" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    act(() => teamCreate.mock.calls[0][2].onSuccess({ name: "Shared", key: "vlt_revealed" }));
-    expect(screen.getByText("vlt_revealed")).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Stale draft" } });
-    keysError = new Error("Access denied");
-    rerender(<SettingsProxyPage />);
-    expect(screen.getByRole("alert").textContent).toContain("verify team key access");
-    expect(screen.queryByText("vlt_revealed")).toBeNull();
-    expect(screen.queryByText("team-1 shared key")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Create" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
-    keysError = null;
-    rerender(<SettingsProxyPage />);
-    expect(screen.getByLabelText<HTMLInputElement>("Key name").value).toBe("");
-    expect(screen.queryByText("vlt_revealed")).toBeNull();
-  });
-
-  it("ignores a late create response after admin role loss and does not restore the old draft", () => {
-    const { rerender } = render(<SettingsProxyPage />);
-    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Pending" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    teamRole = "member";
-    rerender(<SettingsProxyPage />);
-    act(() => teamCreate.mock.calls[0][2].onSuccess({ name: "Late", key: "vlt_late" }));
-    expect(screen.queryByText("vlt_late")).toBeNull();
-    expect(screen.queryByLabelText("Key name")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
-    teamRole = "admin";
-    rerender(<SettingsProxyPage />);
-    expect(screen.getByLabelText<HTMLInputElement>("Key name").value).toBe("");
-    expect(screen.queryByText("vlt_late")).toBeNull();
-    expect(screen.getByText(/Team members can see key names/)).toBeTruthy();
-    expect(screen.queryByText(/Everyone on the team can see it/)).toBeNull();
-  });
-});
-
-
-describe("team proxy setup presentation", () => {
-  it("shows the server's corrective action when key creation needs real auth", () => {
+  it("shows the corrective server message for auth-disabled key creation", () => {
     teamId = "team-1";
     createError = new ApiError(503, "POST /teams/team-1/api-keys → 503", {
       error: "Team API keys need real auth. Set BETTER_AUTH_SECRET and sign in.",
@@ -311,6 +296,5 @@ describe("team proxy setup presentation", () => {
     render(<SettingsProxyPage />);
     expect(screen.getByRole("alert").textContent).toBe("Team API keys need real auth. Set BETTER_AUTH_SECRET and sign in.");
     expect(screen.queryByText(/POST \/teams/)).toBeNull();
-    expect(screen.getByRole("button", { name: "Create" })).toBeTruthy();
   });
 });

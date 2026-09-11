@@ -176,7 +176,33 @@ The hash is 64-bit, not cryptographic. A collision only matters when two differe
 Team workspaces expose Policies beside General, API keys, and Proxy. Members
 can read the team's rules. Team admins and org admins can create, edit, and
 revoke them. These operations require an acting user; a team key cannot change
-its own policy. Settings reuse the existing rule form and matcher semantics.
+its own policy. Settings reuse the personal overrides and grants components:
+Team policy overrides list, New override (target, mode, Save override), then
+Team active grants. Members see read-only rows and an admin explanation.
+Scope/role changes and read errors discard drafts, errors, and confirmations.
+All override deletions and grant/rule revocations require confirmation.
+
+`PUT /api/teams/:id/policy-overrides` uses the personal override bounds check,
+returning an actionable 400 for an allow that could loosen org policy. Under
+the team ownership lock and locked membership authority, it upserts the exact
+target among non-revoked rows with `appliesIn=any`, no matchers, and no expiry.
+Repeated saves retain one row ID; historical duplicate simple rows are softly
+revoked. Independent conditional, context-specific, or expiring rows never
+participate. They remain visible, with all conditions and expiry, in an
+always-available Advanced rules disclosure, which reuses the existing policy
+form and row controls for conditional rule creation, mode changes, and confirmed
+deletion by ID. Its list includes only conditional, context-specific, or expiring
+rows, and omits kill switches. The default overrides and grants flow stays simple.
+
+`GET /api/teams/:id/grants` and `DELETE /api/teams/:id/grants/:grantId` scope
+active grants by their owning session or persisted run, never `grantedBy`.
+Both grant and session organization must match; runs use their stored owner
+and join the workflow definition for organization. Missing definitions make
+orphaned run grants inaccessible rather than guessing their organization.
+Revocation repeats ownership predicates in the write and soft-revokes only
+matching grants. Members may list; team/org admins may revoke under locked
+authority. Personal grant endpoints retain their existing creator-based scope.
+No migration or live-data cleanup is required.
 
 Rules use the existing `action_policies` principal columns with type `team`.
 Org CRUD filters by the org principal, so it cannot list or mutate team rows.

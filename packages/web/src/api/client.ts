@@ -1471,6 +1471,10 @@ export const api = {
     request<PutPolicyOverrideResponse>("PUT", "/me/policy-overrides", body),
   deleteMyPolicyOverride: (body: DeletePolicyOverrideRequest) =>
     request<DeletePolicyOverrideResponse>("DELETE", "/me/policy-overrides", body),
+  putTeamPolicyOverride: (teamId: string, body: PutPolicyOverrideRequest) =>
+    request<CreateOrgPolicyResponse>("PUT", `/teams/${encodeURIComponent(teamId)}/policy-overrides`, body),
+  listTeamGrants: (teamId: string) => request<ListGrantsResponse>("GET", `/teams/${encodeURIComponent(teamId)}/grants`),
+  deleteTeamGrant: (teamId: string, id: string) => request<DeleteGrantResponse>("DELETE", `/teams/${encodeURIComponent(teamId)}/grants/${encodeURIComponent(id)}`),
   listMyGrants: () => request<ListGrantsResponse>("GET", "/me/grants"),
   deleteMyGrant: (body: DeleteGrantRequest) =>
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),

@@ -34,7 +34,7 @@ import type {
   RiskLevel,
   ValetPlugin,
 } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import {
@@ -98,7 +98,7 @@ export interface PolicyRowScope {
  * session/execution, and the user's overrides. Filtering/precedence is the
  * pure core's job; this only narrows the query.
  */
-export async function loadPolicyRows(db: AppDb, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
+export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
   // Session ownership comes from the durable row, never the acting member.
   let teamId = scope.teamId;
   if (scope.sessionId) {
