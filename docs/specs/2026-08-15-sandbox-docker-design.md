@@ -212,8 +212,10 @@ root. Consequences:
     disable manager subtree controllers or repopulate `/init`. This access
     permits self-denial of service inside the sandbox. It does not permit
     movement across the private cgroup namespace or changes to outer limits.
-  - Service placement: PID 1, the startup chain, dockerd, containerd, and
-    gateway services inherit `/init/services`. Kubernetes exec commands
+  - Service placement: Tini is PID 1. It starts the selected startup script
+    and forwards signals to its process group. Tini, the startup chain,
+    dockerd, containerd, and gateway services inherit `/init/services`.
+    Kubernetes exec commands
     are expected to join PID 1's cgroup, as observed in the target cluster.
     Acceptance must verify this behavior after controller or runtime
     upgrades. Valet keeps `services` for the sandbox container lifetime.

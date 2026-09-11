@@ -133,8 +133,9 @@ On Kubernetes, the `valet-docker` RuntimeClass mounts the sandbox cgroup
 read-write inside its private cgroup namespace. Valet delegates only the
 `/init` manager and its three core delegation files to `dockerd` UID 1500.
 The empty manager distributes controllers to a mapped-root-owned `services`
-leaf. PID 1, dockerd, gateway services, and later exec processes start in that
-leaf. This placement isolates services from RootlessKit evacuation.
+leaf. Tini is PID 1 and forwards signals to its process group. Tini, dockerd,
+gateway services, and later exec processes start in that leaf. This placement
+isolates services from RootlessKit evacuation.
 
 Cgroup v2 does not check the target process credentials during migration.
 Because UID 1500 owns `/init/cgroup.procs`, it can move PID 1 or another

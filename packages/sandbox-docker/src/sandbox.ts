@@ -344,7 +344,7 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
       opts.image,
       "sh",
       "-c",
-      "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+      "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
     );
   } else if (opts.docker) {
     // Same probe-and-degrade idiom as the full profile: images without the
@@ -353,7 +353,7 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
       opts.image,
       "sh",
       "-c",
-      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+      "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
     );
   } else {
     // Keep the container alive — most images exit immediately if PID 1 is
