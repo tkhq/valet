@@ -24,6 +24,8 @@ import type {
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ListWorkflowTriggersResponse,
+  ListWorkflowToolApprovalsResponse,
+  RevokeWorkflowToolApprovalResponse,
   ResolveWorkflowApprovalRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
@@ -67,6 +69,7 @@ export const qkWorkflows = {
   // Sits under the `detail(id)` prefix on purpose: saving the definition
   // invalidates the detail, and the predictions must follow the definition.
   permissions: (id: string) => ["workflows", id, "permissions"] as const,
+  approvals: (id: string) => ["workflows", id, "tool-approvals"] as const,
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
@@ -135,6 +138,22 @@ export async function downloadWorkflowFile(
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 0);
   return filename;
+}
+
+export function useWorkflowToolApprovals(id: string) {
+  return useQuery<ListWorkflowToolApprovalsResponse>({
+    queryKey: qkWorkflows.approvals(id),
+    queryFn: () => api.listWorkflowToolApprovals(id),
+    enabled: !!id,
+  });
+}
+
+export function useRevokeWorkflowToolApproval(id: string) {
+  const qc = useQueryClient();
+  return useMutation<RevokeWorkflowToolApprovalResponse, Error, string>({
+    mutationFn: (approvalId) => api.revokeWorkflowToolApproval(id, approvalId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qkWorkflows.approvals(id) }),
+  });
 }
 
 export function useWorkflow(

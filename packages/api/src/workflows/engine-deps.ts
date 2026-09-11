@@ -166,6 +166,8 @@ interface RunContext {
   orgId: string;
   actorUserId: string;
   owner: Principal;
+  workflowId: string;
+  definitionVersionId: string;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -190,7 +192,13 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { orgId: defRow.orgId, actorUserId: actorUserIdFor(owner), owner };
+  return {
+    orgId: defRow.orgId,
+    actorUserId: actorUserIdFor(owner),
+    owner,
+    workflowId: run.params.workflowId,
+    definitionVersionId: run.params.definitionVersionId,
+  };
 }
 
 /**
@@ -503,6 +511,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
+        workflowId: ctx.workflowId,
+        definitionVersionId: ctx.definitionVersionId,
+        nodeId: req.invocationId.split(":")[2],
       });
     },
 

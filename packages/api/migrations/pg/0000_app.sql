@@ -840,6 +840,30 @@ CREATE UNIQUE INDEX "runtime_grants_session_policy_key" ON "runtime_grants" ("or
 --> statement-breakpoint
 CREATE UNIQUE INDEX "runtime_grants_execution_policy_key" ON "runtime_grants" ("org_id","workflow_execution_id","policy_key") WHERE "workflow_execution_id" IS NOT NULL AND "revoked_at" IS NULL;
 --> statement-breakpoint
+CREATE TABLE "workflow_tool_approvals" (
+	"id" text PRIMARY KEY NOT NULL,
+	"fingerprint" text NOT NULL UNIQUE,
+	"org_id" text NOT NULL,
+	"principal_type" text NOT NULL,
+	"principal_id" text NOT NULL,
+	"workflow_id" text NOT NULL,
+	"definition_version_id" text NOT NULL,
+	"node_id" text NOT NULL,
+	"service" text NOT NULL,
+	"action_id" text NOT NULL,
+	"credential" text,
+	"params_hash" text NOT NULL,
+	"policy_revision" text NOT NULL,
+	"approved_by" text NOT NULL,
+	"source_run_id" text NOT NULL,
+	"expires_at" bigint NOT NULL,
+	"revoked_at" bigint,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "workflow_tool_approvals_workflow" ON "workflow_tool_approvals" ("org_id","workflow_id","revoked_at");
+--> statement-breakpoint
 CREATE TABLE "action_policy_overrides" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
@@ -869,6 +893,7 @@ CREATE TABLE "action_invocations" (
 	"matched_policy_id" text,
 	"matched_grant_id" text,
 	"matched_override_id" text,
+	"matched_workflow_approval_id" text,
 	"status" text,
 	"session_id" text,
 	"workflow_execution_id" text,

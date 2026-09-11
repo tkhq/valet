@@ -55,6 +55,8 @@ interface ToolEffects {
   gateItem?: unknown;
   riskLevel?: string;
   provenance?: string;
+  approvalFingerprint?: string;
+  policyRevision?: string;
   timeoutAt?: number;
 }
 
@@ -69,6 +71,8 @@ function readToolEffects(cp: NodeCheckpoint | undefined): ToolEffects {
     gateItem: e.gateItem,
     riskLevel: typeof e.riskLevel === 'string' ? e.riskLevel : undefined,
     provenance: typeof e.provenance === 'string' ? e.provenance : undefined,
+    approvalFingerprint: typeof e.approvalFingerprint === 'string' ? e.approvalFingerprint : undefined,
+    policyRevision: typeof e.policyRevision === 'string' ? e.policyRevision : undefined,
     timeoutAt: typeof e.timeoutAt === 'number' ? e.timeoutAt : undefined,
   };
 }
@@ -196,7 +200,10 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
         error: `approval was recorded but policy enforcement still requires approval for ${node.service}.${node.action} — the grant write may have failed; resolve the gate again or check org policies`,
       });
     }
-    return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance);
+    return await openGate(
+      args, invocationId, renderedParams, response.riskLevel, response.provenance,
+      response.approvalFingerprint, response.policyRevision,
+    );
   }
 
   if (!response.ok) {
@@ -218,6 +225,8 @@ async function openGate(
   renderedParams: Record<string, unknown>,
   riskLevel: string | undefined,
   provenance: string | undefined,
+  approvalFingerprint: string | undefined,
+  policyRevision: string | undefined,
 ): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock, onApprovalPending } = args;
   const suffix = iterationSuffix(iteration);
@@ -254,6 +263,8 @@ async function openGate(
     ...(gateItem !== undefined ? { gateItem } : {}),
     ...(riskLevel !== undefined ? { riskLevel } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
+    ...(approvalFingerprint !== undefined ? { approvalFingerprint } : {}),
+    ...(policyRevision !== undefined ? { policyRevision } : {}),
     ...(timeoutAt !== undefined ? { timeoutAt } : {}),
   };
 

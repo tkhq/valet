@@ -111,7 +111,7 @@ export interface WorkflowInvokeActionRequest {
 export type WorkflowInvokeActionResult =
   | { ok: true; result: unknown }
   | { ok: false; error: string }
-  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string };
+  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string; approvalFingerprint?: string; policyRevision?: string };
 
 /**
  * Engine surface available to node executors and the interpreter's cancel

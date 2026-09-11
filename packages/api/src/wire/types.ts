@@ -2048,14 +2048,33 @@ export interface WorkflowRunDetail {
 
 export type GetWorkflowRunResponse = WorkflowRunDetail;
 
+export interface WorkflowToolApprovalWire {
+  id: string;
+  nodeId: string;
+  service: string;
+  actionId: string;
+  approvedBy: string;
+  sourceRunId: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface ListWorkflowToolApprovalsResponse {
+  approvals: WorkflowToolApprovalWire[];
+}
+
+export interface RevokeWorkflowToolApprovalResponse {
+  revoked: true;
+}
+
 export interface ResolveWorkflowApprovalRequest {
   approved: boolean;
   note?: string;
   /** Approve scope (policy gates): 'once' (default) authorizes only this
-   * invocation; 'run' writes a run-scoped grant for the gated action;
+   * invocation; 'run' writes a run-scoped grant; 'workflow' remembers the exact action for later unchanged runs;
    * 'always' (org admin only) writes a durable org allow policy. Ignored on
    * approval-node gates and on denials. */
-  scope?: "once" | "run" | "always";
+  scope?: "once" | "run" | "workflow" | "always";
   /** Foreach-iteration disambiguation; omit or 0 for top-level nodes. */
   iteration?: number;
 }
@@ -4731,6 +4750,7 @@ export interface ActionLogEntryWire {
   matchedPolicyId: string | null;
   matchedGrantId: string | null;
   matchedOverrideId: string | null;
+  matchedWorkflowApprovalId?: string | null;
   status: ActionInvocationStatusWire | null;
   sessionId: string | null;
   workflowExecutionId: string | null;

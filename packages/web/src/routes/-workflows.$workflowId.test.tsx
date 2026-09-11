@@ -40,6 +40,8 @@ let blockerDisabled: boolean | undefined;
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
 const allowMutateAsync = vi.fn().mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
+const revokeApprovalMutate = vi.fn();
+let approvalsData: { approvals: Array<{ id: string; nodeId: string; actionId: string; expiresAt: number }> } = { approvals: [] };
 /** Per-test permissions payload. Default: nothing gates, so the header
  * badge stays absent everywhere it is not the subject. */
 let permissionsData: {
@@ -99,6 +101,8 @@ vi.mock("~/api/workflows", () => ({
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useWorkflowPermissions: () => ({ data: permissionsData, isLoading: false, error: null }),
+  useWorkflowToolApprovals: () => ({ data: approvalsData, isLoading: false, error: null }),
+  useRevokeWorkflowToolApproval: () => ({ mutate: revokeApprovalMutate, isPending: false, error: null }),
   useAllowWorkflowPermissions: () => ({
     mutateAsync: allowMutateAsync,
     isPending: false,
@@ -189,6 +193,8 @@ describe("WorkflowEditorPage", () => {
     blockerDisabled = undefined;
     allowMutateAsync.mockClear();
     permissionsData = { nodes: [] };
+    approvalsData = { approvals: [] };
+    revokeApprovalMutate.mockClear();
     delete (workflowData as { origin?: string }).origin;
     delete (workflowData as { upstream?: unknown }).upstream;
   });
@@ -326,6 +332,21 @@ describe("WorkflowEditorPage", () => {
     fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
     fireEvent.click(await screen.findByText("Download"));
     expect(downloadWorkflowFile).toHaveBeenCalledWith("wf_1");
+  });
+
+  it("lists and revokes remembered approvals from the overflow menu", async () => {
+    approvalsData = {
+      approvals: [{ id: "approval-1", nodeId: "post", actionId: "slack.send_message", expiresAt: 2_000_000_000_000 }],
+    };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByText("Remembered approvals"));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("slack.send_message")).toBeTruthy();
+    expect(within(dialog).getByText(/Node post/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
+    expect(revokeApprovalMutate).toHaveBeenCalledWith("approval-1");
   });
 
   it("renders the scoped triggers panel for this workflow", () => {

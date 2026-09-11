@@ -1482,6 +1482,36 @@ export const runtimeGrants = pgTable(
   ],
 );
 
+// Reusable approval for one exact workflow tool action. The fingerprint
+// binds owner, definition version, node, action, credential mode, rendered
+// params, and policy revision. Revocation is a nullable timestamp so audit
+// history stays intact.
+export const workflowToolApprovals = pgTable(
+  "workflow_tool_approvals",
+  {
+    id: text("id").primaryKey(),
+    fingerprint: text("fingerprint").notNull().unique(),
+    orgId: text("org_id").notNull(),
+    principalType: text("principal_type", { enum: ["user", "team", "org"] }).notNull(),
+    principalId: text("principal_id").notNull(),
+    workflowId: text("workflow_id").notNull(),
+    definitionVersionId: text("definition_version_id").notNull(),
+    nodeId: text("node_id").notNull(),
+    service: text("service").notNull(),
+    actionId: text("action_id").notNull(),
+    credential: text("credential", { enum: ["auto", "app", "user"] }),
+    paramsHash: text("params_hash").notNull(),
+    policyRevision: text("policy_revision").notNull(),
+    approvedBy: text("approved_by").notNull(),
+    sourceRunId: text("source_run_id").notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+    revokedAt: bigint("revoked_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("workflow_tool_approvals_workflow").on(t.orgId, t.workflowId, t.revokedAt)],
+);
+
 // Durable per-user overrides. Unlike `action_policies` these have no
 // `appliesIn`/expiry — a user's override applies everywhere until replaced.
 export const actionPolicyOverrides = pgTable(
@@ -1538,6 +1568,7 @@ export const actionInvocations = pgTable(
     matchedPolicyId: text("matched_policy_id"),
     matchedGrantId: text("matched_grant_id"),
     matchedOverrideId: text("matched_override_id"),
+    matchedWorkflowApprovalId: text("matched_workflow_approval_id"),
     status: text("status", {
       enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"],
     }),

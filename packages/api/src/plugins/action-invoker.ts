@@ -62,7 +62,8 @@ import {
 } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
+import { persistInvocationAudit, resolveActionPolicyWithRevision, updateInvocationOutcome } from "../policies/service.js";
+import { findWorkflowToolApproval, resolveWorkflowCredentialIdentity, workflowApprovalFingerprint } from "../workflows/tool-approvals.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -102,6 +103,10 @@ export interface ActionInvocationContext {
    * context), so the action executes as before.
    */
   workflowExecutionId?: string;
+  /** Immutable workflow identity used only for narrowly scoped reusable approvals. */
+  workflowId?: string;
+  definitionVersionId?: string;
+  nodeId?: string;
 }
 
 export interface ActionInvokerOpts {
@@ -369,6 +374,18 @@ async function computeResult(
   // straight to `allow`. The policy-facing actionId
   // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
   // canonical id matches both the session and workflow paths.
+  const credentialIdentity = () => resolveWorkflowCredentialIdentity({
+    db: opts.db,
+    orgId: ctx.orgId,
+    owner: ctx.owner,
+    service: credentialService,
+    ...(req.credential !== undefined ? { credential: req.credential } : {}),
+    params: req.params,
+    orgProvided: declared?.requires?.orgCredential === true,
+    credentialRequired: declared !== null || credentialService === "github",
+    now: (opts.clock ?? Date.now)(),
+  });
+
   const policyActionId = qualifiedActionId(req.service, action);
   // Set only when enforceWorkflowPolicy wrote a decision row (org + run
   // context present); also the org scope for the outcome-stamp UPDATE.
@@ -380,6 +397,8 @@ async function computeResult(
     action.riskLevel,
     entry.actionPlugin.defaultApprovalMode,
     policyActionId,
+    entry.plugin.version,
+    credentialIdentity,
   );
   if (denial) return denial;
 
@@ -494,13 +513,16 @@ async function enforceWorkflowPolicy(
   riskLevel: RiskLevel,
   pluginDefault: ApprovalMode | undefined,
   policyActionId: string,
+  pluginVersion: string,
+  resolveCredentialIdentity: () => Promise<string | undefined>,
 ): Promise<WorkflowInvokeActionResult | null> {
   if (!ctx.orgId || !ctx.workflowExecutionId) return null;
   const now = (opts.clock ?? Date.now)();
 
-  let decision: Awaited<ReturnType<typeof resolveActionPolicy>>;
+  let decision: Awaited<ReturnType<typeof resolveActionPolicyWithRevision>>["decision"];
+  let policyRevision: string;
   try {
-    decision = await resolveActionPolicy(opts.db, {
+    ({ decision, policyRevision } = await resolveActionPolicyWithRevision(opts.db, {
       orgId: ctx.orgId,
       userId: ctx.userId,
       service: req.service,
@@ -511,7 +533,7 @@ async function enforceWorkflowPolicy(
       workflowExecutionId: ctx.workflowExecutionId,
       pluginDefault,
       now,
-    });
+    }));
   } catch (err) {
     console.error("action-invoker: policy resolution failed:", err);
     if (req.approval) {
@@ -584,6 +606,48 @@ async function enforceWorkflowPolicy(
   }
 
   // decision.mode === "require_approval"
+  const credentialIdentity = await resolveCredentialIdentity();
+  let reusableFingerprint: string | undefined;
+  if (ctx.workflowId && ctx.definitionVersionId && ctx.nodeId && credentialIdentity) {
+    reusableFingerprint = workflowApprovalFingerprint({
+      orgId: ctx.orgId,
+      owner: ctx.owner,
+      workflowId: ctx.workflowId,
+      definitionVersionId: ctx.definitionVersionId,
+      nodeId: ctx.nodeId,
+      service: req.service,
+      actionId: policyActionId,
+      pluginVersion,
+      ...(req.credential !== undefined ? { credential: req.credential } : {}),
+      credentialIdentity,
+      params: req.params,
+      policyRevision,
+    });
+    const remembered = await findWorkflowToolApproval(opts.db, reusableFingerprint, now);
+    if (remembered) {
+      await persistInvocationAudit(opts.db, {
+        invocationId: `pol:wf:${req.invocationId}`,
+        service: req.service,
+        actionId: policyActionId,
+        riskLevel,
+        resolvedMode: decision.mode,
+        baseMode: decision.provenance.baseMode,
+        matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
+        matchedGrantId: null,
+        matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
+        matchedWorkflowApprovalId: remembered.id,
+        status: "approved",
+        workflowExecutionId: ctx.workflowExecutionId,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        params: req.params,
+        resolvedBy: remembered.approvedBy,
+        createdAt: now,
+      });
+      return null;
+    }
+  }
+
   if (req.approval) {
     // The tool executor holds an approved, unconsumed signal — treat as authorized.
     await persistInvocationAudit(opts.db, {
@@ -626,7 +690,13 @@ async function enforceWorkflowPolicy(
     params: req.params,
     createdAt: now,
   });
-  return { ok: false, requiresApproval: true, riskLevel, provenance: decision.provenance.source };
+  return {
+    ok: false,
+    requiresApproval: true,
+    riskLevel,
+    provenance: decision.provenance.source,
+    ...(reusableFingerprint !== undefined ? { approvalFingerprint: reusableFingerprint, policyRevision } : {}),
+  };
 }
 
 export { qualifiedActionId };

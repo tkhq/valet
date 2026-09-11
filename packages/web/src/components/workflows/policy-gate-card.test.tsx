@@ -82,12 +82,23 @@ describe("PolicyGateCard", () => {
 
   // ── Case 2: Approve once ───────────────────────────────────────────────────
 
-  it("Approve once fires with scope=once and the gate iteration", () => {
+  it("Approve for this workflow is the primary, narrowly reusable action", () => {
     const gate = makeGate({ iteration: 3 });
     render(<PolicyGateCard runId="wfrun_1" gate={gate} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Approve once" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve for this workflow" }));
 
+    expect(mutate).toHaveBeenCalledWith({
+      nodeId: "node_1",
+      body: { approved: true, scope: "workflow", note: undefined, iteration: 3 },
+    });
+  });
+
+  it("keeps Approve once available in the options menu", async () => {
+    const user = userEvent.setup();
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ iteration: 3 })} />);
+    await user.click(screen.getByRole("button", { name: "More approval options" }));
+    await user.click(screen.getByRole("menuitem", { name: /Approve once/i }));
     expect(mutate).toHaveBeenCalledWith({
       nodeId: "node_1",
       body: { approved: true, scope: "once", note: undefined, iteration: 3 },
@@ -212,6 +223,17 @@ describe("PolicyGateCard", () => {
     expect(screen.getByText(/This gate was already resolved\. Refreshing/i)).toBeTruthy();
     // The raw "POST … → 409" message must NOT appear in the error area.
     expect(screen.queryByText(/→ 409/)).toBeNull();
+  });
+
+  it("shows not-reusable guidance instead of the already-resolved banner", () => {
+    mockIsError = true;
+    mockError = new ApiError(422, "POST /api/workflows/runs/x/approvals/y → 422", {
+      code: "workflow_approval_not_reusable",
+      error: "This gate cannot be remembered. Approve it once or for this run.",
+    });
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
+    expect(screen.getByText("This gate cannot be remembered. Approve it once or for this run.")).toBeTruthy();
+    expect(screen.queryByText(/already resolved/i)).toBeNull();
   });
 
   it("shows apiErrorMessage body for non-409 ApiErrors", () => {

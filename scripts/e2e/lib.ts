@@ -88,6 +88,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/sessions-run-state.test.ts",
   "src/integration/reload-tool-rendering.test.ts",
   "src/integration/workflow-engine-deps.test.ts",
+  "src/integration/workflow-approval-persistence.test.ts",
   "src/integration/orchestrator-info.test.ts",
   "src/integration/team-copy.test.ts",
   "src/integration/team-dashboard.test.ts",
