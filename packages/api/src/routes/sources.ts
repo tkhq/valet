@@ -17,6 +17,7 @@
  * SETUP_COMMANDS validation: reject entries that contain newlines or carriage
  * returns (Dockerfile structural-injection guard, Task 15 spec review).
  */
+import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
@@ -77,6 +78,14 @@ function validateSetupCommands(cmds: unknown): string | undefined {
 // ── Admin router (/api/org/sources) ──────────────────────────────────────────
 
 export const sourcesRouter = new Hono<AppEnv>();
+
+sourcesRouter.get("/health", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  c.header("Cache-Control", "no-store");
+  return c.json(await c.var.providers.prebuildService.health(c.var.user.orgId));
+});
+
 
 // GET / — list all sources for the org (all kinds)
 sourcesRouter.get("/", async (c) => {
@@ -374,6 +383,7 @@ sourcesRouter.post("/:id/bake", async (c) => {
     return c.json({ bake: row }, 202);
   } catch (err) {
     if (err instanceof AnonymousImageBakesDisabledError) return c.json({ error: err.message }, 403);
+    if (err instanceof RegistryCapacityError) return c.json({ error: err.message, code: err.code }, 503);
     if (err instanceof PrebuildUnavailableError) return c.json({ error: err.message }, 409);
     if (err instanceof PrebuildConfigNotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof GitHubAuthError) return c.json({ error: err.message }, 502);

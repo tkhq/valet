@@ -29,6 +29,9 @@ pass() {
   echo "ok - $1"
 }
 
+python3 "$CHART_DIR/test/registry_health_test.py"
+pass "registry filesystem probe HTTP tests"
+
 echo "== helm lint =="
 helm lint "$CHART_DIR"
 pass "helm lint clean"
@@ -488,5 +491,52 @@ if helm template valet "$CHART_DIR" --kube-version 1.30.0 --set sandbox.image.re
   fail "repository-without-tag render: must fail (a silent \"foo:\" ref is a malformed image), got a clean render"
 fi
 pass "sandbox.image.repository without tag fails the render (required tag)"
+
+# Registry health stays cluster-internal and shares the registry filesystem.
+HEALTH_SERVICE=$(helm template valet "$CHART_DIR" --kube-context rancher-desktop \
+  --show-only templates/registry-health-service.yaml)
+grep -q 'type: ClusterIP' <<<"$HEALTH_SERVICE" || fail "registry health must use ClusterIP"
+grep -q 'port: 5001' <<<"$HEALTH_SERVICE" || fail "registry health must use port 5001"
+if grep -qE 'NodePort|nodePort:' <<<"$HEALTH_SERVICE"; then
+  fail "registry health must not expose a NodePort"
+fi
+REGISTRY_POD=$(helm template valet "$CHART_DIR" --kube-context rancher-desktop \
+  --show-only templates/registry-statefulset.yaml \
+  --set registry.health.image.repository=example.com/python --set registry.health.image.tag=test)
+HEALTH_CONTAINER=$(awk '/- name: registry-health/{f=1} f && /^      volumes:/{exit} f{print}' <<<"$REGISTRY_POD")
+if grep -q 'readinessProbe:' <<<"$HEALTH_CONTAINER"; then
+  fail "registry telemetry failure must not remove registry serving endpoints"
+fi
+grep -q 'image: "example.com/python:test"'  <<<"$HEALTH_CONTAINER" || fail "registry health image override is missing"
+grep -q 'runAsNonRoot: true' <<<"$HEALTH_CONTAINER" || fail "registry health must run as nonroot"
+grep -q 'readOnlyRootFilesystem: true' <<<"$HEALTH_CONTAINER" || fail "registry health root filesystem must be read-only"
+grep -q 'allowPrivilegeEscalation: false' <<<"$HEALTH_CONTAINER" || fail "registry health must forbid privilege escalation"
+grep -A1 'mountPath: /var/lib/registry' <<<"$HEALTH_CONTAINER" | grep -q 'readOnly: true' \
+  || fail "registry health must mount the registry volume read-only"
+grep -q 'VALET_REGISTRY_HEALTH_URL: "http://valet-registry-health.valet-sandboxes.svc.cluster.local:5001/health"' <<<"$BUNDLED_CONFIGMAP" \
+  || fail "bundled registry health URL is missing"
+grep -q 'VALET_REGISTRY_MIN_FREE_GB: "5"' <<<"$BUNDLED_CONFIGMAP" || fail "default byte reserve is missing"
+grep -q 'VALET_REGISTRY_MIN_FREE_PERCENT: "10"' <<<"$BUNDLED_CONFIGMAP" || fail "default percentage reserve is missing"
+if grep -q 'VALET_REGISTRY_HEALTH_URL:' <<<"$EXTERNAL_REGISTRY_CONFIGMAP"; then
+  fail "external registry without a health URL must leave capacity unknown"
+fi
+EXTERNAL_HEALTH=$(helm template valet "$CHART_DIR" --kube-context rancher-desktop \
+  --set externalRegistry.url=registry.example.com \
+  --set externalRegistry.healthUrl=https://capacity.example.com/health \
+  --set registry.minFreeGb=0 --set-json registry.minFreePercent=0.5)
+grep -q 'VALET_REGISTRY_HEALTH_URL: "https://capacity.example.com/health"' <<<"$EXTERNAL_HEALTH" \
+  || fail "external registry health URL override is missing"
+grep -q 'VALET_REGISTRY_MIN_FREE_GB: "0"' <<<"$EXTERNAL_HEALTH" || fail "zero byte reserve override was lost"
+grep -q 'VALET_REGISTRY_MIN_FREE_PERCENT: "0.5"' <<<"$EXTERNAL_HEALTH" || fail "fractional percentage reserve override was lost"
+for INVALID_RESERVE in registry.minFreeGb=-1 registry.minFreePercent=0 registry.minFreePercent=-1 registry.minFreePercent=100 registry.minFreePercent=101 registry.minFreeGb=invalid registry.minFreePercent=invalid; do
+  if helm template valet "$CHART_DIR" --kube-context rancher-desktop --set "$INVALID_RESERVE" > /dev/null 2>&1; then
+    fail "invalid registry reserve must fail chart rendering: $INVALID_RESERVE"
+  fi
+done
+DISABLED_REGISTRY=$(helm template valet "$CHART_DIR" --kube-context rancher-desktop --set registry.bundled=false)
+if grep -qE 'registry-health|VALET_REGISTRY_HEALTH_URL:' <<<"$DISABLED_REGISTRY"; then
+  fail "disabled registry must omit bundled health resources and URL"
+fi
+pass "registry health service, security, endpoint, and reserve wiring"
 
 echo "All golden assertions passed."

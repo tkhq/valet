@@ -7,7 +7,8 @@
  * preserved; new tests cover: base one-per-org 409, kind='repo' POST 400,
  * newline setup command 400, PATCH kind-scoped field 400s.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { RegistryCapacityError } from "../bakes/registry-health.js";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -873,5 +874,24 @@ describe("bake queue routes", () => {
     const reorder = await fetch(`${api.baseUrl}/api/org/sources/queue`, { method: "PATCH", headers: HEADERS, body: JSON.stringify({ bakeIds: [] }) });
     expect(reorder.status).toBe(409);
     expect(await reorder.json()).toMatchObject({ error: expect.stringContaining("Refresh") });
+  });
+});
+
+describe("registry health API", () => {
+  it("exposes health to org admins and rejects members", async () => {
+    api = await bootTestApi();
+    const response = await fetch(`${api.baseUrl}/api/org/sources/health`, { headers: HEADERS });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({ cache: { bytesUsed: 0 }, registry: { status: "unconfigured", availableBytes: null } });
+    expect((await fetch(`${api.baseUrl}/api/org/sources/health`, { headers: MEMBER_HEADERS })).status).toBe(403);
+  });
+  it("maps capacity rejection to actionable 503 with a stable code", async () => {
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
+    const source = await createBase(api.baseUrl);
+    vi.spyOn(api.providers.prebuildService, "assertRegistryCapacity").mockRejectedValue(new RegistryCapacityError("full"));
+    const response = await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bake`, { method: "POST", headers: HEADERS });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "registry_full", error: expect.stringContaining("Free registry space") });
   });
 });

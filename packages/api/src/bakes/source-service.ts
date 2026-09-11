@@ -30,9 +30,12 @@ import type { BakeQueueItem, ListBakeQueueResponse } from "../wire/types.js";
  * in-memory build-id map, the boot-time orphan sweep, and the retention seam
  * still holds — that machinery moved here verbatim.
  */
+import { readCacheState } from "./cache-health.js";
+import { isPushFailure, probeRegistry, RegistryCapacityError } from "./registry-health.js";
+import { recordBakeHealth } from "./metrics.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
@@ -692,6 +695,7 @@ export interface SourceServiceDeps {
   registryInsecure?: boolean;
   registryPushHost?: string;
   env?: NodeJS.ProcessEnv;
+  registryFetch?: typeof fetch;
 }
 
 function newBakeId(newId: () => string): string {
@@ -716,11 +720,15 @@ export class SourceService {
   private readonly failedRetentionAt = new Map<string, number>();
   private readonly registryInsecure: boolean;
   private readonly registryPushHost: string | undefined;
+  private readonly registryFetch: typeof fetch;
+  private healthTimer?: ReturnType<typeof setInterval>;
+  private healthReporting = false;
   private pollTimer?: ReturnType<typeof setInterval>;
   private schedulerTimer?: ReturnType<typeof setInterval>;
 
   constructor(deps: SourceServiceDeps) {
     this.db = deps.db;
+    this.registryFetch = deps.registryFetch ?? fetch;
     this.builder = deps.builder;
     this.githubTokenDeps = deps.githubTokenDeps;
     this.now = deps.now ?? Date.now;
@@ -822,6 +830,60 @@ export class SourceService {
     const requested = bakeIds.map((id) => this.activeBuildIds.get(id));
     if (requested.some((id) => id === undefined || !ownedIds.has(id))) return false;
     return builder.reorderQueue(current.filter((id) => ownedIds.has(id)), requested.filter((id) => id !== undefined));
+  }
+
+  /** Org-scoped logical accounting plus deployment-wide physical capacity. */
+  async health(orgId: string) {
+    const { rows, protectedIds } = await readCacheState(this.db, orgId);
+    const bytesUsed = rows.reduce((sum, row) => sum + (row.sizeBytes ?? 0), 0);
+    const windowMs = 60 * 60_000;
+    const failed = await this.db.select({ error: bakes.error, logTail: bakes.logTail })
+      .from(bakes).innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+      .where(and(eq(imageSources.orgId, orgId), eq(bakes.status, "failed"), gte(bakes.finishedAt, this.now() - windowMs)));
+    const registry = await probeRegistry(this.env, this.registryFetch);
+    return {
+      checkedAt: this.now(),
+      cache: {
+        bytesUsed, cacheBudgetGb: this.cacheBudgetGb, budgetBytes: this.cacheBudgetGb * 1e9,
+        unknownSizeCount: rows.filter((row) => row.sizeBytes === null).length,
+        overBudget: bytesUsed > this.cacheBudgetGb * 1e9,
+        over_budget_all_protected: bytesUsed > this.cacheBudgetGb * 1e9 && rows.every((row) => protectedIds.has(row.id)),
+      },
+      registry,
+      canAcceptBakes: registry.status === "unconfigured" ? null : registry.status === "healthy",
+      recentPushFailures: { count: failed.filter((row) => isPushFailure(row.error, row.logTail)).length, windowMs },
+    };
+  }
+
+  /** Runs before side effects, including children that reuse an existing bake. */
+  async assertRegistryCapacity(): Promise<void> {
+    const registry = await probeRegistry(this.env, this.registryFetch);
+    if (registry.status === "full" || registry.status === "unknown") {
+      throw new RegistryCapacityError(registry.status);
+    }
+  }
+
+  /** Startup and periodic reporting also catches pressure when no bakes finish. */
+  async reportHealth(): Promise<void> {
+    if (this.healthReporting) return;
+    this.healthReporting = true;
+    try {
+      const sources = await this.db.selectDistinct({ orgId: imageSources.orgId }).from(imageSources);
+      // Keep registry monitoring active even before the first source exists.
+      for (const orgId of sources.length ? sources.map((s) => s.orgId) : [""]) {
+        const health = await this.health(orgId);
+        recordBakeHealth(orgId, health);
+        if (health.cache.overBudget || (health.registry.status !== "healthy" && this.builderBackend === "kubernetes")
+          || health.registry.status === "full" || health.registry.status === "unknown") {
+          console.error("bake_storage_pressure", { orgId, ...health,
+            action: "Free registry space or remove unused registry images. Run registry garbage collection after image removal. Check the registry health probe." });
+        }
+      }
+    } catch (error) {
+      console.error("bake_health_check_failed: Restore database and registry health access.", error);
+    } finally {
+      this.healthReporting = false;
+    }
   }
 
   private async loadSource(sourceId: string): Promise<ImageSourceRow> {
@@ -990,6 +1052,7 @@ export class SourceService {
   async startBake(sourceId: string): Promise<BakeRow> {
     if (!this.builder) throw new PrebuildUnavailableError();
     const source = await this.loadSource(sourceId);
+    await this.assertRegistryCapacity();
     if (source.kind === "base") return this.startBaseBake(source);
     if (source.kind === "repo") return this.startRepoBake(source);
     throw new Error(`cannot bake source of kind '${source.kind}' (${source.id})`);
@@ -1377,7 +1440,7 @@ export class SourceService {
     }
   }
 
-  /** Keeps the newest 2 `pushed` bakes per source; deletes the images (never
+  /** Keeps the newest 2 `pushed` bakes and all live-session bakes; deletes the images (never
    * the rows) for the rest via `this.retention`, deduping any imageRef a kept
    * row still references. */
   private async applyRetention(sourceId: string, backend: string): Promise<void> {
@@ -1386,8 +1449,10 @@ export class SourceService {
       .from(bakes)
       .where(and(eq(bakes.sourceId, sourceId), eq(bakes.status, "pushed")))
       .orderBy(desc(bakes.createdAt));
-    const kept = pushedRows.slice(0, 2);
-    const stale = pushedRows.slice(2);
+    const source = await this.loadSource(sourceId);
+    const { protectedIds } = await readCacheState(this.db, source.orgId);
+    const kept = pushedRows.filter((row, index) => index < 2 || protectedIds.has(row.id));
+    const stale = pushedRows.filter((row, index) => index >= 2 && !protectedIds.has(row.id));
     if (stale.length === 0) return;
     const keptRefs = new Set(kept.map((r) => r.imageRef));
     const staleRefs = [...new Set(stale.map((r) => r.imageRef).filter((ref) => !keptRefs.has(ref)))];
@@ -1411,44 +1476,10 @@ export class SourceService {
    */
   private async enforceCacheCeiling(orgId: string, backend: string): Promise<void> {
     try {
-      const rows = await this.db
-        .select({
-          id: bakes.id,
-          sourceId: bakes.sourceId,
-          imageRef: bakes.imageRef,
-          sizeBytes: bakes.sizeBytes,
-          createdAt: bakes.createdAt,
-        })
-        .from(bakes)
-        .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
-        .where(and(eq(imageSources.orgId, orgId), eq(bakes.status, "pushed")))
-        .orderBy(bakes.createdAt);
-
-      if (rows.length === 0) return;
-
-      const budget = this.cacheBudgetGb * 1_000_000_000;
-      let total = rows.reduce((sum, r) => sum + (r.sizeBytes ?? 0), 0);
+      const { rows, protectedIds } = await readCacheState(this.db, orgId);
+      const budget = this.cacheBudgetGb * 1e9;
+      let total = rows.reduce((sum, row) => sum + (row.sizeBytes ?? 0), 0);
       if (total <= budget) return;
-
-      // Protected: each source's newest pushed bake id.
-      const protectedIds = new Set<string>();
-      const newestPerSource = new Map<string, { id: string; createdAt: number }>();
-      for (const r of rows) {
-        const cur = newestPerSource.get(r.sourceId);
-        if (!cur || r.createdAt > cur.createdAt) {
-          newestPerSource.set(r.sourceId, { id: r.id, createdAt: r.createdAt });
-        }
-      }
-      for (const v of newestPerSource.values()) protectedIds.add(v.id);
-
-      // Protected: any bake a live (active/hibernated) session booted from.
-      const liveBakeRows = await this.db
-        .select({ bakeId: agentSessions.bakeId })
-        .from(agentSessions)
-        .where(and(eq(agentSessions.orgId, orgId), inArray(agentSessions.status, ["active", "hibernated"])));
-      for (const s of liveBakeRows) {
-        if (s.bakeId) protectedIds.add(s.bakeId);
-      }
 
       // Remaining rows still in the cache (kept OR not-yet-evicted). Used to
       // decide whether an evicted ref is still referenced elsewhere.
@@ -1470,6 +1501,7 @@ export class SourceService {
             // stays full — the ceiling would undercount forever. Keep the
             // row and stop this pass; the registry is unhealthy, so further
             // deletes are futile until the next pass.
+            remaining.add(victim.id);
             console.warn(
               `prebuild cache ceiling: image delete failed for ${victim.imageRef}; keeping its bake row and ending this pass`,
             );
@@ -1483,7 +1515,7 @@ export class SourceService {
       if (total > budget) {
         const gb = (n: number) => (n / 1_000_000_000).toFixed(2);
         console.warn(
-          `prebuild cache over budget (${gb(total)}gb > ${gb(budget)}gb) but all remaining bakes are protected`,
+          `prebuild cache over budget (${gb(total)}gb > ${gb(budget)}gb): ${[...remaining].every((id) => protectedIds.has(id)) ? "all remaining bakes are protected" : "image deletion failed"}. Free registry space or remove unused registry images.`,
         );
       }
     } catch (err) {
@@ -1989,11 +2021,14 @@ export class SourceService {
     }
   }
 
-  /** Runs the boot-time orphan sweep, then starts the poll (10s) and
-   * scheduler (10min) intervals. Idempotent. */
+  /** Runs the orphan sweep and health check, then starts polling,
+   * scheduling, and minute health reports. Idempotent. */
   async start(): Promise<void> {
     if (this.pollTimer || this.schedulerTimer) return;
     await this.sweepOrphanedBuilds();
+    await this.reportHealth();
+    this.healthTimer = setInterval(() => { void this.reportHealth(); }, 60_000);
+    this.healthTimer.unref();
     this.pollTimer = setInterval(() => {
       void this.syncActiveBuilds().catch((err) => console.error("prebuild poll pass failed:", err));
     }, this.pollIntervalMs);
@@ -2004,9 +2039,11 @@ export class SourceService {
     this.schedulerTimer.unref();
   }
 
-  /** Clears both intervals. Safe to call even if `start()` was never
+  /** Clears all intervals. Safe to call even if `start()` was never
    * called. */
   stop(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = undefined;
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
     this.pollTimer = undefined;

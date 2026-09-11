@@ -55,6 +55,8 @@ data:
   # default (providers/image-builder.ts's `defaultBackendFor`) so a future
   # default-pairing change can't silently disable prebuilds on this chart.
   VALET_IMAGE_BUILDER: "kubernetes"
+  VALET_REGISTRY_MIN_FREE_GB: {{ .Values.registry.minFreeGb | quote }}
+  VALET_REGISTRY_MIN_FREE_PERCENT: {{ .Values.registry.minFreePercent | quote }}
   {{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
   # Split PUSH host from PULL host (standard kind/minikube pattern). PULL host
   # (VALET_PREBUILD_REGISTRY) lands on prebuild-row image refs + sandbox pod
@@ -68,6 +70,7 @@ data:
   # from the api pod (retention manifest deletes) — the in-cluster Service DNS.
   VALET_PREBUILD_REGISTRY_PUSH: {{ printf "%s-registry.%s.svc.cluster.local:5000" (include "valet.fullname" .) .Values.sandbox.namespace | quote }}
   VALET_PREBUILD_REGISTRY_INSECURE: "true"
+  VALET_REGISTRY_HEALTH_URL: {{ printf "http://%s-registry-health.%s.svc.cluster.local:5001/health" (include "valet.fullname" .) .Values.sandbox.namespace | quote }}
   # Per-org baked-image cache budget. The api default (20 GB) is larger than
   # the bundled registry volume (registry.storageSize, 10Gi), so the eviction
   # ceiling could never fire before the disk filled. Keep this value below
@@ -79,6 +82,9 @@ data:
   # External registry: no push/pull split — both hosts are the same endpoint.
   VALET_PREBUILD_REGISTRY_PUSH: {{ .Values.externalRegistry.url | quote }}
   VALET_PREBUILD_REGISTRY_INSECURE: "false"
+  {{- if .Values.externalRegistry.healthUrl }}
+  VALET_REGISTRY_HEALTH_URL: {{ .Values.externalRegistry.healthUrl | quote }}
+  {{- end }}
   {{- if .Values.externalRegistry.pullSecret }}
   VALET_SANDBOX_IMAGE_PULL_SECRET: {{ .Values.externalRegistry.pullSecret | quote }}
   {{- end }}

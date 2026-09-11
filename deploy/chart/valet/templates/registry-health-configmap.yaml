@@ -1,0 +1,13 @@
+{{- if and .Values.registry.bundled (not .Values.externalRegistry.url) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valet.fullname" . }}-registry-health
+  namespace: {{ .Values.sandbox.namespace }}
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+data:
+  registry-health.py: |
+{{ .Files.Get "files/registry-health.py" | indent 4 }}
+{{- end }}
