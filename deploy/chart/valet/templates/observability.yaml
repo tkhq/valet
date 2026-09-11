@@ -64,6 +64,9 @@ spec:
               subPath: valet-provider.yaml
             - name: dashboards
               mountPath: /etc/valet-dashboards
+            - name: dashboards
+              mountPath: /otel-lgtm/grafana/conf/provisioning/alerting/valet-prebuild-alerts.yaml
+              subPath: valet-prebuild-alerts.yaml
           {{- with .Values.observability.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

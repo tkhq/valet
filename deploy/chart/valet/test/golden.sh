@@ -409,6 +409,12 @@ grep -q 'valet-dashboard.json' "$TMP_DIR/bundled.yaml" \
   || fail "bundled render: dashboard JSON not mounted/rendered"
 grep -q '"uid": "valet-observability"' "$TMP_DIR/bundled.yaml" \
   || fail "bundled render: dashboard JSON body (uid valet-observability) missing from the ConfigMap"
+grep -q 'Sandbox image builds' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: prebuild dashboard panels are missing"
+grep -q 'valet-prebuild-alerts.yaml' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: prebuild alert provisioning is missing"
+grep -q 'valet-prebuild-registry-divergence' "$TMP_DIR/bundled.yaml" \
+  || fail "bundled render: registry divergence alert is missing"
 if grep -q 'valet-grafana-dashboards' "$TMP_DIR/no-observability.yaml"; then
   fail "observability.enabled=false still renders the dashboards ConfigMap"
 fi
