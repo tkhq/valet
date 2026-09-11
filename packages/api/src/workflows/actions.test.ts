@@ -65,6 +65,19 @@ describe("workflowsActionPlugin", () => {
     ]);
   });
 
+  it("describes the explicit source, destination, and collision rule for team copies", () => {
+    const copy = workflowsActionPlugin(noDeps).actions.find((a) => a.id === "workflows.copy_to_team");
+    expect(copy?.description).toContain("Leaves the original and its triggers unchanged");
+    expect(copy?.parameters).toMatchObject({
+      required: ["workflow_id", "team_id", "name"],
+      properties: {
+        workflow_id: { description: expect.stringContaining("personal workflow ID") },
+        team_id: { description: expect.stringContaining("destination team ID") },
+        name: { description: expect.stringContaining("Must not exist") },
+      },
+    });
+  });
+
   it("marks reads low-risk and writes medium-risk", () => {
     const plugin = workflowsActionPlugin(noDeps);
     const byId = new Map(plugin.actions.map((a) => [a.id, a.riskLevel]));
