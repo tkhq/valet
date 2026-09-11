@@ -29,7 +29,7 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
 4. **Create, list, and revoke follow the workspace switcher.** Settings → API keys is the page. `CreateScopeLine` states the active workspace. Personal keys stay on personal scope. Team keys appear when the switcher is a team. Do not add an `OwnerPicker`. Do not bury the form under Organization → Teams: that page is not the switcher, and a create that used the switcher there would lie about the place.
 
-5. **Authority equals a team member, not an org admin.** A team key may create team-owned sessions, start team-owned workflows, and read team-owned rows. It cannot change org settings, other teams, or personal resources. The middleware allowlist is GET `/api/me`, `/api/sessions` and paths below it, `/api/workflows` and paths below it, and POST `/api/teams/:id/orchestrator` for the key's own team. The match is on path segments, so `/api/sessionsX` is refused.
+5. **Authority is limited to team session and workflow routes.** A team key may read, run, and change its team-owned sessions and workflows, and delete sessions, subject to route and resource guards. Deleting a workflow definition requires a human team or organization admin; a team key receives 403 (TKAI-430). It is not a read-only key. It cannot change org settings, other teams, or personal resources. The middleware allowlist is GET `/api/me`, `/api/sessions` and paths below it, `/api/workflows` and paths below it, and POST `/api/teams/:id/orchestrator` for the key's own team. The match is on path segments, so `/api/sessionsX` is refused.
 
    `valet send` without `--session` targets the caller's default assistant. For a team key that is the team's, reached through `POST /api/teams/:id/orchestrator` with no membership check on the creating admin. The CLI reads `GET /api/me` once per command and posts the team route when the answer has `role: "team"`; a personal credential keeps posting `/api/orchestrator`.
 
@@ -98,3 +98,10 @@ Concurrent key creation uses the same `lockTeamForOwnership(tx, teamId)` lock as
 If deletion or lost authorization wins, creation returns 404 without the secret. A failed pin returns 500 without the secret. After the transaction settles, the route deletes the minted row on either failure, including transaction errors. If creation wins, team deletion removes the pinned row through its existing cleanup.
 
 The route regression suite completes team deletion after a real better-auth mint and before the final pin. It verifies 404, no secret, no stored key, and failed authentication. Additional cases cover lost administration rights, a missing minted row, and a pin write error. The existing create, revoke, and authorization tests remain.
+
+
+### Authority copy (TKAI-445)
+
+The team key form states its mutation authority and lifetime before creation. This changes the explanation, not the permission model. Existing route restrictions, approval rules, repository-owned resource guards, and unsettled-run guards still apply.
+
+TKAI-430 narrows workflow-definition deletion to human administrators. Team-key copy names this restriction; session deletion and other allowed workflow operations remain available.

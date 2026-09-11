@@ -108,8 +108,15 @@ export function subscriptionMatchesEvent(
   eventKey: string,
   payload: unknown,
   catalog: EventCatalogEntry[],
+  teamMentionScope = false,
 ): boolean {
   if (!eventKeyMatches(eventKey, sub.eventKeys as string[])) return false;
+  // The async team gate replaces legacy creator filters with live membership.
+  // Callers must authorize the team before persisting or delivering the event.
+  if (eventKey === "slack.app_mention" && teamMentionScope) {
+    return filtersMatch(payload, eventKey,
+      (sub.filters as SubscriptionFilter[]).filter((f) => f.field !== "user"), catalog);
+  }
   // The match-time arm of the mention-scope rule (events/mention-scope.ts,
   // TKAI-299). A `slack.app_mention` subscription with no user filter
   // predates the write-time gate and would fire for EVERY user's mentions.

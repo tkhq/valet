@@ -1675,7 +1675,7 @@ export class EngineHost {
       // follows the OWNER either way: a shared session never reaches the
       // frozen actor's personal vault.
       const owner: CredentialOwner = actingMember ? { type: "user", id: userId } : sessionOwner;
-      const scopes = onePasswordScopesFor(actingMember ? "team" : owner.type);
+      const scopes = onePasswordScopesFor(actingMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly

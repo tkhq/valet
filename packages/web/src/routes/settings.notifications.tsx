@@ -27,6 +27,7 @@ const NOTIFICATION_KINDS: NotificationKind[] = [
   "question",
   "escalation",
   "approval",
+  "review",
 ];
 
 const KIND_LABEL: Record<NotificationKind, string> = {
@@ -34,6 +35,7 @@ const KIND_LABEL: Record<NotificationKind, string> = {
   question: "Questions",
   escalation: "Escalations",
   approval: "Approvals",
+  review: "Team deletion requests",
 };
 
 const KIND_DESCRIPTION: Record<NotificationKind, string> = {
@@ -41,6 +43,7 @@ const KIND_DESCRIPTION: Record<NotificationKind, string> = {
   question: "When your assistant needs an answer to keep going.",
   escalation: "When something needs your attention urgently.",
   approval: "When a decision gate is waiting on you.",
+  review: "When a team resource needs your review before deletion.",
 };
 
 export function NotificationsPage() {

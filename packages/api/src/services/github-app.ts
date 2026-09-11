@@ -42,11 +42,12 @@
  * full table scan of user-owned `github` credential rows; fine at today's
  * scale (one query, small row count), and confined to this one function.
  */
+import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { createPrivateKey, randomUUID, sign } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { credentials, githubInstallations, type GithubInstallationRow } from "../schema/index.js";
+import { credentials, githubInstallations, orgs, type GithubInstallationRow } from "../schema/index.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 
@@ -311,6 +312,30 @@ function appJwtHeaders(jwt: string): Record<string, string> {
   };
 }
 
+/** Verify the App is installed on this exact repository, not merely able to
+ * read its public metadata. No user token or anonymous fallback is allowed. */
+export async function githubAppRepositoryAccess(
+  deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl">,
+  orgId: string,
+  repository: string,
+): Promise<boolean> {
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) return false;
+  const config = await loadAppConfig(deps, orgId);
+  if (!config) return false;
+  const response = await githubFetch(deps)(
+    `${githubApiUrl(deps)}/repos/${repository.split("/").map(encodeURIComponent).join("/")}/installation`,
+    { headers: appJwtHeaders(mintAppJwt(config)), signal: AbortSignal.timeout(5_000) },
+  );
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error("GitHub App repository access could not be verified.");
+  const body: unknown = await response.json();
+  if (typeof body !== "object" || body === null || !("id" in body) ||
+      typeof body.id !== "number" || !("suspended_at" in body)) {
+    throw new Error("GitHub App repository access could not be verified.");
+  }
+  return body.suspended_at === null;
+}
+
 // ── Credential verification (`GET /app`) ─────────────────────────────────
 // The admin route that connects an app which already exists checks the app
 // id and the private key against GitHub BEFORE it stores them. Without the
@@ -539,58 +564,63 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
   const jwt = mintAppJwt(config);
   const installations = await fetchAllInstallations(deps, jwt);
 
-  const [existingRows, linkedByLogin] = await Promise.all([
-    deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId)),
-    loadLinkedUserLoginMap(deps.db),
-  ]);
-  const existingByInstallationId = new Map(existingRows.map((row) => [row.installationId, row]));
+  const linkedByLogin = await loadLinkedUserLoginMap(deps.db);
+  return deps.db.transaction(async (tx) => {
+    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+    const existingRows = await tx.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+    const existingByInstallationId = new Map(existingRows.map((row) => [row.installationId, row]));
 
-  const nowMs = (deps.now ?? Date.now)();
-  const seenIds = new Set<number>();
-  const rows: GithubInstallationRow[] = [];
+    const nowMs = (deps.now ?? Date.now)();
+    const seenIds = new Set<number>();
+    const rows: GithubInstallationRow[] = [];
 
-  for (const inst of installations) {
-    seenIds.add(inst.installationId);
-    const existing = existingByInstallationId.get(inst.installationId);
-    const id = existing?.id ?? `ghi_${randomUUID()}`;
-    const linkedUserId = linkedByLogin.get(inst.accountLogin.toLowerCase()) ?? null;
+    for (const inst of installations) {
+      seenIds.add(inst.installationId);
+      const existing = existingByInstallationId.get(inst.installationId);
+      const id = existing?.id ?? `ghi_${randomUUID()}`;
+      const linkedUserId = linkedByLogin.get(inst.accountLogin.toLowerCase()) ?? null;
 
-    const [row] = await deps.db
-      .insert(githubInstallations)
-      .values({
-        id,
-        orgId,
-        installationId: inst.installationId,
-        accountLogin: inst.accountLogin,
-        accountType: inst.accountType,
-        repositorySelection: inst.repositorySelection,
-        suspended: inst.suspended,
-        linkedUserId,
-        createdAt: nowMs,
-        updatedAt: nowMs,
-      })
-      .onConflictDoUpdate({
-        target: [githubInstallations.orgId, githubInstallations.installationId],
-        set: {
+      const [row] = await tx
+        .insert(githubInstallations)
+        .values({
+          id,
+          orgId,
+          installationId: inst.installationId,
           accountLogin: inst.accountLogin,
           accountType: inst.accountType,
           repositorySelection: inst.repositorySelection,
           suspended: inst.suspended,
           linkedUserId,
+          createdAt: nowMs,
           updatedAt: nowMs,
-        },
-      })
-      .returning();
-    rows.push(row);
-  }
-
-  for (const row of existingRows) {
-    if (!seenIds.has(row.installationId)) {
-      await deps.db.delete(githubInstallations).where(eq(githubInstallations.id, row.id));
+        })
+        .onConflictDoUpdate({
+          target: [githubInstallations.orgId, githubInstallations.installationId],
+          set: {
+            accountLogin: inst.accountLogin,
+            accountType: inst.accountType,
+            repositorySelection: inst.repositorySelection,
+            suspended: inst.suspended,
+            linkedUserId,
+            updatedAt: nowMs,
+          },
+        })
+        .returning();
+      rows.push(row);
     }
-  }
 
-  return rows;
+    for (const row of existingRows) {
+      if (!seenIds.has(row.installationId)) {
+        await tx.delete(githubInstallations).where(eq(githubInstallations.id, row.id));
+      }
+    }
+
+    const signature = (items: readonly { installationId: number; accountLogin: string; suspended: boolean }[]) =>
+      JSON.stringify(items.map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+    if (signature(existingRows) !== signature(rows)) await invalidateWorkflowSources(tx, { orgId });
+    return rows;
+  });
 }
 
 // ── Webhook-URL sync (`PATCH /app/hook/config`) ──────────────────────────

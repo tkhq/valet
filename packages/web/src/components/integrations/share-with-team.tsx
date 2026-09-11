@@ -25,6 +25,7 @@ import { errorText } from "~/lib/error-text";
 
 export function ShareWithTeam({ service, title }: { service: string; title: string }) {
   const [open, setOpen] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
   const teamsQ = useTeams();
   const teams = teamsQ.data?.teams ?? [];
   const mine = teams.filter((team) => team.callerRole !== null);
@@ -34,7 +35,7 @@ export function ShareWithTeam({ service, title }: { service: string; title: stri
   const settled = !teamsQ.isLoading && !teamsQ.error;
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={(next) => { setOpen(next); setAcknowledged(false); }}>
       <PopoverTrigger asChild>
         <Button size="sm" variant="ghost" aria-label={`Share ${title} with a team`}>
           Share with a team
@@ -42,9 +43,13 @@ export function ShareWithTeam({ service, title }: { service: string; title: stri
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-2">
         <p className="px-2 pb-2 text-xs text-muted">
-          Share your {title} connection with a team you belong to. The team
-          follows your live credential. It does not copy the secret.
+          Prefer a dedicated team account. Sharing lets teammates act through your {title} account with its permissions.
+          Access stops if you leave the team or revoke sharing.
         </p>
+        <label className="flex items-start gap-2 px-2 pb-2 text-xs">
+          <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
+          I authorize teammates to act through my personal account.
+        </label>
         {teamsQ.isLoading && <p className="px-2 py-2 text-xs text-muted">Loading teams…</p>}
         {teamsQ.error && (
           <p className="px-2 py-2 text-xs text-danger-500">Could not load teams. Reload the page.</p>
@@ -57,7 +62,7 @@ export function ShareWithTeam({ service, title }: { service: string; title: stri
         )}
         <ul className="space-y-1">
           {mine.map((team) => (
-            <TeamShareRow key={team.id} team={team} service={service} title={title} open={open} />
+            <TeamShareRow key={team.id} team={team} service={service} title={title} open={open} acknowledged={acknowledged} />
           ))}
         </ul>
         {settled && hidden > 0 && (
@@ -76,11 +81,13 @@ function TeamShareRow({
   service,
   title,
   open,
+  acknowledged,
 }: {
   team: TeamSummary;
   service: string;
   title: string;
   open: boolean;
+  acknowledged: boolean;
 }) {
   const me = useMe();
   const credsQ = useCredentials("team", { teamId: team.id, enabled: open });
@@ -108,6 +115,7 @@ function TeamShareRow({
         {mine && row?.referenceBroken && (
           <p className="text-xs text-danger-500">Broken. Reconnect {title}, then share again.</p>
         )}
+        {credsQ.error && <p className="text-xs text-danger-500">Could not check this team’s connection. Reload before sharing.</p>}
         {err && <p className="text-xs text-danger-500">{shareError(err, title)}</p>}
       </div>
       {mine ? (
@@ -130,7 +138,7 @@ function TeamShareRow({
       ) : (
         <Button
           size="sm"
-          disabled={pending || occupied || credsQ.isLoading}
+          disabled={!acknowledged || pending || occupied || credsQ.isLoading || !!credsQ.error || !credsQ.data}
           aria-label={`Share ${title} with ${team.name}`}
           onClick={() => delegate.mutate({ service, body: { teamId: team.id } })}
         >

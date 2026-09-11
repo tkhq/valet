@@ -90,12 +90,24 @@ const SHARED_BY_ME: CredentialSummary[] = [
   { service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z", delegatedFrom: "u1" },
 ];
 
-function openMenu() {
+function openMenu(acknowledge = true) {
   render(<ShareWithTeam service="linear" title="Linear" />);
   fireEvent.click(screen.getByRole("button", { name: "Share Linear with a team" }));
+  if (acknowledge) fireEvent.click(screen.getByRole("checkbox"));
 }
 
 describe("ShareWithTeam", () => {
+  it("requires explicit personal-account authorization before sharing", () => {
+    teams = [TEAM];
+    openMenu(false);
+    const share = screen.getByRole("button", { name: "Share Linear with Engineering" });
+    fireEvent.click(share);
+    expect(delegateMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(share);
+    expect(delegateMutate).toHaveBeenCalledWith({ service: "linear", body: { teamId: "team_1" } });
+  });
+
   beforeEach(() => {
     teams = [TEAM];
     teamCreds = [];

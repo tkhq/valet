@@ -159,3 +159,46 @@ The server checks personal ownership and destination membership in the same orga
 A copy gets a new ID, token and version history. Its default audience is the organization,
 as on ordinary publish; team ownership does not make an artifact link team-private.
 Public grants, comments and source-session links do not transfer. A key collision refuses the copy.
+
+## Bidirectional personal/team knowledge transfers (2026-09-10)
+
+Bidirectional means an explicit pull from a team and an explicit push to a team.
+Knowledge in this scope is the existing memory-file corpus, including Markdown documents under `artifacts/`.
+The TKAI-431 push remains `mem_copy_to_team` and `POST /api/memory/copy-to-team`.
+The new pull uses `mem_copy_from_team` and `POST /api/memory/copy-from-team`.
+Both accept `{ teamId, from, to }` and return `{ file }` with status 201.
+Paths are relative to their respective owners. Virtual `team:{id}/` prefixes are read-only and are rejected as copy paths.
+
+Both directions use one copy service. The caller must act as their own personal principal.
+Team assistants, team API keys, and foreign personal scopes cannot transfer through an actor's personal memory.
+Pull checks source-team membership before reading the team file. Push checks destination membership and existing team memory write authority.
+These checks also apply to internal tool requests. The transaction holds the team ownership lock and shared team and membership-row locks through insertion.
+Push also locks the actor’s target-org membership row before evaluating an org-admin grant.
+Concurrent demotion or removal cannot revoke a locked grant between its check and the insert.
+The source query includes its owner tuple. The destination owner comes from the checked team or the authenticated personal scope.
+Personal copies use the same empty org ID as ordinary personal memory writes.
+
+`MemoryScope` intentionally has no active org field. Existing reads discover all teams through `listTeamsForUser` without an org filter.
+Transfers preserve that cross-organization memory contract: an actor can transfer with a team in any organization where they hold membership.
+Push checks admin authority in the target team’s organization, never an unrelated or active organization.
+The HTTP request’s active org and the tool context’s org do not narrow this memory scope.
+Changing that rule requires a separate change to memory reads, writes, and discovery.
+
+Each operation copies one current file and preserves its original. Content, metadata, and links remain unchanged.
+The copy starts at version one. Source-session and mirror bindings are cleared; no share record transfers.
+A destination collision returns status 400 with an instruction to choose another path, matching the existing push contract.
+The owner/path unique key also rejects concurrent collisions. There is no overwrite, merge, or automatic rename option.
+The user can choose a new path or skip the transfer.
+
+The memory skill explains team discovery through `mem_read` and `mem_search`, with pull and push examples.
+Both tools are registered in the standard assistant memory tool list.
+The memory document view offers “Push to a team” for personal files and “Pull to personal memory” for team files.
+The form requires a destination path and an explicit submission. Push lists teams from the current organization’s existing team picker.
+The form uses the shared Input and DropdownMenu primitives.
+Unavailable teams stay disabled with a short admin-access explanation. Loading, retry, empty, collision, and success states are visible.
+The API and tools retain cross-organization memory access; the web team picker remains current-org scoped.
+Workflow and published-artifact copy services remain unchanged. This scope excludes bulk copies, dependency rewriting,
+background sync, and outward repository publishing from the broader TKAI-432 work.
+
+Validation covers both directions, exact content and metadata, unchanged originals, collisions, concurrent pulls,
+member-only pull access, denied push access, revoked membership, forged scopes, malformed HTTP requests, and real tool/HTTP round trips.

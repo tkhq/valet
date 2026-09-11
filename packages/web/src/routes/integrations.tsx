@@ -42,13 +42,17 @@ export const Route = createFileRoute("/integrations")({
   validateSearch: readIntegrationsSearch,
 });
 
-type ConnectResult = { kind: "connected" | "error"; value: string; detail?: string } | null;
+type ConnectResult = { kind: "connected" | "error"; value: string; detail?: string; teamId?: string } | null;
 
 /**
  * Maps OAuth callback error codes to human-readable messages. Each message
  * names the corrective action when one exists.
  */
 const ERROR_MESSAGES: Record<string, string> = {
+  team_sync_failed: "Connection saved. Open Workflows and sync the team sources again.",
+  team_access_changed: "Team access changed. Ask a team admin to restart the connection.",
+  team_connection_exists: "This team already has a connection. Disconnect it before connecting another account.",
+  team_identity_unsupported: "This personal identity cannot be used for a team. Connect a team account instead.",
   identity_conflict:
     "This Slack account is already linked to another Valet user. Unlink it there first, or sign in as that user.",
 };
@@ -69,6 +73,7 @@ function useConnectResult(): ConnectResult {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("connected");
     const error = params.get("error");
+    const teamId = params.get("teamId") ?? undefined;
     // Server-composed corrective action (e.g. an OAuthInterpretError message);
     // rendered as plain text below, never as markup.
     const detail = params.get("detail");
@@ -76,8 +81,8 @@ function useConnectResult(): ConnectResult {
     window.history.replaceState(null, "", window.location.pathname);
     setResult(
       connected
-        ? { kind: "connected", value: connected }
-        : { kind: "error", value: error ?? "", ...(detail ? { detail } : {}) },
+        ? { kind: "connected", value: connected, teamId }
+        : { kind: "error", value: error ?? "", teamId, ...(detail ? { detail } : {}) },
     );
   }, []);
 
@@ -85,15 +90,26 @@ function useConnectResult(): ConnectResult {
 }
 
 export function IntegrationsPage() {
-  const { teamId } = useWorkspaceScope();
+  const { teamId, setKey } = useWorkspaceScope();
+  const connectResult = useConnectResult();
+  useEffect(() => {
+    if (connectResult?.teamId) setKey(connectResult.teamId);
+  }, [connectResult, setKey]);
   // Unmount personal forms and team dialogs when the workspace changes.
-  return teamId ? <TeamIntegrations key={teamId} teamId={teamId} /> : <PersonalIntegrationsPage />;
+  if (teamId) {
+    const notice = connectResult?.teamId === teamId
+      ? connectResult.kind === "connected"
+        ? `Connected ${connectResult.value}.`
+        : connectResult.detail ?? ERROR_MESSAGES[connectResult.value] ?? "Connection failed. Select Connect to try again."
+      : undefined;
+    return <TeamIntegrations key={teamId} teamId={teamId} notice={notice} />;
+  }
+  return <PersonalIntegrationsPage connectResult={connectResult?.teamId && connectResult.kind === "connected" ? null : connectResult} />;
 }
 
-function PersonalIntegrationsPage() {
+function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectResult }) {
   const { data, isLoading, error } = usePlugins();
   const plugins = data?.plugins ?? [];
-  const connectResult = useConnectResult();
 
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
   // this module and never builds a real router context.

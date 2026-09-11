@@ -104,12 +104,11 @@ the vault or item id instead, so every reference `find` prints resolves.
    row passes through, and `UserReadCtx.scopes` is required so no reader can
    skip the decision.
 
-   A team-owned session reads the org scope in full (product decision
-   2026-09-06). A team admin may narrow that to a list of `op://` references
-   (`docs/specs/2026-09-04-team-onepassword-vaults-design.md`). The lease is
-   an optional restriction, never a default denial. When one exists, `resolve`
-   refuses a reference outside it and names the fix, and `find` omits it.
-   When none exists, the broker behaves as it did before the lease.
+   A team-owned session uses its team's service account when configured.
+   Only an absent team token permits automatic org fallback. Empty searches
+   and failed references do not broaden access. Explicit org scope remains
+   available. Reference grant preferences are retired; vault permissions
+   determine which references resolve. See the team-vault design.
 
    The broker asks a second question the api side does not have to: is this
    token's holder the session's owner? A session changes hands through
@@ -166,9 +165,9 @@ the vault or item id instead, so every reference `find` prints resolves.
    `VALET_SANDBOX_TOKEN` when no creds mount exists.
 3. It POSTs every reference in one request to `/api/sandbox-secrets/resolve`.
 4. The route resolves every reference concurrently through
-   `OnePasswordService`: the org scope first, then the personal scope when the
-   session is user-owned. A scope with no token yields to the next; a token
-   1Password refuses is remembered.
+   `OnePasswordService`: team first for a trusted team principal, or org then
+   personal for a user-owned session. Only a missing team token permits org
+   fallback. A configured team failure is returned without substitution.
 5. The response carries `values` (positional) and `unresolved`.
 6. The script decodes each value, unsets the sandbox token, exports the
    variables, and `exec`s the command.
@@ -224,8 +223,9 @@ than a fallback. `persona.test.ts` pins each of those properties.
   misses, requires a sandbox token and names the fix without one, names every
   unsupported reference, and round-trips a value containing a quote, a
   backslash, and a newline; refuses the personal scope on a team-owned session
-  while keeping it for a user-owned one; reads every org reference for a team
-  session with no lease and only the granted ones with a lease; and returns
+  while keeping it for a user-owned one; preserves org reads when a team token
+  is absent; ignores obsolete reference preferences; refuses inaccessible team references
+  without org substitution; and returns
   positional `values` with `null` for a miss.
 - `packages/api/src/engine/prompt-rules.test.ts` — the composed prompt names
   the command and the reference shape.
@@ -257,3 +257,11 @@ than a fallback. `persona.test.ts` pins each of those properties.
   that the agent is unable to read it.
 - `base64` must exist in the sandbox image. The script names the fix when it
   does not.
+
+## Discovery selection (2026-09-10)
+
+`find` stops after searching a configured team token, including an empty result.
+Duplicate vault/item titles use IDs so candidates remain separately addressable.
+The generated command wrapper refuses multiple matches and preserves the scope
+of a unique match. Explicit stored references and repo-pinned references remain
+supported. These changes do not alter the arbitrary-command plaintext limit above.

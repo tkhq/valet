@@ -34,6 +34,7 @@ const deleteTeamMutate = vi.fn();
 const addTeamMemberMutate = vi.fn();
 const setTeamMemberRoleMutate = vi.fn();
 const removeTeamMemberMutate = vi.fn();
+const joinSuggestedTeamMutate = vi.fn();
 
 const createInviteMutate = vi.fn();
 const revokeInviteMutate = vi.fn();
@@ -119,6 +120,10 @@ let teamMembersData: { members: Array<{ userId: string; role: "admin" | "member"
   members: [{ userId: "u1", role: "admin" }],
 };
 
+let suggestedTeamsData = {
+  teams: [] as Array<{ id: string; name: string; memberCount: number }>,
+};
+
 let invitesData: {
   invites: Array<{
     id: string;
@@ -131,7 +136,7 @@ let invitesData: {
 } = { invites: [] };
 
 vi.mock("@tanstack/react-router", () => ({
-  createFileRoute: () => (config: unknown) => config,
+  createFileRoute: () => (config: object) => ({ ...config, useSearch: () => ({}) }),
   useNavigate: () => navigateMock,
   // The Library page keeps its filters and both cursor stacks in the search
   // params, so it reads them even on its first page.
@@ -167,6 +172,11 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+vi.mock("~/components/settings/team-deletion-requests", () => ({
+  TeamDeletionRequests: ({ teamId, canManage }: { teamId: string; canManage: boolean }) =>
+    <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
+}));
+
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
@@ -183,6 +193,13 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useOrgDirectory: () => ({ data: orgDirectoryData, isLoading: false, error: null }),
     useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
     useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+    useSuggestedTeams: () => ({ data: suggestedTeamsData, isLoading: false, error: null }),
+    useJoinSuggestedTeam: () => ({
+      mutate: joinSuggestedTeamMutate,
+      isPending: false,
+      error: null,
+      variables: undefined,
+    }),
     useMe: () => ({ data: meData, isLoading: false, error: null }),
     useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
     useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
@@ -191,12 +208,6 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
     useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
     usePatchTeam: () => ({ mutate: vi.fn(), isPending: false, error: null }),
-    // The 1Password references block on an expanded team reads and writes
-    // through these hooks; stubbed like the rest so no QueryClientProvider
-    // is needed here.
-    useTeamOnePasswordRefs: () => ({ data: { refs: [] }, isLoading: false, error: null }),
-    usePutTeamOnePasswordRefs: () => ({ mutate: vi.fn(), isPending: false, error: null }),
-    useDeleteTeamOnePasswordRefs: () => ({ mutate: vi.fn(), isPending: false, error: null }),
     // The team default-model combobox reads the catalog through this hook.
     useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
     // The Size group (Task 15) and the team-defaults reasoning select read
@@ -209,18 +220,6 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
   };
 });
-
-// The Teams page carries `TeamSyncSection`, whose visibility gate reads the
-// auth config. `sso: null` keeps the section out of this suite — it pins the
-// page and the panel; the section has its own suite
-// (components/settings/team-sync-section.test.tsx).
-vi.mock("~/api/auth-config", () => ({
-  useAuthConfig: () => ({
-    data: { stub: true, social: [], sso: null },
-    isLoading: false,
-    error: null,
-  }),
-}));
 
 vi.mock("~/api/invites", () => ({
   useInvites: () => ({ data: invitesData, isLoading: false, error: null }),
@@ -300,6 +299,7 @@ beforeEach(() => {
     ],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
+  suggestedTeamsData = { teams: [] };
   orgDirectoryData = {
     users: [
       { userId: "u1", email: "ada@x.test", name: "Ada", avatarUrl: null },
@@ -561,21 +561,21 @@ describe("OrganizationTeamsPage", () => {
       });
     });
 
-    it("offers no mutation controls on a team where the caller is only a member", () => {
+    it("offers a deletion request but no direct mutation controls to a member", async () => {
       teamsData = {
         teams: [{ ...teamsData.teams[0], callerRole: "member" }],
       };
       render(<OrganizationTeamsPage />);
-      expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
-      fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Platform actions" }));
+      expect(screen.queryByRole("menuitem", { name: "Delete team" })).toBeNull();
+      await user.click(screen.getByRole("menuitem", { name: "Request deletion" }));
+      expect(screen.getByRole("region", { name: "Deletion requests" }).getAttribute("data-can-manage")).toBe("false");
       expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
     });
   });
 
-  describe("identity-provider-managed teams", () => {
-    // Admin on purpose: the controls below are gated on authorization AND
-    // on origin, so a member fixture would pass for the wrong reason. This
-    // one proves the origin gate holds even for somebody allowed to mutate.
+  describe("identity-provider-backed teams", () => {
     const mirrored: TeamSummary = {
       id: "team_2",
       orgId: "org_1",
@@ -588,62 +588,36 @@ describe("OrganizationTeamsPage", () => {
       defaultModel: null,
     };
 
-    it("marks the team and offers no actions menu WHILE mirroring is on", () => {
+    it("keeps manual controls and shows provenance", () => {
       teamsData = { teams: [mirrored] };
-      orgData = { ...orgData, features: { organizations: true, ssoTeamSync: true } };
       render(<OrganizationTeamsPage />);
 
       expect(screen.getByText("Identity provider")).toBeTruthy();
-      // The menu holds Delete only, and the API refuses it. An empty menu
-      // would be a control the reader cannot use.
-      expect(screen.queryByRole("button", { name: "platform actions" })).toBeNull();
-    });
-
-    it("marks a team paused and RETURNS its controls when mirroring is off", () => {
-      // Off is the default. A team the sync no longer touches must not stay
-      // locked: nothing is going to overwrite an edit, and leaving it read
-      // only would strand whatever it owns with no way to change who can
-      // reach it.
-      teamsData = { teams: [mirrored] };
-      render(<OrganizationTeamsPage />);
-
-      expect(screen.getByText("Identity provider (paused)")).toBeTruthy();
       expect(screen.getByRole("button", { name: "platform actions" })).toBeTruthy();
-    });
-
-    it("offers no membership controls, and says why, naming the group", async () => {
-      teamsData = { teams: [mirrored] };
-      // The lock is what this asserts, so mirroring must be ON for it.
-      orgData = { ...orgData, features: { organizations: true, ssoTeamSync: true } };
-      render(<OrganizationTeamsPage />);
       fireEvent.click(screen.getByRole("button", { name: "Expand platform" }));
-
-      // The reason sits with the roster, where the controls would be.
-      expect(
-        screen.getByText(/Membership comes from identity provider group \/platform\./),
-      ).toBeTruthy();
-      expect(screen.getByText(/sign in again/)).toBeTruthy();
-
-      expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
-      expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
-      // The role still shows, as a fact rather than a menu.
-      expect(screen.getByText("Admin")).toBeTruthy();
-      expect(screen.queryByRole("button", { name: /Admin/ })).toBeNull();
+      expect(screen.getByRole("button", { name: "Add member" })).toBeTruthy();
     });
 
-    it("leaves a local team beside it fully editable", async () => {
-      const user = userEvent.setup();
-      teamsData = { teams: [teamsData.teams[0], mirrored] };
+    it("shows eligible suggestions and joins only after an explicit action", () => {
+      suggestedTeamsData = {
+        teams: [{ id: "team_suggested", name: "Research", memberCount: 4 }],
+      };
       render(<OrganizationTeamsPage />);
 
-      expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
-      fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
-      await user.click(screen.getByRole("button", { name: "Add member" }));
-      await user.click(await screen.findByText("Grace"));
-      expect(addTeamMemberMutate).toHaveBeenCalledWith({
-        teamId: "team_1",
-        body: { userId: "u2", role: "member" },
-      });
+      expect(screen.getByText("Suggested teams")).toBeTruthy();
+      expect(screen.getByText("Research")).toBeTruthy();
+      expect(screen.getByText("4 members")).toBeTruthy();
+      expect(joinSuggestedTeamMutate).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Join" }));
+      expect(joinSuggestedTeamMutate).toHaveBeenCalledWith("team_suggested");
+    });
+
+    it("does not render the old team-sync controls or group paths", () => {
+      render(<OrganizationTeamsPage />);
+      expect(screen.queryByRole("switch", { name: "Team sync" })).toBeNull();
+      expect(screen.queryByLabelText("Group path")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Add group" })).toBeNull();
+      expect(screen.queryByText("/platform")).toBeNull();
     });
   });
 });
@@ -679,3 +653,8 @@ describe("OrganizationLibraryPage", () => {
     expect(screen.queryByRole("button", { name: /import/i })).toBeNull();
   });
 });
+
+vi.mock("~/api/onepassword", () => ({
+  useTeamOnePasswordStatus: () => ({ data: { tokenConnected: false }, isPending: false, isError: false, isSuccess: true }),
+  useTeamOnePasswordToken: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
+}));

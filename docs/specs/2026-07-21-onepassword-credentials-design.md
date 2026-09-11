@@ -31,7 +31,7 @@ tokens only), syncing/mirroring 1Password items.
 
 1. **Mapping lives in the credential row** — a new *kind* of credential row
    (reference-carrying), not a separate mapping table or org setting.
-2. **Two token scopes** — an org service-account token (admin-managed; once set,
+2. **Token scopes** — an org service-account token (admin-managed; once set,
    any member's sessions resolve org-scoped references through it) and personal
    tokens (member-managed, resolve personally-scoped references).
 3. **Selection UX is browse-and-pick** (option A): picker drills
@@ -54,7 +54,7 @@ secret material:
   metadata: {
     onepassword: {
       reference: "op://Vault/Item/field",
-      tokenScope: "org" | "personal",  // which service-account token resolves it
+      tokenScope: "org" | "personal" | "team",  // which service-account token resolves it
     }
   }
 }
@@ -114,18 +114,17 @@ tool's error result, never a session-level failure.
 
 When neither a user row nor a reachable org row names the service, the
 resolver asks 1Password for an item whose title names it
-(`findCredentialForService`, `titleNamesService`). The org token is tried
-first, then the personal token. The personal scope is consulted only for a
+(`findCredentialForService`, `titleNamesService`). For a user-owned session, the org token is tried first, then the personal token. The personal scope is consulted only for a
 user-owned session (`onePasswordScopesFor(ownerType)`): a team- or org-owned
 session can be prompted by people other than the actor frozen onto it, so its
 reads never reach that actor's personal vault. The same rule governs the
 sandbox broker.
 
-A team admin may narrow a team's reads to a list of `op://` references
-(`docs/specs/2026-09-04-team-onepassword-vaults-design.md`). The lease gates
-the reference on the team row and on the org-provided row. It does not narrow
-the vault lookup, which matches on item title and yields no reference to
-check. With no lease, a team read has the org scope in full.
+Team tokens and automatic discovery follow
+`docs/specs/2026-09-04-team-onepassword-vaults-design.md`. A configured team
+token is authoritative; only its absence permits org discovery. Explicit org
+references keep using the org token. Reference grant preferences are retired.
+Ambiguous service-name matches require explicit selection.
 
 ## Owner-precedence contract
 
@@ -436,3 +435,11 @@ code as of the implementing commits:
 - **`body.onepassword` is validated at write time.** `reference` must be a
   string that starts with `op://`. `tokenScope` must be exactly `org` or
   `personal`. `scope=org` with `tokenScope=personal` is rejected.
+
+## Team token extension (2026-09-10)
+
+Team service accounts use the existing encrypted team-owned `onepassword` row.
+The team-vault design owns status, administration, locking, discovery, and the
+retirement of reference preferences. Personal sessions do not gain team access.
+SDK logs now omit raw errors and secret references. Duplicate discovery titles
+use stable IDs so each returned reference selects a distinct item.

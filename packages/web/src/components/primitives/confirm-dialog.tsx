@@ -18,6 +18,7 @@ export function ConfirmDialog({
   pending = false,
   error,
   onConfirm,
+  children,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -29,10 +30,12 @@ export function ConfirmDialog({
   pending?: boolean;
   error?: ReactNode;
   onConfirm: () => void;
+  children?: ReactNode;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title={title} description={description}>
+        {children}
         <DialogFooter>
           <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
             Cancel

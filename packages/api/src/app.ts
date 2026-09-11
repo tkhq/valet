@@ -5,6 +5,7 @@
  * test app with stub providers, no node-server). It also keeps boot-time
  * I/O (open sqlite, build providers) out of the hot test path.
  */
+import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -28,6 +29,7 @@ import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
+import { teamDeletionRequestsRouter } from "./routes/team-deletion-requests.js";
 import { teamsRouter } from "./routes/teams.js";
 import { teamApiKeysRouter } from "./routes/team-api-keys.js";
 import { memoryRouter } from "./routes/memory.js";
@@ -308,6 +310,7 @@ export function createApp(
   app.route("/api/sessions", ratingsRouter);
   app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
+  app.route("/api/teams", teamDeletionRequestsRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/teams", teamApiKeysRouter);
   app.route("/api/memory", memoryRouter);
@@ -408,7 +411,8 @@ export function createApp(
   // `code` (e.g. ArchivedAssistantError). A bare third-party error with an
   // upstream statusCode stays a 500 — relabeling it as a client fault
   // would hide a server-side failure from alerting.
-  app.onError((err, c) => {
+  app.onError(async (err, c) => {
+    if (err instanceof TeamAdminRequiredError) return c.json(await teamAdminRefusal(c.var.providers.db, c.var.user.orgId, err), 403);
     console.error(`route error ${c.req.method} ${c.req.path}:`, err);
     const duck = err as { statusCode?: unknown; code?: unknown };
     const declared =

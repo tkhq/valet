@@ -78,3 +78,25 @@ describe("commandWrapperScript", () => {
     expect(run.status).toBe(0);
   });
 });
+
+describe("command discovery selection", () => {
+  function run(hits: string) {
+    const dir = mkdtempSync(join(tmpdir(), "valet-discovery-"));
+    const wrapper = join(dir, "wrapper");
+    writeFileSync(wrapper, commandWrapperScript({ command: "fakecli", env: "FAKE_KEY", credential: "linear" }));
+    writeFileSync(join(dir, "fakecli"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(dir, "valet-secrets"), `#!/bin/sh\nif [ "$1" = find ]; then\ncat <<'HITS'\n${hits}\nHITS\nelse\nprintf '%s\\n' "$@"\nfi\n`, { mode: 0o755 });
+    return spawnSync("sh", [wrapper], { encoding: "utf8", env: { PATH: `${dir}:/usr/bin:/bin` } });
+  }
+  it("refuses multiple candidates instead of taking the first", () => {
+    const result = run("team\top://v/i1/token\nteam\top://v/i2/token");
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("Multiple 1Password items match");
+    expect(result.stdout).toBe("");
+  });
+  it("preserves a unique candidate's scope when resolving it", () => {
+    const result = run("team\top://v/i/token");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("run\n--scope\nteam\n--env\nFAKE_KEY=op://v/i/token\n");
+  });
+});

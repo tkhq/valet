@@ -366,7 +366,8 @@ async function insertMirror(
     updatedAt: now,
   };
   try {
-    await db.insert(skills).values(row);
+    // Keep a handled name collision from aborting the source transaction.
+    await db.transaction((tx) => tx.insert(skills).values(row));
     return true;
   } catch (err) {
     // `skills_owner_name` is the only unique index, so a violation is a name

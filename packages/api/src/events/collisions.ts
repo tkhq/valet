@@ -34,7 +34,7 @@ import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
 
 // Duplicated from mention-scope.ts so this module stays pure (mention-scope
 // does IO). `subscriptionMatchesEvent` fails closed on a mention subscription
-// with no user filter, so such a row never fires and cannot collide.
+// with no user filter outside team assistant scope, so such a row cannot collide.
 const SLACK_MENTION_KEY = "slack.app_mention";
 
 /** The slice of a target the severity policy reads. Structurally satisfied by
@@ -44,9 +44,11 @@ export interface CollisionTarget {
   workflowId?: string;
   assistantId?: string;
   follow?: boolean;
+  orchestrator?: "user" | "team" | "org";
 }
 
 export interface CollisionCandidate {
+  ownerType?: string;
   eventKeys: string[];
   filters: SubscriptionFilter[];
   target: CollisionTarget;
@@ -176,21 +178,22 @@ function filterRelation(
  * The concrete catalog keys BOTH subscriptions can actually fire on. A key
  * is dropped when either side can never match it: a filter on a field the
  * key's catalog entry does not declare fails closed in `filtersMatch`, and a
- * mention subscription without a `user` filter fails closed in
+ * non-team mention subscription without a `user` filter fails closed in
  * `subscriptionMatchesEvent`.
  */
 function effectiveSharedKeys(
   cand: CollisionCandidate,
-  exist: { eventKeys: string[]; filters: SubscriptionFilter[] },
+  exist: CollisionCandidate,
   catalog: EventCatalogEntry[],
 ): string[] {
-  const canFire = (sub: { filters: SubscriptionFilter[] }, entry: EventCatalogEntry): boolean => {
+  const canFire = (sub: CollisionCandidate, entry: EventCatalogEntry): boolean => {
+    const filters = effectiveFilters(sub);
     // An empty `in` list never passes, so the whole conjunction never does.
-    if (sub.filters.some((f) => f.op === "in" && Array.isArray(f.value) && f.value.length === 0)) {
+    if (filters.some((f) => f.op === "in" && Array.isArray(f.value) && f.value.length === 0)) {
       return false;
     }
-    if (!sub.filters.every((f) => entry.filters.some((cf) => cf.field === f.field))) return false;
-    if (entry.key === SLACK_MENTION_KEY && !sub.filters.some((f) => f.field === "user")) {
+    if (!filters.every((f) => entry.filters.some((cf) => cf.field === f.field))) return false;
+    if (entry.key === SLACK_MENTION_KEY && !teamMention(sub) && !sub.filters.some((f) => f.field === "user")) {
       return false;
     }
     return true;
@@ -234,6 +237,17 @@ function severity(
   return relation === "equal" || relation === "superset" ? "blocking" : "overlapping";
 }
 
+/** Team membership replaces stored creator filters, including interim rows. */
+function teamMention(sub: CollisionCandidate): boolean {
+  return sub.target.kind === "orchestrator" &&
+    (sub.ownerType === "team" || (sub.ownerType === undefined && sub.target.orchestrator === "team")) &&
+    eventKeyMatches(SLACK_MENTION_KEY, sub.eventKeys);
+}
+
+function effectiveFilters(sub: CollisionCandidate): SubscriptionFilter[] {
+  return teamMention(sub) ? sub.filters.filter((f) => f.field !== "user") : sub.filters;
+}
+
 /**
  * Compares a candidate subscription against existing rows and reports every
  * collision. The caller passes the rows to compare against — enabled rows in
@@ -248,7 +262,7 @@ export function computeCollisions<
   for (const sub of existing) {
     const sharedKeys = effectiveSharedKeys(candidate, sub, catalog);
     if (sharedKeys.length === 0) continue;
-    const relation = filterRelation(candidate.filters, sub.filters);
+    const relation = filterRelation(effectiveFilters(candidate), effectiveFilters(sub));
     if (relation === null) continue;
     const kind = severity(candidate.target, sub.target, relation);
     if (kind === null) continue;

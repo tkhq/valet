@@ -13,6 +13,7 @@
  * Writes of an org source stay admin-only, including Sync. A member
  * still reads org-library rows. The sweep keeps those rows fresh.
  */
+import { lockTeamDeletionAccess, TeamAdminRequiredError } from "./team-deletion-access.js";
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, like, or, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
@@ -176,6 +177,7 @@ export function adoptedTeamSourceRow(
     lastSha: null,
     lastManifestHash: null,
     discoveryScan: null,
+    syncRevision: 0,
     lastSyncedAt: null,
     lastError: null,
     createdAt: opts.now,
@@ -359,6 +361,7 @@ export async function createContentSource(
     lastSha: null,
     lastManifestHash: null,
     discoveryScan: null,
+    syncRevision: 0,
     lastSyncedAt: null,
     lastError: null,
     createdAt: now,
@@ -557,18 +560,18 @@ export async function deleteContentSource(
   id: string,
   opts: { isOrgAdmin?: boolean } = {},
 ): Promise<boolean> {
-  const row = await ownedContentSourceRow(db, owner, id, opts);
-  if (!row) return false;
-  // List and read stay member-level. Delete of a team-owned row is an
-  // admin act: it removes every workflow the source mirrors.
-  if (row.ownerType === "team" && !(await canAdministerTeam(db, row.ownerId, owner.userId))) {
-    return false;
-  }
-  await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
+    const [candidate] = await tx.select().from(contentSources).where(and(eq(contentSources.id, id), eq(contentSources.orgId, owner.orgId))).limit(1);
+    if (!candidate) return false;
+    const row = candidate.ownerType === "team" ? candidate : await ownedContentSourceRow(tx, owner, id, opts);
+    if (!row) return false;
+    if (row.ownerType === "team" && !(await lockTeamDeletionAccess(tx, owner, row.ownerId))) {
+      throw new TeamAdminRequiredError(row.ownerId, "content_source", id);
+    }
     await deleteMirroredContent(tx, row.orgId, id);
-    await tx.delete(contentSources).where(eq(contentSources.id, id));
+    await tx.delete(contentSources).where(and(eq(contentSources.id, id), eq(contentSources.orgId, owner.orgId)));
+    return true;
   });
-  return true;
 }
 
 /**

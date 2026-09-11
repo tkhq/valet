@@ -6,7 +6,7 @@
  * `local-org`, so "another org" is expressed in data, not identity).
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
@@ -20,6 +20,7 @@ import {
   events,
   eventSubscriptions,
   teamMembers,
+  orgMembers,
   teams,
   userIdentityLinks,
   workflowDefinitions,
@@ -1550,12 +1551,11 @@ describe("mention scoping (slack.app_mention)", () => {
     target: { kind: "orchestrator" },
   };
 
-  it("a team-owned mention subscription still injects the creator user filter", async () => {
+  it("a team-owned mention subscription uses membership instead of a creator filter", async () => {
     const a = await bootSlack();
     const now = Date.now();
     await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
     await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
-    await linkSlack(a, "local-user", "U_LOCAL");
     const res = await postSubscription(a.baseUrl, {
       ...MENTION_BODY,
       target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
@@ -1566,10 +1566,41 @@ describe("mention scoping (slack.app_mention)", () => {
     expect(body.ownerId).toBe("team_1");
     expect(body.filters).toEqual([
       { field: "channel", op: "eq", value: "C123", label: "#eng" },
-      { field: "user", op: "eq", value: "U_LOCAL" },
     ]);
     const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, body.id));
     expect(rows[0].filters).toEqual(body.filters);
+  });
+
+  it.each(["team", "organization"])("redelivery rechecks the mentioner's current %s membership", async (removed) => {
+    const a = await bootSlack();
+    await a.providers.eventDispatcher.stop();
+    await a.providers.db.insert(teams).values({ id: "team-replay", orgId: "local-org", name: "Replay", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team-replay", userId: "member-b", role: "member" });
+    await a.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "member-b", role: "member" });
+    await linkSlack(a, "member-b", "U_B");
+    await seedSubscriptionRow(a, "sub-replay", "local-org", {
+      ownerType: "team", ownerId: "team-replay", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "orchestrator" },
+    });
+    await a.providers.db.insert(events).values({
+      id: "event-replay", orgId: "local-org", service: "slack", eventKey: "slack.app_mention",
+      dedupeKey: "replay", actor: { externalId: "U_B" }, refs: {}, summary: "Mention",
+      payload: { user: "U_B", channel: "C1", ts: "1.2" }, occurredAt: Date.now(), receivedAt: Date.now(),
+    });
+    const first = await redeliver(a.baseUrl, "event-replay");
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ created: 1 });
+    if (removed === "team") {
+      await a.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, "team-replay"));
+    } else {
+      await a.providers.db.delete(orgMembers).where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "member-b")));
+      // A stale team row and membership elsewhere must not authorize replay.
+      await a.providers.db.insert(orgMembers).values({ orgId: "other-org", userId: "member-b", role: "member" });
+      expect(await a.providers.db.select().from(teamMembers).where(eq(teamMembers.teamId, "team-replay"))).toHaveLength(1);
+    }
+    const second = await redeliver(a.baseUrl, "event-replay");
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ created: 0 });
   });
 
   it("injects the creator's linked Slack user filter on create", async () => {

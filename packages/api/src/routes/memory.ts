@@ -42,6 +42,7 @@ import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   copyFileToTeam,
+  copyFileFromTeam,
   exportFiles,
   importFiles,
   linksForFile,
@@ -219,22 +220,27 @@ export function handleServiceError(err: unknown): { body: { error: string; code?
   return null;
 }
 
-memoryRouter.post("/copy-to-team", async (c) => {
-  try {
-    const scope = await resolveScope(c, "read");
-    const body: unknown = await c.req.json().catch(() => null);
-    if (!body || typeof body !== "object" || !("from" in body) || typeof body.from !== "string" ||
-        !("to" in body) || typeof body.to !== "string" || !("teamId" in body) || typeof body.teamId !== "string" || !body.teamId.trim()) {
-      throw new ValidationError("Provide from, to and teamId to copy a personal memory file.");
+for (const [route, copy] of [
+  ["/copy-to-team", copyFileToTeam],
+  ["/copy-from-team", copyFileFromTeam],
+] as const) {
+  memoryRouter.post(route, async (c) => {
+    try {
+      const scope = await resolveScope(c, "read");
+      const body: unknown = await c.req.json().catch(() => null);
+      if (!body || typeof body !== "object" || !("from" in body) || typeof body.from !== "string" ||
+          !("to" in body) || typeof body.to !== "string" || !("teamId" in body) || typeof body.teamId !== "string" || !body.teamId.trim()) {
+        throw new ValidationError("Provide from, to and teamId to copy a memory file.");
+      }
+      const file = await copy(c.var.providers.db, scope, { from: body.from, to: body.to, teamId: body.teamId });
+      return c.json({ file }, 201);
+    } catch (err) {
+      const mapped = handleServiceError(err);
+      if (mapped) return c.json(mapped.body, mapped.status);
+      throw err;
     }
-    const file = await copyFileToTeam(c.var.providers.db, scope, { from: body.from, to: body.to, teamId: body.teamId });
-    return c.json({ file }, 201);
-  } catch (err) {
-    const mapped = handleServiceError(err);
-    if (mapped) return c.json(mapped.body, mapped.status);
-    throw err;
-  }
-});
+  });
+}
 
 memoryRouter.get("/", async (c) => {
   let scope: MemoryScope;

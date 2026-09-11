@@ -463,21 +463,11 @@ export const messages = pgTable(
 // creator-auto-admin live in service code (`services/teams.ts`), inside one
 // transaction — not expressible as table constraints.
 //
-// `origin` records where a row came from, as `skills.origin` does below. It
-// names the ONE writer of that row's `team_members`:
-//
-//   `idp`    mirrors an identity-provider group. The login-time sync
-//            (`services/team-sync.ts`) owns its membership, and it removes as
-//            well as adds — that is what offboarding means.
-//   `config` is declared in `valet.yaml`. The boot reconciler
-//            (`services/config-reconcile.ts`) asserts the declared members and
-//            never deletes one, so the file cannot take access away.
-//   `local`  belongs to the people who made it in Valet. Only the team routes
-//            write it.
-//
-// No row has two writers, so no membership has two opinions and nothing can
-// oscillate between boot and login. Every sync write is scoped by
-// `origin = 'idp'`; every reconciler write is scoped by `origin = 'config'`.
+// `origin` records where a row came from, as `skills.origin` does below.
+// An `idp` row can receive explicit join suggestions, but login does not
+// write its membership. A `config` row is declared in `valet.yaml`; the boot
+// reconciler asserts its declared members and never removes one. A `local`
+// row was created in Valet. The team routes manage membership for all rows.
 //
 // `external_id` holds the full group path (`/platform`). The path is what the
 // token claim carries, it survives a realm re-import, and it stays legible in
@@ -533,6 +523,21 @@ export const teamMembers = pgTable(
   (t) => [
     primaryKey({ columns: [t.teamId, t.userId] }),
     index("team_members_user").on(t.userId),
+  ],
+);
+
+// Current identity-provider eligibility for an explicit team join. The row
+// stores no group path. The team row owns that sensitive mapping.
+export const teamJoinEligibilities = pgTable(
+  "team_join_eligibilities",
+  {
+    teamId: text("team_id").notNull(),
+    userId: text("user_id").notNull(),
+    observedAt: bigint("observed_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.userId] }),
+    index("team_join_eligibilities_user").on(t.userId),
   ],
 );
 
@@ -1136,6 +1141,8 @@ export const contentSources = pgTable(
      * the current head takes no head-commit short-circuit, which is what
      * makes the mechanism survive a release that does not write it. */
     discoveryScan: text("discovery_scan"),
+    /** Fences sync completion against newer passes and readiness changes. */
+    syncRevision: bigint("sync_revision", { mode: "number" }).notNull().default(0),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
     lastError: text("last_error"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -2053,6 +2060,7 @@ export type SessionThreadRow = typeof sessionThreads.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type TeamRow = typeof teams.$inferSelect;
 export type TeamMemberRow = typeof teamMembers.$inferSelect;
+export type TeamJoinEligibilityRow = typeof teamJoinEligibilities.$inferSelect;
 export type AssistantRow = typeof assistants.$inferSelect;
 export type ChildWatchRow = typeof childWatches.$inferSelect;
 export type NotificationRow = typeof notifications.$inferSelect;
@@ -2436,3 +2444,19 @@ export const ratings = pgTable(
 );
 
 export type RatingRow = typeof ratings.$inferSelect;
+
+/** One pending decision per team resource. Expiry is interpreted on read. */
+export const teamDeletionRequests = pgTable("team_deletion_requests", {
+  id: text("id").primaryKey(), orgId: text("org_id").notNull(), teamId: text("team_id").notNull(),
+  resourceType: text("resource_type").$type<"workflow" | "skill" | "content_source" | "credential" | "api_key" | "team">().notNull(),
+  resourceId: text("resource_id").notNull(), resourceLabel: text("resource_label").notNull(),
+  requestedBy: text("requested_by").notNull(), reason: text("reason"),
+  requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  status: text("status").$type<"pending" | "approved" | "declined" | "withdrawn">().notNull().default("pending"),
+  decidedBy: text("decided_by"), decidedAt: bigint("decided_at", { mode: "number" }),
+  decisionNote: text("decision_note"), lastRefusal: text("last_refusal"),
+}, (t) => [
+  uniqueIndex("team_deletion_requests_pending").on(t.teamId, t.resourceType, t.resourceId).where(sql`${t.status} = 'pending'`),
+  index("team_deletion_requests_team_status").on(t.teamId, t.status),
+]);

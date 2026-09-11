@@ -19,12 +19,13 @@ const installMutateAsync = vi.fn();
 const templatesQuery: {
   data: ListWorkflowTemplatesResponse | undefined;
   isLoading: boolean;
+  isFetching?: boolean;
   error: Error | null;
 } = { data: undefined, isLoading: false, error: null };
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
-    <a {...rest}>{children}</a>
+    <a href={typeof rest.to === "string" ? rest.to : undefined} {...rest}>{children}</a>
   ),
   useNavigate: () => navigate,
 }));
@@ -461,13 +462,13 @@ describe("TemplateGallery", () => {
       render(<TemplateGallery />);
 
       expect(screen.queryByText("Connect Slack")).toBeNull();
-      const share = screen.getByText("Share Slack with the team").closest("a");
+      const share = screen.getByText("Set up Slack access").closest("a");
       expect(share?.getAttribute("to") ?? share?.getAttribute("href")).toBe("/integrations");
 
       fireEvent.click(screen.getByRole("button", { name: "What it does" }));
       expect(
         within(screen.getByRole("dialog")).getByText(
-          "Slack is not connected for this team. Connect Slack on the Integrations page and share it with the team, then install this template.",
+          "Slack is not connected for this team. Set up access on the Integrations page, then install this template.",
         ),
       ).toBeTruthy();
     });
@@ -476,7 +477,7 @@ describe("TemplateGallery", () => {
       teamId = "team_ops";
       templatesQuery.data = { templates: [triageDigest] };
       render(<TemplateGallery />);
-      expect(screen.getByText("Share integrations with the team")).toBeTruthy();
+      expect(screen.getByText("Set up integrations access")).toBeTruthy();
     });
   });
 
@@ -502,4 +503,64 @@ describe("TemplateGallery", () => {
     expect(navigate).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Install" })).toBeTruthy();
   });
+});
+
+it("labels organization App access without offering a team GitHub connection", () => {
+  teamId = "team-a";
+  templatesQuery.data = { templates: [{
+    ...memorySweep, requires: [{ service: "github", connected: false, organizationProvided: true }],
+    blockers: ["The organization GitHub App needs an active installation."],
+  }] };
+  render(<TemplateGallery />);
+  expect(screen.getByText("Organization GitHub App · organization access")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Organization GitHub settings" }).getAttribute("to")).toBe("/settings/organization/github");
+  expect(screen.queryByRole("link", { name: "Set up GitHub access" })).toBeNull();
+  expect(screen.queryByText("Share GitHub with the team")).toBeNull();
+  expect(screen.queryByText("Use template")).toBeNull();
+  fireEvent.click(screen.getByText("What it does"));
+  expect(within(screen.getByRole("dialog")).getByText("Organization GitHub App · organization access")).toBeTruthy();
+});
+
+it("does not offer a cached install while refreshing prerequisites", () => {
+  templatesQuery.data = { templates: [memorySweep] };
+  templatesQuery.isFetching = true;
+  render(<TemplateGallery />);
+  expect(screen.getByRole("button", { name: "Checking access…" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.queryByText("Use template")).toBeNull();
+  templatesQuery.isFetching = false;
+});
+
+it("keeps entered install fields through a prerequisite refresh", () => {
+  templatesQuery.data = { templates: [batchAction] };
+  const view = render(<TemplateGallery />);
+  fireEvent.click(screen.getByRole("button", { name: "Use template" }));
+  const input = screen.getByRole("textbox", { name: "What to do with each row" });
+  fireEvent.change(input, { target: { value: "Keep this instruction" } });
+  templatesQuery.isFetching = true;
+  view.rerender(<TemplateGallery />);
+  expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Checking access…" }).hasAttribute("disabled")).toBe(true);
+  templatesQuery.isFetching = false;
+  view.rerender(<TemplateGallery />);
+  expect(screen.getByRole("textbox", { name: "What to do with each row" }).getAttribute("value")).toBe("Keep this instruction");
+});
+
+it("keeps explicit team credential guidance separate from organization GitHub setup", () => {
+  teamId = "team-a";
+  templatesQuery.data = { templates: [{ ...memorySweep,
+    requires: [{ service: "github", connected: false }],
+  }] };
+  render(<TemplateGallery />);
+  expect(screen.queryByRole("link", { name: "Organization GitHub settings" })).toBeNull();
+  expect(screen.getByRole("link", { name: "Set up GitHub access" }).getAttribute("to")).toBe("/integrations");
+});
+
+it("offers both setup paths when organization GitHub and another team service are missing", () => {
+  teamId = "team-a";
+  templatesQuery.data = { templates: [{ ...memorySweep, requires: [
+    { service: "github", connected: false, organizationProvided: true },
+    { service: "linear", connected: false },
+  ] }] };
+  render(<TemplateGallery />);
+  expect(screen.getByRole("link", { name: "Organization GitHub settings" }).getAttribute("to")).toBe("/settings/organization/github");
+  expect(screen.getByRole("link", { name: "Set up Linear access" }).getAttribute("to")).toBe("/integrations");
 });

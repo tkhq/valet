@@ -15,6 +15,7 @@ import type { OwnerFilter } from "~/api/client";
 import type { ArtifactListItem, ListArtifactsResponse } from "@valet/api/wire";
 
 const mine: ArtifactListItem = {
+  ownerType: "user",
   id: "art_mine",
   path: "artifacts/report.md",
   title: "Deploy report",
@@ -303,4 +304,16 @@ it("shows colleague artifacts without offering unauthorized revoke", () => {
   orgRole = "admin";
   view.rerender(<ArtifactsPage />);
   expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
+});
+
+it("labels team rows and gallery as team-only even with a legacy public flag", () => {
+  owner = { ownerType: "team", ownerId: "team-1" };
+  artifactsData = { artifacts: [{ ...mine, ownerType: "team", visibility: "public", actorUserId: "other-member" }] };
+  orgRole = "member";
+  render(<ArtifactsPage />);
+  expect(screen.getByText("Team-only")).toBeTruthy();
+  expect(screen.getByText("Team-only pages. Only current members of this team can open these links.")).toBeTruthy();
+  expect(screen.queryByText("public")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+  expect(screen.queryByRole("switch", { name: "Allow anyone with the link" })).toBeNull();
 });

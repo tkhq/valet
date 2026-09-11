@@ -95,12 +95,12 @@ function ArtifactPage() {
       <div className="flex min-h-screen items-center justify-center p-8 text-center">
         <div className="max-w-sm space-y-2">
           <h1 className="font-display text-xl text-ink">
-            {status === 401 ? "This page needs a login." : "This link doesn't work anymore."}
+            {status === 401 ? "This page needs a login." : "This page is unavailable."}
           </h1>
           <p className="text-sm text-muted">
             {status === 401
-              ? "It is shared with a Valet organization. Log in to view it."
-              : "The share was revoked, or the link is wrong. Ask the person who sent it for a fresh one."}
+              ? "Log in with an account that has access to this page."
+              : "This page is unavailable or you do not have access. Ask the person who sent the link to check your access."}
           </p>
           {status === 401 && (
             <a
@@ -163,6 +163,9 @@ function ArtifactPage() {
             {doc.icon ? `${doc.icon} ` : ""}
             {doc.title}
           </h1>
+          {doc.ownerType === "team" && (
+            <span className="shrink-0 text-[11px] text-muted" title="Only current members of the owning team can open this link.">Team-only</span>
+          )}
           <p className="hidden shrink-0 text-[11px] text-muted sm:block">
             {doc.sharedBy ? `${doc.sharedBy} · ` : ""}v{doc.version} · {relativeTime(doc.updatedAt)}
           </p>

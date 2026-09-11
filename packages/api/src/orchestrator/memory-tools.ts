@@ -365,7 +365,7 @@ export const artifactCopyToTeamTool = defineTool({
 
 export const memCopyToTeamTool = defineTool({
   name: "mem_copy_to_team",
-  description: "Save an existing personal memory file into a team by copying its exact content and metadata. Requires team membership and team memory write authority. Never deletes the source or overwrites a destination. Links remain unchanged; copy only the explicit file requested by the user.",
+  description: "Push an existing personal memory or knowledge file into a team by copying its exact content and metadata. Requires team membership plus team-admin or target-organization-admin authority. Use mem_copy_from_team to pull team knowledge into personal memory. Never deletes the source or overwrites a destination. Links remain unchanged; copy only the explicit file requested by the user.",
   parameters: Type.Object({
     from: Type.String({ description: "Existing personal memory path to copy." }),
     to: Type.String({ description: "New destination path in team memory. Must not exist." }),
@@ -375,6 +375,25 @@ export const memCopyToTeamTool = defineTool({
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     return memoryRequest(new URL("/api/memory/copy-to-team", cfg.apiBaseUrl), {
+      method: "POST",
+      headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
+      body: JSON.stringify(args),
+    }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
+  },
+});
+
+export const memCopyFromTeamTool = defineTool({
+  name: "mem_copy_from_team",
+  description: "Pull an explicitly selected team memory or knowledge file into personal memory with exact content and metadata. Requires current team membership. Use mem_copy_to_team to push personal memory to a team. Never deletes the source or overwrites a destination. Links remain unchanged; copy only the explicit file requested by the user.",
+  parameters: Type.Object({
+    from: Type.String({ description: "Existing path within the source team, without the team:{id}/ prefix." }),
+    to: Type.String({ description: "New destination path in personal memory. Must not exist." }),
+    teamId: Type.String({ description: "Explicit source team ID." }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return memoryRequest(new URL("/api/memory/copy-from-team", cfg.apiBaseUrl), {
       method: "POST",
       headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
       body: JSON.stringify(args),
@@ -737,6 +756,7 @@ export function buildMemoryTools(): ToolDef[] {
     memSearchTool,
     memMoveTool,
     memCopyToTeamTool,
+    memCopyFromTeamTool,
     artifactCopyToTeamTool,
     memLinksTool,
     memShareTool,

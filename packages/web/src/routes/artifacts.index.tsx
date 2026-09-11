@@ -51,7 +51,9 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
       <div className="mx-auto max-w-4xl px-6 py-10">
         <h1 className="font-display text-2xl text-ink">Artifacts</h1>
         <p className="mt-1 text-sm text-muted">
-          Pages published in this workspace. A link serves logged-in members of your org unless it is public.
+          {owner.ownerType === "team"
+            ? "Team-only pages. Only current members of this team can open these links."
+            : "Pages published in this workspace. A link serves logged-in members of your org unless it is public."}
         </p>
 
         <div className="mt-6">
@@ -116,7 +118,9 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
             <span>·</span>
             <span>version {artifact.sharedVersion ?? artifact.version}</span>
             <span>·</span>
-            {artifact.visibility === "public" ? (
+            {artifact.ownerType === "team" ? (
+              <span>Team-only</span>
+            ) : artifact.visibility === "public" ? (
               <span className="rounded bg-ink-wash px-1.5 py-0.5">public</span>
             ) : (
               <span>{artifact.visibility}</span>

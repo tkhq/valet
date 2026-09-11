@@ -127,6 +127,7 @@ function teamIdOf(update: unknown): string | undefined {
 }
 
 interface FanOutDeps {
+  botUserId?: string;
   db: AppDb;
   plugins: ValetPlugin[];
   transport: ChannelTransport;
@@ -176,6 +177,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
     await handleFollowedMessage(
       {
         db: deps.db,
+        botUserId: deps.botUserId,
         engineHost: deps.engineHost,
         normalizeChannelMessage: channelMessageNormalizer(deps.channelHost),
         fetchThreadWindow: channelThreadWindowFetcher(deps.channelHost),
@@ -303,6 +305,7 @@ slackWebhookRouter.post("/webhook", async (c) => {
     transport,
     channelHost,
     engineHost,
+    botUserId: typeof credential?.metadata?.botUserId === "string" ? credential.metadata.botUserId : undefined,
     triggerDefs: slackTriggerDefs(plugins),
     onIngest: eventDispatcher.nudge,
     orgId,

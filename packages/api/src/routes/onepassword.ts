@@ -14,6 +14,9 @@
  * A typed `OnePasswordAuthError` maps to 400 with its own message; any other
  * rejection maps to 502 so SDK or network detail never reaches the client.
  */
+import { and, eq, isNotNull } from "drizzle-orm";
+import { credentials } from "../schema/index.js";
+import { canAdministerTeam, canViewTeam, getTeamInOrg } from "../services/teams.js";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
@@ -22,6 +25,7 @@ import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js
 import { getAllowPersonalOnePassword, setOrgFeatures } from "../services/org.js";
 import type {
   ListOpVaultsResponse,
+  TeamOnePasswordStatusResponse,
   OnePasswordSettingsResponse,
   PutOnePasswordSettingsRequest,
 } from "../wire/types.js";
@@ -29,8 +33,10 @@ import type {
 export const onePasswordRouter = new Hono<AppEnv>();
 
 
-function scopeFromQuery(c: Context<AppEnv>): OnePasswordScope {
-  return c.req.query("scope") === "org" ? "org" : "personal";
+function scopeFromQuery(c: Context<AppEnv>): OnePasswordScope | null {
+  const raw = c.req.query("scope");
+  if (raw === undefined) return "personal";
+  return raw === "org" || raw === "personal" || raw === "team" ? raw : null;
 }
 
 /**
@@ -43,7 +49,13 @@ function scopeFromQuery(c: Context<AppEnv>): OnePasswordScope {
 async function requireScopeAccess(c: Context<AppEnv>, scope: OnePasswordScope) {
   const { db } = c.var.providers;
   const user = c.var.user;
-  if (scope === "org") {
+  if (scope === "org") return undefined;
+  if (scope === "team") {
+    const teamId = c.req.query("teamId");
+    if (!teamId) return c.json({ error: "Pass teamId for team scope." }, 400);
+    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await canAdministerTeam(db, teamId, user.id))) {
+      return c.json({ error: "Team not found." }, 404);
+    }
     return undefined;
   }
   const allowed = await getAllowPersonalOnePassword(db, user.orgId);
@@ -105,15 +117,30 @@ onePasswordRouter.get("/vaults", async (c) => {
   const { onePassword } = c.var.providers;
   const user = c.var.user;
   const scope = scopeFromQuery(c);
+  if (!scope) return c.json({ error: "Set scope to org, personal, or team." }, 400);
 
   const forbidden = await requireScopeAccess(c, scope);
   if (forbidden) return forbidden;
 
   try {
-    const vaults = await onePassword.listVaults(scope, { orgId: user.orgId, userId: user.id });
+    const vaults = await onePassword.listVaults(scope, { orgId: user.orgId, userId: user.id, teamId: scope === "team" ? c.req.query("teamId") : undefined });
     const resp: ListOpVaultsResponse = { vaults };
     return c.json(resp);
   } catch (err) {
     return mapOnePasswordError(c, err);
   }
+});
+
+/** Presence only: this read neither decrypts tokens nor contacts 1Password. */
+onePasswordRouter.get("/team-status", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const teamId = c.req.query("teamId");
+  if (!teamId) return c.json({ error: "Pass teamId." }, 400);
+  if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await canViewTeam(db, teamId, user.id))) {
+    return c.json({ error: "Team not found." }, 404);
+  }
+  const [row] = await db.select({ id: credentials.ownerId }).from(credentials)
+    .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, teamId), eq(credentials.service, ONEPASSWORD_SERVICE), isNotNull(credentials.apiKeyEnc))).limit(1);
+  return c.json({ tokenConnected: Boolean(row) } satisfies TeamOnePasswordStatusResponse);
 });

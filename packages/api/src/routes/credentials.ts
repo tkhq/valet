@@ -1,3 +1,4 @@
+import { deleteTeamCredential } from "../services/team-resource-deletion.js";
 /**
  * `/api/credentials` — manual token entry + connection summary for the
  * connect UI (plugin-system-v2 plan Task 15). OAuth connect/callback lives
@@ -42,7 +43,10 @@
  * against Slack and records the workspace identity. See
  * `services/slack-connect.ts`.
  */
+import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
+import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { Hono, type Context } from "hono";
+import { insertCredentialIfAbsent, lockTeamCredentialAuthority, replaceCredential } from "../services/credential-insert.js";
 import { and, eq } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
 import { credentialSecret, type CredentialOwner, type StoredCredential } from "@valet/engine";
@@ -56,6 +60,7 @@ import {
   OnePasswordAuthError,
   onePasswordMeta,
 } from "../services/onepassword.js";
+import { mutateTeamOnePassword } from "../services/team-onepassword-token.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
@@ -108,9 +113,7 @@ function rowHasSecret(stored: StoredCredential): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
-/** A secretless source row a team read can still turn into a secret: a
- * 1Password reference on the org token (`resolveTeamCredentialRead` runs
- * with org scopes only). */
+/** A delegated user reference can use the org token, never a personal or team token. */
 function usableByTeamRead(stored: StoredCredential): boolean {
   return onePasswordMeta(stored)?.tokenScope === "org";
 }
@@ -168,18 +171,18 @@ function isCredentialKind(type: StoredCredential["type"]): type is PutCredential
 
 function parseOnePasswordField(
   value: unknown,
-): { ok: true; reference: string; tokenScope: "org" | "personal" } | { ok: false; error: string } {
+): { ok: true; reference: string; tokenScope: "org" | "personal" | "team" } | { ok: false; error: string } {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, error: "onepassword must be an object with reference and tokenScope" };
   }
   const candidate = value as Record<string, unknown>;
   const { reference, tokenScope } = candidate;
-  // The grant grammar, so a stored reference is one a team admin can lease.
+  // Use the same reference grammar as the sandbox broker.
   if (typeof reference !== "string" || !isOnePasswordReference(reference)) {
     return { ok: false, error: "onepassword.reference must be an op://vault/item/field reference" };
   }
-  if (tokenScope !== "org" && tokenScope !== "personal") {
-    return { ok: false, error: "onepassword.tokenScope must be org or personal" };
+  if (tokenScope !== "org" && tokenScope !== "personal" && tokenScope !== "team") {
+    return { ok: false, error: "onepassword.tokenScope must be org, personal, or team" };
   }
   return { ok: true, reference, tokenScope };
 }
@@ -288,8 +291,8 @@ credentialsRouter.get("/", async (c) => {
       .from(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, owner.id)));
     for (const row of rows) {
-      // The team 1Password grant reuses this service name. List it on
-      // GET /api/teams/:id/onepassword-refs, not as an integration credential.
+      // Reserved token status has its own endpoint; never list token rows
+      // as integration credentials.
       if (row.service === ONEPASSWORD_SERVICE) continue;
       if (!isCredentialKind(row.type)) continue;
       const from = delegatedFromMeta(row.metadata);
@@ -299,7 +302,7 @@ credentialsRouter.get("/", async (c) => {
         const source = stillMember ? await engineCredentials.get({ type: "user", id: from }, row.service) : null;
         // A source row with neither a secret nor a reference has nothing
         // to resolve. A personal-scope reference has one the team read
-        // cannot use: it runs on org-scoped tokens only.
+        // cannot use: team reads never consult personal tokens.
         referenceBroken =
           !stillMember || source === null || (!rowHasSecret(source) && !usableByTeamRead(source));
       }
@@ -350,15 +353,11 @@ credentialsRouter.put("/:service", async (c) => {
   const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, "write");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
-
-  if (service === ONEPASSWORD_SERVICE && scope === "team") {
-    return c.json(
-      {
-        error:
-          "A team 1Password token is not supported yet. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
-      },
-      400,
-    );
+  if (body.createOnly !== undefined && typeof body.createOnly !== "boolean") {
+    return c.json({ error: "createOnly must be a boolean. Send true to add a team connection." }, 400);
+  }
+  if (body.createOnly && (scope !== "team" || body.onepassword)) {
+    return c.json({ error: "createOnly supports direct team tokens. Select team scope and enter a token." }, 400);
   }
 
   // Availability gate (integration-availability design): a user-scope save
@@ -487,15 +486,16 @@ credentialsRouter.put("/:service", async (c) => {
         400,
       );
     }
+    if (parsed.tokenScope === "team" && owner.type !== "team") {
+      return c.json({ error: "A team reference requires team ownership. Set scope to team and pass teamId." }, 400);
+    }
     if (scope === "org" && parsed.tokenScope === "personal") {
       return c.json(
         { error: "An org-scoped credential cannot use a personal 1Password token. Set tokenScope to org." },
         400,
       );
     }
-    // A team row is resolved with org-scoped tokens only
-    // (`resolveTeamCredentialRead`), so a personal reference would never
-    // resolve.
+    // Team reads never borrow a member's personal token.
     if (scope === "team" && parsed.tokenScope === "personal") {
       return c.json(
         {
@@ -511,8 +511,8 @@ credentialsRouter.put("/:service", async (c) => {
       if (!allowed) {
         return c.json(PERSONAL_DISABLED, 403);
       }
-      // Every team that rides this row reads it with org-scoped tokens
-      // only, so a personal reference would leave each of them with a
+      // Delegated user references can use only org scope, so a personal
+      // reference would leave each team with a
       // reference that never resolves. Refuse while shares exist: the
       // caller revokes them on purpose, or stores a reference a team can
       // read.
@@ -532,7 +532,7 @@ credentialsRouter.put("/:service", async (c) => {
 
     let resolved: string;
     try {
-      resolved = await onePassword.resolveReference(tokenScope, { orgId: user.orgId, userId: user.id }, reference);
+      resolved = await onePassword.resolveReference(tokenScope, { orgId: user.orgId, userId: user.id, teamId: owner.type === "team" ? owner.id : undefined }, reference);
     } catch (err) {
       return mapOnePasswordError(c, err);
     }
@@ -548,9 +548,21 @@ credentialsRouter.put("/:service", async (c) => {
       if (rejected) return rejected;
     }
     await engineCredentials.save(owner, service, credential);
-    if (owner.type === "team") await resyncTeamWorkflows(c, [owner.id]);
+    await refreshCredentialReadiness(c.var.providers, owner, service);
     const resp: PutCredentialResponse = { ok: true };
     return c.json(resp);
+  }
+
+  if (service === ONEPASSWORD_SERVICE && owner.type === "team") {
+    if (body.type !== "service_account" || typeof body.apiKey !== "string" || !body.apiKey.trim() ||
+        body.accessToken !== undefined || body.refreshToken !== undefined || body.metadata !== undefined) {
+      return c.json({ error: "Send a service_account with apiKey only. Configure vault permissions in 1Password." }, 400);
+    }
+    const ok = await mutateTeamOnePassword(db, c.var.providers.encryptionKey,
+      { orgId: user.orgId, userId: user.id, teamId: owner.id }, { kind: "token", token: body.apiKey.trim() });
+    if (!ok) return c.json({ error: "Team not found." }, 404);
+    await resyncTeamWorkflows(c, [owner.id]);
+    return c.json({ ok: true } satisfies PutCredentialResponse);
   }
 
   // Plain token write to the reserved `onepassword` service — the caller's
@@ -590,8 +602,31 @@ credentialsRouter.put("/:service", async (c) => {
     if (rejected) return rejected;
   }
 
-  await engineCredentials.save(owner, service, credential);
-  if (owner.type === "team") await resyncTeamWorkflows(c, [owner.id]);
+  if (owner.type === "team") {
+    const outcome = await db.transaction(async (tx) => {
+      if (!(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id }))) {
+        return "access_changed";
+      }
+      if (body.createOnly) {
+        const inserted = await insertCredentialIfAbsent(tx, c.var.providers.encryptionKey, owner, service, credential);
+        if (inserted) await invalidateWorkflowSources(tx, { teamId: owner.id });
+        return inserted ? "created" : "exists";
+      }
+      await replaceCredential(tx, c.var.providers.encryptionKey, owner, service, credential);
+      await invalidateWorkflowSources(tx, { teamId: owner.id });
+      return "created";
+    });
+    if (outcome === "access_changed") {
+      return c.json({ error: "Team access changed. Ask a team admin to restart the connection." }, 404);
+    }
+    if (outcome === "exists") {
+      return c.json({ error: "This team already has a connection for this service. Ask a team admin to remove it before connecting another account." }, 409);
+    }
+  } else {
+    await engineCredentials.save(owner, service, credential);
+  }
+
+  await refreshCredentialReadiness(c.var.providers, owner, service);
 
   const resp: PutCredentialResponse = { ok: true };
   return c.json(resp);
@@ -609,7 +644,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
     return c.json(
       {
         error:
-          "A team 1Password token is not supported yet. Grant op:// references at PUT /api/teams/:id/onepassword-refs.",
+          "1Password tokens cannot be delegated. Ask a team admin to connect a team service account.",
       },
       400,
     );
@@ -655,7 +690,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
       400,
     );
   }
-  // A team read resolves 1Password references with org-scoped tokens only
+  // Delegated references must use org scope; a user row cannot select a team token
   // (`resolveTeamCredentialRead`), the same rule the team PUT applies. A
   // reference-only source row with a personal token would leave the team
   // with a reference that never resolves.
@@ -704,19 +739,23 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   // shape matches what `PgCredentialStore.save` writes for a reference row
   // with no secret: every secret column NULL, no scopes, no expiry.
   const now = Date.now();
-  const inserted = await db
-    .insert(credentials)
-    .values({
-      ownerType: "team",
-      ownerId: body.teamId,
-      service,
-      type: source.type,
-      metadata: { delegatedFrom: user.id, sourceType: source.type },
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoNothing()
-    .returning({ service: credentials.service });
+  const inserted = await db.transaction(async (tx) => {
+    const rows = await tx
+      .insert(credentials)
+      .values({
+        ownerType: "team",
+        ownerId: body.teamId,
+        service,
+        type: source.type,
+        metadata: { delegatedFrom: user.id, sourceType: source.type },
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing()
+      .returning({ service: credentials.service });
+    if (rows.length > 0) await invalidateWorkflowSources(tx, { teamId: body.teamId });
+    return rows;
+  });
   if (inserted.length === 0) {
     // The slot holds either another member's share or a secret the team
     // stores, and the two are removed under different labels ("Stop
@@ -766,22 +805,21 @@ credentialsRouter.delete("/:service", async (c) => {
   const { engineCredentials, db } = c.var.providers;
   const user = c.var.user;
   const scope = parseCredentialScope(c.req.query("scope"));
-  const ownerOrErr = await resolveCredentialOwner(c, scope, c.req.query("teamId"), "write");
+  const ownerOrErr = await resolveCredentialOwner(c, scope, c.req.query("teamId"), "read");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
   const service = c.req.param("service");
   if (service === ONEPASSWORD_SERVICE && owner.type === "team") {
-    return c.json(
-      {
-        error:
-          "A team 1Password token is not supported yet. Revoke op:// references at DELETE /api/teams/:id/onepassword-refs.",
-      },
-      400,
-    );
+    const ok = await mutateTeamOnePassword(db, c.var.providers.encryptionKey,
+      { orgId: user.orgId, userId: user.id, teamId: owner.id }, { kind: "token", token: null });
+    if (!ok) return c.json({ error: "Team not found." }, 404);
+    await resyncTeamWorkflows(c, [owner.id]);
+    return c.json({ ok: true } satisfies DeleteCredentialResponse);
   }
 
-  await engineCredentials.delete(owner, service);
-  if (owner.type === "team") await resyncTeamWorkflows(c, [owner.id]);
+  if (owner.type === "team") await deleteTeamCredential(db, { orgId: user.orgId, userId: user.id }, owner.id, service);
+  else await engineCredentials.delete(owner, service);
+  if (owner.type !== "user") await refreshCredentialReadiness(c.var.providers, owner, service);
   if (owner.type === "user") {
     // Every team that rode this credential loses it, so each is resynced.
     const revoked = await deleteDelegationsFrom(db, { userId: user.id, service });

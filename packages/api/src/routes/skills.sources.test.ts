@@ -351,7 +351,7 @@ describe("org-scoped skill sources", () => {
     expect(body.source.ownerType).toBe("team");
   });
 
-  it("a team member lists a team source and cannot delete it", async () => {
+  it("a member lists a team source but needs an admin to approve its deletion", async () => {
     const f = serve({ sha: "commit-1", names: ["deploy"] });
     api = await bootTestApi({ githubApiUrl: f.url });
     const team = await createTeam(api.providers.db, {
@@ -375,12 +375,33 @@ describe("org-scoped skill sources", () => {
       method: "DELETE",
       headers: { "x-valet-test-user-id": "test-member" },
     });
-    expect(del.status).toBe(404);
+    expect(del.status).toBe(403);
+    expect(await del.json()).toMatchObject({ code: "team_admin_required", teamId: team.id });
 
     const still = (await (
       await fetch(`${api.baseUrl}/api/skills/sources?ownerType=team&ownerId=${team.id}`)
     ).json()) as ListSkillSourcesResponse;
     expect(still.sources).toHaveLength(1);
+
+    const requestRes = await fetch(`${api.baseUrl}/api/teams/${team.id}/deletion-requests`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ resourceType: "content_source", resourceId: created.source.id }),
+    });
+    expect(requestRes.status).toBe(201);
+    const { request } = await requestRes.json() as { request: { id: string } };
+    const refusedAgain = await fetch(`${api.baseUrl}/api/skills/sources/${created.source.id}`, {
+      method: "DELETE", headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(refusedAgain.status).toBe(403);
+    expect(await refusedAgain.json()).toMatchObject({ code: "team_admin_required", teamId: team.id, requestId: request.id });
+
+    const approved = await fetch(`${api.baseUrl}/api/teams/${team.id}/deletion-requests/${request.id}/approve`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    });
+    expect(approved.status).toBe(200);
+    const after = await (await fetch(`${api.baseUrl}/api/skills/sources?ownerType=team&ownerId=${team.id}`)).json() as ListSkillSourcesResponse;
+    expect(after.sources).toEqual([]);
   });
 
   it("excludeOrg drops org rows from the unfiltered list", async () => {

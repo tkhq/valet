@@ -16,12 +16,26 @@ async function seedUser(db: AppDb, id: string, orgId: string) {
   await db.insert(orgMembers).values({ orgId, userId: id, role: "member" });
 }
 
-const orgArtifact = { orgId: "org-1", visibility: "org" as const, revokedAt: null };
-const publicArtifact = { orgId: "org-1", visibility: "public" as const, revokedAt: null };
+const orgArtifact = { ownerType: "user", orgId: "org-1", visibility: "org" as const, revokedAt: null };
+const publicArtifact = { ownerType: "user", orgId: "org-1", visibility: "public" as const, revokedAt: null };
 const member = { orgId: "org-1" };
 const outsider = { orgId: "org-2" };
 
 describe("decideArtifactAccess", () => {
+  it("requires same-org live team membership before considering public visibility", () => {
+    for (const visibility of ["org", "public"] as const) {
+      const artifact = { ...orgArtifact, ownerType: "team", visibility };
+      for (const allowPublicArtifacts of [false, true]) {
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: undefined, teamMember: true })).toEqual({ kind: "login" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member })).toEqual({ kind: "not_found" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member, teamMember: false })).toEqual({ kind: "not_found" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: outsider, teamMember: true })).toEqual({ kind: "not_found" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member, teamMember: true })).toEqual({ kind: "serve" });
+        expect(decideArtifactAccess({ artifact: { ...artifact, revokedAt: 1 }, allowPublicArtifacts, user: member, teamMember: true })).toEqual({ kind: "not_found" });
+      }
+    }
+  });
+
   it("404s a missing artifact for everyone", () => {
     expect(decideArtifactAccess({ artifact: undefined, allowPublicArtifacts: true, user: member })).toEqual({
       kind: "not_found",

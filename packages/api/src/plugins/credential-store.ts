@@ -17,6 +17,7 @@
  * `@valet/store-postgres` — see their doc comments for the never-re-parse
  * rule).
  */
+import { CREDENTIAL_INVALIDATION_SQL } from "../services/content-sync/invalidation.js";
 import { fromJsonbColumn, jsonbToParam, type PgQueryable } from "@valet/store-postgres";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
@@ -113,7 +114,7 @@ export class PgCredentialStore implements CredentialStore {
   async save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void> {
     const now = this.clock();
     await this.db.query(
-      `INSERT INTO credentials
+      `WITH written AS (INSERT INTO credentials
          (owner_type, owner_id, service, type, access_token_enc, refresh_token_enc, api_key_enc, expires_at, scopes, metadata, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        ON CONFLICT (owner_type, owner_id, service) DO UPDATE SET
@@ -124,7 +125,9 @@ export class PgCredentialStore implements CredentialStore {
          expires_at = EXCLUDED.expires_at,
          scopes = EXCLUDED.scopes,
          metadata = EXCLUDED.metadata,
-         updated_at = EXCLUDED.updated_at`,
+         updated_at = EXCLUDED.updated_at
+       RETURNING owner_type, owner_id, service)
+       ${CREDENTIAL_INVALIDATION_SQL}`,
       [
         owner.type,
         owner.id,
@@ -143,7 +146,8 @@ export class PgCredentialStore implements CredentialStore {
   }
 
   async delete(owner: CredentialOwner, service: string): Promise<void> {
-    await this.db.query(`DELETE FROM credentials WHERE owner_type = $1 AND owner_id = $2 AND service = $3`, [
+    await this.db.query(`WITH written AS (DELETE FROM credentials WHERE owner_type = $1 AND owner_id = $2 AND service = $3
+      RETURNING owner_type, owner_id, service) ${CREDENTIAL_INVALIDATION_SQL}`, [
       owner.type,
       owner.id,
       service,

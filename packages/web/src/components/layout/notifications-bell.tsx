@@ -26,6 +26,7 @@ const KIND_LABEL: Record<NotificationKind, string> = {
   question: "Question",
   escalation: "Escalation",
   approval: "Approval",
+  review: "Review",
 };
 
 export interface BellState {

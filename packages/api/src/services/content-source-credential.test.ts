@@ -86,6 +86,7 @@ function sourceRow(overrides: Partial<ContentSourceRow>): ContentSourceRow {
     lastSha: null,
     lastManifestHash: null,
     discoveryScan: null,
+    syncRevision: 0,
     lastSyncedAt: null,
     lastError: null,
     createdAt: NOW,

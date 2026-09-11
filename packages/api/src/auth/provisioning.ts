@@ -10,8 +10,9 @@ import { eq, and } from "drizzle-orm";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { orgMembers, users, teams, teamMembers } from "../schema/index.js";
-import { ensureOrg, findOrg, getOrgFeatures, getSsoTeamGroups } from "../services/org.js";
-import { readTeamClaim, reconcileIdpTeams } from "../services/team-sync.js";
+import { ensureOrg, findOrg } from "../services/org.js";
+import { readTeamClaim } from "../services/team-sync.js";
+import { refreshTeamJoinEligibility } from "../services/team-join-eligibility.js";
 import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import type { SourceService } from "../bakes/source-service.js";
@@ -167,29 +168,11 @@ function readInviteCode(body: Record<string, unknown> | null | undefined): strin
  * membership + invite bookkeeping (`.after`), and provider-token capture
  * into the credential store (`databaseHooks.account.create.after`).
  *
- * The fifth hook is the odd one out. `provisionUser` is an sso PLUGIN
- * option, not a member of `hooks`/`databaseHooks`, so `auth/index.ts` hands
- * it to `sso({...})` instead. It is returned from here anyway, because it
- * belongs with the provisioning rules and because every database hook above
- * fires on user CREATION only — none of them re-runs on a repeat sign-in,
- * and team sync must run on every one.
- *
- * ## Two team writers, one order, and why the order does not matter
- *
- * A first single-sign-on login runs three of these in sequence. The sso
- * plugin calls `handleOAuthUserInfo` — which runs the `databaseHooks` — and
- * only then `provisionUser`, both awaited, before it sets the session cookie
- * (`@better-auth/sso/dist/index.mjs`, both callback paths). So the order is:
- * admission (`user.create.before`), then org membership and the
- * config-declared team bind (`user.create.after`), then the identity-provider
- * team sync (`provisionUser`). Every later login runs `provisionUser` alone.
- *
- * Correctness must NOT rest on that order, because a plugin upgrade can
- * change it. It rests on the two writers touching disjoint rows: the bind
- * below reads `origin = 'config'` and the sync reads `origin = 'idp'`, and
- * the boot reconciler fails the api rather than let one name hold both. The
- * order is recorded here only because both paths call `ensureOrg`, and a
- * later edit that widens either scope would reintroduce the overlap.
+ * The fifth hook is the odd one out. `provisionUser` is an sso plugin
+ * option, not a member of `hooks` or `databaseHooks`, so `auth/index.ts`
+ * hands it to `sso({...})`. Every database hook above fires only on user
+ * creation. `provisionUser` runs on each login and refreshes join eligibility.
+ * It does not write teams or memberships.
  *
  * `user.create.before` and `.after` run within the same request but as
  * separate calls with no shared parameter — `admission`'s resolved invite
@@ -203,7 +186,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
   databaseHooks: BetterAuthOptions["databaseHooks"];
   provisionUser: (data: SsoProvisionData) => Promise<void>;
 } {
-  const { db, cfg, credentialStore, instanceConfig, configPath, sourceService } = deps;
+  const { db, cfg, credentialStore, instanceConfig, sourceService } = deps;
   const pendingAdmissions = new Map<string, Admission>();
 
   const beforeHook = createAuthMiddleware(async (ctx) => {
@@ -338,65 +321,29 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
   };
 
   /**
-   * Mirrors the identity provider's groups into this user's teams, on every
-   * single-sign-on login (`provisionUserOnEveryLogin`, set in
-   * `auth/index.ts`). The rules live in `services/team-sync.ts`.
+   * Captures current join eligibility on every single-sign-on login. It
+   * creates no team and changes no membership. The explicit join route reads
+   * this server-held snapshot and always grants the member role.
    *
-   * This function is ONLY team mirroring. It decides no role and no
-   * membership of the organization: admission, the global role and the
-   * `org_members` row are settled by `userCreateBefore` and `userCreateAfter`
-   * above, which never read the gate below. Identity keeps syncing when team
-   * mirroring is off.
-   *
-   * Three things this function must never do:
-   *
-   * 1. Throw. The plugin awaits it BEFORE it sets the session cookie, so an
-   *    exception here means nobody signs in. A database fault must cost one
-   *    user one stale login, which the next login corrects. It must not lock
-   *    the organization out.
-   * 2. Write anything when the claim is missing. `readTeamClaim` runs first.
-   * 3. Create an org. The gate is a column on the org row, so asking whether
-   *    mirroring is on must not be the thing that makes an org to ask about.
-   *    `findOrgFeatures` reads; `ensureOrg` is not called from here.
+   * An absent or unreadable claim clears prior eligibility. A claim failure
+   * can hide a suggestion, but it cannot leave a stale grant usable.
    */
   const provisionUser = async (data: SsoProvisionData): Promise<void> => {
-    // No OIDC config means no configured claim names. A provider registered
-    // in the database carries no group claim through `userInfo` either,
-    // because the extra fields are declared on the configured provider.
     const oidc = cfg.oidc;
     if (!oidc) return;
 
     try {
-      const claim = readTeamClaim(data.userInfo, oidc.teamClaim, oidc.teamAssertedClaim);
-      if (!claim.present) return;
-
-      // The gate. Off is the default and the answer for a deployment that
-      // set nothing, so no team is created and no membership is removed. It
-      // is read on each login, not at boot, so an operator who turns it on
-      // does not have to restart the api. Existing mirrored teams are left
-      // exactly as they are while it is off — see the spec, "When the gate
-      // is off".
       const org = await findOrg(db);
       if (!org) return;
-      const features = await getOrgFeatures(db, org.id);
-      if (!features.ssoTeamSync) return;
-
-      await reconcileIdpTeams(db, {
+      const claim = readTeamClaim(data.userInfo, oidc.teamClaim, oidc.teamAssertedClaim);
+      await refreshTeamJoinEligibility(db, {
         orgId: org.id,
         userId: data.user.id,
         claim,
         adminGroupName: oidc.teamAdminGroup,
-        // The allowlist lives on the org row, where Settings edits it and
-        // the boot reconciler asserts `auth.sso.teams.groups` over it at
-        // every start (`services/config-reconcile.ts`). Read per login,
-        // like the gate above, so a Settings edit needs no restart. NULL
-        // means no list was ever set, which mirrors nothing — the boot
-        // report names the fix (`services/team-sync.ts`).
-        mirroredGroups: (await getSsoTeamGroups(db, org.id)) ?? [],
-        configPath,
       });
     } catch (err) {
-      console.error(`team sync: reconcile failed for user ${data.user.id}:`, err);
+      console.error(`team suggestions: eligibility refresh failed for user ${data.user.id}:`, err);
     }
   };
 

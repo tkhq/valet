@@ -11,6 +11,7 @@ import { downloadTextFile, memoryDownloadName } from "~/lib/download";
 import { splitFrontmatter } from "~/lib/frontmatter";
 import { relativeTime } from "~/lib/relative-time";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { MemoryTransfer } from "./memory-transfer";
 import { ShareControls } from "./share-controls";
 
 /** Pure — the exact prefill text the footer hands off to the composer. */
@@ -300,6 +301,10 @@ export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath
         >
           {body}
         </Markdown>
+      )}
+
+      {!editing && (
+        <MemoryTransfer key={`${owner?.ownerType}:${owner?.ownerId}:${path}`} path={path} owner={owner} />
       )}
 
       {!editing && !isTeamScope && (

@@ -1722,6 +1722,21 @@ export interface ListTeamsResponse {
   teams: TeamSummary[];
 }
 
+/** An eligible team suggestion. Identity-provider group paths stay server-side. */
+export interface SuggestedTeamSummary {
+  id: string;
+  name: string;
+  memberCount: number;
+}
+
+export interface ListSuggestedTeamsResponse {
+  teams: SuggestedTeamSummary[];
+}
+
+export interface JoinSuggestedTeamResponse {
+  joined: true;
+}
+
 export interface ListTeamMembersResponse {
   members: TeamMemberSummary[];
 }
@@ -1796,7 +1811,7 @@ export interface CreateTeamApiKeyResponse {
 // — every route derives `userId` from the caller's session, never a path
 // param. 30s polling from the web client; no WS plumbing this phase.
 
-export type NotificationKind = "notification" | "question" | "escalation" | "approval";
+export type NotificationKind = "notification" | "question" | "escalation" | "approval" | "review";
 export type NotificationUrgency = "low" | "normal" | "high";
 
 export interface NotificationSummary {
@@ -2327,6 +2342,10 @@ export interface DeleteWorkflowScheduleResponse {
  * gallery refuses to install.
  */
 export interface WorkflowTemplateRequirement {
+  /** Access supplied by the organization, not a connection held by the team. */
+  organizationProvided?: true;
+  /** Repository installation is verified before this template arms GitHub events. */
+  repositoryCheckOnInstall?: true;
   /** Credential service key, matching `PluginServiceSummary.service`. */
   service: string;
   connected: boolean;
@@ -3044,6 +3063,8 @@ export interface ListCredentialsResponse {
 }
 
 export interface PutCredentialRequest {
+  /** Team token setup: refuse an occupied slot instead of replacing it. */
+  createOnly?: boolean;
   type: CredentialKind;
   accessToken?: string;
   apiKey?: string;
@@ -3059,7 +3080,7 @@ export interface PutCredentialRequest {
   /** Resolve this credential's secret via a 1Password reference instead of
    * an inline `accessToken`/`apiKey` (1Password credential provider plan,
    * Task 3). Mutually exclusive with both. */
-  onepassword?: { reference: string; tokenScope: "org" | "personal" };
+  onepassword?: { reference: string; tokenScope: "org" | "personal" | "team" };
 }
 
 export interface PutCredentialResponse {
@@ -3081,6 +3102,10 @@ export interface DelegateCredentialResponse {
 // ── REST: 1Password picker backend + settings (1Password credential
 // provider plan, Task 3) ───────────────────────────────────────────────────
 
+export interface TeamOnePasswordStatusResponse {
+  tokenConnected: boolean;
+}
+
 export interface OnePasswordSettingsResponse {
   allowPersonal: boolean;
   orgTokenConnected: boolean;
@@ -3093,23 +3118,6 @@ export interface PutOnePasswordSettingsRequest {
 
 export interface ListOpVaultsResponse {
   vaults: { id: string; title: string }[];
-}
-
-/** GET/PUT `/api/teams/:id/onepassword-refs` — the team's leased `op://` set. */
-export interface TeamOnePasswordRefsResponse {
-  refs: string[];
-}
-
-export interface PutTeamOnePasswordRefsRequest {
-  refs: string[];
-}
-
-export interface PutTeamOnePasswordRefsResponse {
-  refs: string[];
-}
-
-export interface DeleteTeamOnePasswordRefsResponse {
-  ok: true;
 }
 
 /** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
@@ -3253,6 +3261,8 @@ export interface ShareArtifactResponse {
  * version (the pinned `sharedVersion`, else the latest) and takes no
  * version parameter: a link holder must not walk the history. */
 export interface GetArtifactResponse {
+  /** Team ownership restricts the audience regardless of stored visibility. */
+  ownerType: string;
   title: string;
   /** The SOURCE — what downloads serve. */
   content: string;
@@ -3273,6 +3283,8 @@ export interface GetArtifactResponse {
 }
 
 export interface ArtifactListItem {
+  /** Team ownership restricts the audience regardless of stored visibility. */
+  ownerType: string;
   id: string;
   path: string;
   title: string;
@@ -3548,7 +3560,14 @@ export interface UsageBreakdownResponse {
   skillBreakdown: SkillUsageBreakdown[];
   byModel: (UsageBucket & { model: string | null })[];
   /** Org scope always; team scope when the caller administers the team. */
-  byUser?: (UsageBucket & { userId: string; name: string })[];
+  byUser?: (UsageBucket & {
+    userId: string;
+    name: string;
+    /** Team admins only. Distinct session-days divided by dailyAgentWindow.days. */
+    avgDailyActiveAgents?: number;
+  })[];
+  /** Calendar window for agent activity; spend continues to use the rolling window. */
+  dailyAgentWindow?: { days: number; sinceMs: number; untilMs: number; timezone: "UTC" };
   byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
 }
 
@@ -5077,3 +5096,34 @@ export interface ListFlaggedResponse {
   /** Present when more rows exist; pass back as ?cursor=. */
   nextCursor?: string;
 }
+
+/** Distinct active agent sessions per UTC day and owning team. */
+export interface DailyAgentActivityResponse {
+  scope: "me" | "team" | "org";
+  timezone: "UTC";
+  days: Array<{
+    dayMs: number;
+    teamId: string | null;
+    teamName: string | null;
+    kind: "assistant" | "child" | "workflow" | "session";
+    activeAgents: number;
+  }>;
+}
+export type TeamDeletionResourceType = "workflow" | "skill" | "content_source" | "credential" | "api_key" | "team";
+export interface TeamDeletionRequestSummary {
+  id: string; orgId: string; teamId: string;
+  resourceType: TeamDeletionResourceType; resourceId: string; resourceLabel: string;
+  requestedBy: string; requesterName: string; requesterIsMember: boolean; reason: string | null;
+  requestedAt: number; expiresAt: number;
+  status: "pending" | "approved" | "declined" | "withdrawn" | "expired";
+  decidedBy: string | null; decidedAt: number | null; decisionNote: string | null; lastRefusal: string | null;
+}
+export interface ListTeamDeletionRequestsParams {
+  status?: "all" | "pending" | "history";
+  limit?: number;
+  cursor?: string;
+}
+export interface ListTeamDeletionRequestsResponse { requests: TeamDeletionRequestSummary[]; nextCursor: string | null }
+export interface TeamDeletionTarget { resourceType: TeamDeletionResourceType; resourceId: string; label: string }
+export interface ListTeamDeletionTargetsResponse { targets: TeamDeletionTarget[] }
+export interface SubmitTeamDeletionRequest { resourceType: TeamDeletionResourceType; resourceId: string; reason?: string }

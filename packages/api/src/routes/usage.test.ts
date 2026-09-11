@@ -6,15 +6,19 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { getUsageBreakdown } from "../services/usage.js";
 import {
   agentSessions,
+  assistants,
+  childWatches,
+  workflowDefinitions,
   llmProxyRequests,
   skillContextAttributions,
   skillInvocations,
   teams,
   teamMembers,
 } from "../schema/index.js";
-import type { UsageBreakdownResponse, UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
+import type { DailyAgentActivityResponse, UsageBreakdownResponse, UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -363,5 +367,180 @@ describe("GET /api/usage/summary", () => {
     const body = (await res.json()) as { me: { day: { costUsd: number; totalTokens: number } } };
     expect(body.me.day.costUsd).toBeCloseTo(0.003, 6);
     expect(body.me.day.totalTokens).toBe(120);
+  });
+});
+
+describe("GET /api/usage/daily-agents", () => {
+  it("counts distinct active sessions per UTC day and team, including children", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const day = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+    const yesterday = day - 86_400_000;
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(teams).values([
+      { id: "activity-a", orgId: "local-org", name: "Activity A", createdAt: day },
+      { id: "activity-b", orgId: "local-org", name: "Activity B", createdAt: day },
+    ]);
+    await db.insert(teamMembers).values({ teamId: "activity-a", userId: "local-user", role: "member" });
+    await db.insert(agentSessions).values([
+      ...["assistant:activity", "activity-child", "activity-idle"].map((id) => ({
+        id, userId: "local-user", orgId: "local-org", workspace: "/w", status: "active" as const,
+        ownerType: "team" as const, ownerId: "activity-a", createdAt: yesterday, updatedAt: day,
+      })),
+      { id: "activity-other", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "activity-b", createdAt: yesterday, updatedAt: day },
+      { id: "orchestrator:activity", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: yesterday, updatedAt: day },
+      { id: "activity-foreign", userId: "local-user", orgId: "other-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: yesterday, updatedAt: day },
+    ]);
+    await db.insert(assistants).values({ id: "activity", orgId: "local-org", ownerType: "team", ownerId: "activity-a", sessionId: "assistant:activity", createdAt: yesterday });
+    await db.insert(childWatches).values({ childSessionId: "activity-child", queueItemId: "activity-q", parentSessionId: "assistant:activity", parentThreadId: "th", actorUserId: "local-user", orgId: "local-org", createdAt: yesterday });
+    for (const [id, session, at] of [
+      ["activity-1", "assistant:activity", yesterday],
+      ["activity-2", "assistant:activity", day - 1],
+      ["activity-3", "assistant:activity", day],
+      ["activity-4", "activity-child", day],
+      ["activity-5", "activity-child", day],
+      ["activity-6", "activity-other", day],
+      ["activity-7", "orchestrator:activity", day],
+      ["activity-8", "activity-foreign", day],
+    ] satisfies Array<[string, string, number]>) await seedEngineEntry(api, id, session, at);
+    // Unpriced usage still counts; a zero-token assistant message does not.
+    await db.execute(sql`UPDATE engine_entries SET cost = NULL WHERE id = 'activity-4'`);
+    await seedEngineEntry(api, "activity-zero", "activity-idle", day);
+    await db.execute(sql`UPDATE engine_entries SET usage = '{"total":0}' WHERE id = 'activity-zero'`);
+    await db.insert(workflowDefinitions).values({ id: "activity-workflow", orgId: "local-org", ownerType: "team", ownerId: "activity-a", name: "Activity workflow", definition: {}, createdAt: day, updatedAt: day });
+    await api.providers.workflowStore.createRun("activity-run", { workflowId: "activity-workflow", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "activity-a" });
+    await seedEngineEntry(api, "activity-wf1", "wf:activity-run:node", day);
+    await seedEngineEntry(api, "activity-wf2", "wf:activity-run:node", day);
+    await seedEngineEntry(api, "activity-wf3", "wf:activity-run:node:1", day);
+    const res = await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=org&window=7d`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as DailyAgentActivityResponse;
+    expect(body.timezone).toBe("UTC");
+    expect(body.days).toEqual([
+      { dayMs: yesterday, teamId: "activity-a", teamName: "Activity A", kind: "assistant", activeAgents: 1 },
+      { dayMs: day, teamId: null, teamName: null, kind: "assistant", activeAgents: 1 },
+      { dayMs: day, teamId: "activity-a", teamName: "Activity A", kind: "assistant", activeAgents: 1 },
+      { dayMs: day, teamId: "activity-a", teamName: "Activity A", kind: "child", activeAgents: 1 },
+      { dayMs: day, teamId: "activity-a", teamName: "Activity A", kind: "workflow", activeAgents: 2 },
+      { dayMs: day, teamId: "activity-b", teamName: "Activity B", kind: "session", activeAgents: 1 },
+    ]);
+    const teamRes = await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=team&teamId=activity-a&window=24h`);
+    const teamBody = await teamRes.json() as DailyAgentActivityResponse;
+    expect(teamBody.days).toEqual(body.days.filter((r) => r.dayMs === day && r.teamId === "activity-a"));
+    expect((await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=team&teamId=activity-b`)).status).toBe(404);
+    expect((await fetch(`${api.baseUrl}/api/usage/daily-agents?scope=org`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(403);
+  });
+});
+
+// Member activity deliberately differs from billing attribution for shared agents.
+describe("GET /api/usage/breakdown — team daily active agents", () => {
+  const DAY = 86_400_000;
+  const today = Date.UTC(2026, 8, 10);
+  const now = today + 12 * 60 * 60 * 1000;
+
+  async function seedActivity(testApi: TestApi) {
+    const db = testApi.providers.db;
+    await db.insert(teams).values([
+      { id: "activity-team", orgId: "local-org", name: "Activity", createdAt: today },
+      { id: "activity-other-team", orgId: "local-org", name: "Other", createdAt: today },
+    ]);
+    await db.insert(teamMembers).values([
+      { teamId: "activity-team", userId: "local-user", role: "admin" },
+      { teamId: "activity-team", userId: "test-member", role: "member" },
+    ]);
+    await db.insert(agentSessions).values([
+      ...["activity-assistant", "activity-child", "activity-idle", "activity-legacy"].map((id) => ({
+        id, userId: "local-user", orgId: "local-org", workspace: "/w", status: "active" as const,
+        ownerType: "team" as const, ownerId: "activity-team", createdAt: today - 10 * DAY, updatedAt: today,
+      })),
+      { id: "activity-other", userId: "test-member", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "activity-other-team", createdAt: today, updatedAt: today },
+      { id: "activity-personal", userId: "test-member", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "test-member", createdAt: today, updatedAt: today },
+      { id: "activity-foreign", userId: "test-member", orgId: "other-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "activity-team", createdAt: today, updatedAt: today },
+    ]);
+    await db.insert(assistants).values({ id: "activity", orgId: "local-org", ownerType: "team", ownerId: "activity-team", sessionId: "activity-assistant", createdAt: today });
+    await db.insert(childWatches).values({ childSessionId: "activity-child", queueItemId: "child-q", parentSessionId: "activity-assistant", parentThreadId: "th", actorUserId: "test-member", orgId: "local-org", createdAt: today });
+    await db.insert(workflowDefinitions).values({ id: "activity-wf", orgId: "local-org", ownerType: "team", ownerId: "activity-team", name: "Workflow", definition: {}, createdAt: today, updatedAt: today });
+    await testApi.providers.workflowStore.createRun("activity-run", { workflowId: "activity-wf", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "activity-team" });
+
+    async function entry(id: string, session: string, at: number, actor?: string, thread = "th") {
+      await seedEngineEntry(testApi, id, session, at);
+      await db.execute(sql`UPDATE engine_entries SET thread_id = ${thread} WHERE id = ${id}`);
+      if (actor) {
+        const queueId = `q-${id}`;
+        await db.execute(sql`
+          INSERT INTO engine_queue_items (id, session_id, thread_id, status, content, author,
+            attempt_count, max_attempts, timeout_at, created_at, updated_at)
+          VALUES (${queueId}, ${session}, ${thread}, 'settled', 'prompt', ${JSON.stringify({ id: actor })}, 1, 1, ${now}, ${at}, ${at})
+        `);
+        await db.execute(sql`UPDATE engine_entries SET queue_item_id = ${queueId} WHERE id = ${id}`);
+      }
+    }
+    await entry("a-first", "activity-assistant", today - 6 * DAY, "test-member");
+    await entry("a-too-old", "activity-assistant", today - 6 * DAY - 1, "test-member");
+    await entry("a-yesterday", "activity-assistant", today - 1, "test-member");
+    await entry("a-today", "activity-assistant", today, "test-member");
+    await entry("a-repeat-thread", "activity-assistant", today + 1, "test-member", "other-thread");
+    await entry("a-second-member", "activity-assistant", today + 2, "local-user");
+    await entry("a-unattributed", "activity-assistant", today + 3);
+    await entry("a-future", "activity-assistant", now + 1, "future-actor");
+    await entry("child-1", "activity-child", today);
+    await entry("child-2", "activity-child", today + 1);
+    await entry("wf-1", "wf:activity-run:node", today);
+    await entry("wf-2", "wf:activity-run:node", today + 1);
+    await entry("wf-iteration", "wf:activity-run:node:1", today);
+    await entry("legacy", "activity-legacy", today);
+    await entry("idle", "activity-idle", today);
+    await db.execute(sql`UPDATE engine_entries SET usage = '{"total":0}' WHERE id = 'idle'`);
+    await db.execute(sql`UPDATE engine_entries SET cost = NULL WHERE id IN ('child-1', 'child-2')`);
+    for (const session of ["activity-other", "activity-personal", "activity-foreign"]) await entry(session, session, today, "test-member");
+    await db.insert(llmProxyRequests).values({ id: "activity-proxy", createdAt: today, orgId: "local-org", userId: "test-member", apiKeyId: "k", providerKind: "anthropic", model: "claude", endpoint: "/v1/messages", stream: false, statusCode: 200, requestBody: "{}", totalTokens: 100 });
+  }
+
+  it("deduplicates session-days, attributes shared assistants to prompt actors, and includes children and workflow iterations", async () => {
+    api = await bootTestApi();
+    await seedActivity(api);
+    const scope = { scope: "team", orgId: "local-org", teamId: "activity-team", byMember: true } as const;
+    const week = await getUsageBreakdown(api.providers.db, { scope, windowMs: 7 * DAY, now });
+    expect(week.dailyAgentWindow).toEqual({ days: 7, sinceMs: today - 6 * DAY, untilMs: now, timezone: "UTC" });
+    const members = new Map(week.byUser?.map((r) => [r.userId, r]));
+    // Assistant on three days plus the child today; not turns or range uniques.
+    expect(members.get("test-member")?.avgDailyActiveAgents).toBeCloseTo(4 / 7);
+    expect(members.get("test-member")?.turns).toBe(0); // actor differs from billed user
+    expect(members.get("local-user")?.avgDailyActiveAgents).toBeCloseTo(2 / 7);
+    expect(members.get("shared")?.avgDailyActiveAgents).toBeCloseTo(3 / 7);
+    expect(members.has("future-actor")).toBe(false);
+    expect(members.size).toBe(3);
+    const day = await getUsageBreakdown(api.providers.db, { scope, windowMs: DAY, now });
+    expect(day.byUser?.find((r) => r.userId === "test-member")?.avgDailyActiveAgents).toBe(2);
+    const midnight = await getUsageBreakdown(api.providers.db, { scope, windowMs: DAY, now: today });
+    expect(midnight.dailyAgentWindow?.sinceMs).toBe(today);
+    expect(midnight.byUser?.find((r) => r.userId === "test-member")?.avgDailyActiveAgents).toBe(2);
+    const empty = await getUsageBreakdown(api.providers.db, { scope, windowMs: DAY, now: today - 20 * DAY });
+    expect(empty.byUser?.every((r) => r.avgDailyActiveAgents === 0)).toBe(true);
+  });
+
+  it("returns the metric only to team administrators and enforces team/org isolation", async () => {
+    api = await bootTestApi();
+    await seedActivity(api);
+    const url = `${api.baseUrl}/api/usage/breakdown?scope=team&teamId=activity-team&window=7d`;
+    const admin = await fetch(url);
+    expect(admin.status).toBe(200);
+    // Route responses use the same wire contract as the other tests in this file.
+    const body = await admin.json() as UsageBreakdownResponse;
+    expect(body.dailyAgentWindow?.days).toBe(7);
+    expect(body.byUser?.every((r) => typeof r.avgDailyActiveAgents === "number")).toBe(true);
+    const member = await fetch(url, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(member.status).toBe(200);
+    const memberBody = await member.json() as UsageBreakdownResponse;
+    expect(memberBody.byUser).toBeUndefined();
+    expect(memberBody.dailyAgentWindow).toBeUndefined();
+    expect((await fetch(url.replace("activity-team", "activity-other-team"))).status).toBe(404);
+    await api.providers.db.insert(teams).values({ id: "activity-foreign-team", orgId: "other-org", name: "Foreign", createdAt: today });
+    await api.providers.db.insert(teamMembers).values({ teamId: "activity-foreign-team", userId: "local-user", role: "admin" });
+    expect((await fetch(url.replace("activity-team", "activity-foreign-team"))).status).toBe(404);
+    const personal = await (await fetch(`${api.baseUrl}/api/usage/breakdown?scope=me`)).json() as UsageBreakdownResponse;
+    expect(personal.dailyAgentWindow).toBeUndefined();
   });
 });

@@ -14,16 +14,12 @@
  * lifetime for one session's principal and nothing else.
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { onePasswordScopesFor } from "../services/credential-resolution.js";
 import { isOnePasswordReference, OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
-import {
-  isTeamOpRefGranted,
-  loadTeamOnePasswordRefs,
-  UNGRANTED_TEAM_OP_REF,
-} from "../services/team-onepassword-grant.js";
+import { getTeamInOrg } from "../services/teams.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
@@ -59,15 +55,15 @@ function narrowScopes(
   requested: unknown,
 ): { ok: true; scopes: readonly OnePasswordScope[] } | { ok: false; error: string } {
   if (requested === undefined) return { ok: true, scopes: allowed };
-  if (requested !== "org" && requested !== "personal") {
-    return { ok: false, error: "scope must be org or personal" };
+  if (requested !== "org" && requested !== "personal" && requested !== "team") {
+    return { ok: false, error: "scope must be org, personal, or team" };
   }
   if (!allowed.includes(requested)) {
     return {
       ok: false,
       error:
         requested === "personal"
-          ? "this session reads organization vaults only, so it cannot use a personal 1Password token. A session you own personally can."
+          ? "This session cannot use a personal 1Password token. Start a session you own personally."
           : `this session cannot use the ${requested} scope.`,
     };
   }
@@ -75,7 +71,7 @@ function narrowScopes(
 }
 
 sandboxSecretsRouter.post("/resolve", async (c) => {
-  const { onePassword, db, engineCredentials } = c.var.providers;
+  const { onePassword, db } = c.var.providers;
   // The sandbox principal, never `c.var.user`: the sandbox rung sets only
   // `c.var.sandbox`, and a signed-in browser session must not read plaintext
   // org secrets from a route whose sibling deliberately strips values.
@@ -127,7 +123,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
       userId: agentSessions.userId,
     })
     .from(agentSessions)
-    .where(eq(agentSessions.id, sandbox.sessionId))
+    .where(and(eq(agentSessions.id, sandbox.sessionId), eq(agentSessions.orgId, sandbox.orgId)))
     .limit(1);
   // The personal scope belongs to the identity the token was minted for, not
   // to a user-owned row in the abstract. A session can change hands
@@ -136,8 +132,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // reading `ownerType` alone would let whoever takes ownership present the
   // earlier actor's token and resolve that actor's personal vault. `undefined`
   // is the unknown-owner case `onePasswordScopesFor` already answers with the
-  // org scope alone, which is also the right answer for a team- or org-owned
-  // session and for a user-owned one that is not this token holder's.
+  // org scope alone. A validated team owner additionally permits team scope.
   // `owner_id` carries a DEFAULT '' and rows predating the owner columns
   // still hold it, so a user-owned row names its owner in `user_id` — the
   // same `NULLIF(owner_id, '')` fallback `SCHEMA_REPAIRS` uses. A personal
@@ -145,21 +140,19 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   const row = rows[0];
   const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
   const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
-  const allowed = onePasswordScopesFor(isOwnUserSession ? "user" : undefined);
+  const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
+  if (row?.ownerType === "team" && (!teamId || !(await getTeamInOrg(db, sandbox.orgId, teamId)))) {
+    return c.json({ error: "Team not found. Start a new team session." }, 403);
+  }
+  const allowed = onePasswordScopesFor(teamId ? "team" : isOwnUserSession ? "user" : undefined, teamId);
   const narrowed = narrowScopes(allowed, body.scope);
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
   const scopes = narrowed.scopes;
-  const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
-  // A team lease, when an admin wrote one, narrows the org scope to named
-  // refs. With no lease the team session reads every ref the org token can.
-  const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
-  const granted = teamId ? await loadTeamOnePasswordRefs(engineCredentials, teamId) : null;
-  if (references.some((reference) => !isTeamOpRefGranted(granted, reference))) {
-    return c.json({ error: UNGRANTED_TEAM_OP_REF }, 403);
-  }
+  const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
 
-  // Every reference in parallel; within one, org scope first. A scope with
-  // no token or a disabled toggle has nothing to offer and the next may
+  // Every reference in parallel, within the owner's ordered scopes. An
+  // absent team token permits org fallback; a configured team refusal does not.
+  // A non-team scope with no token or a disabled toggle has nothing to offer and the next may
   // answer. A token that exists and is refused by 1Password is a different
   // failure, and reporting it as "nothing resolved" sent the reader to check
   // vault names that were correct.
@@ -169,6 +162,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // The real SDK reports an unknown vault or item that way, and calling it a
   // refused token sent the reader to rotate a token that was fine.
   let sdkRefused = false;
+  let teamRefused = false;
   const values = await Promise.all(
     references.map(async (reference): Promise<string | null> => {
       for (const scope of scopes) {
@@ -176,6 +170,10 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
           const value = await onePassword.resolveReference(scope, ctx, reference);
           return Buffer.from(value, "utf8").toString("base64");
         } catch (err) {
+          if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
+            teamRefused = true;
+            return null;
+          }
           if (err instanceof OnePasswordAuthError && err.kind === "sdk") sdkRefused = true;
         }
       }
@@ -183,6 +181,9 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
     }),
   );
 
+  if (teamRefused) {
+    return c.json({ error: "Team 1Password could not resolve the reference. Check the team token and its vault permissions." }, 502);
+  }
   if (sdkRefused && values.every((v) => v === null)) {
     return c.json(
       {
@@ -216,7 +217,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
  * a plain-text line can leak.
  */
 sandboxSecretsRouter.post("/find", async (c) => {
-  const { onePassword, db, engineCredentials } = c.var.providers;
+  const { onePassword, db } = c.var.providers;
   const sandbox = c.var.sandbox;
   if (!sandbox) {
     return c.json(
@@ -250,30 +251,35 @@ sandboxSecretsRouter.post("/find", async (c) => {
       userId: agentSessions.userId,
     })
     .from(agentSessions)
-    .where(eq(agentSessions.id, sandbox.sessionId))
+    .where(and(eq(agentSessions.id, sandbox.sessionId), eq(agentSessions.orgId, sandbox.orgId)))
     .limit(1);
   const row = rows[0];
   const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
   const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
-  const allowed = onePasswordScopesFor(isOwnUserSession ? "user" : undefined);
+  const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
+  if (row?.ownerType === "team" && (!teamId || !(await getTeamInOrg(db, sandbox.orgId, teamId)))) {
+    return c.json({ error: "Team not found. Start a new team session." }, 403);
+  }
+  const allowed = onePasswordScopesFor(teamId ? "team" : isOwnUserSession ? "user" : undefined, teamId);
   const narrowed = narrowScopes(allowed, body.scope);
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
 
-  const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
-  const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
-  const granted = teamId ? await loadTeamOnePasswordRefs(engineCredentials, teamId) : null;
+  const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
   const lines: string[] = [];
   for (const scope of narrowed.scopes) {
     try {
       for (const cand of await onePassword.findCandidates(scope, ctx, query)) {
         const reference = `op://${cand.vault}/${cand.item}/${cand.field}`;
-        if (!isTeamOpRefGranted(granted, reference)) continue;
         // Scope-tagged, because the same name can sit in an org vault and a
         // personal one, and the resolver takes the org copy first. Seeing both
         // is how a caller knows to pass --scope.
         lines.push(`${scope}\t${reference}`);
       }
-    } catch {
+      if (scope === "team") break;
+    } catch (err) {
+      if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
+        return c.json({ error: "Team 1Password discovery failed. Check the team token and its vault permissions." }, 502);
+      }
       // A scope with no token, a disabled toggle, or an SDK refusal has
       // nothing to contribute to a search; the next scope may.
     }

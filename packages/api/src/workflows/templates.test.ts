@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 /**
  * Workflow template aggregation and install.
  *
@@ -26,7 +27,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { PgDb } from "@valet/store-postgres";
-import { eventSubscriptions, teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { githubInstallations, eventSubscriptions, teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import {
   bakeInputs,
@@ -731,11 +732,16 @@ describe("listWorkflowTemplateSummaries in a team workspace", () => {
       metadata: { appId: "1", appSlug: "valet", oauthClientId: "iv1", htmlUrl: "https://github.com/apps/valet" },
     });
 
+    await db.insert(githubInstallations).values({
+      id: "app-list", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme",
+      accountType: "Organization", repositorySelection: "selected", suspended: false,
+      createdAt: 1000, updatedAt: 1000,
+    });
     const list = await listWorkflowTemplateSummaries(deps([githubPlugin]), OWNER, {
       teamId: "team-list-4",
     });
     expect(list.find((t) => t.id === "github-app-issues")?.requires).toEqual([
-      { service: "github", connected: true },
+      { service: "github", connected: true, organizationProvided: true },
     ]);
     expect(list.find((t) => t.id === "github-user-issues")?.requires).toEqual([
       { service: "github", connected: false },
@@ -1188,7 +1194,7 @@ describe("installWorkflowTemplate ownership", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected a refusal");
     expect(result.code).toBe("not_connected");
-    expect(result.error).toContain("no App configured");
+    expect(result.error).toContain("active installation");
     expect(result.error).toContain("Settings → Organization");
     expect(result.error).not.toContain("for this team");
   });
@@ -1332,5 +1338,56 @@ describe("github.assign-reviewers — install bakes its roster location", () => 
     expect(params.repo).toBe("valet");
     expect(JSON.stringify(definition)).not.toContain("trigger.data.rosterOwner");
     expect(JSON.stringify(definition)).not.toContain("trigger.data.rosterRepository");
+  });
+});
+
+
+describe("team GitHub template repository prerequisites", () => {
+  async function setup() {
+    await seedTeam("review-team", [OWNER.userId]);
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    await credentials.save({ type: "org", id: OWNER.orgId }, "github_app", {
+      type: "api_key", apiKey: privateKey, accessToken: "test-client", refreshToken: "test-webhook",
+      metadata: { appId: "1", appSlug: "test", oauthClientId: "iv1", htmlUrl: "https://github.com/apps/test" },
+    });
+    await db.insert(githubInstallations).values({
+      id: "review-app", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme",
+      accountType: "Organization", repositorySelection: "selected", suspended: false,
+      createdAt: 1000, updatedAt: 1000,
+    });
+  }
+
+  it.each([
+    { status: 200, body: { id: 1, suspended_at: null }, ok: true },
+    { status: 404, body: {}, ok: false },
+    { status: 503, body: {}, ok: false },
+    { status: 200, body: { id: 1, suspended_at: "2026-09-01" }, ok: false },
+    { status: 200, body: {}, ok: false },
+  ])("checks the exact App installation and leaves no rows on refusal: $status $body", async ({ status, body, ok }) => {
+    await setup();
+    let checks = 0;
+    const dependencies = deps(bundledPlugins);
+    dependencies.github = { fetchImpl: async (url, init) => {
+      checks++;
+      expect(String(url)).toBe("https://api.github.com/repos/acme/platform/installation");
+      expect(new Headers(init?.headers).get("Authorization")).toMatch(/^Bearer ey/);
+      return Response.json(body, { status });
+    } };
+    const list = await listWorkflowTemplateSummaries(dependencies, OWNER, { teamId: "review-team" });
+    expect(list.find((entry) => entry.id === "github.pull-request-review")?.requires).toContainEqual({
+      service: "github", connected: true, organizationProvided: true, repositoryCheckOnInstall: true,
+    });
+    expect(checks).toBe(0); // Gallery is a local readiness read, not a provider probe.
+    const result = await installWorkflowTemplate(dependencies, OWNER, "github.pull-request-review", {
+      teamId: "review-team", inputs: { repository: "acme/platform", mention: "@review" },
+    });
+    expect(result.ok).toBe(ok);
+    expect(checks).toBe(1);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(ok ? 1 : 0);
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(ok ? 1 : 0);
+    expect(await db.select().from(workflowVersions)).toHaveLength(ok ? 1 : 0);
   });
 });

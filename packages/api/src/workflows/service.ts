@@ -4,6 +4,7 @@
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
+import { lockTeamDeletionAccess, TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
@@ -1034,21 +1035,30 @@ export async function deleteWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<DeleteWorkflowResult> {
-  const row = await ownedDefinitionRow(deps.db, owner, id);
-  if (!row) return "not_found";
-  // Deleting the file is the delete, exactly as editing the file is the
-  // edit. A delete here would come back on the next sync anyway.
-  await refuseRepoOwned(deps.db, row);
+  return deps.db.transaction(async (tx) => {
+    const [candidate] = await tx.select().from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
+    if (!candidate) return "not_found";
+    const row = candidate.ownerType === "team" ? candidate : await ownedDefinitionRow(tx, owner, id);
+    if (!row) return "not_found";
+    if (row.ownerType === "team") {
+      // A machine principal must not learn another team's resource or request IDs.
+      if (owner.principal?.type === "team" && owner.principal.id !== row.ownerId) return "not_found";
+      if (owner.principal?.type === "team" || !(await lockTeamDeletionAccess(tx, owner, row.ownerId))) {
+        throw new TeamAdminRequiredError(row.ownerId, "workflow", id);
+      }
+    }
+    // Deleting the file is the delete, exactly as editing the file is the
+    // edit. A delete here would come back on the next sync anyway.
+    await refuseRepoOwned(tx, row);
 
-  const active = await deps.workflowStore.listRuns({
-    workflowIds: [id],
-    status: ["pending", "running", "parked", "terminalizing"],
-    limit: 1,
+    const active = await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+      eq(workflowRuns.workflowId, id), inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
+    )).limit(1);
+    if (active.length > 0) return "has_active_runs";
+
+    await purgeWorkflowRows(tx, owner.orgId, id);
+    return "deleted";
   });
-  if (active.runs.length > 0) return "has_active_runs";
-
-  await purgeWorkflowRows(deps.db, owner.orgId, id);
-  return "deleted";
 }
 
 /**

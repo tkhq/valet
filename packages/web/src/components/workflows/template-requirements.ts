@@ -23,7 +23,7 @@ import { displayName } from "~/components/integrations/display-name";
  */
 export function missingServices(requires: WorkflowTemplateRequirement[]): string[] {
   return requires
-    .filter((r) => !r.connected && r.unconfigured !== true)
+    .filter((r) => !r.connected && r.unconfigured !== true && !r.organizationProvided)
     .map((r) => displayName(r.service));
 }
 
@@ -33,7 +33,7 @@ export function unconfiguredServices(requires: WorkflowTemplateRequirement[]): s
 }
 
 export function isInstallable(requires: WorkflowTemplateRequirement[], blockers: string[] = []): boolean {
-  return blockers.length === 0 && missingServices(requires).length === 0 && unconfiguredServices(requires).length === 0;
+  return blockers.length === 0 && requires.every((requirement) => requirement.connected && !requirement.unconfigured);
 }
 
 /** One sentence for the services an admin has to set up, worded like the
@@ -44,33 +44,31 @@ export function unconfiguredNote(names: string[]): string {
   return `${subject} not configured for this organization. An admin can set this up in Settings → Organization.`;
 }
 
-/**
- * One sentence for the services the workspace is missing: the fact, then the
- * action.
- *
- * A team run reads the TEAM's credential and never a member's own, so the
- * team wording names the whole chain that closes the gap. Connecting the
- * service is only half of it; the connection then has to be shared with the
- * team, which is what the Integrations page's "Share with a team" control
- * does.
- */
+/** Explain the missing connection in the active workspace. */
 export function missingNote(names: string[], teamId: string | undefined): string {
   const subject = names.length === 1 ? `${names[0]} is` : `${names.join(", ")} are`;
   if (teamId !== undefined) {
-    const what = names.length === 1 ? names[0] : "them";
-    const them = names.length === 1 ? "it" : "them";
-    return (
-      `${subject} not connected for this team. Connect ${what} on the Integrations page and ` +
-      `share ${them} with the team, then install this template.`
-    );
+    return `${subject} not connected for this team. Set up access on the Integrations page, then install this template.`;
   }
   return `${subject} not connected on your account. Connect ${names.length === 1 ? "it" : "them"} on the Integrations page, then install this template.`;
 }
 
-/** The card's control for a template the workspace cannot install yet. It
- * links to Integrations either way; the label names the work waiting there,
- * which in a team workspace is the sharing step. */
+/** Link to setup without requiring personal credential sharing. */
 export function connectLabel(names: string[], teamId: string | undefined): string {
   const what = names.length === 1 ? names[0] : "integrations";
-  return teamId === undefined ? `Connect ${what}` : `Share ${what} with the team`;
+  return teamId === undefined ? `Connect ${what}` : `Set up ${what} access`;
+}
+
+/** Name the authority without claiming the team holds a credential. */
+export function requirementLabel(requirement: WorkflowTemplateRequirement): string {
+  const name = requirement.service === "github" && requirement.organizationProvided
+    ? "Organization GitHub App" : displayName(requirement.service);
+  if (requirement.repositoryCheckOnInstall) return `${name} · repository access checked on install`;
+  return requirement.organizationProvided ? `${name} · organization access` : name;
+}
+
+/** Missing App access is configured in organization settings, not Integrations. */
+export function needsOrganizationGithubSetup(requires: WorkflowTemplateRequirement[]): boolean {
+  return requires.some((requirement) => requirement.service === "github" &&
+    !requirement.connected && requirement.organizationProvided === true);
 }

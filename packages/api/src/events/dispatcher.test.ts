@@ -12,6 +12,10 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { findFollowedThread } from "./followed-threads.js";
 import {
+  teams,
+  teamMembers,
+  orgMembers,
+  userIdentityLinks,
   eventDeliveries,
   events,
   eventSubscriptions,
@@ -247,10 +251,19 @@ describe("EventDispatcher", () => {
     expect(row.attempts).toBe(1);
   });
 
+  async function seedMentionMember(teamId: string) {
+    await tdb.appDb.insert(teams).values({ id: teamId, orgId: ORG, name: "Team", createdAt: Date.now() });
+    await tdb.appDb.insert(teamMembers).values({ teamId, userId: "member-9", role: "member" });
+    await tdb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "member-9", role: "member" });
+    await tdb.appDb.insert(userIdentityLinks).values({ id: "link-9", provider: "slack", externalId: "U9", userId: "member-9", createdAt: Date.now() });
+  }
+
   it("channel-origin orchestrator delivery: readable body + origin + sender, no raw JSON", async () => {
+    await seedMentionMember("team-x");
     const { deliveryId } = await seedDelivery({
       target: { kind: "orchestrator" },
       ownerType: "team",
+      ownerId: "team-x",
       service: "slack",
       eventKey: "slack.app_mention",
       eventKeys: ["slack.app_mention"],
@@ -283,6 +296,7 @@ describe("EventDispatcher", () => {
   });
 
   it("records a followed thread for a follow-enabled channel mention; none when follow is off", async () => {
+    await seedMentionMember("team-x");
     async function dispatchMention(follow: boolean) {
       await seedDelivery({
         target: { kind: "orchestrator", follow },
@@ -293,7 +307,7 @@ describe("EventDispatcher", () => {
         eventKeys: ["slack.app_mention"],
         refs: { channel: "C1" },
         summary: "Mention",
-        payload: { type: "app_mention", channel: "C1", text: "hi", ts: "1.2" },
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
       });
       const dispatcher = new EventDispatcher({
         db: tdb.appDb,
@@ -314,6 +328,7 @@ describe("EventDispatcher", () => {
     const row = await findFollowedThread(tdb.appDb, key);
     expect(row?.ownerType).toBe("team");
     expect(row?.ownerId).toBe("team-x");
+    expect(row?.createdBy).toBe("member-9");
   });
 
   it("signal target: inserts workflow_signals for org runs parked on event:<key> and wakes them", async () => {

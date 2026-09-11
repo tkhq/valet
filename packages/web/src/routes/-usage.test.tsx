@@ -18,7 +18,7 @@
  *   - disabled-gateway notice renders.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import type {
   UsageBreakdownResponse,
@@ -832,6 +832,48 @@ describe("UsagePage — team workspace scope", () => {
     const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
     expect(csvLink!.href).toContain("scope=team");
     expect(csvLink!.href).toContain("teamId=team-x");
+  });
+
+  it("shows member daily averages, zeroes, shared activity, and the UTC denominator", () => {
+    const members = mockBreakdownOrgScope.byUser ?? [];
+    const first = members[0];
+    if (!first) throw new Error("Missing member fixture");
+    breakdownResult.data = {
+      ...mockBreakdown,
+      scope: "team",
+      dailyAgentWindow: { days: 7, sinceMs: DAY_A_MS, untilMs: DAY_B_MS, timezone: "UTC" },
+      byUser: [
+        ...members.map((row, i) => ({ ...row, avgDailyActiveAgents: i === 0 ? 4 / 7 : 0 })),
+        { ...first, userId: "shared", name: "Team / shared", avgDailyActiveAgents: 3 / 7 },
+      ],
+    };
+    const view = render(<UsagePage />);
+    expect(screen.getByRole("columnheader", { name: "Avg daily active agents" })).toBeTruthy();
+    const explanation = screen.getByText("How active agents are counted").closest("details");
+    expect(explanation?.open).toBe(false);
+    fireEvent.click(screen.getByText("How active agents are counted"));
+    expect(screen.getByText(/7 UTC calendar days/)).toBeTruthy();
+    for (const [name, value] of [["Alice Smith", "0.57"], ["Bob Jones", "0.00"], ["Team / shared", "0.43"]]) {
+      const row = screen.getByRole("row", { name: new RegExp(name ?? "") });
+      expect(within(row).getByText(value ?? "")).toBeTruthy();
+    }
+    fireEvent.click(screen.getByRole("button", { name: "24h" }));
+    expect(breakdownCalls.at(-1)?.slice(0, 3)).toEqual(["24h", "team", "team-x"]);
+    breakdownResult.data = {
+      ...breakdownResult.data,
+      dailyAgentWindow: { days: 1, sinceMs: DAY_B_MS, untilMs: DAY_B_MS, timezone: "UTC" },
+      byUser: [{ ...first, avgDailyActiveAgents: 2 }],
+    };
+    view.rerender(<UsagePage />);
+    expect(screen.getByText(/1 UTC calendar day,/)).toBeTruthy();
+    expect(screen.getByText("2.00")).toBeTruthy();
+    expect(screen.queryByText("0.57")).toBeNull();
+  });
+
+  it("does not expose member activity when the server omits it for a plain member", () => {
+    render(<UsagePage />);
+    expect(screen.queryByText("By member")).toBeNull();
+    expect(screen.queryByText("Avg daily active agents")).toBeNull();
   });
 
   it("hides the me/org toggle even for org admins", () => {

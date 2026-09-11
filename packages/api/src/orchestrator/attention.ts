@@ -35,7 +35,7 @@ import type { DecisionAction, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { notifications, orgMembers, teamMembers, userNotificationPreferences } from "../schema/index.js";
 
-export type AttentionKind = "notification" | "question" | "escalation" | "approval";
+export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
 export type AttentionUrgency = "low" | "normal" | "high";
 
 export interface AttentionEvent {
@@ -113,7 +113,7 @@ export function resolveAudience(owner: Principal, kind: AttentionKind, membershi
 
   if (owner.type === "team") {
     const members = membership.teamMembers ?? [];
-    if (kind === "escalation") {
+    if (kind === "escalation" || kind === "review") {
       return members.filter((m) => m.role === "admin").map((m) => m.userId);
     }
     return members.map((m) => m.userId);
@@ -182,13 +182,17 @@ function escapeLike(value: string): string {
  * kind must extend this match too.
  */
 export async function markGateNotificationsRead(db: AppDb, gateId: string): Promise<void> {
+  return markAttentionNotificationsRead(db, "approval", gateId);
+}
+
+export async function markAttentionNotificationsRead(db: AppDb, kind: AttentionKind, dedupeKey: string): Promise<void> {
   await db
     .update(notifications)
     .set({ readAt: Date.now() })
     .where(
       and(
         isNull(notifications.readAt),
-        like(notifications.id, `n-approval-${escapeLike(gateId)}-%`),
+        like(notifications.id, `n-${kind}-${escapeLike(dedupeKey)}-%`),
       ),
     );
 }

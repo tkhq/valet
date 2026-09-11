@@ -26,6 +26,8 @@ export function SelectMenu<T extends string>({
   triggerLabel,
   triggerClassName,
   align = "start",
+  disabled = false,
+  ariaLabel,
 }: {
   value: T;
   options: readonly SelectMenuOption<T>[];
@@ -34,12 +36,14 @@ export function SelectMenu<T extends string>({
   triggerLabel?: ReactNode;
   triggerClassName?: string;
   align?: "start" | "end";
+  disabled?: boolean;
+  ariaLabel?: string;
 }) {
   const current = options.find((o) => o.value === value);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button type="button" variant="secondary" size="sm" className={triggerClassName}>
+        <Button type="button" variant="secondary" size="sm" className={triggerClassName} disabled={disabled} aria-label={ariaLabel}>
           {triggerLabel ?? current?.label ?? value}
         </Button>
       </DropdownMenuTrigger>

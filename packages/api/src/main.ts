@@ -33,8 +33,6 @@ import {
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
 import { seedMissingTeamDefaults } from "./services/teams.js";
-import { findOrg, getOrgFeatures, getSsoTeamGroups } from "./services/org.js";
-import { reportTeamSyncState } from "./services/team-sync.js";
 import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
@@ -520,28 +518,6 @@ async function runBootChain(): Promise<void> {
   const seededTeams = await seedMissingTeamDefaults(providers.db);
   if (seededTeams.length > 0) {
     console.log(`seeded a default assistant for ${seededTeams.length} team(s) without one: ${seededTeams.join(", ")}`);
-  }
-
-  if (closed) return;
-
-  // Team mirroring is off unless an operator asks for it, so say once what it
-  // will do. This runs AFTER the reconcile above, which is what applies
-  // `org.features.ssoTeamSync` from the file. It reads and prints; it never
-  // creates an org and never deletes a team.
-  {
-    const org = await findOrg(providers.db);
-    if (org) {
-      const features = await getOrgFeatures(providers.db, org.id);
-      await reportTeamSyncState(providers.db, {
-        orgId: org.id,
-        enabled: features.ssoTeamSync,
-        ssoConfigured: authConfig?.oidc !== undefined,
-        // The column, not the file: the reconcile above already wrote the
-        // file's list over it, and Settings edits land here too.
-        mirroredGroups: (await getSsoTeamGroups(providers.db, org.id)) ?? [],
-        configPath: process.env.VALET_CONFIG,
-      });
-    }
   }
 
   if (closed) return;

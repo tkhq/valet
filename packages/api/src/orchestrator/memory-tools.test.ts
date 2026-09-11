@@ -28,6 +28,7 @@ import {
   memSearchTool,
   memMoveTool,
   memCopyToTeamTool,
+  memCopyFromTeamTool,
   memLinksTool,
   memShareTool,
   artifactPublishTool,
@@ -78,6 +79,7 @@ describe("buildMemoryTools", () => {
       "mem_search",
       "mem_move",
       "mem_copy_to_team",
+      "mem_copy_from_team",
       "artifact_copy_to_team",
       "mem_links",
       "mem_share",
@@ -402,5 +404,32 @@ describe("mem_copy_to_team", () => {
     await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
     expect((await memCopyToTeamTool.execute({ ...args, to: "notes/second.md" }, ctx)).text).toContain("[memory_error]");
     expect((await memReadTool.execute({ path: args.from }, ctx)).text).toContain("Exact content.");
+  });
+});
+
+
+describe("mem_copy_from_team", () => {
+  it("discovers team knowledge, pulls it over HTTP, and enforces membership and personal scope", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Knowledge", creatorUserId: "local-user" });
+    await memWriteTool.execute({ path: "knowledge/source.md", content: "# Transfer\n\nExact knowledge.\n" }, ctx);
+    await memCopyToTeamTool.execute({ from: "knowledge/source.md", to: "knowledge/team.md", teamId: team.id }, ctx);
+    expect((await memReadTool.execute({ path: "" }, ctx)).text).toContain(`team:${team.id}`);
+    expect((await memReadTool.execute({ path: `team:${team.id}/knowledge/` }, ctx)).text).toContain("team.md");
+    await api.providers.db.update(teamMembers).set({ role: "member" }).where(eq(teamMembers.teamId, team.id));
+    const args = { from: "knowledge/team.md", to: "knowledge/pulled.md", teamId: team.id };
+    const result = await memCopyFromTeamTool.execute(args, ctx);
+    expect(result.text).toContain('"ownerId":"local-user"');
+    expect(result.text).toContain('"path":"knowledge/pulled.md"');
+    expect((await memReadTool.execute({ path: args.to }, ctx)).text).toContain("Exact knowledge.");
+    expect((await memCopyFromTeamTool.execute(args, ctx)).text).toContain("Choose another path");
+    const fresh = { ...args, to: "knowledge/denied.md" };
+    expect((await memCopyFromTeamTool.execute(fresh, { ...ctx, owner: { type: "team", id: team.id } })).text).toContain("personal");
+    expect((await memCopyFromTeamTool.execute(fresh, { ...ctx, owner: { type: "user", id: "test-member" } })).text).toContain("personal");
+    await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
+    expect((await memCopyFromTeamTool.execute(fresh, ctx)).text).toContain("[memory_error]");
+    expect((await memReadTool.execute({ path: args.to }, ctx)).text).toContain("Exact knowledge.");
   });
 });

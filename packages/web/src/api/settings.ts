@@ -1,3 +1,4 @@
+import { qkTemplates } from "./templates";
 /**
  * TanStack Query hooks for the settings shell's data surface (split-settings
  * design, Task 5). Mirrors the factory idiom in `src/api/queries.ts`:
@@ -26,9 +27,11 @@ import type {
   GetModelTiersResponse,
   GetOrgReasoningResponse,
   GetSlackAppResponse,
+  JoinSuggestedTeamResponse,
   ListAssistantsResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
+  ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   MeResponse,
@@ -61,16 +64,14 @@ import type {
   PutCredentialResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
-  PutTeamOnePasswordRefsRequest,
-  PutTeamOnePasswordRefsResponse,
   SetTeamMemberRoleRequest,
-  TeamOnePasswordRefsResponse,
-  DeleteTeamOnePasswordRefsResponse,
   TestLlmProviderRequest,
   TestLlmProviderResponse,
 } from "@valet/api/wire";
 import { qkAssistants } from "./assistants";
 import { api } from "./client";
+import { qkIntegrations } from "./integrations";
+import { qkRepos } from "./repos";
 
 /**
  * Whether a named plugin is enabled for the current caller, read from the org
@@ -102,8 +103,8 @@ export const qkSettings = {
   approvedModels: () => ["settings", "approvedModels"] as const,
   orgReasoning: () => ["settings", "orgReasoning"] as const,
   teams: () => ["settings", "teams"] as const,
+  suggestedTeams: () => ["settings", "teams", "suggestions"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
-  teamOnePasswordRefs: (teamId: string) => ["settings", "teams", teamId, "onepassword-refs"] as const,
   githubApp: () => ["settings", "githubApp"] as const,
   /** Prefix of every `slackApp` key — what the mutations invalidate. */
   slackAppAll: () => ["settings", "slackApp"] as const,
@@ -242,6 +243,14 @@ export function useTeams(opts?: Partial<UseQueryOptions<ListTeamsResponse>>) {
   });
 }
 
+export function useSuggestedTeams(opts?: Partial<UseQueryOptions<ListSuggestedTeamsResponse>>) {
+  return useQuery<ListSuggestedTeamsResponse>({
+    queryKey: qkSettings.suggestedTeams(),
+    queryFn: () => api.listSuggestedTeams(),
+    ...opts,
+  });
+}
+
 export function useTeamMembers(teamId: string, opts?: UseQueryOptions<ListTeamMembersResponse>) {
   return useQuery<ListTeamMembersResponse>({
     queryKey: qkSettings.teamMembers(teamId),
@@ -250,35 +259,6 @@ export function useTeamMembers(teamId: string, opts?: UseQueryOptions<ListTeamMe
   });
 }
 
-export function useTeamOnePasswordRefs(teamId: string, opts?: UseQueryOptions<TeamOnePasswordRefsResponse>) {
-  return useQuery<TeamOnePasswordRefsResponse>({
-    queryKey: qkSettings.teamOnePasswordRefs(teamId),
-    queryFn: () => api.listTeamOnePasswordRefs(teamId),
-    ...opts,
-  });
-}
-
-export function usePutTeamOnePasswordRefs() {
-  const qc = useQueryClient();
-  return useMutation<PutTeamOnePasswordRefsResponse, Error, { teamId: string; body: PutTeamOnePasswordRefsRequest }>({
-    mutationFn: ({ teamId, body }) => api.putTeamOnePasswordRefs(teamId, body),
-    onSuccess: (_data, { teamId }) => {
-      void qc.invalidateQueries({ queryKey: qkSettings.teamOnePasswordRefs(teamId) });
-    },
-  });
-}
-
-export function useDeleteTeamOnePasswordRefs() {
-  const qc = useQueryClient();
-  return useMutation<DeleteTeamOnePasswordRefsResponse, Error, { teamId: string }>({
-    mutationFn: ({ teamId }) => api.deleteTeamOnePasswordRefs(teamId),
-    onSuccess: (_data, { teamId }) => {
-      void qc.invalidateQueries({ queryKey: qkSettings.teamOnePasswordRefs(teamId) });
-    },
-  });
-}
-
-// ── Mutations ────────────────────────────────────────────────────────────
 
 export function useUploadMyAvatar() {
   const qc = useQueryClient();
@@ -505,6 +485,18 @@ export function teamCreateQueryKeys() {
   return [qkSettings.teams(), qkAssistants.list()] as const;
 }
 
+export function useJoinSuggestedTeam() {
+  const qc = useQueryClient();
+  return useMutation<JoinSuggestedTeamResponse, Error, string>({
+    mutationFn: (teamId) => api.joinSuggestedTeam(teamId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.suggestedTeams() });
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
+      qc.invalidateQueries({ queryKey: qkAssistants.list() });
+    },
+  });
+}
+
 export function useCreateTeam() {
   const qc = useQueryClient();
   return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
@@ -645,6 +637,8 @@ export function useSaveGithubAppCredential() {
     mutationFn: (body) => api.postGithubAppCredential(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
+      qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
+      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -655,6 +649,8 @@ export function useRefreshGithubApp() {
     mutationFn: () => api.refreshGithubApp(),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
+      qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
+      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -665,6 +661,8 @@ export function useDeleteGithubApp() {
     mutationFn: () => api.deleteGithubApp(),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
+      qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
+      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -701,6 +699,7 @@ export function useSaveSlackCredential() {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
     },
   });
 }
@@ -711,6 +710,7 @@ export function useDeleteSlackApp() {
     mutationFn: () => api.deleteCredential("slack", { scope: "org" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
     },
   });
 }

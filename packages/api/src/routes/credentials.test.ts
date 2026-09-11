@@ -4,14 +4,14 @@
  * validation 400s for malformed bodies; unauth 401s (same pattern as
  * `plugins.test.ts` — flip `VALET_LOCAL_AUTH` off for one request).
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { contentSources, orgMembers, users } from "../schema/index.js";
+import { contentSources, credentials, orgMembers, users } from "../schema/index.js";
 import { createContentSource } from "../services/content-sources.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
-import { addMember, createTeam } from "../services/teams.js";
+import { addMember, createTeam, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { startSlackFixture, type SlackFixture } from "../test-helpers/slack-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
 
@@ -665,7 +665,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
 
   // One op:// grammar for the write path, the sandbox broker, and the team
   // grant. A reference this route stores must be one a team admin can grant,
-  // or a stored row can never be leased to a team.
+  // so stored references and broker references accept the same grammar.
   it("a reference with too few segments 400s, so every stored ref is grantable", async () => {
     api = await bootTestApi();
     const fake = new FakeOnePasswordService();
@@ -700,7 +700,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     });
     expect(put.status).toBe(400);
     expect(await put.json()).toEqual({
-      error: "onepassword.tokenScope must be org or personal",
+      error: "onepassword.tokenScope must be org, personal, or team",
     });
   });
 
@@ -1010,6 +1010,67 @@ describe("team credential scope (TKAI-205)", () => {
     await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
     return team;
   }
+
+  it("creates a team token once and refuses concurrent replacement", async () => {
+    const team = await teamWithMember();
+    const baseUrl = api!.baseUrl;
+    const write = (token: string, headers = HEADERS) => fetch(`${baseUrl}/api/credentials/demo`, {
+      method: "PUT", headers,
+      body: JSON.stringify({ scope: "team", teamId: team.id, type: "api_key", apiKey: token, createOnly: true }),
+    });
+    expect((await write("member", MEMBER_HEADERS)).status).toBe(404);
+    const responses = await Promise.all([write("one"), write("two")]);
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
+    const winner = responses[0].status === 200 ? "one" : "two";
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "demo"))
+      .toMatchObject({ apiKey: winner });
+    expect((await write("replacement")).status).toBe(409);
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "demo"))
+      .toMatchObject({ apiKey: winner });
+    const list = await fetch(`${baseUrl}/api/credentials?scope=team&teamId=${team.id}`);
+    expect(await list.text()).not.toContain(winner === "one" ? '"apiKey":"one"' : '"apiKey":"two"');
+  });
+
+  it("omits complete access and refresh token sentinels from direct team responses", async () => {
+    const team = await teamWithMember();
+    if (!api) throw new Error("API not booted");
+    const sentinels = { accessToken: "team-access-SENTINEL-714c", refreshToken: "team-refresh-SENTINEL-d65e" };
+    const put = await fetch(`${api.baseUrl}/api/credentials/demo`, {
+      method: "PUT", headers: HEADERS,
+      body: JSON.stringify({ scope: "team", teamId: team.id, type: "oauth2", createOnly: true, ...sentinels }),
+    });
+    expect(put.status).toBe(200);
+    const list = await fetch(`${api.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: MEMBER_HEADERS });
+    expect(list.status).toBe(200);
+    const publicOutput = `${await put.text()} ${await list.text()}`;
+    const storedRows = await api.providers.db.select().from(credentials).where(eq(credentials.ownerId, team.id));
+    for (const sentinel of Object.values(sentinels)) {
+      expect(publicOutput).not.toContain(sentinel);
+      expect(JSON.stringify(storedRows)).not.toContain(sentinel);
+    }
+    expect(await api.providers.engineCredentials.get({ type: "team", id: team.id }, "demo")).toMatchObject(sentinels);
+  });
+
+  it("preserves legacy team replacement without changing the original connection date", async () => {
+    const team = await teamWithMember();
+    if (!api) throw new Error("API not booted");
+    const owner = { type: "team" as const, id: team.id };
+    await api.providers.engineCredentials.save(owner, "demo", {
+      type: "oauth2", accessToken: "old-access", refreshToken: "old-refresh", scopes: ["old-scope"], metadata: { old: true },
+    });
+    await api.providers.db.update(credentials).set({ createdAt: 123 }).where(eq(credentials.ownerId, team.id));
+    const response = await fetch(`${api.baseUrl}/api/credentials/demo`, {
+      method: "PUT", headers: HEADERS,
+      body: JSON.stringify({ scope: "team", teamId: team.id, type: "api_key", apiKey: "replacement-sentinel" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await api.providers.engineCredentials.get(owner, "demo")).toMatchObject({
+      type: "api_key", apiKey: "replacement-sentinel", accessToken: undefined, refreshToken: undefined, scopes: undefined, metadata: undefined,
+    });
+    const [row] = await api.providers.db.select().from(credentials).where(eq(credentials.ownerId, team.id));
+    expect(row?.createdAt).toBe(123);
+    expect(row?.updatedAt).toBeGreaterThan(123);
+  });
 
   it("lets a member read team scope and refuses a non-admin PUT with 404", async () => {
     const team = await teamWithMember();
@@ -1562,6 +1623,53 @@ describe("team credential scope (TKAI-205)", () => {
       slack = fixture;
       process.env.VALET_SLACK_API_BASE = fixture.url;
     }
+
+    // Exercise the existing provider-validation await; this adds no Slack setup flow.
+    it.each(["remove", "demote", "org-demote", "org-remove", "delete-team"].flatMap((change) =>
+      [true, false].map((createOnly) => ({ change, createOnly })),
+    ))(
+      "refuses direct writing with createOnly=$createOnly when $change occurs during validation", async ({ change, createOnly }) => {
+        const team = await teamWithMember([slackDeclaration]);
+        if (!api) throw new Error("API not booted");
+        const app = api;
+        const orgAdmin = change.startsWith("org-");
+        if (orgAdmin) {
+          await app.providers.db.update(orgMembers).set({ role: "admin" }).where(eq(orgMembers.userId, "test-member"));
+        } else {
+          await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "admin" });
+        }
+        const fixture = startSlackFixture();
+        useFixture(fixture);
+        const actualFetch = globalThis.fetch;
+        let revoked = false;
+        const validation = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+          const url = input instanceof Request ? input.url : String(input);
+          if (url === `${fixture.url}/auth.test`) {
+            if (change === "remove") await removeMember(app.providers.db, { teamId: team.id, userId: "test-member" });
+            if (change === "demote") await setRole(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+            if (change === "org-demote") await app.providers.db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.userId, "test-member"));
+            if (change === "org-remove") await app.providers.db.delete(orgMembers).where(eq(orgMembers.userId, "test-member"));
+            if (change === "delete-team") await deleteTeam(app.providers.db, { teamId: team.id });
+            revoked = true;
+          }
+          return actualFetch(input, init);
+        });
+        try {
+          const response = await fetch(`${app.baseUrl}/api/credentials/slack`, {
+            method: "PUT", headers: MEMBER_HEADERS,
+            body: JSON.stringify({ type: "bot_token", accessToken: "rejected-SENTINEL-862e", scope: "team", teamId: team.id, createOnly }),
+          });
+          expect(revoked).toBe(true);
+          expect(response.status).toBe(404);
+          const body = await response.text();
+          expect(body).toContain("Team access changed");
+          expect(body).not.toContain("rejected-SENTINEL-862e");
+          expect(await app.providers.db.select().from(credentials).where(eq(credentials.ownerId, team.id))).toEqual([]);
+        } finally {
+          validation.mockRestore();
+        }
+      },
+    );
 
     it("rejects a token Slack rejects, naming the fix, and stores nothing", async () => {
       const team = await teamWithMember([slackDeclaration]);

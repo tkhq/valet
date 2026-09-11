@@ -1,3 +1,4 @@
+import { deleteTeamApiKey } from "../services/team-resource-deletion.js";
 /**
  * Team-scoped `vlt_` keys (TKAI-396). Create, list, and revoke live on
  * `/api/teams/:id/api-keys`. The better-auth `apikey` table stays; `{ teamId,
@@ -175,17 +176,6 @@ teamApiKeysRouter.delete("/:id/api-keys/:keyId", async (c) => {
   const { db } = c.var.providers;
   const teamId = c.req.param("id");
   const keyId = c.req.param("keyId");
-  const team = await getTeamInOrg(db, user.orgId, teamId);
-  if (!team || !(await canAdministerTeam(db, teamId, user.id))) {
-    return c.json({ error: "team not found" }, 404);
-  }
-
-  // The delete is scoped to the team in the same statement, so a key that
-  // another team owns is never touched, whatever the earlier read said.
-  const deleted = await db
-    .delete(apikey)
-    .where(and(eq(apikey.id, keyId), eq(apikey.teamId, teamId)))
-    .returning({ id: apikey.id });
-  if (deleted.length === 0) return c.json({ error: "api key not found" }, 404);
+  await deleteTeamApiKey(db, { orgId: user.orgId, userId: user.id }, teamId, keyId);
   return c.json({ ok: true as const });
 });

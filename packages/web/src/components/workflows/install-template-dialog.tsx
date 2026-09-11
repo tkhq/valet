@@ -38,6 +38,7 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { describeCadence } from "./cadence";
 import {
   isInstallable,
+  requirementLabel,
   missingNote,
   missingServices,
   unconfiguredNote,
@@ -95,10 +96,12 @@ export function InstallTemplateDialog({
   template,
   open,
   onOpenChange,
+  checkingPrerequisites = false,
 }: {
   template: WorkflowTemplateSummary;
   open: boolean;
   onOpenChange: (next: boolean) => void;
+  checkingPrerequisites?: boolean;
 }) {
   const navigate = useNavigate();
   const install = useInstallTemplate();
@@ -153,7 +156,7 @@ export function InstallTemplateDialog({
             {template.requires.map((req) => (
               <span key={req.service} className="flex items-center gap-1.5">
                 <ServiceIcon slug={req.service} label={displayName(req.service)} size="sm" />
-                <span className="text-xs text-muted">{displayName(req.service)}</span>
+                <span className="text-xs text-muted">{requirementLabel(req)}</span>
               </span>
             ))}
           </div>
@@ -246,12 +249,13 @@ export function InstallTemplateDialog({
           <Button
             onClick={() => void submit()}
             disabled={
+              checkingPrerequisites ||
               install.isPending ||
               !installable ||
               hasEmptyRequired(template.inputs, values, scheduled)
             }
           >
-            {install.isPending ? "Installing…" : "Install"}
+            {checkingPrerequisites ? "Checking access…" : install.isPending ? "Installing…" : "Install"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -190,3 +190,35 @@ To make the choice real, both of these must land: add `"team"` to `CredentialOwn
 - Org-owned OAuth connects.
 - Per-org OAuth client configuration UI (env-only for confidential clients this phase).
 - Slack OAuth (v2 bot-token entry stands until the Slack channel work lands).
+
+
+## Team account connections (2026-09-10)
+
+Team admins and org admins can connect an OAuth account from team Integrations.
+The consent dialog explains that team members can use the granted permissions.
+Use a dedicated account when the provider supports one. OAuth does not create
+an independent service identity or prove that an account is a bot.
+
+The existing connect route accepts `scope=team&teamId=...`. Signed state binds
+both the team and organization to the connecting user. Start and callback check
+team admin access in that organization. The callback checks again after token
+exchange, under the team deletion lock. An insert-only write refuses an occupied
+service slot, including concurrent callbacks. Tokens use the existing encryption
+and refresh paths; personal credentials remain unchanged.
+
+Both MCP registration with PKCE and configured authorization-code providers use
+this path. Personal identity links, including Slack user identities, are refused.
+GitHub retains its App and token flows. Organization OAuth is outside this change.
+The callback returns to the selected team. If access is lost, the error remains
+visible in Personal. Services with missing deployment OAuth configuration cannot
+start token entry. A failed workflow resync reports that the connection was saved
+and directs the user to retry sync.
+
+Validation covers both provider modes, encrypted team storage, personal isolation,
+revoked admin access, team deletion, callback user mismatch, concurrent callbacks,
+personal identity refusal, team token refresh, and consent and workspace feedback.
+Provider fixtures test protocol handling only. Live provider authorization, secret
+resolution, and inbound delivery require configured accounts in the local demo.
+
+
+Team credential saves recheck authority inside the write transaction after provider validation. The transaction holds the team ownership lock and shared locks on the team and membership rows. Role changes and member removal cannot commit between that check and the credential write. This applies to OAuth callbacks and direct token writes. Personal credential storage keeps its existing behavior.

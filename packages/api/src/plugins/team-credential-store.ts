@@ -17,7 +17,6 @@
  */
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { onePasswordMeta } from "../services/onepassword.js";
-import { refsFromGrantRow } from "../services/team-onepassword-grant.js";
 
 function rowSecret(credential: StoredCredential): string | undefined {
   const value = credential.accessToken ?? credential.apiKey;
@@ -63,11 +62,9 @@ export class TeamCredentialStore implements CredentialStore {
     if (rowSecret(row)) return row;
     const from = delegatedFrom(row);
     if (!from) {
-      // Empty stub (no secret, no delegation). A 1Password reference still
-      // needs to reach `resolveRow`. The team's leased `op://` set lives on
-      // the reserved `onepassword` row as `metadata.refs` and must surface
-      // so grant reads are not always empty.
-      if (onePasswordMeta(row) || refsFromGrantRow(row).length > 0) return row;
+      // Only a stored reference needs resolution. Obsolete grant-only rows
+      // are empty stubs; metadata.refs no longer controls access.
+      if (onePasswordMeta(row)) return row;
       return null;
     }
 

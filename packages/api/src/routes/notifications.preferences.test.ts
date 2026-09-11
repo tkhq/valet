@@ -17,14 +17,14 @@ afterEach(async () => {
 });
 
 describe("GET /api/notifications/preferences", () => {
-  it("reports all four kinds as web-enabled by default", async () => {
+  it("reports all five kinds as web-enabled by default", async () => {
     api = await bootTestApi();
 
     const res = await fetch(`${api.baseUrl}/api/notifications/preferences`);
     expect(res.status).toBe(200);
     const { preferences } = (await res.json()) as ListNotificationPreferencesResponse;
 
-    expect(preferences.map((p) => p.kind).sort()).toEqual(["approval", "escalation", "notification", "question"]);
+    expect(preferences.map((p) => p.kind).sort()).toEqual(["approval", "escalation", "notification", "question", "review"]);
     expect(preferences.every((p) => p.web === true)).toBe(true);
   });
 });

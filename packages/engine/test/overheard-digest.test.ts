@@ -253,6 +253,22 @@ describe("overheard digest: queue coalescing", () => {
     faux.unregister();
   });
 
+  it("preserves the digest actor and never merges different actors", async () => {
+    const faux = registerFauxProvider({ provider: "digest-actor" });
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+    const a = await thread.submitPrompt(overheardSignal({ body: "A" }), { author: { id: "a" } });
+    const b = await thread.submitPrompt(overheardSignal({ body: "B" }), { author: { id: "b" } });
+    expect((await store.getQueueItem(session.id, a.queueItemId))?.status).toBe("queued");
+    const digest = await thread.submitPrompt(overheardSignal({ body: "B again" }), { author: { id: "b" } });
+    expect((await store.getQueueItem(session.id, a.queueItemId))?.status).toBe("queued");
+    expect((await store.getQueueItem(session.id, b.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+    expect((await store.getQueueItem(session.id, digest.queueItemId))?.author).toEqual({ id: "b" });
+    faux.unregister();
+  });
+
   it("keeps multiple settlements independent next to coalesced overheard chatter", async () => {
     const faux = registerFauxProvider({ provider: "settlement-no-merge" });
     faux.setResponses([]);

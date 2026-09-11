@@ -432,7 +432,7 @@ describe("content sources service", () => {
     await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
     const source = await createContentSource(db, owner("u1"), { repo: "tkhq/ours", teamId: team.id });
 
-    expect(await deleteContentSource(db, owner("u2"), source.id)).toBe(false);
+    await expect(deleteContentSource(db, owner("u2"), source.id)).rejects.toMatchObject({ code: "team_admin_required", teamId: team.id });
     expect(await ownedContentSourceRow(db, owner("u1"), source.id)).not.toBeNull();
   });
 

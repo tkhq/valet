@@ -20,6 +20,8 @@ export interface FollowedThreadRow extends FollowedThreadKey {
   ownerType: "user" | "team" | "org";
   ownerId: string;
   createdBy: string;
+  /** A team re-mention must keep the original conversation binding. */
+  preserveBinding?: boolean;
   /** Provider ts of the message that bound the follow (the mention), so the
    * router's gap re-hydration has a starting point before the first overheard
    * delivery. Absent → tracking starts at the first delivery. */
@@ -33,7 +35,7 @@ export interface FollowedThreadRow extends FollowedThreadKey {
 /** Bind a thread to an owner's assistant. Idempotent on `(org, channel, thread)`. */
 export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): Promise<void> {
   const now = Date.now();
-  await db
+  const insert = db
     .insert(followedThreads)
     .values({
       id: randomUUID(),
@@ -48,29 +50,30 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       lastActivityAt: now,
       lastSeenTs: row.lastSeenTs ?? null,
       assistantId: row.assistantId ?? null,
-    })
-    .onConflictDoUpdate({
-      target: [
-        followedThreads.orgId,
-        followedThreads.channelType,
-        followedThreads.channelId,
-        followedThreads.threadTs,
-      ],
-      // `createdBy` too: it is the actor the follow-router runs the assistant
-      // session as, so a re-bind by a different owner must carry the new
-      // binder's actor, not the first one's. `assistantId` follows the same
-      // rule — a re-bind by a rule naming a different assistant re-points the
-      // thread, and a rule naming none resets it to the owner's default.
-      // `lastSeenTs` is deliberately NOT in the update set: a re-mention on an
-      // already-followed thread must not rewind the router's gap tracking.
-      set: {
-        ownerType: row.ownerType,
-        ownerId: row.ownerId,
-        createdBy: row.createdBy,
-        assistantId: row.assistantId ?? null,
-        lastActivityAt: now,
-      },
     });
+  const target = [followedThreads.orgId, followedThreads.channelType,
+    followedThreads.channelId, followedThreads.threadTs];
+  if (row.preserveBinding) {
+    await insert.onConflictDoNothing({ target });
+    return;
+  }
+  await insert.onConflictDoUpdate({
+    target,
+    // `createdBy` too: it is the actor the follow-router runs the assistant
+    // session as, so a re-bind by a different owner must carry the new
+    // binder's actor, not the first one's. `assistantId` follows the same
+    // rule — a re-bind by a rule naming a different assistant re-points the
+    // thread, and a rule naming none resets it to the owner's default.
+    // `lastSeenTs` is deliberately NOT in the update set: a re-mention on an
+    // already-followed thread must not rewind the router's gap tracking.
+    set: {
+      ownerType: row.ownerType,
+      ownerId: row.ownerId,
+      createdBy: row.createdBy,
+      assistantId: row.assistantId ?? null,
+      lastActivityAt: now,
+    },
+  });
 }
 
 /** The follow record for a thread, or `null` when the thread is not followed. */

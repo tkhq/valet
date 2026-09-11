@@ -16,8 +16,7 @@
  *      `plugins/action-invoker.ts`.
  *   2. The team has a credential row for it that resolves: a direct row with
  *      a secret, a delegated reference whose delegator is still on the
- *      team and still connected, or a 1Password reference inside the
- *      team's lease that a configured client turns into a secret.
+ *      team and still connected, or a 1Password reference that a configured client turns into a secret.
  *      `credentials.list` returns a row after any of those lapses, so each
  *      hit is read back the way a run reads it
  *      (`services/credential-resolution.ts#resolveTeamCredentialRead`,
@@ -25,7 +24,9 @@
  *   3. The service is in `orgProvidedServiceSet` (an org-mode connection
  *      every member already rides).
  *   4. Every tool node naming that service pins `credential: "app"` and
- *      `loadAppConfig` reports a configured GitHub App.
+ *      the organization has an active App installation. A literal owner
+ *      must match; a repository supplied later is verified during template
+ *      installation before GitHub event subscriptions are written.
  *   5. Every unpinned github node (no `credential`, or `"auto"`) has an App
  *      installation to act through: the one for the node's literal `owner`
  *      parameter, or the org's sole one
@@ -33,12 +34,10 @@
  *      team branch of the invoker's github provider, which tries the team
  *      row first and then the installation. A `"user"` pin stays on the
  *      team row: it never reaches an installation.
- *   6. An org-scoped 1Password item resolves for the service. A team run
- *      that finds no row falls through to `lookupInOnePassword` on the org
- *      scope (`services/credential-resolution.ts#resolveTeamCredentialRead`),
- *      so the same lookup answers here, and only when a 1Password client is
- *      configured. The personal scope is never consulted: a team run has no
- *      actor whose vault it may borrow (`onePasswordScopesFor("team")`).
+ *   6. A 1Password item resolves through the same lookup as a team run.
+ *      A configured team token is authoritative, including misses and errors.
+ *      Only an absent team token permits org discovery. Personal scope is
+ *      never consulted.
  *
  * Before condition 6 the predicate asks `connectModeFor` with the
  * team as owner, as the invoker does before it reads a credential. A
@@ -69,7 +68,6 @@ import {
   onePasswordScopesFor,
   resolveTeamCredentialRead,
 } from "../services/credential-resolution.js";
-import { loadAppConfig } from "../services/github-app.js";
 import { installationResolvesFor, isUsableGithubUserRow } from "../services/github-tokens.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { connectModeFor, findCredentialDeclaration, orgProvidedServiceSet } from "../services/integration-availability.js";
@@ -104,6 +102,7 @@ export interface UnverifiableWorkflowCall {
 
 export interface TeamServiceReadiness {
   ready: string[];
+  organizationProvided?: string[];
   blocked: BlockedTeamService[];
   unverifiable: UnverifiableWorkflowCall[];
 }
@@ -207,8 +206,7 @@ function credentialFreeServices(plugins: ValetPlugin[]): Set<string> {
  * What a listed team row is worth. `resolves` is a row a run can use.
  * `broken` is a delegated reference whose delegator left the team or lost
  * the source row. `refused` is a row the run's read rejects with a typed
- * message: a 1Password reference outside the team's lease, or one no
- * client can dereference. `empty` is a stub with no secret and no
+ * message: a 1Password reference no client can dereference. `empty` is a stub with no secret and no
  * delegation, which gates like no row at all so an org-provided service is
  * not blocked by it.
  */
@@ -217,8 +215,7 @@ type TeamRowState = { kind: "resolves" } | { kind: "broken" } | { kind: "refused
 /**
  * The row read the way a team run reads it, stopped at the team row
  * (`orgFallback: "none"`): the org-provided fallback and the vault search
- * are separate conditions below, each with its own reason. The lease and
- * the scope rule apply here as they do on the run, so a reference the run
+ * are separate conditions below, each with its own reason. The scope rule applies here as they do on the run, so a reference the run
  * would refuse on every fire is blocked with the message the run gives.
  */
 async function teamRowState(
@@ -231,13 +228,13 @@ async function teamRowState(
   try {
     row = await resolveTeamCredentialRead(
       deps,
-      { orgId, teamId, userId: "", scopes: onePasswordScopesFor("team") },
+      { orgId, teamId, userId: "", scopes: onePasswordScopesFor("team", teamId) },
       service,
       "none",
     );
   } catch (err) {
     if (err instanceof CredentialReferenceBrokenError) return { kind: "broken" };
-    // A lease or scope refusal, a missing or disabled token: the run gives
+    // A scope refusal, a missing or disabled token: the run gives
     // the same answer on every fire, so the trigger stays off with that
     // message. An SDK or network failure is transient and must not disarm
     // anything: it propagates so the sync defers the file to its next pass.
@@ -280,10 +277,8 @@ function literalRepoOwner(params: Record<string, unknown>): string | undefined {
  * `"auto"`: ready when every one of them has an installation to act
  * through. Otherwise the first node without one decides. An App that is
  * present but cannot pick an installation for the node gets a reason that
- * names the mismatch; no App, or an App with no installation recorded yet
- * (the table fills on the first run or on "Refresh installations"), is
- * the plain "connect" state and carries no reason of its own. A `"user"`
- * pin is not answered here, so the caller keeps looking.
+ * names the mismatch. Missing App configuration or installations point to
+ * organization setup. A `"user"` pin stays on the team credential path.
  */
 async function unpinnedGithubGate(
   deps: TeamServiceReadinessDeps,
@@ -298,7 +293,7 @@ async function unpinnedGithubGate(
     switch (resolution.gap) {
       case "no_app":
       case "no_installations":
-        return { ready: false };
+        return { ready: false, reason: "An admin can set up or refresh the organization GitHub App in Settings → Organization → GitHub." };
       case "no_installation_for_owner":
         return {
           ready: false,
@@ -364,11 +359,37 @@ export async function teamServiceReadiness(
   const teamServices = new Set(teamRows.map((row) => row.service));
 
   const ready: string[] = [];
+  const organizationProvided: string[] = [];
   const blocked: BlockedTeamService[] = [];
   for (const service of services) {
     if (credentialFree.has(service)) {
       ready.push(service);
       continue;
+    }
+    const forService = nodes.filter((node) => node.service === service);
+    const appNodes = forService.filter((node) => node.credential === "app");
+    // App pins never borrow a team token, including mixed App/user definitions.
+    if (appNodes.length > 0) {
+      if (appNodes.length === forService.length) organizationProvided.push(service);
+      let appReady = true;
+      for (const node of appNodes) {
+        const result = await installationResolvesFor(
+          { db: deps.db, credentials: deps.credentials, env }, opts.orgId, literalRepoOwner(node.params),
+          { strictOwner: true, dynamicOwner: typeof node.params.owner === "string" && node.params.owner.includes("{{") },
+        );
+        if (!result.ok) {
+          appReady = false;
+          break;
+        }
+      }
+      if (!appReady) {
+        blocked.push({ service, reason: "The organization GitHub App needs an active installation for this workflow. An admin can configure or refresh installations in Settings → Organization → GitHub." });
+        continue;
+      }
+      if (appNodes.length === forService.length) {
+        ready.push(service);
+        continue;
+      }
     }
     if (teamServices.has(service)) {
       const state = await teamRowState(
@@ -396,23 +417,8 @@ export async function teamServiceReadiness(
       }
     }
     if (orgProvided.has(service)) {
+      organizationProvided.push(service);
       ready.push(service);
-      continue;
-    }
-    const forService = nodes.filter((node) => node.service === service);
-    const allApp = forService.length > 0 && forService.every((node) => node.credential === "app");
-    if (allApp) {
-      const app = await loadAppConfig({ credentials: deps.credentials, env }, opts.orgId);
-      if (app) {
-        ready.push(service);
-        continue;
-      }
-      blocked.push({
-        service,
-        reason:
-          `${service} pins the GitHub App, but this organization has no App configured. ` +
-          `An admin sets it up in Settings → Organization.`,
-      });
       continue;
     }
     // Condition 5. Only github reaches an installation: the invoker routes
@@ -421,15 +427,20 @@ export async function teamServiceReadiness(
     // is. The gap is held rather than reported: a vault item titled
     // `github` still answers an unpinned node, as it does on the run.
     let unpinnedReason: string | undefined;
+    let needsOrganizationGithub = false;
     if (service === "github") {
       const unpinned = forService.filter((node) => node.credential === undefined || node.credential === "auto");
       const userPinned = forService.some((node) => node.credential === "user");
       const gate = unpinned.length > 0 ? await unpinnedGithubGate(deps, opts.orgId, unpinned) : { ready: true as const };
       if (gate.ready && !userPinned) {
+        organizationProvided.push(service);
         ready.push(service);
         continue;
       }
-      if (!gate.ready) unpinnedReason = gate.reason;
+      if (!gate.ready && !userPinned) {
+        unpinnedReason = gate.reason;
+        needsOrganizationGithub = true;
+      }
     }
     // The invoker refuses a service whose org prerequisite is missing
     // before it reads any credential (`plugins/action-invoker.ts`), so a
@@ -459,20 +470,29 @@ export async function teamServiceReadiness(
     // credential row at all. `userId` is empty for the same reason the
     // run's is: no member is the actor of a team run.
     if (deps.onePassword) {
-      const fromVault = await lookupInOnePassword(
-        { credentials: deps.credentials, onePassword: deps.onePassword },
-        { orgId: opts.orgId, userId: "", scopes: onePasswordScopesFor("team") },
-        service,
-      );
-      if (fromVault) {
-        ready.push(service);
+      try {
+        const fromVault = await lookupInOnePassword(
+          { credentials: deps.credentials, onePassword: deps.onePassword },
+          { orgId: opts.orgId, teamId: opts.teamId, userId: "", scopes: onePasswordScopesFor("team", opts.teamId) },
+          service,
+        );
+        if (fromVault) {
+          ready.push(service);
+          continue;
+        }
+      } catch (err) {
+        blocked.push({ service, reason: err instanceof OnePasswordAuthError
+          ? `${err.message} Check this team's 1Password connection.`
+          : "1Password lookup failed. Check this team's 1Password connection." });
         continue;
       }
     }
+    // Recommend the App only after existing team and vault options fail.
+    if (needsOrganizationGithub) organizationProvided.push(service);
     blocked.push({
       service,
       reason: unpinnedReason ?? `Connect ${service} for this team.`,
     });
   }
-  return { ready, blocked, unverifiable };
+  return { ready, blocked, unverifiable, ...(organizationProvided.length > 0 ? { organizationProvided } : {}) };
 }

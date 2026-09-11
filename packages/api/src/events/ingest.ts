@@ -8,7 +8,8 @@ import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
-import { subscriptionMatchesEvent, subscriptionNamesKey } from "./match.js";
+import { subscriptionNamesKey } from "./match.js";
+import { authorizedSubscriptionMatchesEvent } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
 export interface IngestDeps {
@@ -110,7 +111,10 @@ export async function ingestEvent(
     .select()
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
-  const matched = subs.filter((sub) => subscriptionMatchesEvent(sub, event.key, event.payload, catalog));
+  const matched: typeof subs = [];
+  for (const sub of subs) {
+    if (await authorizedSubscriptionMatchesEvent(deps.db, sub, event.key, event.payload, catalog)) matched.push(sub);
+  }
   if (matched.length === 0) {
     // If a subscription NAMES this key but every one filtered this occurrence
     // out, record it so "my trigger didn't fire" is answerable. An event no

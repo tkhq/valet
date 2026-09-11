@@ -31,6 +31,7 @@
  * workflows. Two installs of a batch template with different parameters is
  * the intended use, so refusing the second would be wrong.
  */
+import { githubAppRepositoryAccess } from "../services/github-app.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray, like, or } from "drizzle-orm";
 import type { ActionPlugin, CredentialOwner, CredentialStore, ValetPlugin, WorkflowTemplate } from "@valet/engine";
@@ -100,6 +101,8 @@ export interface TemplateServiceDeps {
   /** The 1Password client a team run resolves through, so a team install
    * is gated on the same vault lookup. Absent on a deployment without one. */
   onePassword?: OnePasswordService;
+  /** Provider seam for the exact repository installation check. */
+  github?: { apiUrl?: string; fetchImpl?: typeof fetch };
 }
 
 /** A template plus what contributed it, so every message can name the place
@@ -461,6 +464,7 @@ export function templateCaveats(
 // ─── Summaries ───────────────────────────────────────────────────────────
 
 export interface SummarizeResult {
+  githubEvents: boolean;
   summary: WorkflowTemplateSummary;
   definition: WorkflowDefinition;
 }
@@ -492,6 +496,7 @@ export function summarizeTemplate(
   return {
     ok: true,
     value: {
+      githubEvents: owned.template.events?.some((event) => event.eventKeys.some((key) => key.startsWith("github."))) ?? false,
       definition,
       summary: {
         id: owned.template.id,
@@ -661,7 +666,7 @@ export async function listWorkflowTemplateSummaries(
   // it than the tool nodes stays correct here.
   const readinessBySignature = new Map<string, Promise<TeamServiceReadiness>>();
   const summaries: WorkflowTemplateSummary[] = [];
-  for (const { summary, definition } of listed) {
+  for (const { summary, definition, githubEvents } of listed) {
     const signature = readinessSignature(definition);
     const pending =
       readinessBySignature.get(signature) ??
@@ -683,6 +688,9 @@ export async function listWorkflowTemplateSummaries(
       byService.set(service, {
         service,
         connected,
+        ...(readiness.organizationProvided?.includes(toolService) ? { organizationProvided: true as const } : {}),
+        ...(toolService === "github" && githubEvents
+          ? { repositoryCheckOnInstall: true as const } : {}),
         ...(dynamic ? { dynamic: true } : {}),
         ...(unavailable.has(service) ? { unconfigured: true } : {}),
       });
@@ -1146,6 +1154,28 @@ export async function installWorkflowTemplate(
       };
     }
     subscriptions.push({ name, eventKeys: event.eventKeys, filters: write.filters });
+  }
+
+  if (teamId !== undefined) {
+    // Webhook delivery needs the organization's App even when tool nodes use
+    // a team token. Verify exact repo installation before writing any rows.
+    const repositories = new Set<string>();
+    for (const subscription of subscriptions) {
+      if (!subscription.eventKeys.some((key) => key.startsWith("github."))) continue;
+      const repoFilter = subscription.filters.find((filter) => filter.field === "repo" && filter.op === "eq");
+      if (!repoFilter || typeof repoFilter.value !== "string") {
+        return { ok: false, code: "invalid_input", error: "Choose an exact repository for this team's GitHub trigger.", errors: ["A repository equality filter is required."] };
+      }
+      repositories.add(repoFilter.value);
+    }
+    for (const repository of repositories) {
+      try {
+        if (await githubAppRepositoryAccess({ credentials: deps.credentials, ...deps.github }, owner.orgId, repository)) continue;
+      } catch {
+        return { ok: false, code: "not_connected", error: "Could not verify organization GitHub App repository access. Retry before installing this template." };
+      }
+      return { ok: false, code: "not_connected", error: `The organization GitHub App is not installed or is suspended on ${repository}. An admin must grant it repository access in Settings → Organization → GitHub, then install this template.` };
+    }
   }
 
   let workflowName = owned.template.name;

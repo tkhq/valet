@@ -21,7 +21,6 @@ import { Link } from "@tanstack/react-router";
 import type { WorkflowTemplateSummary } from "@valet/api/wire";
 import { Button, Spinner } from "~/components/primitives";
 import { ServiceIcon } from "~/components/service-icon";
-import { displayName } from "~/components/integrations/display-name";
 import { useWorkflowTemplates } from "~/api/templates";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { InstallTemplateDialog } from "./install-template-dialog";
@@ -29,13 +28,15 @@ import { describeCadence } from "./cadence";
 import {
   connectLabel,
   isInstallable,
+  requirementLabel,
   missingServices,
+  needsOrganizationGithubSetup,
   unconfiguredNote,
   unconfiguredServices,
 } from "./template-requirements";
 
 export function TemplateGallery() {
-  const { data, isLoading, error } = useWorkflowTemplates();
+  const { data, isLoading, isFetching, error } = useWorkflowTemplates();
   const templates = data?.templates ?? [];
 
   if (isLoading) {
@@ -66,13 +67,13 @@ export function TemplateGallery() {
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       {templates.map((template) => (
-        <TemplateCard key={template.id} template={template} />
+        <TemplateCard key={template.id} template={template} refreshing={isFetching} />
       ))}
     </div>
   );
 }
 
-function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
+function TemplateCard({ template, refreshing }: { template: WorkflowTemplateSummary; refreshing?: boolean }) {
   const [open, setOpen] = useState(false);
   const missing = missingServices(template.requires);
   const unconfigured = unconfiguredServices(template.requires);
@@ -87,13 +88,10 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
               grey already means "built in, nothing to connect" on the
               integrations page. */}
           {template.requires.map((req) => (
-            <ServiceIcon
-              key={req.service}
-              slug={req.service}
-              label={displayName(req.service)}
-              size="sm"
-              className={req.connected ? undefined : "opacity-40"}
-            />
+            <span key={req.service} className="flex items-center gap-1.5">
+              <ServiceIcon slug={req.service} label={requirementLabel(req)} size="sm" className={req.connected ? undefined : "opacity-40"} />
+              {(req.organizationProvided || req.repositoryCheckOnInstall) && <span className="text-xs text-muted">{requirementLabel(req)}</span>}
+            </span>
           ))}
         </div>
       )}
@@ -120,9 +118,14 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
               What it does
             </Button>
           )}
+          {scope.teamId !== undefined && needsOrganizationGithubSetup(template.requires) && (
+            <Button size="sm" variant="secondary" asChild>
+              <Link to="/settings/organization/github">Organization GitHub settings</Link>
+            </Button>
+          )}
           {ready ? (
-            <Button size="sm" onClick={() => setOpen(true)}>
-              Use template
+            <Button size="sm" disabled={refreshing} onClick={() => setOpen(true)}>
+              {refreshing ? "Checking access…" : "Use template"}
             </Button>
           ) : missing.length > 0 ? (
             <Button size="sm" variant="secondary" asChild>
@@ -144,7 +147,7 @@ function TemplateCard({ template }: { template: WorkflowTemplateSummary }) {
 
       {/* Mounted only while open, so every open starts from the declared
           defaults with no error left over from a previous attempt. */}
-      {open && <InstallTemplateDialog template={template} open onOpenChange={setOpen} />}
+      {open && <InstallTemplateDialog template={template} open onOpenChange={setOpen} checkingPrerequisites={refreshing} />}
     </div>
   );
 }

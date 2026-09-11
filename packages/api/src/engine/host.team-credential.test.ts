@@ -21,7 +21,7 @@ import { githubTokenArgsForOwner, isUsableGithubRow } from "../services/session-
 import { agentSessions, orgs } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { createAssistant } from "../assistants/service.js";
-import type { OnePasswordService } from "../services/onepassword.js";
+import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 
 const orgId = "team-cred-org";
 const userId = "team-cred-user";
@@ -292,6 +292,7 @@ describe("EngineHost team-owned session credentials", () => {
       findCandidates: async () => [],
       findCredentialForService: async (scope, _ctx, service) => {
         tried.push(scope);
+        if (scope === "team") throw new OnePasswordAuthError("No team token", "no_token");
         return scope === "org" && service === "openai" ? "sk-org-vault" : null;
       },
     };
@@ -317,8 +318,8 @@ describe("EngineHost team-owned session credentials", () => {
     const cred = await session.credentialProvider().get("openai");
 
     expect(cred?.accessToken).toBe("sk-org-vault");
-    // Org scope only: a shared session never searches the actor's personal vault.
-    expect(tried).toEqual(["org"]);
+    // An absent team token permits org discovery, never personal discovery.
+    expect(tried).toEqual(["team", "org"]);
   });
 
   it("team OpenAI does not read the prompting member's key when no org or team row exists", async () => {

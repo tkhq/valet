@@ -15,9 +15,11 @@ export const Route = createFileRoute("/settings")({
 export function SettingsLayout() {
   const { teamId, key } = useWorkspaceScope();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const settings = pathname === "/settings" || pathname.startsWith("/settings/");
   const organization = pathname === "/settings/organization" || pathname.startsWith("/settings/organization/");
   // Do not mount a personal form under a team label, even for one render.
-  const redirectTo = teamId !== undefined && !organization && !isTeamSettingsPath(pathname)
+  // The layout can still render while navigation leaves settings.
+  const redirectTo = settings && teamId !== undefined && !organization && !isTeamSettingsPath(pathname)
     ? TEAM_SETTINGS_PATH
     : teamId === undefined && pathname === TEAM_SETTINGS_PATH
       ? "/settings/profile"

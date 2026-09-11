@@ -10,6 +10,10 @@ import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js
 import { findFollowedThread, upsertFollowedThread } from "../events/followed-threads.js";
 import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 
+import { eq } from "drizzle-orm";
+import { teams, teamMembers, orgMembers } from "../schema/index.js";
+import { deliverToAssistantThread } from "../events/assistant-delivery.js";
+
 const ORG = "org-1";
 const USER = "user-1";
 
@@ -58,6 +62,7 @@ describe("handleFollowedMessage", () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
+    await appDb.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
     engineHost = new EngineHost({
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
@@ -73,6 +78,75 @@ describe("handleFollowedMessage", () => {
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
+  });
+
+  it.each(["removed", "foreign-org", "org-removed"])("denies a team follow with %s membership before fetching context", async (mode) => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: mode === "foreign-org" ? "other-org" : ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: USER, lastSeenTs: "1.3",
+    });
+    if (mode === "removed") await testDb.appDb.delete(teamMembers).where(eq(teamMembers.teamId, "team-follow"));
+    if (mode === "org-removed") {
+      await testDb.appDb.delete(orgMembers).where(eq(orgMembers.orgId, ORG));
+      await testDb.appDb.insert(orgMembers).values({ orgId: "other-org", userId: USER, role: "admin" });
+      expect(await testDb.appDb.select().from(teamMembers).where(eq(teamMembers.teamId, "team-follow"))).toHaveLength(1);
+    }
+    const fetchThreadWindow = vi.fn(async () => null);
+    const ensure = vi.spyOn(engineHost, "ensureFreshThread");
+    await handleFollowedMessage({ db: testDb.appDb, engineHost, fetchThreadWindow }, {
+      orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "reply" }),
+    });
+    expect(fetchThreadWindow).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    expect((await findFollowedThread(testDb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" }))?.lastSeenTs).toBe("1.3");
+  });
+
+  it("keeps the live team follow actor when a different sender replies", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: USER,
+    });
+    const deps = { db: testDb.appDb, engineHost, botUserId: "UBOT" };
+    await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
+      type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "OTHER", text: "<@OTHERBOT> reply",
+    }) });
+    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: USER, orgId: ORG });
+    await vi.waitFor(async () => {
+      const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
+      expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: USER }, signal: { origin: { reply: "manual" } } });
+    });
+  });
+
+  it.each([true, false])("paired Slack envelopes produce one addressed turn (message first=%s)", async (messageFirst) => {
+    const deps = { db: testDb.appDb, engineHost, botUserId: "UBOT" };
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "user", ownerId: USER, createdBy: USER,
+    });
+    const session = await defaultAssistantSessionFor(deps, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+    const message = () => handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
+      type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "<@UBOT> help",
+    }, "EvMessage") });
+    const mention = () => deliverToAssistantThread(deps, {
+      orgId: ORG, owner: { type: "user", id: USER }, actorUserId: USER, threadKey: "slack:C1:1.2",
+      signal: { kind: "signal", signalType: "slack.app_mention", body: "help", origin: { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.7", reply: "auto" } },
+      dispatchId: "event:mention-delivery", mismatchReason: "test",
+    });
+    if (messageFirst) { await message(); await mention(); }
+    else { await mention(); await message(); }
+    await message();
+    await mention();
+    const thread = session.thread("slack:C1:1.2");
+    await vi.waitFor(async () => {
+      const entries = await session.providers.store.getEntries(session.id, thread.id);
+      const prompts = entries.filter((e) => e.type === "message" && e.role === "user");
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toMatchObject({ signal: { origin: { reply: "auto" } } });
+    });
   });
 
   it("routes a followed threaded message to the bound assistant thread as an overheard signal", async () => {

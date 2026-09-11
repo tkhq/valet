@@ -453,7 +453,7 @@ describe("buildActionInvoker", () => {
   // Discovery reads the credential before any try/catch the invoker has. A
   // lease refusal raised there must come back as a failed result that names
   // the fix, not as a rejected promise the workflow node reports bare.
-  it("team-owned run: a lease refusal during resolveActions returns the typed error", async () => {
+  it("team-owned run: obsolete grants do not block action discovery", async () => {
     const store = new FakeCredentialStore();
     store.seed({ type: "team", id: "t1" }, "onepassword", {
       type: "service_account",
@@ -480,9 +480,8 @@ describe("buildActionInvoker", () => {
       { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
     );
 
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && "error" in result ? result.error : "").toContain("Ask a team admin");
-    expect(dynamicAction.calls()).toBe(0);
+    expect(result.ok).toBe(true);
+    expect(dynamicAction.calls()).toBe(1);
   });
 
   it("team-owned run: an unknown action reports the typo, not a missing credential", async () => {

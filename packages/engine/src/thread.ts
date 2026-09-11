@@ -672,7 +672,7 @@ export class Thread {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey),
+          this.coalesceQueuedOverheard(coalesceKey, item.author?.id),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
@@ -703,7 +703,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, actorId?: string): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -713,6 +713,7 @@ export class Thread {
           i.status === "queued" &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
+          i.author?.id === actorId &&
           overheardCoalesceKey(i.content) === coalesceKey,
       )
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -724,6 +725,7 @@ export class Thread {
       replyTarget: newest.replyTarget,
       model: newest.model,
       role: newest.role,
+      author: newest.author,
       metadata: { overheardDigest: digest },
     });
     const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
@@ -4564,7 +4566,8 @@ export class Thread {
     const origin =
       runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
     return {
-      userId: session.options.userId,
+      // Author is persisted with the submission; session credentials stay fixed.
+      userId: this.runningItem?.author?.id ?? session.options.userId,
       orgId: session.options.orgId,
       sessionId: session.id,
       threadId: this.id,

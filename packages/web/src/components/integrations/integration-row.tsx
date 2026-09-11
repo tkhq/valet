@@ -35,6 +35,7 @@ import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
+import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
@@ -131,7 +132,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
   const single = plugin.services.length === 1 ? plugin.services[0] : undefined;
 
   return (
-    <div className="flex flex-col rounded-lg border border-line bg-paper p-4 transition-shadow hover:shadow-sm">
+    <IntegrationCard>
       {single ? (
         <ServiceBlock
           service={single}
@@ -167,7 +168,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
           )}
         </>
       )}
-    </div>
+    </IntegrationCard>
   );
 }
 
@@ -186,42 +187,6 @@ export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
       <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">
         built in
       </span>
-    </div>
-  );
-}
-
-function CardHeading({
-  title,
-  slug,
-  description,
-  state,
-}: {
-  title: string;
-  slug: string;
-  description?: string;
-  state?: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-start gap-3">
-      <ServiceIcon slug={slug} label={title} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium text-ink">{title}</span>
-          {state}
-        </div>
-        {description && (
-          <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">{description}</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function CardFooter({ meta, right }: { meta?: string | null; right?: React.ReactNode }) {
-  return (
-    <div className="mt-auto flex items-center justify-between gap-3 pt-4">
-      <span className="font-mono text-xs text-muted">{meta ?? ""}</span>
-      {right}
     </div>
   );
 }

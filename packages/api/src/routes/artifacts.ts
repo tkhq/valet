@@ -21,26 +21,25 @@
  * Share authorization is READ-level (`resolveScope(c, "read")`): sharing
  * needs no more authority than reading, because a reader can already copy
  * the content anywhere. Managing an existing artifact (widen/revoke/pin)
- * requires being its sharer or an org admin.
+ * requires being its sharer or an org admin. Team ownership requires live
+ * membership on reads, comments, lists, and management, regardless of visibility.
  */
 import { Hono, type Context } from "hono";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { ValetAuth } from "../auth/index.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 import { resolveOrgId } from "../lib/org.js";
 import { agentSessions, users } from "../schema/index.js";
-import { requireUser, resolveOptionalIdentity, type AuthUser, type RequestIdentity } from "../middleware/auth.js";
+import { requireActingUser, requirePrincipal, requireUser, resolveOptionalIdentity, type AuthUser, type RequestIdentity } from "../middleware/auth.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
-import { getTeamInOrg, isTeamMember } from "../services/teams.js";
 import { canViewSession } from "../services/session-access.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
-import type { MemoryScope } from "../services/memory.js";
 import {
   addArtifactComment,
   copyArtifactToTeam,
@@ -49,6 +48,7 @@ import {
   getArtifactById,
   getArtifactByToken,
   getArtifactComment,
+  hasArtifactTeamAccess,
   listArtifactComments,
   listArtifacts,
   listArtifactsForOwner,
@@ -62,6 +62,7 @@ import {
   setArtifactSharedVersion,
   setArtifactVisibility,
   shareArtifact,
+  type ArtifactScope,
   type ArtifactCommentRow,
   type ArtifactRow,
   type ArtifactSummaryRow,
@@ -120,6 +121,7 @@ function toListItem(c: Context<AppEnv>, row: ArtifactSummaryRow): ArtifactListIt
     token: row.token,
     url: shareUrl(c, row.token),
     visibility: row.visibility,
+    ownerType: row.ownerType,
     actorUserId: row.actorUserId,
     revoked: row.revokedAt !== null,
     createdAt: row.createdAt,
@@ -209,9 +211,12 @@ async function loadCommentContext(
   const { user } = caller;
   const allowPublic =
     artifact.visibility === "public" ? await getAllowPublicArtifacts(db, artifact.orgId) : false;
-  const access = decideArtifactAccess({ artifact, allowPublicArtifacts: allowPublic, user });
+  const access = decideArtifactAccess({
+    artifact, allowPublicArtifacts: allowPublic, user,
+    teamMember: await hasArtifactTeamAccess(db, artifact, user),
+  });
   if (access.kind === "not_found") return { error: c.json({ error: "not found" }, 404) };
-  if (!mayComment(artifact, user)) {
+  if (access.kind !== "serve" || !mayComment(artifact, user)) {
     return {
       error: c.json(
         { error: "Comments need a logged-in member of the organization this page belongs to." },
@@ -236,7 +241,7 @@ async function canSendToSourceSession(
   const rows = await db
     .select()
     .from(agentSessions)
-    .where(eq(agentSessions.id, artifact.sourceSessionId))
+    .where(and(eq(agentSessions.id, artifact.sourceSessionId), eq(agentSessions.orgId, artifact.orgId)))
     .limit(1);
   const row = rows[0];
   if (!row) return { ok: false };
@@ -304,7 +309,10 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
     const allowPublic =
       artifact.visibility === "public" ? await getAllowPublicArtifacts(db, artifact.orgId) : false;
 
-    const access = decideArtifactAccess({ artifact, allowPublicArtifacts: allowPublic, user });
+    const access = decideArtifactAccess({
+      artifact, allowPublicArtifacts: allowPublic, user,
+      teamMember: await hasArtifactTeamAccess(db, artifact, user),
+    });
     if (access.kind === "not_found") {
       return c.json({ error: "not found" }, 404);
     }
@@ -335,6 +343,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       icon: artifact.icon,
       version: served.version,
       visibility: artifact.visibility,
+      ownerType: artifact.ownerType,
       updatedAt: artifact.updatedAt,
       ...(sharedBy !== undefined ? { sharedBy } : {}),
       canComment: mayComment(artifact, user),
@@ -481,9 +490,11 @@ artifactsRouter.post("/copy-to-team", async (c) => {
 });
 
 artifactsRouter.post("/share", async (c) => {
-  let scope: MemoryScope;
+  let scope: ArtifactScope;
   try {
-    scope = await resolveScope(c, "read");
+    const resolved = await resolveScope(c, "read");
+    // Only the verified internal-token branch lacks a request principal.
+    scope = { ...resolved, principal: requirePrincipal(c) ?? resolved.owner };
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -504,10 +515,11 @@ artifactsRouter.post("/share", async (c) => {
 
   const { db } = c.var.providers;
   try {
+    const orgId = await orgIdForShare(c, db);
     if (body.revoke === true) {
       // `key` and `path` share the publish-key namespace, so one revoke
       // path serves both shapes.
-      await revokeArtifactByPath(db, scope, hasPath ? body.path! : body.key!);
+      await revokeArtifactByPath(db, scope, hasPath ? body.path! : body.key!, orgId);
       return c.json({ ok: true });
     }
 
@@ -515,7 +527,7 @@ artifactsRouter.post("/share", async (c) => {
     if (hasPath) {
       row = await shareArtifact(db, scope, {
         path: body.path!,
-        orgId: await orgIdForShare(c, db),
+        orgId,
         sourceSessionId: c.req.header("x-valet-session-id"),
       });
     } else {
@@ -529,7 +541,7 @@ artifactsRouter.post("/share", async (c) => {
         title: typeof body.title === "string" ? body.title : undefined,
         description: typeof body.description === "string" ? body.description : undefined,
         icon: typeof body.icon === "string" ? body.icon : undefined,
-        orgId: await orgIdForShare(c, db),
+        orgId,
         sourceSessionId: c.req.header("x-valet-session-id"),
       });
     }
@@ -566,13 +578,13 @@ function truthyQuery(value: string | undefined): boolean {
 }
 
 artifactsRouter.get("/", async (c) => {
-  const user = requireUser(c);
+  const user = requireActingUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
   const { db } = c.var.providers;
 
   // Owner filter (team dashboard design): `?ownerType=team&ownerId=<id>`
-  // lists that team's artifacts, member-gated (org admins pass, the same
-  // rule every team read applies). Non-members get 404 (existence-hiding).
+  // lists that team's artifacts. All callers need current membership.
+  // Non-members get 404 (existence-hiding).
   const ownerType = c.req.query("ownerType");
   const ownerId = c.req.query("ownerId");
   const mine = truthyQuery(c.req.query("mine"));
@@ -609,10 +621,7 @@ artifactsRouter.get("/", async (c) => {
     if (ownerType === "user") {
       if (ownerId !== user.id) return c.json({ error: "owner not found" }, 404);
     } else {
-      const team = await getTeamInOrg(db, user.orgId, ownerId);
-      const allowed = team && (
-        (await isTeamMember(db, ownerId, user.id)) || (await isOrgAdmin(db, user.orgId, user.id))
-      );
+      const allowed = await hasArtifactTeamAccess(db, { ownerType, ownerId, orgId: user.orgId }, user);
       if (!allowed) return c.json({ error: "owner not found" }, 404);
     }
     const limitParam = c.req.query("limit");
@@ -658,7 +667,7 @@ async function loadManagedArtifact(
 ): Promise<{ row: ArtifactRow } | { error: Response }> {
   const { db } = c.var.providers;
   const row = await getArtifactById(db, c.req.param("id"));
-  if (!row || row.orgId !== user.orgId) {
+  if (!row || row.orgId !== user.orgId || !(await hasArtifactTeamAccess(db, row, user))) {
     return { error: c.json({ error: "not found" }, 404) };
   }
   if (row.actorUserId !== user.id && !(await isOrgAdmin(db, user.orgId, user.id))) {
@@ -668,7 +677,7 @@ async function loadManagedArtifact(
 }
 
 artifactsRouter.get("/:id/versions", async (c) => {
-  const user = requireUser(c);
+  const user = requireActingUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
 
   const loaded = await loadManagedArtifact(c, user);
@@ -681,7 +690,7 @@ artifactsRouter.get("/:id/versions", async (c) => {
 });
 
 artifactsRouter.patch("/:id", async (c) => {
-  const user = requireUser(c);
+  const user = requireActingUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
 
   let body: PatchArtifactRequest;
@@ -710,6 +719,9 @@ artifactsRouter.patch("/:id", async (c) => {
   if ("error" in loaded) return loaded.error;
 
   const { db } = c.var.providers;
+  if (body.visibility === "public" && loaded.row.ownerType === "team") {
+    return c.json({ error: "Team artifacts require team membership. Share the link with members of the owning team." }, 400);
+  }
   if (body.visibility === "public" && !(await getAllowPublicArtifacts(db, user.orgId))) {
     return c.json(
       {
@@ -737,7 +749,7 @@ artifactsRouter.patch("/:id", async (c) => {
 });
 
 artifactsRouter.delete("/:id", async (c) => {
-  const user = requireUser(c);
+  const user = requireActingUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
 
   const loaded = await loadManagedArtifact(c, user);

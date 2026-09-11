@@ -115,7 +115,7 @@ describe("TeamCredentialStore", () => {
     await expect(store.get(team, "slack")).resolves.toBeNull();
   });
 
-  it("returns a team 1Password grant row that has no secret", async () => {
+  it("ignores an obsolete team grant row without a token", async () => {
     const inner = makeStore({
       "team:team_1:onepassword": {
         type: "service_account",
@@ -127,9 +127,7 @@ describe("TeamCredentialStore", () => {
         throw new Error("grant rows must not check membership");
       },
     });
-    await expect(store.get(team, "onepassword")).resolves.toMatchObject({
-      metadata: { refs: ["op://Shared/Acme/credential"] },
-    });
+    await expect(store.get(team, "onepassword")).resolves.toBeNull();
   });
 
   it("returns a 1Password reference row that has no secret yet", async () => {
