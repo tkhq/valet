@@ -48,6 +48,8 @@ export type AgentStatus =
 export interface StreamMessage extends Message {
   /** Client-only rows stay until REST confirms the same message or queue item. */
   persistence?: "optimistic" | "streaming";
+  /** Next canonical row seen when this client-only row first needs reconciliation. */
+  restAnchor?: { id: string; createdAt: number };
   settledOutcome?: SettledOutcome;
   /**
    * Reason for a non-clean `settledOutcome`, taken from the wire event's
@@ -846,35 +848,127 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const slice = ensure(state, sessionId);
       const others = slice.messages.filter((message) => message.threadId !== threadId);
       const current = slice.messages.filter((message) => message.threadId === threadId);
-      const freshIds = new Set(freshMessages.map((message) => message.id));
-      const freshQueueItemIds = new Set(
-        freshMessages.flatMap((message) => message.queueItemId ? [message.queueItemId] : []),
+      const freshIndexById = new Map(
+        freshMessages.map((message, index) => [message.id, index]),
       );
-      const freshUserContents = new Set(
-        freshMessages.filter((message) => message.role === "user").map((message) => message.content),
-      );
-      const isConfirmedOptimisticUser = (message: StreamMessage): boolean => {
-        if (message.persistence !== "optimistic" || message.role !== "user") return false;
-        if (message.queueItemId) return freshQueueItemIds.has(message.queueItemId);
-        return freshUserContents.has(message.content);
+      const freshUserIndexesByQueueItem = new Map<string, number[]>();
+      const freshUserIndexesByContent = new Map<string, number[]>();
+      for (let index = 0; index < freshMessages.length; index++) {
+        const message = freshMessages[index];
+        if (message.role !== "user") continue;
+        const contentIndexes = freshUserIndexesByContent.get(message.content) ?? [];
+        contentIndexes.push(index);
+        freshUserIndexesByContent.set(message.content, contentIndexes);
+        if (message.queueItemId) {
+          const queueIndexes = freshUserIndexesByQueueItem.get(message.queueItemId) ?? [];
+          queueIndexes.push(index);
+          freshUserIndexesByQueueItem.set(message.queueItemId, queueIndexes);
+        }
+      }
+      const usedFreshIndexes = new Set<number>();
+      const queueCursor = new Map<string, number>();
+      const contentCursor = new Map<string, number>();
+      const takeIndex = (
+        indexes: number[] | undefined,
+        key: string,
+        cursors: Map<string, number>,
+      ): number | undefined => {
+        if (!indexes) return undefined;
+        let cursor = cursors.get(key) ?? 0;
+        while (cursor < indexes.length && usedFreshIndexes.has(indexes[cursor])) cursor++;
+        cursors.set(key, cursor + 1);
+        return indexes[cursor];
       };
+      const freshIndexFor = (message: StreamMessage): number | undefined => {
+        const idIndex = freshIndexById.get(message.id);
+        if (idIndex !== undefined) {
+          usedFreshIndexes.add(idIndex);
+          return idIndex;
+        }
+        if (message.persistence !== "optimistic" || message.role !== "user") return undefined;
+        const index = message.queueItemId
+          ? takeIndex(
+              freshUserIndexesByQueueItem.get(message.queueItemId),
+              message.queueItemId,
+              queueCursor,
+            )
+          : takeIndex(
+              freshUserIndexesByContent.get(message.content),
+              message.content,
+              contentCursor,
+            );
+        if (index !== undefined) usedFreshIndexes.add(index);
+        return index;
+      };
+
+      const matchedFreshIndexes = current.map(freshIndexFor);
+      // Record the next canonical row once. The anchor survives snapshots that
+      // omit that row, so a later reconciliation cannot cement the local row
+      // at the bottom of newer history. A confirmed optimistic row contributes
+      // its canonical REST identity.
+      let nextCanonical: StreamMessage | undefined;
+      const anchoredCurrent = [...current];
+      for (let index = anchoredCurrent.length - 1; index >= 0; index--) {
+        const message = anchoredCurrent[index];
+        const matchedIndex = matchedFreshIndexes[index];
+        if (message.persistence === undefined) {
+          nextCanonical = message;
+        } else if (matchedIndex !== undefined) {
+          nextCanonical = freshMessages[matchedIndex];
+        } else if (!message.restAnchor && nextCanonical) {
+          anchoredCurrent[index] = {
+            ...message,
+            restAnchor: { id: nextCanonical.id, createdAt: nextCanonical.createdAt },
+          };
+        }
+      }
       const overlap = hasMore
-        ? current.findIndex((message) => freshIds.has(message.id))
+        ? anchoredCurrent.findIndex((message) => freshIndexById.has(message.id))
         : -1;
-      const prefix = overlap >= 0 ? current.slice(0, overlap) : [];
-      const afterTail = overlap >= 0 ? current.slice(overlap) : current;
-      const transient = afterTail.filter(
-        (message) =>
-          message.persistence !== undefined &&
-          !freshIds.has(message.id) &&
-          !isConfirmedOptimisticUser(message),
+      const prefix = overlap >= 0 ? anchoredCurrent.slice(0, overlap) : [];
+      const afterTailStart = overlap >= 0 ? overlap : 0;
+      const afterTail = overlap >= 0 ? anchoredCurrent.slice(overlap) : anchoredCurrent;
+      const beforeFresh = Array.from(
+        { length: freshMessages.length + 1 },
+        (): StreamMessage[] => [],
       );
+      const unresolved: StreamMessage[] = [];
+      for (let index = 0; index < afterTail.length; index++) {
+        const message = afterTail[index];
+        if (matchedFreshIndexes[afterTailStart + index] !== undefined) continue;
+        if (message.persistence === undefined) continue;
+        const anchorIndex = message.restAnchor
+          ? freshIndexById.get(message.restAnchor.id)
+          : undefined;
+        if (anchorIndex !== undefined) beforeFresh[anchorIndex].push(message);
+        else unresolved.push(message);
+      }
+
+      // Anchors and REST rows are chronological. One forward cursor places
+      // missing anchors before the first newer row without a per-row search.
+      let freshCursor = 0;
+      for (const message of unresolved) {
+        if (message.restAnchor) {
+          while (
+            freshCursor < freshMessages.length &&
+            freshMessages[freshCursor].createdAt < message.restAnchor.createdAt
+          ) freshCursor++;
+          beforeFresh[freshCursor].push(message);
+        } else {
+          beforeFresh[freshMessages.length].push(message);
+        }
+      }
+      const mergedTail: StreamMessage[] = [];
+      for (let index = 0; index < freshMessages.length; index++) {
+        mergedTail.push(...beforeFresh[index], freshMessages[index]);
+      }
+      mergedTail.push(...beforeFresh[freshMessages.length]);
       return {
         bySession: {
           ...state.bySession,
           [sessionId]: {
             ...slice,
-            messages: [...others, ...prefix, ...freshMessages, ...transient],
+            messages: [...others, ...prefix, ...mergedTail],
           },
         },
       };

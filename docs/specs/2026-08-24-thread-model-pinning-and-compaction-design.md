@@ -352,7 +352,11 @@ It replaces the overlapping suffix with the REST tail. If no row overlaps,
 the tail replaces the thread. The store keeps only rows marked `optimistic`
 or `streaming` after that tail. REST confirmation
 removes a client row with the same message id or queue item id. A complete
-response replaces canonical rows for the thread.
+response replaces canonical rows for the thread. The merge records the next canonical
+row ID and timestamp on each client-only row. This anchor survives REST snapshots
+that omit the canonical row. If the ID is absent, the timestamp places the row
+before newer canonical history. The merge indexes IDs, queue items, and user
+content, then uses forward scans. Reconciliation is linear in stored and fresh rows.
 
 ## Out of scope
 

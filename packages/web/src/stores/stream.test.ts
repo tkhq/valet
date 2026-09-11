@@ -740,7 +740,7 @@ describe("active model state", () => {
 describe("setThreadMessages", () => {
   beforeEach(reset);
 
-  function restMessage(id: string): Message {
+  function restMessage(id: string, createdAt = 1): Message {
     return {
       id,
       sessionId: SESSION,
@@ -748,7 +748,7 @@ describe("setThreadMessages", () => {
       role: "assistant",
       content: id,
       parts: [{ kind: "text", text: id }],
-      createdAt: 1,
+      createdAt,
     };
   }
 
@@ -837,6 +837,97 @@ describe("setThreadMessages", () => {
     });
     const afterDelta = useStreamStore.getState().bySession[SESSION].messages;
     expect(afterDelta.find((m) => m.id === "asst-1")?.content).toBe("hello");
+  });
+
+  it("keeps a superseded streaming message before the prompt that replaced it", () => {
+    const { addUserMessage, ingest, setMessageQueueItemId, setThreadMessages } =
+      useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("m1")]);
+    ingest(SESSION, messageStart("superseded-assistant", 2));
+    const successorId = addUserMessage(SESSION, "replace that", THREAD);
+    setMessageQueueItemId(SESSION, successorId, "q-successor");
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("m1"),
+      {
+        id: "successor-user",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "user",
+        content: "replace that",
+        parts: [{ kind: "text", text: "replace that" }],
+        createdAt: 3,
+        queueItemId: "q-successor",
+      },
+    ]);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map((message) => message.id)).toEqual(
+      ["m1", "superseded-assistant", "successor-user"],
+    );
+  });
+
+  it("keeps an anchored transient before an advanced tail with no overlap", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("a", 1), restMessage("anchor", 3)]);
+    ingest(SESSION, messageStart("transient", 2));
+    useStreamStore.setState((state) => ({
+      bySession: {
+        ...state.bySession,
+        [SESSION]: {
+          ...state.bySession[SESSION],
+          messages: [
+            state.bySession[SESSION].messages[0],
+            state.bySession[SESSION].messages[2],
+            state.bySession[SESSION].messages[1],
+          ],
+        },
+      },
+    }));
+
+    setThreadMessages(SESSION, THREAD, [restMessage("c", 4), restMessage("d", 5)], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "transient",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("restores a transient before an anchor omitted by a stale snapshot", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("a", 1), restMessage("anchor", 3)]);
+    ingest(SESSION, messageStart("transient", 2));
+    useStreamStore.setState((state) => ({
+      bySession: {
+        ...state.bySession,
+        [SESSION]: {
+          ...state.bySession[SESSION],
+          messages: [
+            state.bySession[SESSION].messages[0],
+            state.bySession[SESSION].messages[2],
+            state.bySession[SESSION].messages[1],
+          ],
+        },
+      },
+    }));
+
+    setThreadMessages(SESSION, THREAD, [restMessage("a", 1)], true);
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "a",
+      "transient",
+    ]);
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("a", 1),
+      restMessage("anchor", 3),
+      restMessage("new", 4),
+    ]);
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "a",
+      "transient",
+      "anchor",
+      "new",
+    ]);
   });
 
   it("does not reorder the prefix when a stale tail follows message_start", () => {
