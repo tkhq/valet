@@ -626,7 +626,7 @@ describe("SandboxAttachment.reconcile", () => {
   });
 
   it("image drift → new epoch, create with the new image, steps re-applied", async () => {
-    const provider = new RecordingProvider();
+    const provider = new RecordingProvider({ release: true });
     const applied: string[] = [];
     const mkSteps = () => [
       step("s1", "sh1", async () => {
@@ -649,7 +649,8 @@ describe("SandboxAttachment.reconcile", () => {
     expect(provider.createImages).toEqual(["img:v1", "img:v2"]); // booted new image
     // The old sandbox teardown is fire-and-forget (void .catch()) — flush it.
     await new Promise((r) => setTimeout(r, 0));
-    expect(provider.destroyCalls).toEqual(["sb-1"]); // old sandbox released via destroy
+    expect(provider.releaseCalls).toEqual(["sb-1"]); // compute released; workspace retained
+    expect(provider.destroyCalls).toEqual([]);
     expect(applied).toEqual(["s1"]); // steps re-applied on the fresh container
     expect(att.observedImage()).toBe("img:v2");
     expect(att.state).toBe("ready");

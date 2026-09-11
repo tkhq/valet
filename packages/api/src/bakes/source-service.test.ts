@@ -1562,17 +1562,31 @@ describe("SourceService", () => {
 // ── pure helpers (ported) ────────────────────────────────────────────────
 
 describe("imageRefFor / slugify", () => {
-  it("slugifies configId/owner/repo into the valet-prebuild convention for docker", () => {
+  const commit = "abcdef1234567890abcdef1234567890abcdef12";
+
+  it("uses identity and commit prefixes in an OCI-valid bounded tag", () => {
     expect(slugify("Acme_Corp")).toBe("acme-corp");
-    expect(imageRefFor("docker", "cfg_ABC", "Acme Corp", "My Repo!", "abc123")).toBe(
-      "valet-prebuild/cfg-abc/acme-corp-my-repo:abc123",
+    const identity = "1".repeat(64);
+    const ref = imageRefFor("docker", "cfg_ABC", "Acme Corp", "My Repo!", commit, identity);
+    expect(ref).toBe(
+      `valet-prebuild/cfg-abc/acme-corp-my-repo:${identity.slice(0, 24)}-${commit.slice(0, 32)}`,
     );
+    const tag = ref.slice(ref.lastIndexOf(":") + 1);
+    expect(tag).toMatch(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/);
+    expect(tag.length).toBeLessThanOrEqual(128);
   });
 
-  it("kubernetes defaults to the bundled in-cluster registry host", () => {
-    expect(imageRefFor("kubernetes", "cfg1", "acme", "widgets", "abc123")).toBe(
-      `${DEFAULT_PREBUILD_REGISTRY_HOST}/cfg1/acme-widgets:abc123`,
+  it("changes at the same commit when parent or recipe identity changes", () => {
+    const refs = ["1", "2", "3"].map((value) =>
+      imageRefFor("kubernetes", "cfg1", "acme", "widgets", commit, value.repeat(64)),
     );
+    expect(new Set(refs).size).toBe(3);
+    expect(refs[0]).toMatch(new RegExp(`^${DEFAULT_PREBUILD_REGISTRY_HOST}/cfg1/acme-widgets:`));
+  });
+
+  it("hashes malformed values instead of injecting them into the tag", () => {
+    const ref = imageRefFor("docker", "cfg1", "acme", "widgets", "branch/:latest", "raw/:identity");
+    expect(ref).toMatch(/^valet-prebuild\/cfg1\/acme-widgets:[a-f0-9]{24}-[a-f0-9]{32}$/);
   });
 });
 

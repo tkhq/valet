@@ -231,7 +231,7 @@ describe("hash sensitivity", () => {
     expect(changedSteps["clone:acme/widget"]).toBe(baseSteps["clone:acme/widget"]);
   });
 
-  it("changing bakedSha changes specHash only when imageRef is different", () => {
+  it("a new content-addressed image ref changes the desired spec", () => {
     // Same imageRef, different bakedSha → step hashes identical → same specHash.
     const sameSha = computeSpec({
       ...snapWithRepoBake,
@@ -244,6 +244,7 @@ describe("hash sensitivity", () => {
       ...snapWithRepoBake,
       repoBake: { ...snapWithRepoBake.repoBake!, imageRef: "ghcr.io/acme/widget-bake:xyz" },
     });
+    expect(diffImage.image).toBe("ghcr.io/acme/widget-bake:xyz");
     expect(specHash(diffImage)).not.toBe(specHash(base));
   });
 });

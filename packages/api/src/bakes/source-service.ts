@@ -123,29 +123,30 @@ export function slugify(value: string): string {
  * kubernetes backend's caller doesn't supply `registryHost` explicitly. */
 export const DEFAULT_PREBUILD_REGISTRY_HOST = "valet-registry:5000";
 
-/**
- * `valet-prebuild/<sourceSlug>/<owner>-<repo>:<sha>` for docker;
- * `<registryHost>/<sourceSlug>/<owner>-<repo>:<sha>` for kubernetes. The
- * `<sourceSlug>` is a distinct segment in the REPOSITORY PATH (not the tag)
- * so two sources baking the same repo at the same sha get distinct
- * namespaces — see the retention dedup note. */
+/** Repository bake ref. The tag combines bounded prefixes of the existing
+ * content identity and commit. Invalid external values are hashed before use,
+ * so no repository or branch text can enter the OCI tag. */
 export function imageRefFor(
   backend: string,
   configId: string,
   owner: string,
   repo: string,
   sha: string,
+  identityHash: string,
   registryHost?: string,
 ): string {
   const path = `${slugify(configId)}/${slugify(owner)}-${slugify(repo)}`;
+  const safeIdentity = /^[a-f0-9]{24,}$/i.test(identityHash) ? identityHash : sha256Hex(identityHash);
+  const safeCommit = /^[a-f0-9]{6,64}$/i.test(sha) ? sha : sha256Hex(sha);
+  const tag = `${safeIdentity.slice(0, 24).toLowerCase()}-${safeCommit.slice(0, 32).toLowerCase()}`;
   switch (backend) {
     case "kubernetes": {
       const host = registryHost ?? DEFAULT_PREBUILD_REGISTRY_HOST;
-      return `${host}/${path}:${sha}`;
+      return `${host}/${path}:${tag}`;
     }
     case "docker":
     default:
-      return `valet-prebuild/${path}:${sha}`;
+      return `valet-prebuild/${path}:${tag}`;
   }
 }
 
@@ -1141,7 +1142,15 @@ export class SourceService {
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
-    const imageRef = imageRefFor(builder.backend, source.id, owner, repo, head.sha, this.env.VALET_PREBUILD_REGISTRY);
+    const imageRef = imageRefFor(
+      builder.backend,
+      source.id,
+      owner,
+      repo,
+      head.sha,
+      identity,
+      this.env.VALET_PREBUILD_REGISTRY,
+    );
     const now = this.now();
     const row: BakeRow = {
       id: newBakeId(this.newId),
