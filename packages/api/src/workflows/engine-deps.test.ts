@@ -26,7 +26,12 @@ afterEach(async () => {
   api = undefined;
 });
 
-async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<void> {
+async function seedRun(
+  a: TestApi,
+  runId: string,
+  workflowId: string,
+  identity: { name: string } = { name: "engine-deps-unit-test" },
+): Promise<void> {
   const { db, workflowStore } = a.providers;
   const now = Date.now();
   await db
@@ -36,7 +41,7 @@ async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<v
       orgId: LOCAL_ORG.id,
       ownerType: "user",
       ownerId: LOCAL_USER.id,
-      name: "engine-deps-unit-test",
+      name: identity.name,
       definition: { version: "dag/v1", nodes: [], edges: [] },
       createdAt: now,
       updatedAt: now,
@@ -99,6 +104,32 @@ describe("buildWorkflowEngineDeps: invokeAction", () => {
 
     expect(result).toEqual({ ok: true, result: { echoed: "hello", hasCredential: false } });
     expect(fixture.calls()).toBe(1);
+  });
+
+  it("passes the workflow identity to a tool action", async () => {
+    let sender: { displayName?: string } | undefined;
+    const action: PluginAction = {
+      id: "demo.sender",
+      name: "sender",
+      description: "sender",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        sender = await ctx.resolveOutboundSender?.();
+        return { success: true, data: {} };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [action] };
+    const plugin: ValetPlugin = { name: "demo", version: "0.0.1", actions: [actionPlugin] };
+    api = await bootTestApi({ plugins: [plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    const runId = "wfrun_workflow_sender";
+    await seedRun(api, runId, "wf_workflow_sender", { name: "Workflow digest" });
+
+    await deps.invokeAction({ service: "demo", action: "sender", params: {}, invocationId: `workflow:${runId}:node1` });
+
+    expect(sender).toEqual({ displayName: "Workflow digest" });
   });
 
   it("is idempotent by invocationId: a duplicate call executes the action ONCE and returns the identical original result", async () => {

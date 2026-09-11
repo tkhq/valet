@@ -103,7 +103,7 @@ describe("EngineHost outbound sender identity", () => {
     api = undefined;
   });
 
-  it("uses the current default assistant for a workflow session node", async () => {
+  it("uses the workflow identity instead of its owner assistant", async () => {
     api = await bootTestApi({ plugins: [] });
     const assistant = await createAssistant(api.providers.db, ORG, { type: "user", id: USER }, "Release bot");
     await api.providers.db
@@ -116,9 +116,10 @@ describe("EngineHost outbound sender identity", () => {
       orgId: ORG,
       owner: { type: "user", id: USER },
       workspace: "/tmp",
+      outboundSender: { displayName: "Workflow digest" },
     });
 
-    expect(await senderFor(session)).toEqual({ displayName: "Release bot", avatarUrl: AVATAR_URL });
+    expect(await senderFor(session)).toEqual({ displayName: "Workflow digest" });
   });
 
   it("uses the current parent assistant for a child-agent session", async () => {
@@ -161,17 +162,17 @@ describe("EngineHost outbound sender identity", () => {
       orgId: ORG,
       owner: { type: "user", id: USER },
       workspace: "/tmp",
+      outboundSender: { displayName: "Workflow digest" },
     });
 
     await expect(postThroughSession(session)).resolves.toMatchObject({
       channel: "C1",
       text: "from a workflow session",
-      username: "Release bot",
-      icon_url: AVATAR_URL,
+      username: "Workflow digest",
     });
   });
 
-  it("uses Slack's bot identity when the workflow session has no assistant", async () => {
+  it("uses the workflow name and Slack's app avatar", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     api = await bootTestApi({ plugins: [slackPlugin] });
@@ -182,11 +183,12 @@ describe("EngineHost outbound sender identity", () => {
       orgId: ORG,
       owner: { type: "user", id: USER },
       workspace: "/tmp",
+      outboundSender: { displayName: "Workflow digest" },
     });
 
     const body = await postThroughSession(session);
     expect(body).toMatchObject({ channel: "C1", text: "from a workflow session" });
-    expect(body.username).toBeUndefined();
+    expect(body.username).toBe("Workflow digest");
     expect(body.icon_url).toBeUndefined();
   });
 });
