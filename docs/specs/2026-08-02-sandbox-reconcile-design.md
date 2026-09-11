@@ -227,13 +227,17 @@ Logs that omit the push error cannot be classified. Counts survive API restarts 
 The bundled registry has a read-only filesystem probe on an internal ClusterIP service. It measures capacity on each request.
 `VALET_REGISTRY_HEALTH_URL` configures this probe. External registries can provide the same JSON protocol.
 The API limits probe requests to three seconds and rejects redirects. Malformed or unavailable configured probes produce `unknown` status.
-New bakes and sandbox-backed children fail before creation when configured capacity is full or unknown.
+New bakes fail before creation when configured capacity is full or unknown.
+Sandbox-backed children can continue when the normal startup resolver selects an existing repository bake, org base image, or configured stock image.
+The child task result includes a warning that new bakes are blocked. The API also logs this warning.
+If the resolver finds no startup image, child creation fails before it creates session state.
+The resolver uses the normal pull preflight and fallback rules. Image pulls can still fail later, as they can during normal startup.
 The bake endpoint returns HTTP 503 with `registry_full` or `registry_capacity_unknown`. The child tool receives the corrective error text.
-Local and virtual children do not need this admission check. Children that reuse existing images still receive the sandbox admission check.
+Local and virtual children do not need this admission check. Existing images do not bypass the guard for a new bake.
 Deployments without a probe retain admission behavior and report unconfigured capacity. Kubernetes deployments log this missing signal as storage pressure.
 
 The reserve is the greater of `VALET_REGISTRY_MIN_FREE_GB` (default 5 GB) and `VALET_REGISTRY_MIN_FREE_PERCENT` (default 10%).
-At or below this reserve, the API stops new admissions. The percentage must be greater than zero and less than 100.
+At or below this reserve, the API stops new bake admissions. Children with an existing startup image receive a warning. The percentage must be greater than zero and less than 100.
 The absolute reserve can be zero. Small registry volumes can use a lower absolute reserve while retaining percentage protection.
 This check does not reserve bytes for concurrent uploads. It does not stop builds already admitted or external registry writers.
 Operators must size the reserve for concurrent builds and monitor free bytes. This mechanism is not a filesystem quota.

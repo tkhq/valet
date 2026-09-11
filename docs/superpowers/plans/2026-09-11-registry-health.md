@@ -19,3 +19,10 @@ The disk reserve stops new admissions. It does not reserve space for in-flight u
 The health endpoint is GET /api/org/sources/health and requires org-admin access. Push failures use persisted push-error text within a one-hour window.
 Both retention paths share readCacheState protection. Tests cover live-session images, child creation without a repo, HTTP 503, and health authorization.
 The sandbox reconcile spec documents the response, reserve policy, unknown telemetry, and operator alert rules.
+
+
+## Existing-image admission revision
+
+Registry pressure blocks new bakes. Child admission uses the existing startup resolver before it creates state.
+An existing repository, base, or stock image permits startup with a warning in the task result and API log.
+No selected image retains the original fail-fast behavior. Tests cover full and unknown capacity, disabled sources, successful startup, and parent-visible warnings.

@@ -255,3 +255,11 @@ Team and org orchestrators have no meaningful legacy counterpart and launch v2-o
 Approval and escalation links include the originating thread. Workflow session nodes have no app session row, so their session links open an approval view instead of the standalone session viewer. The view uses the shared decision card and polls pending gates.
 
 Only decision-list, resolve, and withdraw endpoints accept these workflow sessions. They require an existing engine session, its run, a definition in the caller's organization, and current owner access. The workflow engine restores the session through its existing path. This does not grant prompt, sandbox, or session lifecycle access. Old workflow-session notification URLs reach the same view. A resolved gate shows an empty state with a link to the run.
+
+
+### Registry pressure during child startup
+
+The task result can include host startup warnings. The engine includes each warning in the parent-visible task response.
+If registry capacity blocks new bakes, child admission uses the normal repository, base, and stock image resolver.
+An existing startup image permits the child to start with a warning. If no image is selected, creation fails before it writes child state.
+This exception does not permit new image bakes. See the sandbox reconcile spec for capacity reporting and reserve settings.
