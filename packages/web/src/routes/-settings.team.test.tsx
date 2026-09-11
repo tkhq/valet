@@ -63,16 +63,16 @@ describe("settings workspace routing", () => {
     expect(directoryRead).not.toHaveBeenCalled();
   });
 
-  it.each(["/settings", "/settings/profile", "/settings/appearance", "/settings/assistant", "/settings/policies"])("does not mount personal forms at %s in team scope", (path) => {
+  it.each(["/settings/profile", "/settings/appearance", "/settings/assistant", "/settings/policies"])("keeps personal settings reachable at %s in team scope", (path) => {
     teamId = "team_1";
     pathname = path;
     render(<SettingsLayout />);
+    expect(screen.getByText("You")).toBeTruthy();
     expect(screen.getByText("Team")).toBeTruthy();
-    expect(screen.queryByRole("link", { name: "Profile" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Appearance" })).toBeNull();
-    expect(screen.getByRole("link", { name: "General" }).getAttribute("href")).toBe("/settings/team");
-    expect(screen.getByTestId("redirect").textContent).toBe("/settings/team");
-    expect(screen.queryByRole("button", { name: "Save personal" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Profile" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Appearance" })).toBeTruthy();
+    expect(screen.queryByTestId("redirect")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save personal" })).toBeTruthy();
   });
 
   it("keeps the workspace-aware API keys route reachable in both scopes", () => {
@@ -99,7 +99,7 @@ describe("settings workspace routing", () => {
     fireEvent.change(screen.getByLabelText("Personal draft"), { target: { value: "old personal draft" } });
     teamId = "team_1";
     view.rerender(<SettingsLayout />);
-    expect(screen.queryByLabelText("Personal draft")).toBeNull();
+    expect(screen.getByLabelText("Personal draft")).toHaveProperty("value", "");
     pathname = "/settings/team";
     view.rerender(<SettingsLayout />);
     expect(screen.getByText("team_1")).toBeTruthy();

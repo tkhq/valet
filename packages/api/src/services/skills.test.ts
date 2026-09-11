@@ -323,7 +323,7 @@ describe("listSkillSourcesFor", () => {
     expect(sources[0]?.content).toBe(BODY);
   });
 
-  it("returns only the team's own skills for a team principal", async () => {
+  it("returns team and org skills but excludes personal skills for a team principal", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
     await createSkill(db, owner("u1"), { name: "mine", description: "Personal.", content: BODY });
     await createSkill(db, owner("u1"), {
@@ -332,9 +332,26 @@ describe("listSkillSourcesFor", () => {
       content: BODY,
       teamId: team.id,
     });
+    await insertOrgSkill(db, "basic-code-review", "# Review\n");
 
     const sources = await listSkillSourcesFor(db, { type: "team", id: team.id }, ORG);
-    expect(sources.map((s) => s.name)).toEqual(["ours"]);
+    expect(sources.map((s) => s.name)).toEqual(["ours", "basic-code-review"]);
+    expect(sources.some((source) => source.name === "mine")).toBe(false);
+  });
+
+  it("lets a team's skill shadow an org skill of the same name", async () => {
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+    await createSkill(db, owner("u1"), {
+      name: "deploy",
+      description: "Shared.",
+      content: "# Team\n",
+      teamId: team.id,
+    });
+    await insertOrgSkill(db, "deploy", "# Org\n");
+
+    const sources = await listSkillSourcesFor(db, { type: "team", id: team.id }, ORG);
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.content).toBe("# Team\n");
   });
 
   it("drops the team copy when a personal skill claims the same name", async () => {

@@ -41,7 +41,8 @@ Does NOT cover: real login / identity providers (auth design pass, separate); in
 /settings/organization/teams    ORGANIZATION · Teams     (any org member + gate; amended 2026-08-28)
 ```
 
-- The rail shows two small-caps groups: **You** (always) and **Organization** (only when the feature gate is ON). Amended 2026-08-28: an org admin sees every Organization item; a plain member sees a one-item group (Teams). With the gate off, nobody sees the group — hidden, not disabled.
+- The rail always shows **You**. A selected team adds **Team** without replacing **You**. Team selection stays active when a person opens a personal or organization settings page. The layout redirects `/settings/team` to `/settings/profile` only when no selected team exists.
+- The rail shows **Organization** only when the feature gate is on. Amended 2026-08-28: an org admin sees every Organization item; a plain member sees Teams and 1Password. With the gate off, nobody sees the group.
 - With the gate OFF and the caller an org admin, the rail bottom shows the **enable card** ("Working with a team? Enable organizations") in place of the group.
 - Direct navigation to an org route the caller may not open renders a quiet empty state ("Organization settings are managed by your org admins" for a gate-on non-admin outside Teams; "Organizations aren't enabled" for gate-off) — never a crash, never a redirect loop. A failed org fetch with nothing cached renders a retry state instead of either message (the client must not claim the gate is off when it does not know).
 - `/integrations` is unchanged and stays in the top nav. The top-nav gear keeps linking to `/settings`.
