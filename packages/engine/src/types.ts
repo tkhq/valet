@@ -375,6 +375,8 @@ export interface BaseEntry {
   threadId: string;
   parentId: string | null;
   createdAt: number;
+  /** Store insertion order, used as the stable tie-break for equal timestamps. */
+  sequence?: number;
   metadata?: Record<string, unknown>;
   /** The submission that produced this entry — the transcript↔submission linkage. */
   queueItemId?: string;

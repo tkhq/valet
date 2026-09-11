@@ -49,9 +49,9 @@ export interface StreamMessage extends Message {
   /** Client-only rows stay until REST confirms the same message or queue item. */
   persistence?: "optimistic" | "streaming";
   /** Next canonical row seen when this client-only row first needs reconciliation. */
-  restAnchor?: { id: string; createdAt: number };
+  restAnchor?: { id: string; createdAt: number; sequence?: number };
   /** Prior canonical row, used when an equal-time snapshot omits the next row. */
-  restPreviousAnchor?: { id: string; createdAt: number };
+  restPreviousAnchor?: { id: string; createdAt: number; sequence?: number };
   settledOutcome?: SettledOutcome;
   /**
    * Reason for a non-clean `settledOutcome`, taken from the wire event's
@@ -925,6 +925,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
             restPreviousAnchor: {
               id: previousCanonical.id,
               createdAt: previousCanonical.createdAt,
+              sequence: previousCanonical.sequence,
             },
           };
         }
@@ -940,7 +941,11 @@ export const useStreamStore = create<StreamStore>((set) => ({
         } else if (!message.restAnchor && nextCanonical) {
           anchoredCurrent[index] = {
             ...message,
-            restAnchor: { id: nextCanonical.id, createdAt: nextCanonical.createdAt },
+            restAnchor: {
+              id: nextCanonical.id,
+              createdAt: nextCanonical.createdAt,
+              sequence: nextCanonical.sequence,
+            },
           };
         }
       }
@@ -979,15 +984,24 @@ export const useStreamStore = create<StreamStore>((set) => ({
         else unresolved.push(message);
       }
 
-      // Anchors and REST rows are chronological. One forward cursor places
-      // missing anchors before the first strictly newer row. Equal timestamps
-      // have no wire tie-break, so they do not invent an order.
+      // Anchors and REST rows use canonical (createdAt, sequence) order. One
+      // forward cursor places each missing anchor after rows at or before it.
+      // If either sequence is absent, equal timestamps do not establish order.
+      const atOrBeforeAnchor = (
+        fresh: Message,
+        anchor: NonNullable<StreamMessage["restAnchor"]>,
+      ): boolean => {
+        if (fresh.createdAt !== anchor.createdAt) return fresh.createdAt < anchor.createdAt;
+        return fresh.sequence !== undefined && anchor.sequence !== undefined
+          ? fresh.sequence <= anchor.sequence
+          : false;
+      };
       let freshCursor = 0;
       for (const message of unresolved) {
         if (message.restAnchor) {
           while (
             freshCursor < freshMessages.length &&
-            freshMessages[freshCursor].createdAt <= message.restAnchor.createdAt
+            atOrBeforeAnchor(freshMessages[freshCursor], message.restAnchor)
           ) freshCursor++;
           beforeFresh[freshCursor].push(message);
         } else {

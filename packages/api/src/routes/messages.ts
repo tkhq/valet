@@ -105,6 +105,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       content: e.summary,
       parts: [],
       createdAt: wireCreatedAt(e.createdAt),
+      sequence: e.sequence,
       compaction: {
         summary: e.summary,
         tokensBefore: e.tokenCountBefore,
@@ -131,6 +132,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     content: e.content,
     parts,
     createdAt: wireCreatedAt(e.createdAt),
+    sequence: e.sequence,
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
     model: e.model,

@@ -9,7 +9,7 @@
  * attachments — the field is dropped for those.
  */
 import { describe, expect, it } from "vitest";
-import type { CompactionEntry, MessageEntry } from "@valet/engine";
+import type { CommandResultEntry, CompactionEntry, MessageEntry } from "@valet/engine";
 import { entryToMessage } from "./messages.js";
 
 function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
@@ -25,6 +25,29 @@ function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
   };
   return { ...base, ...overrides };
 }
+
+describe("entryToMessage — stable order projection", () => {
+  it("projects the store sequence on a message entry", () => {
+    expect(entryToMessage(baseEntry({ sequence: 17 }), "sess", "th")?.sequence).toBe(17);
+  });
+
+  it("projects the store sequence on a command result", () => {
+    const entry: CommandResultEntry = {
+      id: "cmd_1",
+      sessionId: "sess",
+      threadId: "th",
+      parentId: null,
+      type: "command_result",
+      command: "/status",
+      source: "builtin",
+      ok: true,
+      output: "idle",
+      createdAt: 1,
+      sequence: 18,
+    };
+    expect(entryToMessage(entry, "sess", "th")?.sequence).toBe(18);
+  });
+});
 
 describe("entryToMessage — attachments projection", () => {
   it("passes through a data: URL attachment unchanged", () => {
@@ -264,6 +287,7 @@ describe("entryToMessage — compaction projection", () => {
     tokenCountBefore: 12000,
     tokenCountAfter: 300,
     createdAt: Date.parse("2024-01-01T00:00:00.000Z"),
+    sequence: 19,
   };
 
   it("projects a CompactionEntry as a system message with a compaction field", () => {
@@ -273,6 +297,7 @@ describe("entryToMessage — compaction projection", () => {
     // Content degrades to the summary for clients without a divider renderer.
     expect(msg?.content).toBe("## Goal\n- keep going");
     expect(msg?.parts).toEqual([]);
+    expect(msg?.sequence).toBe(19);
     expect(msg?.compaction).toEqual({
       summary: "## Goal\n- keep going",
       tokensBefore: 12000,

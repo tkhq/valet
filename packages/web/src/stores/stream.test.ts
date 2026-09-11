@@ -740,7 +740,7 @@ describe("active model state", () => {
 describe("setThreadMessages", () => {
   beforeEach(reset);
 
-  function restMessage(id: string, createdAt = 1): Message {
+  function restMessage(id: string, createdAt = 1, sequence?: number): Message {
     return {
       id,
       sessionId: SESSION,
@@ -749,6 +749,7 @@ describe("setThreadMessages", () => {
       content: id,
       parts: [{ kind: "text", text: id }],
       createdAt,
+      sequence,
     };
   }
 
@@ -897,6 +898,53 @@ describe("setThreadMessages", () => {
 
     expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
       "transient",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("keeps an anchored transient before an equal-time advanced tail", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("a", 1, 1),
+      restMessage("anchor", 3, 2),
+    ]);
+    ingest(SESSION, messageStart("transient", 3));
+    const [a, anchor, transient] = useStreamStore.getState().bySession[SESSION].messages;
+    setCurrentMessages([a, transient, anchor]);
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("c", 3, 3),
+      restMessage("d", 3, 4),
+    ], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "transient",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("keeps equal-time transients conservative when sequence metadata is absent", () => {
+    const { setThreadMessages } = useStreamStore.getState();
+    const a = restMessage("a", 1);
+    const anchor = restMessage("anchor", 3);
+    const transientOne: StreamMessage = {
+      ...restMessage("transient-1", 3),
+      persistence: "streaming",
+    };
+    const transientTwo: StreamMessage = {
+      ...restMessage("transient-2", 3),
+      persistence: "streaming",
+    };
+    setThreadMessages(SESSION, THREAD, [a, anchor]);
+    setCurrentMessages([a, transientOne, transientTwo, anchor]);
+
+    setThreadMessages(SESSION, THREAD, [restMessage("c", 3), restMessage("d", 3)], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "transient-1",
+      "transient-2",
       "c",
       "d",
     ]);

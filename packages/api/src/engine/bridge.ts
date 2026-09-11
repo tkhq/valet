@@ -152,6 +152,7 @@ export function commandResultEntryToMessage(
     content: e.output,
     parts: [],
     createdAt: Number.isFinite(created) ? created : Date.now(),
+    sequence: e.sequence,
     queueItemId: e.queueItemId,
     command: {
       // Strip the leading slash from the stored command string.

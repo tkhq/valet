@@ -1200,6 +1200,8 @@ export interface Message {
   content: string;
   parts: MessagePart[];
   createdAt: number;
+  /** Stable store order for entries that have the same createdAt value. */
+  sequence?: number;
   /**
    * The submission (engine queue item) that produced this entry —
    * transcript↔submission linkage. Populated from the engine's
