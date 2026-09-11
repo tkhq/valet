@@ -6,7 +6,7 @@ import type {
   PluginActionContext,
   PluginActionResult,
 } from "@valet/engine";
-import { formatSlackBlocks, markdownToSlackMrkdwn, slimMessage } from "@valet/plugin-slack/actions";
+import { markdownToSlackMrkdwn, slimMessage } from "@valet/plugin-slack/actions";
 import { isRevokedError, notConnectedError, reconnectError, slackFetch, slackGet } from "./api.js";
 
 /**
@@ -461,10 +461,10 @@ const sendDm = action(
 const postMessage = action(
   Type.Object({
     channel: Type.String({ description: "Channel ID (C…/G…) or user ID (U…) for a DM." }),
-    text: Type.String({ description: "Message text. Supports Slack mrkdwn formatting." }),
+    text: Type.String({ description: "Message text in CommonMark. Valet converts it to Slack mrkdwn." }),
     thread_ts: Type.Optional(Type.String({ description: "Post as a threaded reply." })),
     blocks: Type.Optional(
-      Type.String({ description: "Block Kit JSON array as a string for rich formatting." }),
+      Type.String({ description: "Block Kit JSON array. Each mrkdwn element must use Slack mrkdwn. Markdown blocks use CommonMark." }),
     ),
   }),
 )({
@@ -484,12 +484,7 @@ const postMessage = action(
     if (p.thread_ts) body.thread_ts = p.thread_ts;
     if (p.blocks) {
       try {
-        const blocks = JSON.parse(p.blocks);
-        body.blocks = Array.isArray(blocks)
-          ? formatSlackBlocks(blocks.filter((block): block is Record<string, unknown> =>
-            typeof block === "object" && block !== null && !Array.isArray(block),
-          ))
-          : blocks;
+        body.blocks = JSON.parse(p.blocks);
       } catch {
         return { success: false, error: "blocks must be valid JSON" };
       }

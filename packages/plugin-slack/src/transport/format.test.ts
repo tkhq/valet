@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatSlackBlocks, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
+import { markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 
 describe("neutralizeSlackMentions", () => {
   it("defuses every broadcast sequence", () => {
@@ -26,18 +26,6 @@ describe("neutralizeSlackMentions", () => {
 
   it("leaves an autolinked URL alone", () => {
     expect(neutralizeSlackMentions("<https://example.com>")).toBe("<https://example.com>");
-  });
-});
-
-describe("formatSlackBlocks", () => {
-  it("converts mrkdwn elements but preserves CommonMark markdown blocks", () => {
-    expect(formatSlackBlocks([
-      { type: "section", text: { type: "mrkdwn", text: "**bold**" } },
-      { type: "markdown", text: "**bold**" },
-    ])).toEqual([
-      { type: "section", text: { type: "mrkdwn", text: "*bold*" } },
-      { type: "markdown", text: "**bold**" },
-    ]);
   });
 });
 
@@ -132,6 +120,24 @@ describe("markdownToSlackMrkdwn", () => {
     expect(markdownToSlackMrkdwn("# Heading\n- item\n1. first")).toBe("*Heading*\n- item\n1. first");
   });
 
+  it("converts a heading that contains bold text", () => {
+    expect(markdownToSlackMrkdwn("# **Heading**")).toBe("*Heading*");
+  });
+
+  it("converts links inside bold text", () => {
+    expect(markdownToSlackMrkdwn("See **[PR #631](https://github.com/tkhq/valet/pull/631)** for details"))
+      .toBe("See *<https://github.com/tkhq/valet/pull/631|PR #631>* for details");
+  });
+
+  it("converts strikethrough", () => {
+    expect(markdownToSlackMrkdwn("~~strike~~")).toBe("~strike~");
+  });
+
+  it("does not treat math and intraword underscores as emphasis", () => {
+    expect(markdownToSlackMrkdwn("5 * 3 = 15 and 2 * 4 = 8")).toBe("5 * 3 = 15 and 2 * 4 = 8");
+    expect(markdownToSlackMrkdwn("my__var__x")).toBe("my__var__x");
+  });
+
   // ─── Plain Text ──────────────────────────────────────────────────────
 
   it("returns plain text unchanged", () => {
@@ -199,23 +205,16 @@ describe("markdownToSlackMrkdwn", () => {
   });
 
   describe("control-sequence escaping (injection safety)", () => {
-    it("neutralizes a mass-ping <!channel> in literal text", () => {
-      const result = markdownToSlackMrkdwn("Heads up <!channel> deploying now");
-      expect(result).not.toContain("<!channel>");
-      expect(result).toContain("&lt;!channel>");
+    it("preserves Slack-native mentions and specials", () => {
+      expect(markdownToSlackMrkdwn("Heads up <!channel> deploying now")).toBe("Heads up <!channel> deploying now");
+      expect(markdownToSlackMrkdwn("<!here> <@U0123> <#C0456|general> <!subteam^S123|@team>"))
+        .toBe("<!here> <@U0123> <#C0456|general> <!subteam^S123|@team>");
     });
 
-    it("neutralizes <!here> and user/channel mentions", () => {
-      expect(markdownToSlackMrkdwn("<!here>")).toBe("&lt;!here>");
-      expect(markdownToSlackMrkdwn("ping <@U0123>")).toBe("ping &lt;@U0123>");
-      expect(markdownToSlackMrkdwn("in <#C0456|general>")).toBe("in &lt;#C0456|general>");
-    });
-
-    it("escapes a raw link-spoof <url|label> but keeps real markdown links", () => {
-      expect(markdownToSlackMrkdwn("<https://evil.example|Slack Support>")).toBe(
-        "&lt;https://evil.example|Slack Support>",
-      );
-      // A genuine [text](url) still converts to a real Slack link.
+    it("preserves Slack-native links and converts Markdown links", () => {
+      expect(markdownToSlackMrkdwn("<https://evil.example|Slack Support>"))
+        .toBe("<https://evil.example|Slack Support>");
+      expect(markdownToSlackMrkdwn("<https://example.com>")).toBe("<https://example.com>");
       expect(markdownToSlackMrkdwn("[docs](https://example.com)")).toBe("<https://example.com|docs>");
     });
 

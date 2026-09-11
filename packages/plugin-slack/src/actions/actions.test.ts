@@ -673,18 +673,6 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '124.567', channel: 'C1' } });
   });
 
-  it('send_message converts CommonMark in supplied mrkdwn blocks', async () => {
-    mockGuardAllowsPublicChannel(fetchMock);
-    const blocks = JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: '**digest title**' } }]);
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '125.677', channel: 'C1' }));
-
-    await action('slack.send_message').execute({ channel: 'C1', text: 'fallback', blocks }, pluginCtx());
-
-    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
-    const body = JSON.parse(init.body as string);
-    expect(body.blocks[0].text.text).toBe('*digest title*');
-  });
-
   it('send_message supports optional blocks for rich formatting', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     const blocks = JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: '*bold*' } }]);
@@ -697,7 +685,7 @@ describe('slack actions', () => {
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(body.blocks).toEqual([{ type: 'section', text: { type: 'mrkdwn', text: '_bold_' } }]);
+    expect(body.blocks).toEqual(JSON.parse(blocks));
     expect(result).toEqual({ success: true, data: { ts: '125.678', channel: 'C1' } });
   });
 
@@ -814,7 +802,21 @@ describe('slack actions', () => {
       pluginCtx(),
     );
 
-    expect(result).toEqual({ success: false, error: 'blocks must be a JSON array' });
+    expect(result).toEqual({ success: false, error: 'blocks must be a JSON array. Provide a JSON array of Block Kit objects.' });
+  });
+
+  it('send_message rejects non-object Block Kit elements', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text: 'invalid', blocks: '["not a block"]' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'blocks must contain only Block Kit objects. Replace each non-object element and retry.',
+    });
   });
 
   it('send_message uses buildContentBlocks for long text messages', async () => {

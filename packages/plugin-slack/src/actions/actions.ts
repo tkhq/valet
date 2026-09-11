@@ -12,7 +12,7 @@ import { checkPrivateChannelAccess } from "./channel-access.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
-import { formatSlackBlocks, markdownToSlackMrkdwn } from "../transport/format.js";
+import { markdownToSlackMrkdwn } from "../transport/format.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -845,9 +845,9 @@ const getReactions = action(Type.Object({
 
 const sendMessage = action(Type.Object({
     channel: Type.String({ description: 'Channel ID (C...) or channel name with # prefix (e.g. #proj-valet). Use list_channels to find IDs.' }),
-    text: Type.String({ description: 'Message body. Supports Slack mrkdwn formatting (bold: *text*, italic: _text_, code: `code`, links: <url|label>).' }),
+    text: Type.String({ description: 'Message body in CommonMark. Valet converts it to Slack mrkdwn. Use **bold**, *italic*, ~~strike~~, [text](url), and backticks for code.' }),
     thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply under an existing message. Use the ts value returned by a previous send_message call (e.g. "1780887543.189519").' })),
-    blocks: Type.Optional(Type.String({ description: 'Block Kit JSON array as a string for rich formatting. When provided, text is used as the notification fallback only.' })),
+    blocks: Type.Optional(Type.String({ description: 'Block Kit JSON array as a string. Each mrkdwn element must use Slack mrkdwn. Markdown blocks use CommonMark. When provided, text is the notification fallback.' })),
     unfurl_links: Type.Optional(Type.Boolean({ description: 'Whether Slack shows link-preview "unfurls" for URLs in the message. Omit to keep Slack\'s default (previews on). Set false to suppress link previews — e.g. when posting a batch of Linear/GitHub/Jira links you do not want each to expand into a card.' })),
     unfurl_media: Type.Optional(Type.Boolean({ description: 'Whether Slack unfurls media (images, video, rich media) linked in the message. Omit to keep Slack\'s default (on). Set false alongside unfurl_links to fully suppress embeds.' })),
   }))({
@@ -897,8 +897,11 @@ const sendMessage = action(Type.Object({
     if (p.blocks) {
       try {
         const parsed = JSON.parse(p.blocks);
-        if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array' };
-        userBlocks = formatSlackBlocks(parsed as Record<string, unknown>[]);
+        if (!Array.isArray(parsed)) return { success: false, error: 'blocks must be a JSON array. Provide a JSON array of Block Kit objects.' };
+        if (parsed.some((block) => typeof block !== 'object' || block === null || Array.isArray(block))) {
+          return { success: false, error: 'blocks must contain only Block Kit objects. Replace each non-object element and retry.' };
+        }
+        userBlocks = parsed as Record<string, unknown>[];
       } catch {
         return { success: false, error: 'blocks must be valid JSON array, e.g. [{"type":"section","text":{"type":"mrkdwn","text":"*bold*"}}]' };
       }
@@ -1058,7 +1061,7 @@ const reactToOrigin = action(Type.Object({
 const updateMessage = action(Type.Object({
     channel: Type.String({ description: 'Channel ID (C..., or D... for DMs) returned when the message was sent. Channel names are not accepted — use the ID from the send result.' }),
     ts: Type.String({ description: 'Timestamp (ts) of the message to edit, as returned by send_message / reply_to_origin / dm_owner / dm_user (e.g. "1780887543.189519").' }),
-    text: Type.String({ description: 'New message body — fully replaces the previous content. Supports Slack mrkdwn (bold: *text*, italic: _text_, code: `code`, links: <url|label>). Send a single space to blank a message you cannot delete.' }),
+    text: Type.String({ description: 'New message body in CommonMark. Valet converts it to Slack mrkdwn. Send a single space to blank a message you cannot delete.' }),
   }))({
   id: 'slack.update_message',
   name: 'Update Message',
