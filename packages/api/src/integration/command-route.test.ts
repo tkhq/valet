@@ -17,6 +17,9 @@ import { describe, expect, it, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { createSkill } from "../services/skills.js";
+import { createTeam } from "../services/teams.js";
+import { createAssistant, ensureAssistantSession } from "../assistants/service.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { orgs, skills } from "../schema/index.js";
 import type {
   CreateSessionResponse,
@@ -56,6 +59,55 @@ async function getCommands(baseUrl: string, sessionId: string): Promise<ListComm
 }
 
 describe("GET /api/sessions/:id/commands", () => {
+  it("lists the shipped code-review skill for personal and team orchestrators", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+
+    const personalRes = await fetch(`${api.baseUrl}/api/orchestrator`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+    expect(personalRes.status).toBe(200);
+    const personal = (await personalRes.json()) as { sessionId: string };
+
+    const team = await createTeam(api.providers.db, {
+      orgId: OWNER.orgId,
+      name: "Reviewers",
+      creatorUserId: OWNER.userId,
+    });
+    const teamSession = await ensureAssistantSession(
+      { db: api.providers.db, engineHost: api.providers.engineHost },
+      team.defaultAssistant,
+      { actorUserId: OWNER.userId, orgId: OWNER.orgId },
+    );
+
+    for (const sessionId of [personal.sessionId, teamSession.session.id]) {
+      const { commands } = await getCommands(api.baseUrl, sessionId);
+      const command = commands.find((item) => item.name === "skill:code-review");
+      expect(command).toMatchObject({ name: "skill:code-review", source: "skill" });
+      expect(commands.some((item) => item.name === "code-review")).toBe(false);
+    }
+  });
+
+  it("keeps code-review out when the assistant skill allowlist excludes it", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const assistant = await createAssistant(
+      api.providers.db,
+      OWNER.orgId,
+      { type: "user", id: OWNER.userId },
+      "Restricted",
+      { behavior: { skills: { mode: "allowlist", names: ["github"] } } },
+    );
+    const built = await ensureAssistantSession(
+      { db: api.providers.db, engineHost: api.providers.engineHost },
+      assistant,
+      { actorUserId: OWNER.userId, orgId: OWNER.orgId },
+    );
+
+    const { commands } = await getCommands(api.baseUrl, built.session.id);
+    expect(commands.some((item) => item.name === "skill:github")).toBe(true);
+    expect(commands.some((item) => item.name === "skill:code-review")).toBe(false);
+  });
+
   // Task 4: a stored prompt skill reaches a session through `sessionExtras`
   // and registers as `skill:<name>`.
   it("lists a stored prompt skill as skill:<name> with source 'skill'", async () => {

@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { githubPlugin } from "./actions/actions.js";
 import { githubFilterOptionResolvers } from "./filter-options.js";
 import { githubTemplates } from "./templates.js";
 import { githubTriggerDefs } from "./triggers.js";
 
-const skillMd = readFileSync(fileURLToPath(new URL("../skills/github/SKILL.md", import.meta.url)), "utf8");
+const githubSkillMd = readFileSync(new URL("../skills/github/SKILL.md", import.meta.url), "utf8");
+const reviewSkillMd = readFileSync(new URL("../skills/code-review/SKILL.md", import.meta.url), "utf8");
 
 const plugin: ValetPlugin = {
   name: "github",
@@ -15,7 +15,10 @@ const plugin: ValetPlugin = {
   actions: [githubPlugin],
   triggers: githubTriggerDefs,
   filterOptionResolvers: githubFilterOptionResolvers,
-  skills: [loadSkillFromMarkdown(skillMd, "plugin", "github")],
+  skills: [
+    loadSkillFromMarkdown(githubSkillMd, "plugin", "github"),
+    loadSkillFromMarkdown(reviewSkillMd, "plugin", "code-review"),
+  ],
   templates: githubTemplates,
   credentials: [
     {

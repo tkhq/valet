@@ -21,6 +21,12 @@ const CASES = [
     assetFile: resolve(repoRoot, "packages/plugin-github/skills/github/SKILL.md"),
   },
   {
+    name: "plugin-github code-review SKILL.md",
+    sourceFile: resolve(repoRoot, "packages/plugin-github/src/plugin.ts"),
+    literal: "../skills/code-review/SKILL.md",
+    assetFile: resolve(repoRoot, "packages/plugin-github/skills/code-review/SKILL.md"),
+  },
+  {
     name: "store-postgres engine migration (.sql)",
     sourceFile: resolve(repoRoot, "packages/store-postgres/src/migrate.ts"),
     literal: "../migrations/pg/0000_engine.sql",
