@@ -87,7 +87,22 @@ sourcesRouter.get("/", async (c) => {
     .select()
     .from(imageSources)
     .where(eq(imageSources.orgId, c.var.user.orgId));
-  return c.json({ sources: rows, builderAvailable: prebuildService.builderBackend !== null });
+  // One summary per source keeps collapsed rows current without loading build logs.
+  const latestBakes = await db
+    .selectDistinctOn([bakes.sourceId], {
+      sourceId: bakes.sourceId,
+      status: bakes.status,
+      createdAt: bakes.createdAt,
+    })
+    .from(bakes)
+    .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+    .where(eq(imageSources.orgId, c.var.user.orgId))
+    .orderBy(bakes.sourceId, desc(bakes.createdAt), desc(bakes.id));
+  const latestBySource = new Map(latestBakes.map(({ sourceId, ...bake }) => [sourceId, bake]));
+  return c.json({
+    sources: rows.map((source) => ({ ...source, latestBake: latestBySource.get(source.id) ?? null })),
+    builderAvailable: prebuildService.builderBackend !== null,
+  });
 });
 
 // POST / — create kind='external' or kind='base'; reject kind='repo'

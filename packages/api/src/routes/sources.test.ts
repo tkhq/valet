@@ -14,6 +14,7 @@ import { startGithubFixture, type GithubFixture } from "../test-helpers/github-f
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { MAX_SANDBOX_CPU } from "@valet/shared";
 import { bakes } from "../schema/index.js";
+import type { ListSourcesResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -141,6 +142,24 @@ describe("GET /api/org/sources", () => {
     const res = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
     const body = (await res.json()) as { sources: SourceJson[]; builderAvailable: boolean };
     expect(body.builderAvailable).toBe(true);
+  });
+
+  it("includes only the latest build summary and null for an unbuilt source", async () => {
+    api = await bootTestApi();
+    const source = await seedRepoSource(api);
+    const unbuilt = await createExternal(api.baseUrl);
+    await api.providers.db.insert(bakes).values([
+      { id: `pb_${randomUUID()}`, sourceId: source.id, identityHash: "old", imageRef: "registry/old", status: "pushed", recipe: [], createdAt: 1000 },
+      { id: `pb_${randomUUID()}`, sourceId: source.id, identityHash: "new", imageRef: "registry/new", status: "building", recipe: [], createdAt: 2000, logTail: "build log" },
+    ]);
+    const res = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListSourcesResponse;
+    expect(body.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: source.id, latestBake: { status: "building", createdAt: 2000 } }),
+      expect.objectContaining({ id: unbuilt.id, latestBake: null }),
+    ]));
+    expect(JSON.stringify(body)).not.toContain("build log");
   });
 
   it("lists all kinds for the caller's org", async () => {

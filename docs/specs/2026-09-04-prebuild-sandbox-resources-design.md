@@ -337,6 +337,26 @@ resources:
 This setting gives the unit and end-to-end test suites four CPUs and 8 GiB of
 memory when Valet runs them inside its own sandbox.
 
+## Sandbox settings list
+
+Repository rows start collapsed. Each row shows its name, latest build status,
+enabled switch, build action, and Details button. Details opens the resource
+form and sandbox history together. Resource edits remain when Details closes.
+
+Search matches repository names without case sensitivity. The list shows a
+result count and a clear action when no repositories match. Sorting supports
+name in either direction, recent use, and build status. Name ascending is the
+default. Build status sorts building, queued, failed, built, then unbuilt sources.
+Name breaks ties. Repositories without recent use sort last.
+
+The source list API includes a small latest-build summary per source. The query
+selects the newest build by creation time, with build ID as a stable tiebreaker.
+It scopes summaries to the caller's organization and omits build logs.
+The page refreshes summaries every five seconds while visible. History loads
+only for expanded rows and refreshes on the same interval. The status labels
+are Built, Building, Build queued, Build failed, and Not built. Older servers
+without the summary field show Status unavailable.
+
 ## Testing
 
 - Recipe tests cover valid, partial, malformed, zero, negative, and non-finite values.

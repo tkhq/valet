@@ -36,6 +36,7 @@ export function useSources() {
   return useQuery<ListSourcesResponse>({
     queryKey: qkSources.all(),
     queryFn: () => api.listSources(),
+    refetchInterval: 5_000,
   });
 }
 
@@ -44,6 +45,7 @@ export function useSourceBakes(sourceId: string, opts?: { enabled?: boolean }) {
     queryKey: qkSources.bakes(sourceId),
     queryFn: () => api.listSourceBakes(sourceId),
     enabled: opts?.enabled ?? true,
+    refetchInterval: 5_000,
   });
 }
 
