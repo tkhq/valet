@@ -270,6 +270,71 @@ describe("SourceService", () => {
     });
   }
 
+  describe("cache and registry health", () => {
+    it("reports protected over-budget logical bytes separately from registry bytes", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { sizeBytes: 440e9 });
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "200" } });
+      expect(await svc.health(orgId)).toMatchObject({
+        cache: { bytesUsed: 440e9, cacheBudgetGb: 200, over_budget_all_protected: true, unknownSizeCount: 0 },
+        registry: { status: "unconfigured", capacityBytes: null },
+        recentPushFailures: { count: 0, windowMs: 3600000 },
+      });
+    });
+
+    it("counts only recent push failures and reports unknown sizes", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "unknown-size", sizeBytes: null });
+      await seedBake(db, src, { id: "push", status: "failed", error: "failed to push: no space left on device", finishedAt: NOW });
+      await seedBake(db, src, { id: "build", status: "failed", error: "npm install failed", finishedAt: NOW });
+      await seedBake(db, src, { id: "old", status: "failed", error: "failed to push", finishedAt: NOW - 3600001 });
+      expect(await service.health(orgId)).toMatchObject({ cache: { unknownSizeCount: 1 }, recentPushFailures: { count: 1 } });
+      expect(await service.health("other-org")).toMatchObject({ cache: { bytesUsed: 0 }, recentPushFailures: { count: 0 } });
+    });
+
+    it("does not call an evictable cache all-protected", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "old", sizeBytes: 3e9, createdAt: NOW - 10 });
+      await seedBake(db, src, { id: "current", sizeBytes: 3e9, createdAt: NOW });
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "1" } });
+      expect(await svc.health(orgId)).toMatchObject({ cache: { overBudget: true, over_budget_all_protected: false } });
+    });
+
+    it("rejects unknown configured capacity and recovers without a restart", async () => {
+      let available = false;
+      const svc = makeService({ env: { VALET_REGISTRY_HEALTH_URL: "http://registry/health" },
+        registryFetch: (async () => available
+          ? Response.json({ capacityBytes: 100e9, usedBytes: 50e9, availableBytes: 50e9 })
+          : new Response("unavailable", { status: 503 })) as typeof fetch });
+      await expect(svc.assertRegistryCapacity()).rejects.toThrow("capacity is unknown");
+      available = true;
+      await expect(svc.assertRegistryCapacity()).resolves.toBeUndefined();
+    });
+
+    it("reports pressure without any bake completing", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { sizeBytes: 440e9 });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await service.reportHealth();
+        expect(log).toHaveBeenCalledWith("bake_storage_pressure", expect.objectContaining({
+          cache: expect.objectContaining({ over_budget_all_protected: true }),
+        }));
+      } finally { log.mockRestore(); }
+    });
+
+    it("rejects a bake before inserting a row when registry capacity is exhausted", async () => {
+      const src = await seedBaseSource(db, []);
+      const svc = makeService({
+        env: { VALET_REGISTRY_HEALTH_URL: "http://registry/health" },
+        registryFetch: (async () => Response.json({ capacityBytes: 246e9, availableBytes: 0.1e9, usedBytes: 245.9e9 })) as typeof fetch,
+      });
+      await expect(svc.startBake(src)).rejects.toThrow("registry full");
+      expect(builder.specs).toHaveLength(0);
+      expect(await db.select().from(bakes)).toHaveLength(0);
+    });
+  });
+
   beforeEach(async () => {
     const { pgdb, appDb } = await freshTestPgDb();
     db = appDb;
@@ -1322,6 +1387,16 @@ describe("SourceService", () => {
       const rows = await db.select({ id: bakes.id }).from(bakes);
       return new Set(rows.map((r) => r.id));
     }
+
+    it("per-source retention preserves an older bake used by a live session", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "live-old", imageRef: "ref/live-old", createdAt: NOW - 5000 });
+      await seedBake(db, src, { id: "middle", imageRef: "ref/middle", createdAt: NOW - 4000 });
+      await seedBake(db, src, { id: "newest", imageRef: "ref/newest", createdAt: NOW - 3000 });
+      await seedBakeSession(db, "live-old", "active");
+      await pushBakeWithSize(service, src, "new-sha", 1);
+      expect(retentionCalls.flatMap((call) => call.imageRefs)).not.toContain("ref/live-old");
+    });
 
     it("over budget → evicts oldest-first down to ≤ budget", async () => {
       // budget 3 GB. Seed a second source so the source-under-test's newest is

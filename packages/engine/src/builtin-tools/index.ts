@@ -816,7 +816,10 @@ export const taskTool = defineTool({
       ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
     });
     return {
-      text: `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
+      text: [
+        `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
+        ...(result.warnings ?? []).map((warning) => `Warning: ${warning}`),
+      ].join("\n"),
     };
   },
 });

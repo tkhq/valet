@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "registry": {
+      "type": "object",
+      "required": ["minFreeGb", "minFreePercent"],
+      "properties": {
+        "minFreeGb": {
+          "description": "Set the absolute free-space reserve to zero or a positive number of GB.",
+          "type": "number",
+          "minimum": 0
+        },
+        "minFreePercent": {
+          "description": "Set the percentage free-space reserve above 0 and below 100.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 100
+        }
+      }
+    }
+  }
+}

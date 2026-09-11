@@ -2553,6 +2553,8 @@ export interface SpawnChildRequest {
 export interface SpawnChildResult {
   childSessionId: string;
   queueItemId: string;
+  /** Non-fatal startup conditions that the parent must see. */
+  warnings?: string[];
 }
 
 /**
