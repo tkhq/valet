@@ -5118,7 +5118,12 @@ export interface TeamDeletionRequestSummary {
   status: "pending" | "approved" | "declined" | "withdrawn" | "expired";
   decidedBy: string | null; decidedAt: number | null; decisionNote: string | null; lastRefusal: string | null;
 }
-export interface ListTeamDeletionRequestsResponse { requests: TeamDeletionRequestSummary[] }
+export interface ListTeamDeletionRequestsParams {
+  status?: "all" | "pending" | "history";
+  limit?: number;
+  cursor?: string;
+}
+export interface ListTeamDeletionRequestsResponse { requests: TeamDeletionRequestSummary[]; nextCursor: string | null }
 export interface TeamDeletionTarget { resourceType: TeamDeletionResourceType; resourceId: string; label: string }
 export interface ListTeamDeletionTargetsResponse { targets: TeamDeletionTarget[] }
 export interface SubmitTeamDeletionRequest { resourceType: TeamDeletionResourceType; resourceId: string; reason?: string }

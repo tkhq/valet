@@ -1,6 +1,8 @@
 import { isOrgMember } from "./org.js";
+import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
+import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse } from "../wire/types.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, lte } from "drizzle-orm";
+import { and, desc, eq, gt, lt, lte, ne, or } from "drizzle-orm";
 import { NotFoundError, RepoOwnedWorkflowError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { apikey, contentSources, credentials, skills, teamDeletionRequests, teams, users, workflowDefinitions } from "../schema/index.js";
@@ -94,14 +96,38 @@ export function isDeletionResourceType(value: unknown): value is DeletionResourc
   return typeof value === "string" && Object.hasOwn(deletionResourceRegistry, value);
 }
 function requestScope(a: RequestActor) { return and(eq(teamDeletionRequests.orgId, a.orgId), eq(teamDeletionRequests.teamId, a.teamId)); }
-export async function listDeletionRequests(db: AppDb, a: RequestActor) {
+export async function listDeletionRequests(db: AppDb, a: RequestActor, options: ListTeamDeletionRequestsParams = {}): Promise<ListTeamDeletionRequestsResponse> {
   if (!(await isOrgMember(db, a.orgId, a.userId)) || !(await getTeamInOrg(db, a.orgId, a.teamId)) || !(await canViewTeam(db, a.teamId, a.userId))) missing();
+  const status = options.status ?? "all";
+  const limit = options.limit ?? 100;
+  const now = Date.now();
+  const cursor = options.cursor === undefined || options.cursor.length > 2048 ? undefined : decodePageCursor(options.cursor);
+  if (options.cursor !== undefined && (!cursor || options.cursor.length > 2048 ||
+      cursor.orgId !== a.orgId || cursor.teamId !== a.teamId || cursor.status !== status ||
+      typeof cursor.at !== "number" || !Number.isSafeInteger(cursor.at) || cursor.at < 0 ||
+      typeof cursor.id !== "string" || !cursor.id || cursor.id.length > 256)) {
+    throw new DeletionRequestError("Invalid deletion-request cursor for this team and filter.", 400);
+  }
   const rows = await db.select({ request: teamDeletionRequests, requesterName: users.name }).from(teamDeletionRequests)
-    .leftJoin(users, eq(users.id, teamDeletionRequests.requestedBy)).where(requestScope(a)).orderBy(desc(teamDeletionRequests.requestedAt)).limit(100);
-  return Promise.all(rows.map(async ({ request, requesterName }) => ({ ...request,
-    status: request.status === "pending" && request.expiresAt <= Date.now() ? "expired" as const : request.status,
-    requesterName: requesterName ?? "Former member", requesterIsMember: await isTeamMember(db, a.teamId, request.requestedBy),
-  })));
+    .leftJoin(users, eq(users.id, teamDeletionRequests.requestedBy))
+    .where(and(requestScope(a),
+      status === "pending" ? and(eq(teamDeletionRequests.status, "pending"), gt(teamDeletionRequests.expiresAt, now)) :
+        status === "history" ? or(ne(teamDeletionRequests.status, "pending"), lte(teamDeletionRequests.expiresAt, now)) : undefined,
+      cursor && typeof cursor.at === "number" && typeof cursor.id === "string" ? or(
+        lt(teamDeletionRequests.requestedAt, cursor.at),
+        and(eq(teamDeletionRequests.requestedAt, cursor.at), lt(teamDeletionRequests.id, cursor.id)),
+      ) : undefined,
+    ))
+    .orderBy(desc(teamDeletionRequests.requestedAt), desc(teamDeletionRequests.id)).limit(limit + 1);
+  const page = rows.slice(0, limit);
+  const last = page.at(-1)?.request;
+  return {
+    requests: await Promise.all(page.map(async ({ request, requesterName }) => ({ ...request,
+      status: request.status === "pending" && request.expiresAt <= now ? "expired" as const : request.status,
+      requesterName: requesterName ?? "Former member", requesterIsMember: await isTeamMember(db, a.teamId, request.requestedBy),
+    }))),
+    nextCursor: rows.length > limit && last ? encodePageCursor({ orgId: a.orgId, teamId: a.teamId, status, at: last.requestedAt, id: last.id }) : null,
+  };
 }
 export async function submitDeletionRequest(db: AppDb, a: RequestActor, resourceType: DeletionResourceType, resourceId: string, reason?: string) {
   return db.transaction(async (tx) => {

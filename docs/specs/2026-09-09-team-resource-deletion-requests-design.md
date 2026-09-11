@@ -241,3 +241,32 @@ access.” Update its UI assertion and the Authority copy section in
 `docs/specs/2026-09-04-team-api-keys-design.md` during integration.
 
 Credential removal and `invalidateWorkflowSources(tx, { teamId })` commit together for direct and approved deletion. If the refresh cannot persist, neither the credential deletion nor the approval commits. Route-level regressions cover rollback and retry on both paths.
+
+### Bounded request pagination (PR647 review finding 2)
+
+The request list accepts `status=all|pending|history`, `limit`, and an opaque
+`cursor`. Existing callers can omit these: the default is still the newest 100
+requests with the same `requests` field. Responses also contain `nextCursor`,
+which is null on the last page. Limits must be positive whole numbers and are
+capped at 100. Invalid filters, malformed cursors, and cursors from a different
+organization, team, or filter return 400. Authorization still runs for each page;
+a cursor grants no access.
+
+Pages use descending `(requested_at, id)` keyset order. The ID breaks timestamp
+ties, and a cursor remains usable if its boundary row is deleted. Each query
+reads at most the page limit plus one row. Pending means unexpired pending
+requests; History includes decided and expired requests. Expiry is evaluated
+on each read, so a request can leave Pending while a reviewer is paging.
+
+The team panel starts in Pending, with 50 rows per page and the shared Pager's
+Previous/Next controls. History and All requests are separate filter choices.
+Changing team or filter resets the page and closes confirmation dialogs.
+Previous remains available after a failed or empty later page. Query keys
+include the filter and cursor; submissions and decisions invalidate every
+cached page for the affected list. No page is replaced with another team's
+cached rows.
+
+Regression tests cover an oldest pending request behind 100 newer closed
+requests (including duplicate submission), all 105 pending requests across
+pages with tied timestamps, deletion of the cursor row, expired-history
+filtering, invalid inputs, tenant scope, and UI paging/filter/recovery behavior.

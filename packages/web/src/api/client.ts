@@ -1,4 +1,4 @@
-import type { ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
+import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
  * `@valet/api/wire` so server + web agree on the shape.
@@ -503,7 +503,13 @@ export interface WorkflowRunFilter extends WorkflowRunPage {
 }
 
 export const api = {
-  listTeamDeletionRequests: (teamId: string) => request<ListTeamDeletionRequestsResponse>("GET", `/teams/${encodeURIComponent(teamId)}/deletion-requests`),
+  listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {
+    const query = new URLSearchParams();
+    if (options.status) query.set("status", options.status);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.cursor !== undefined) query.set("cursor", options.cursor);
+    return request<ListTeamDeletionRequestsResponse>("GET", `/teams/${encodeURIComponent(teamId)}/deletion-requests${query.size ? `?${query}` : ""}`);
+  },
   listTeamDeletionTargets: (teamId: string) => request<ListTeamDeletionTargetsResponse>("GET", `/teams/${encodeURIComponent(teamId)}/deletion-requests/targets`),
   submitTeamDeletionRequest: (teamId: string, body: SubmitTeamDeletionRequest) => request<{ request: { id: string }; created: boolean }>("POST", `/teams/${encodeURIComponent(teamId)}/deletion-requests`, body),
   decideTeamDeletionRequest: (teamId: string, id: string, decision: "approve" | "decline" | "withdraw", note?: string) => request<{ ok: true }>("POST", `/teams/${encodeURIComponent(teamId)}/deletion-requests/${encodeURIComponent(id)}/${decision}`, { note }),

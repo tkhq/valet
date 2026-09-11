@@ -1,3 +1,4 @@
+import { readLimit } from "../lib/page-cursor.js";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireActingUser } from "../middleware/auth.js";
@@ -14,7 +15,14 @@ teamDeletionRequestsRouter.get("/:id/deletion-requests/targets", async (c) => {
 });
 teamDeletionRequestsRouter.get("/:id/deletion-requests", async (c) => {
   if (!requireActingUser(c)) return c.json({ error: "Sign in as a person to manage deletion requests." }, 403);
-  return c.json({ requests: await listDeletionRequests(c.var.providers.db, { orgId: c.var.user.orgId, userId: c.var.user.id, teamId: c.req.param("id") }) });
+  const status = c.req.query("status") ?? "all";
+  const limit = readLimit(c.req.query("limit"), 100, 100);
+  if ((status !== "all" && status !== "pending" && status !== "history") || limit === undefined) {
+    return c.json({ error: "Choose all, pending, or history and a positive whole-number limit (maximum 100)." }, 400);
+  }
+  return c.json(await listDeletionRequests(c.var.providers.db,
+    { orgId: c.var.user.orgId, userId: c.var.user.id, teamId: c.req.param("id") },
+    { status, limit, cursor: c.req.query("cursor") }));
 });
 teamDeletionRequestsRouter.post("/:id/deletion-requests", async (c) => {
   if (!requireActingUser(c)) return c.json({ error: "Sign in as a person to manage deletion requests." }, 403);

@@ -1,3 +1,5 @@
+import { Pager } from "~/components/pager";
+import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useEffect, useState } from "react";
 import type { TeamDeletionRequestSummary } from "@valet/api/wire";
 import { useMe } from "~/api/settings";
@@ -6,8 +8,14 @@ import { Button, ConfirmDialog, ErrorRow, Input, LoadingRow, SelectMenu } from "
 import { errorText } from "~/lib/error-text";
 
 export function TeamDeletionRequests({ teamId, canManage }: { teamId: string; canManage: boolean }) {
+  return <ScopedDeletionRequests key={teamId} teamId={teamId} canManage={canManage} />;
+}
+
+function ScopedDeletionRequests({ teamId, canManage }: { teamId: string; canManage: boolean }) {
   const me = useMe();
-  const requests = useTeamDeletionRequests(teamId);
+  const [status, setStatus] = useState<"pending" | "history" | "all">("pending");
+  const [cursors, setCursors] = useState<string[]>([]);
+  const requests = useTeamDeletionRequests(teamId, { status, limit: 50, cursor: currentCursor(cursors) });
   const targets = useTeamDeletionTargets(teamId);
   const submit = useSubmitTeamDeletionRequest(teamId);
   const decide = useDecideTeamDeletionRequest(teamId);
@@ -27,6 +35,9 @@ export function TeamDeletionRequests({ teamId, canManage }: { teamId: string; ca
   return <section aria-label="Deletion requests" className="space-y-2 py-2">
     <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Deletion requests</h4>
     <p className="text-xs text-muted">Ask a team admin to delete a shared resource. Requests expire after 14 days.</p>
+    <SelectMenu<"pending" | "history" | "all"> ariaLabel="Deletion request status" value={status}
+      options={[{ value: "pending", label: "Pending" }, { value: "history", label: "History" }, { value: "all", label: "All requests" }]}
+      onChange={(value) => { setStatus(value); setCursors([]); setConfirmation(null); }} />
     {requests.isPending ? <LoadingRow label="Loading deletion requests…" /> : requests.error ?
       <ErrorRow>Could not load deletion requests. <Button onClick={() => void requests.refetch()}>Retry</Button></ErrorRow> :
       <ul className="space-y-2">{requests.data.requests.length === 0 && <li className="text-xs text-muted">No deletion requests.</li>}
@@ -42,6 +53,12 @@ export function TeamDeletionRequests({ teamId, canManage }: { teamId: string; ca
           </div>}
         </li>)}
       </ul>}
+    <Pager label="deletion requests" page={pageNumber(cursors)} hasPrevious={cursors.length > 0}
+      hasNext={readable && requests.data?.nextCursor != null} busy={requests.isFetching}
+      onPrevious={() => { setConfirmation(null); setCursors(popCursor(cursors)); }}
+      onNext={() => {
+        if (readable && requests.data?.nextCursor) { setConfirmation(null); setCursors(pushCursor(cursors, requests.data.nextCursor)); }
+      }} />
     {targets.isPending ? <LoadingRow label="Loading team resources…" /> : targets.error ?
       <ErrorRow>Could not load team resources. <Button onClick={() => void targets.refetch()}>Retry resources</Button></ErrorRow> :
       <div className="flex flex-wrap gap-2">

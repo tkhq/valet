@@ -1,13 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { SubmitTeamDeletionRequest } from "@valet/api/wire";
+import type { ListTeamDeletionRequestsParams, SubmitTeamDeletionRequest } from "@valet/api/wire";
 import { api } from "./client";
 
 export const deletionKeys = {
   all: (teamId: string) => ["team-deletion-requests", teamId] as const,
   targets: (teamId: string) => ["team-deletion-requests", teamId, "targets"] as const,
 };
-export function useTeamDeletionRequests(teamId: string) {
-  return useQuery({ queryKey: deletionKeys.all(teamId), queryFn: () => api.listTeamDeletionRequests(teamId) });
+export function useTeamDeletionRequests(teamId: string, options: ListTeamDeletionRequestsParams = {}) {
+  return useQuery({ queryKey: [...deletionKeys.all(teamId), "list", options], queryFn: () => api.listTeamDeletionRequests(teamId, options) });
 }
 export function useTeamDeletionTargets(teamId: string) {
   return useQuery({ queryKey: deletionKeys.targets(teamId), queryFn: () => api.listTeamDeletionTargets(teamId) });
