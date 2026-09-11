@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Launches rootless dockerd as the `dockerd` user. Idempotent: a second
-# call while the daemon runs is a no-op. Never fails the caller — a broken
-# daemon must not keep the sandbox from starting. If docker commands fail,
-# read /var/log/valet/dockerd.log inside the sandbox.
+# Launches Docker for a docker-enabled sandbox. A second call while the
+# daemon runs is a no-op. Daemon readiness failures do not stop startup.
+# Unsafe or incomplete cgroup delegation stops Kubernetes sandbox startup.
+# If Docker commands fail, read /var/log/valet/dockerd.log in the sandbox.
 #
 # Invokes rootlesskit DIRECTLY instead of dockerd-rootless.sh: the wrapper
 # forces --detach-netns, and its detached-netns setup runs
@@ -84,17 +84,29 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
       # every echo that xargs -n1 spawns moves one pid. Retry the pair:
       # a process spawned into the root group between the move and the
       # subtree_control write makes the write fail with EBUSY.
-      for i in $(seq 1 10); do
+      for _ in $(seq 1 10); do
         xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>>"$LOG" || true
         sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>>"$LOG" && break
         sleep 0.1
       done
       grep -q . /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null \
         || echo "valet: cgroup2 controller delegation failed — docker run may lack resource controllers" >>"$LOG"
+      # The runtime delegates the namespaced cgroup root to mapped pod root.
+      # Valet runs agent commands as `dockerd`, so hand off only the /init
+      # leaf and its core delegation files. Resource limits and the visible
+      # root stay owned by mapped root. RootlessKit can then evacuate /init
+      # and manage descendants without access to parent or sibling pods.
+      if ! /cgroup-delegation.sh /sys/fs/cgroup init dockerd 2>>"$LOG"; then
+        echo "valet: cgroup delegation failed; Docker and nested rootless runtimes will not start. Recreate the sandbox after correcting the valet-docker RuntimeClass." >>"$LOG"
+        exit 1
+      fi
     else
-      echo "valet: pod cgroup not writable (owner is unmapped host root?) — docker run will fail." \
-           "The sandbox needs the cgroup_writable RuntimeClass; see dockerRuntimeClassName." >>"$LOG"
+      echo "valet: pod cgroup is not writable. Configure the cgroup_writable valet-docker RuntimeClass, then recreate the sandbox." >>"$LOG"
+      exit 1
     fi
+  else
+    echo "valet: cgroup v2 is unavailable. Configure the valet-docker RuntimeClass to mount cgroup v2, then recreate the sandbox." >>"$LOG"
+    exit 1
   fi
   # overlay2 on the emptyDir data-root; vfs only if the probe fails
   # (nothing in a 6.3+ userns kernel should make it fail — belt and
@@ -113,10 +125,9 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
     >> "$LOG" 2>&1 &
   # Wait for daemon-READY, not socket-exists: dockerd creates the socket
   # file before it accepts connections. Probe as the workload user so
-  # readiness also proves the group-660 access path. Per the header
-  # contract this script never fails the caller — on timeout it logs and
-  # still exits 0; the sandbox must start even with a broken daemon.
-  for i in $(seq 1 40); do
+  # readiness also proves the group-660 access path. A timeout is logged,
+  # but does not fail startup. Only unsafe cgroup delegation fails closed.
+  for _ in $(seq 1 40); do
     [ -S "$ROOT_SOCK" ] && su -s /bin/sh dockerd -c 'docker version' >/dev/null 2>&1 && break
     sleep 0.5
   done
@@ -158,7 +169,7 @@ su -s /bin/bash dockerd -c \
      >> '$LOG' 2>&1 &" || true
 # Poll until the daemon socket appears (up to ~10s) before creating the symlink.
 # If the daemon fails to start, skip the symlink — callers can read $LOG.
-for i in $(seq 1 20); do
+for _ in $(seq 1 20); do
   [ -S "$SOCK" ] && break
   sleep 0.5
 done

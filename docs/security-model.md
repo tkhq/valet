@@ -129,6 +129,16 @@ In docker-enabled sandboxes the agent's commands also run as a non-root
 workload user (`dockerd`) rather than container root — a defense-in-depth
 bonus on top of the container boundary.
 
+On Kubernetes, the `valet-docker` RuntimeClass mounts the sandbox cgroup
+read-write inside its private cgroup namespace. Valet delegates only the
+`/init` directory and its three core delegation files from mapped root to
+`dockerd` UID 1500. The visible root and all outer CPU, memory, and PID limit
+files stay owned by mapped root. Kernel cgroup containment prevents `dockerd` from moving a
+process into or out of the sandbox subtree. A nested runtime can only add
+stricter controls below the limits that Kubernetes applies to the sandbox.
+After evacuation into a UID-1500-owned descendant, the agent can freeze, kill,
+or throttle its own sandbox services but cannot cross the sandbox boundary.
+
 The daemon and every container it runs live inside the sandbox's user
 namespace. An escape from an inner container lands in the rootless daemon's
 user namespace, not on the host. It does NOT make the sandbox privileged,
