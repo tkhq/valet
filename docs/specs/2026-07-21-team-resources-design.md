@@ -159,3 +159,23 @@ The server checks personal ownership and destination membership in the same orga
 A copy gets a new ID, token and version history. Its default audience is the organization,
 as on ordinary publish; team ownership does not make an artifact link team-private.
 Public grants, comments and source-session links do not transfer. A key collision refuses the copy.
+
+### Agent discoverability correction (2026-09-10)
+
+The first implementation left the workflow copy only in `list_tools` as
+`workflows.copy_to_team`. Memory and artifact copies were direct tools on the
+personal assistant. This difference made the same task less visible for workflows.
+
+A user-owned assistant now also receives `workflows__copy_to_team` as a pinned
+direct tool. The pin invokes the existing `workflows.copy_to_team` action, so
+validation, policy checks, audit records, permissions and collision handling stay
+on one action path. Its schema names the personal workflow ID, destination team
+ID and new destination name. Its guidance requires an explicit user request and
+all three values before invocation. The action remains available through
+`list_tools` and `call_tool`.
+
+Team assistants, workflow sessions, regular sessions and child sessions do not
+receive the pin. This keeps the existing pinned-action security boundary. The
+memory and artifact schemas now give the same explicit source, destination and
+collision guidance. No UI control is added because conversation is the requested
+surface and the existing agent actions complete the flow.

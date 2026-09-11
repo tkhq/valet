@@ -352,7 +352,11 @@ function asMoveResultBody(body: unknown): MoveResultBody | null {
 export const artifactCopyToTeamTool = defineTool({
   name: "artifact_copy_to_team",
   description: "Copy the current content of an explicitly selected personal artifact into a team. Requires membership. Creates a new org-visible link and never overwrites a destination. Does not copy comments, history, public access or source-session links. The original remains unchanged.",
-  parameters: Type.Object({ artifactId: Type.String(), teamId: Type.String(), key: Type.String() }),
+  parameters: Type.Object({
+    artifactId: Type.String({ description: "Explicit personal artifact ID to copy." }),
+    teamId: Type.String({ description: "Explicit destination team ID." }),
+    key: Type.String({ description: "New artifact key in the destination team. Must not exist." }),
+  }),
   execute: async (args, ctx) => {
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };

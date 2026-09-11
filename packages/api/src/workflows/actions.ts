@@ -179,7 +179,9 @@ function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
 
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
-    workflow_id: Type.String(), team_id: Type.String(), name: Type.String(),
+    workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
+    team_id: Type.String({ description: "Explicit destination team ID." }),
+    name: Type.String({ description: "New workflow name in the destination team. Must not exist." }),
   }))({
     id: "workflows.copy_to_team",
     name: "Copy workflow to team",

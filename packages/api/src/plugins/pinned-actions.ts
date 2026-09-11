@@ -38,11 +38,10 @@
  * member's principal.
  *
  * Session tools are fixed when a session is built, so within a user-owned
- * assistant the pin does apply to that person's whole default assistant and
- * not only to the editor panel. That part is acceptable: the tool reaches
- * nothing `call_tool` could not already reach for that same user, and a
- * wrong workflow id fails loudly with "workflow not found". Revisit the
- * scope if this list grows past the workflow pair.
+ * assistant each pin applies to that person's whole default assistant. That
+ * scope is acceptable: each tool reaches nothing `call_tool` could not reach
+ * for the same user, and a wrong workflow id fails with "workflow not found".
+ * Revisit the scope if this list grows beyond the workflow tools below.
  *
  * DEPLOY NOTE. A cached live session keeps the tool array it was built
  * with. A change here reaches an existing session at its next build.
@@ -58,6 +57,12 @@ import type { PinnedActionSpec } from "@valet/engine";
  * panel does not want.
  */
 export const PINNED_ACTIONS: readonly PinnedActionSpec[] = [
+  {
+    actionId: "workflows.copy_to_team",
+    guidance:
+      "Use this tool only when the user explicitly asks to copy one personal workflow to a named team. " +
+      "Confirm the source workflow, destination team, and new name before you call it.",
+  },
   {
     actionId: "workflows.get_workflow",
     guidance:

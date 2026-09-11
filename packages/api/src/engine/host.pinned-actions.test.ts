@@ -22,7 +22,8 @@ import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js
 const USER = "local-user";
 const ORG = "local-org";
 
-/** The direct tool name `workflows.patch_workflow` maps to. */
+/** Direct tool names for the pinned workflow actions. */
+const COPY_TOOL = "workflows__copy_to_team";
 const PATCH_TOOL = "workflows__patch_workflow";
 
 function makeAction(id: string): PluginAction {
@@ -43,7 +44,11 @@ const workflowsFixture: ValetPlugin = {
   actions: [
     {
       service: "workflows",
-      actions: [makeAction("workflows.get_workflow"), makeAction("workflows.patch_workflow")],
+      actions: [
+        makeAction("workflows.copy_to_team"),
+        makeAction("workflows.get_workflow"),
+        makeAction("workflows.patch_workflow"),
+      ],
     } satisfies ActionPlugin,
   ],
 };
@@ -60,7 +65,7 @@ describe("EngineHost pinned-action scope", () => {
     api = undefined;
   });
 
-  it("gives a user-owned assistant session the direct save tool", async () => {
+  it("gives a user-owned assistant direct copy and save tools", async () => {
     // The workflow editor panel opens exactly this session, and the pin is
     // what stops the model describing an edit it never applied.
     api = await bootTestApi({ plugins: [workflowsFixture] });
@@ -69,7 +74,7 @@ describe("EngineHost pinned-action scope", () => {
       { type: "user", id: USER },
       { actorUserId: USER, orgId: ORG },
     );
-    expect(toolNames(session.options.tools)).toContain(PATCH_TOOL);
+    expect(toolNames(session.options.tools)).toEqual(expect.arrayContaining([COPY_TOOL, PATCH_TOOL]));
   });
 
   it("withholds the direct save tool from a team-owned assistant session", async () => {
@@ -89,6 +94,7 @@ describe("EngineHost pinned-action scope", () => {
       { actorUserId: USER, orgId: ORG },
     );
     const names = toolNames(session.options.tools);
+    expect(names).not.toContain(COPY_TOOL);
     expect(names).not.toContain(PATCH_TOOL);
     expect(names).not.toContain("workflows__get_workflow");
     // The action stays reachable the way it always was.

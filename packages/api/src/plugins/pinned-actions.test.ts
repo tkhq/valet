@@ -23,11 +23,18 @@ describe("PINNED_ACTIONS", () => {
     expect(PINNED_ACTIONS.length).toBeLessThanOrEqual(MAX_PINNED_ACTIONS);
   });
 
-  it("pins the workflow read/write pair and nothing else", () => {
+  it("pins workflow copy, read, and write actions", () => {
     expect(PINNED_ACTIONS.map((p) => p.actionId)).toEqual([
+      "workflows.copy_to_team",
       "workflows.get_workflow",
       "workflows.patch_workflow",
     ]);
+  });
+
+  it("requires an explicit workflow, team, and new name before a copy", () => {
+    const copy = PINNED_ACTIONS.find((p) => p.actionId === "workflows.copy_to_team");
+    expect(copy?.guidance).toContain("explicitly asks");
+    expect(copy?.guidance).toContain("source workflow, destination team, and new name");
   });
 
   it("tells the model that describing a change is not making it", () => {
@@ -58,9 +65,21 @@ describe("pluginSessionExtras with pins", () => {
     expect(tools.map((t) => t.name)).toEqual([
       "list_tools",
       "call_tool",
+      "workflows__copy_to_team",
       "workflows__get_workflow",
       "workflows__patch_workflow",
     ]);
+    const copy = tools.find((t) => t.name === "workflows__copy_to_team");
+    expect(copy?.description).toContain("original and its triggers unchanged");
+    expect(copy?.description).toContain("explicitly asks");
+    expect(copy?.parameters).toMatchObject({
+      required: ["workflow_id", "team_id", "name"],
+      properties: {
+        workflow_id: { description: expect.stringContaining("personal workflow ID") },
+        team_id: { description: expect.stringContaining("destination team ID") },
+        name: { description: expect.stringContaining("Must not exist") },
+      },
+    });
   });
 
   it("ships no direct tools when the caller pins nothing", () => {
@@ -91,6 +110,7 @@ describe("pluginSessionExtras with pins", () => {
     expect(tools.map((t) => t.name)).toEqual([
       "list_tools",
       "call_tool",
+      "workflows__copy_to_team",
       "workflows__get_workflow",
       "workflows__patch_workflow",
     ]);

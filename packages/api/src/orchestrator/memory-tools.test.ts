@@ -18,7 +18,7 @@ import type {
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eq } from "drizzle-orm";
-import { teamMembers } from "../schema/index.js";
+import { artifacts, teamMembers } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -28,6 +28,7 @@ import {
   memSearchTool,
   memMoveTool,
   memCopyToTeamTool,
+  artifactCopyToTeamTool,
   memLinksTool,
   memShareTool,
   artifactPublishTool,
@@ -84,6 +85,27 @@ describe("buildMemoryTools", () => {
       "artifact_publish",
       "mem_rm",
     ]);
+  });
+
+  it("describes explicit copy sources, destinations, and collision rules", () => {
+    expect(memCopyToTeamTool.description).toContain("explicit file requested");
+    expect(memCopyToTeamTool.parameters).toMatchObject({
+      required: ["from", "to", "teamId"],
+      properties: {
+        from: { description: expect.stringContaining("personal memory path") },
+        to: { description: expect.stringContaining("Must not exist") },
+        teamId: { description: expect.stringContaining("destination team ID") },
+      },
+    });
+    expect(artifactCopyToTeamTool.description).toContain("original remains unchanged");
+    expect(artifactCopyToTeamTool.parameters).toMatchObject({
+      required: ["artifactId", "teamId", "key"],
+      properties: {
+        artifactId: { description: expect.stringContaining("personal artifact ID") },
+        teamId: { description: expect.stringContaining("destination team ID") },
+        key: { description: expect.stringContaining("Must not exist") },
+      },
+    });
   });
 });
 
@@ -387,8 +409,8 @@ describe("mem_* tools: real HTTP round trip", () => {
 });
 
 
-describe("mem_copy_to_team", () => {
-  it("copies over HTTP and rechecks membership even for internal tool requests", async () => {
+describe("copy-to-team tools", () => {
+  it("copies memory over HTTP and rechecks membership for internal requests", async () => {
     api = await bootTestApi();
     const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
@@ -402,5 +424,25 @@ describe("mem_copy_to_team", () => {
     await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
     expect((await memCopyToTeamTool.execute({ ...args, to: "notes/second.md" }, ctx)).text).toContain("[memory_error]");
     expect((await memReadTool.execute({ path: args.from }, ctx)).text).toContain("Exact content.");
+  });
+
+  it("copies an artifact over HTTP and refuses a destination collision", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Artifact team", creatorUserId: "local-user" });
+    const published = await artifactPublishTool.execute(
+      { key: "pages/source", content: "# Exact source", format: "markdown" },
+      ctx,
+    );
+    const artifactId = /\/a\/([^/\s]+)/.exec(published.text)?.[1];
+    if (!artifactId) throw new Error("published artifact URL missing token");
+    const [source] = await api.providers.db.select().from(artifacts).where(eq(artifacts.token, artifactId));
+    if (!source) throw new Error("published artifact missing");
+    const args = { artifactId: source.id, teamId: team.id, key: "pages/team-copy" };
+    const copied = await artifactCopyToTeamTool.execute(args, ctx);
+    expect(copied.text).toContain('"path":"pages/team-copy"');
+    expect(copied.text).toContain('"visibility":"org"');
+    expect((await artifactCopyToTeamTool.execute(args, ctx)).text).toContain("another key");
   });
 });
