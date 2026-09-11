@@ -8,6 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import { SLACK_API, slackFetch, slackGet } from "../actions/api.js";
+import { markdownToSlackMrkdwn } from "./format.js";
 
 export class SlackApiError extends Error {
   constructor(
@@ -142,6 +143,7 @@ export class SlackApi {
     const body: Record<string, unknown> = {
       channel: opts.channel,
       text: opts.text,
+      mrkdwn: true,
       unfurl_links: false,
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
@@ -230,7 +232,7 @@ export class SlackApi {
       channel_id: opts.channelId,
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
-    if (opts.initialComment !== undefined) body.initial_comment = opts.initialComment;
+    if (opts.initialComment !== undefined) body.initial_comment = markdownToSlackMrkdwn(opts.initialComment);
     await this.call("files.completeUploadExternal", body);
   }
 

@@ -12,6 +12,7 @@ import { checkPrivateChannelAccess } from "./channel-access.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
+import { markdownToSlackMrkdwn } from "../transport/format.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -301,14 +302,15 @@ async function openAndSendDM(
   const openData = (await openRes.json()) as { ok: boolean; error?: string; channel?: { id?: string } };
   if (!openData.ok || !openData.channel?.id) return slackError(openRes, openData);
 
-  const body: Record<string, unknown> = { channel: openData.channel.id, text };
+  const formattedText = markdownToSlackMrkdwn(text);
+  const body: Record<string, unknown> = { channel: openData.channel.id, text: formattedText, mrkdwn: true };
 
   // For long messages, use blocks so Slack doesn't split into separate threads.
   // Prefers markdown blocks (native table/formatting support), falls back to
   // section blocks for very long messages (> 12K).
   if (text.length > SLACK_TEXT_LIMIT) {
-    body.blocks = buildContentBlocks(text, text);
-    body.text = text.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+    body.blocks = buildContentBlocks(text, formattedText);
+    body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
 
   const { res, data } = await postActionMessage(token, body, ctx);
@@ -887,7 +889,8 @@ const sendMessage = action(Type.Object({
     const denied = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
     if (denied) return denied;
 
-    const body: Record<string, unknown> = { channel: channelId, text: p.text };
+    const formattedText = markdownToSlackMrkdwn(p.text);
+    const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
     if (p.thread_ts) body.thread_ts = p.thread_ts;
 
     let userBlocks: Record<string, unknown>[] | undefined;
@@ -914,13 +917,13 @@ const sendMessage = action(Type.Object({
       const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
       const contentBlocks = userBlocks
         ? userBlocks.slice(0, blockBudget)
-        : buildContentBlocks(p.text, p.text, blockBudget);
+        : buildContentBlocks(p.text, formattedText, blockBudget);
       if (hasAttribution) {
         contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
       }
       body.blocks = contentBlocks;
       if (needsLongBlocks) {
-        body.text = p.text.slice(0, SLACK_TEXT_LIMIT);
+        body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
       }
     } else if (userBlocks) {
       body.blocks = userBlocks;
@@ -978,7 +981,8 @@ const replyToOrigin = action(Type.Object({
     const { res, data } = await postActionMessage(o.token, {
       channel: o.channelId,
       thread_ts: o.threadTs,
-      text: args.text,
+      text: markdownToSlackMrkdwn(args.text),
+      mrkdwn: true,
     }, ctx);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
@@ -1074,10 +1078,16 @@ const updateMessage = action(Type.Object({
     // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
     // previously block-formatted (long) message down to short text must not leave
     // the stale blocks rendering.
-    const body: Record<string, unknown> = { channel: args.channel, ts: args.ts, text: args.text, parse: 'none' };
+    const formattedText = markdownToSlackMrkdwn(args.text);
+    const body: Record<string, unknown> = {
+      channel: args.channel,
+      ts: args.ts,
+      text: formattedText,
+      parse: 'none',
+    };
     if (args.text.length > SLACK_TEXT_LIMIT) {
-      body.blocks = buildContentBlocks(args.text, args.text);
-      body.text = args.text.slice(0, SLACK_TEXT_LIMIT);
+      body.blocks = buildContentBlocks(args.text, formattedText);
+      body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
     } else {
       body.blocks = [];
     }

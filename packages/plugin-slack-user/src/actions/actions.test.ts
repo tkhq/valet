@@ -254,6 +254,7 @@ describe("slack_user.send_dm", () => {
     expect(mocks.slackFetch).toHaveBeenNthCalledWith(2, "chat.postMessage", "xoxp-fake", {
       channel: "D9",
       text: "hello (as me)",
+      mrkdwn: true,
     });
     expect(result.data).toMatchObject({ ok: true, ts: "1.0", channel: "D9" });
   });

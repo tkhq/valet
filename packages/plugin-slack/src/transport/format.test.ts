@@ -44,6 +44,16 @@ describe("markdownToSlackMrkdwn", () => {
     expect(markdownToSlackMrkdwn("**a** and **b**")).toBe("*a* and *b*");
   });
 
+  it("converts bold at the start, mid-line, and next to punctuation", () => {
+    expect(markdownToSlackMrkdwn("**Start** then **middle** and (**end**)."))
+      .toBe("*Start* then *middle* and (*end*).");
+  });
+
+  it("converts nested bold and italic emphasis", () => {
+    expect(markdownToSlackMrkdwn("**bold and *italic***, then ***both***"))
+      .toBe("*bold and _italic_*, then *_both_*");
+  });
+
   // ─── Italic ──────────────────────────────────────────────────────────
 
   it("converts *italic* to _italic_", () => {
@@ -106,6 +116,10 @@ describe("markdownToSlackMrkdwn", () => {
     expect(markdownToSlackMrkdwn("> quoted text")).toBe("> quoted text");
   });
 
+  it("converts headings and leaves lists readable", () => {
+    expect(markdownToSlackMrkdwn("# Heading\n- item\n1. first")).toBe("*Heading*\n- item\n1. first");
+  });
+
   // ─── Plain Text ──────────────────────────────────────────────────────
 
   it("returns plain text unchanged", () => {
@@ -153,6 +167,23 @@ describe("markdownToSlackMrkdwn", () => {
     expect(result).toContain("```first```");
     expect(result).toContain("```second```");
     expect(result).toContain("text");
+  });
+
+  it("converts the daily developer digest", () => {
+    const digest = [
+      "**Valet Daily Developer Digest: Unreleased Change**",
+      "**Change:** fix(integrations): follow the selected team workspace",
+      "**User Impact:** ...",
+      "**Owner:** xBalbinus",
+      "**PR:** https://github.com/tkhq/valet/pull/631",
+    ].join("\n");
+    expect(markdownToSlackMrkdwn(digest)).toBe([
+      "*Valet Daily Developer Digest: Unreleased Change*",
+      "*Change:* fix(integrations): follow the selected team workspace",
+      "*User Impact:* ...",
+      "*Owner:* xBalbinus",
+      "*PR:* https://github.com/tkhq/valet/pull/631",
+    ].join("\n"));
   });
 
   describe("control-sequence escaping (injection safety)", () => {

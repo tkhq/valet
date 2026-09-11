@@ -283,6 +283,9 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   not post.
 - **Telegram has an explicit text reply action.** `telegram.reply_to_origin`
   sends text to the origin DM through the organization bot credential.
+- **Slack outbound text uses one Markdown converter.** The channel transport,
+  bot actions, personal actions, and file comments convert CommonMark to
+  Slack mrkdwn before they send text. Code spans and fenced code stay literal.
 - **Sender name is a handle, not a resolved display name.** The dispatcher sets
   the signal's `sender` attribute from `event.actor` (`login` or `externalId`).
   For a Slack `app_mention` this is the raw Slack user id, because the event

@@ -92,9 +92,19 @@ export function markdownToSlackMrkdwn(text: string): string {
   // built from controlled [text](url) markdown after this escape.
   result = escapeMrkdwn(result);
 
-  // Convert bold to placeholders first (so italic pass doesn't re-match)
-  // **bold** or __bold__ → placeholder
+  // Extract bold spans before italic spans. This prevents a bold delimiter
+  // from being read as two adjacent italic delimiters.
   const boldSpans: string[] = [];
+  // Handle combined emphasis before plain bold. A triple delimiter contains
+  // a complete italic span inside the bold span in CommonMark.
+  result = result.replace(/(?:^|(?<=[\s(]))\*{3}([^*\n]+)\*{3}(?!\*)/g, (_, content: string) => {
+    boldSpans.push(`_${content}_`);
+    return `\x00BD${boldSpans.length - 1}\x00`;
+  });
+  result = result.replace(/\*\*([^*\n]*)\*([^*\n]+)\*\*\*/g, (_, before: string, italic: string) => {
+    boldSpans.push(`${before}_${italic}_`);
+    return `\x00BD${boldSpans.length - 1}\x00`;
+  });
   result = result.replace(/\*\*(.+?)\*\*/g, (_, content: string) => {
     boldSpans.push(content);
     return `\x00BD${boldSpans.length - 1}\x00`;
@@ -104,15 +114,23 @@ export function markdownToSlackMrkdwn(text: string): string {
     return `\x00BD${boldSpans.length - 1}\x00`;
   });
 
-  // *italic* → _italic_ (safe now since bold ** has been extracted)
+  // *italic* → _italic_ (safe now since bold ** has been extracted).
   result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "_$1_");
 
   // [text](url) → <url|text>
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<$2|$1>");
 
-  // Restore bold spans as Slack bold (*text*)
+  // Slack has no heading syntax. Convert a Markdown heading after italic
+  // conversion so its generated bold delimiters stay bold.
+  result = result.replace(/^#{1,6}\s+(.+)$/gm, "*$1*");
+
+  const italicize = (content: string): string =>
+    content.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "_$1_");
+
+  // Restore bold spans as Slack bold (*text*). Convert italic text nested in
+  // a bold span before restoring its outer delimiters.
   result = result.replace(/\x00BD(\d+)\x00/g, (_, i) => {
-    return `*${boldSpans[Number(i)]}*`;
+    return `*${italicize(boldSpans[Number(i)])}*`;
   });
 
   // Restore inline code

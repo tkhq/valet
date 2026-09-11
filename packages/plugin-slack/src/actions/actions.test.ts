@@ -105,7 +105,7 @@ describe('slack actions', () => {
 
     const [postUrl, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(postUrl).toBe('https://slack.com/api/chat.postMessage');
-    expect(JSON.parse(postInit.body as string)).toEqual({ channel: 'D1', text: 'hello owner' });
+    expect(JSON.parse(postInit.body as string)).toEqual({ channel: 'D1', text: 'hello owner', mrkdwn: true });
 
     expect(result).toEqual({ success: true, data: { ts: '123.456', channel: 'D1' } });
   });
@@ -142,6 +142,7 @@ describe('slack actions', () => {
     expect(JSON.parse(postInit.body as string)).toEqual({
       channel: 'D2',
       text: 'hi there',
+      mrkdwn: true,
       username: 'Ada',
       icon_url: 'https://example.com/a.png',
     });
@@ -187,7 +188,7 @@ describe('slack actions', () => {
     );
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://slack.com/api/chat.postMessage');
-    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'here is the answer' });
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'here is the answer', mrkdwn: true });
     expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9' } });
   });
 
@@ -267,7 +268,7 @@ describe('slack actions', () => {
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'follow-up' });
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'follow-up', mrkdwn: true });
     expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.10' } });
   });
 
@@ -584,6 +585,22 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: false, error: 'Missing bot_token' });
   });
 
+  it('send_message converts CommonMark text to Slack mrkdwn', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
+
+    await action('slack.send_message').execute(
+      { channel: 'C1', text: '**Valet Daily Developer Digest**: see [PR](https://github.com/tkhq/valet/pull/631)' },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      text: '*Valet Daily Developer Digest*: see <https://github.com/tkhq/valet/pull/631|PR>',
+      mrkdwn: true,
+    });
+  });
+
   it('send_message posts a message to a channel by ID with guard check', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
@@ -596,7 +613,7 @@ describe('slack actions', () => {
     const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(url).toBe('https://slack.com/api/chat.postMessage');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
-    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'hello channel' });
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'hello channel', mrkdwn: true });
     expect(result).toEqual({ success: true, data: { ts: '123.456', channel: 'C1' } });
   });
 
@@ -652,7 +669,7 @@ describe('slack actions', () => {
     );
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'reply in thread', thread_ts: '123.456' });
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', text: 'reply in thread', thread_ts: '123.456', mrkdwn: true });
     expect(result).toEqual({ success: true, data: { ts: '124.567', channel: 'C1' } });
   });
 
