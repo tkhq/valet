@@ -91,12 +91,10 @@ if [ "${VALET_DOCKER_USERNS:-0}" = "1" ]; then
       done
       grep -q . /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null \
         || echo "valet: cgroup2 controller delegation failed — docker run may lack resource controllers" >>"$LOG"
-      # The runtime delegates the namespaced cgroup root to mapped pod root.
-      # Valet runs agent commands as `dockerd`, so hand off only the /init
-      # leaf and its core delegation files. Resource limits and the visible
-      # root stay owned by mapped root. RootlessKit can then evacuate /init
-      # and manage descendants without access to parent or sibling pods.
-      if ! /cgroup-delegation.sh /sys/fs/cgroup init dockerd 2>>"$LOG"; then
+      # Keep persistent services in a mapped-root-owned leaf. The delegated
+      # /init manager stays empty so nested runtimes can enable controllers
+      # without moving PID 1, dockerd, or later exec processes.
+      if ! /cgroup-delegation.sh /sys/fs/cgroup dockerd 2>>"$LOG"; then
         echo "valet: cgroup delegation failed; Docker and nested rootless runtimes will not start. Recreate the sandbox after correcting the valet-docker RuntimeClass." >>"$LOG"
         exit 1
       fi
