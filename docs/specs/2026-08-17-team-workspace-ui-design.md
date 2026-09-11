@@ -210,6 +210,7 @@ In a team workspace, Settings replaces the You group with Team. General opens th
 The Team rail also keeps API keys at `/settings/api-keys`, using its existing workspace-aware controls.
 Profile, appearance, and other personal-only settings are omitted in team scope. Direct personal settings URLs redirect before their forms mount.
 Organization settings keep their existing routes and permission gates. Personal workspace settings remain unchanged.
+The scope redirect applies only to settings URLs. Primary navigation out of settings must reach its destination, even while the settings layout remains mounted during the transition.
 
 The team page reuses TeamsPanel with a selected team ID. It shows only that team, expanded, without the create-team form.
 Existing team-admin, org-admin, member, and managed-team restrictions apply. This change adds no roles or persona model.
