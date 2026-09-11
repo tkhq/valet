@@ -43,6 +43,7 @@ import {
   parsePrincipal,
   type ActionPlugin,
   type CredentialStore,
+  type ChannelSenderIdentity,
   type Principal,
   type SessionStore,
   type SignalContent,
@@ -166,6 +167,7 @@ interface RunContext {
   orgId: string;
   actorUserId: string;
   owner: Principal;
+  outboundSender: ChannelSenderIdentity;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -174,7 +176,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   if (!run.owner) throw new Error(`workflow engine-deps: run ${runId} has no recorded owner`);
 
   const defRows = await opts.db
-    .select({ orgId: workflowDefinitions.orgId })
+    .select({ orgId: workflowDefinitions.orgId, name: workflowDefinitions.name, avatarUrl: workflowDefinitions.avatarUrl })
     .from(workflowDefinitions)
     .where(eq(workflowDefinitions.id, run.params.workflowId))
     .limit(1);
@@ -190,7 +192,15 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { orgId: defRow.orgId, actorUserId: actorUserIdFor(owner), owner };
+  return {
+    orgId: defRow.orgId,
+    actorUserId: actorUserIdFor(owner),
+    owner,
+    outboundSender: {
+      displayName: defRow.name,
+      ...(defRow.avatarUrl !== null ? { avatarUrl: defRow.avatarUrl } : {}),
+    },
+  };
 }
 
 /**
@@ -280,6 +290,7 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
     owner: ctx.owner,
     workspace,
     title,
+    outboundSender: ctx.outboundSender,
   });
 }
 
@@ -503,6 +514,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
+        outboundSender: ctx.outboundSender,
       });
     },
 

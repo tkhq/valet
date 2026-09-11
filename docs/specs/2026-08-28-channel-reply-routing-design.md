@@ -164,7 +164,9 @@ and `signal` records engine-routed admissions.
   `dm_user`. `ChannelHost` resolves the session's `assistants` row for host
   deliveries. The engine gives session actions a dynamic
   `resolveOutboundSender` callback. Headless workflow actions and workflow
-  session nodes resolve the run owner's default assistant when they post.
+  session nodes use the workflow definition name and its optional avatar.
+  If a workflow has no avatar, Slack receives no `icon_url` and uses the app
+  or bot avatar. These paths never use the run owner's assistant identity.
   Child-agent sessions resolve the assistant that owns their parent session,
   then use the owner's default assistant when the parent has no assistant.
   Both paths read the current row, so profile edits apply without a

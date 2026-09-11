@@ -663,6 +663,7 @@ CREATE TABLE "workflow_definitions" (
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
 	"name" text NOT NULL,
+	"avatar_url" text,
 	"definition" jsonb NOT NULL,
 	-- Repository mirror columns. A `repo` row is the mirror of one workflow
 	-- file and is read-only in the product: editing the file is the edit, and

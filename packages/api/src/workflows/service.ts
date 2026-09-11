@@ -168,10 +168,26 @@ export function validateDefinitionInput(
 
 type WorkflowRow = typeof workflowDefinitions.$inferSelect;
 
+export function validateWorkflowAvatar(avatarUrl: unknown): string | null {
+  if (avatarUrl === undefined || avatarUrl === null) return null;
+  if (typeof avatarUrl !== "string") return "avatarUrl must be an https:// image URL, or null to clear it.";
+  try {
+    const parsed = new URL(avatarUrl);
+    if (parsed.protocol !== "https:" || !parsed.hostname || /\s/.test(avatarUrl)) {
+      return "avatarUrl must be an https:// image URL, or null to clear it.";
+    }
+  } catch {
+    return "avatarUrl must be an https:// image URL, or null to clear it.";
+  }
+  if (avatarUrl.length > 2048) return "avatarUrl is limited to 2048 characters. Use a shorter URL.";
+  return null;
+}
+
 function rowToDefinition(row: WorkflowRow, source?: { repoFullName: string; ref: string }): WorkflowDefinitionSummary {
   const summary: WorkflowDefinitionSummary = {
     id: row.id,
     name: row.name,
+    ...(row.avatarUrl !== null ? { avatarUrl: row.avatarUrl } : {}),
     definition: row.definition,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -538,11 +554,11 @@ export async function getWorkflowDefinition(
 export async function createWorkflowDefinition(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
-  input: { name: string; definition: unknown; teamId?: string; skipMembershipCheck?: boolean },
+  input: { name: string; definition: unknown; avatarUrl?: string; teamId?: string; skipMembershipCheck?: boolean },
 ): Promise<WorkflowDefinitionSummary> {
   const now = Date.now();
   const id = newWorkflowId("wf");
-  const values = { id, orgId: owner.orgId, name: input.name, definition: input.definition, createdAt: now, updatedAt: now };
+  const values = { id, orgId: owner.orgId, name: input.name, avatarUrl: input.avatarUrl ?? null, definition: input.definition, createdAt: now, updatedAt: now };
 
   let ownerType: "user" | "team" = "user";
   let ownerId = owner.userId;
@@ -586,7 +602,7 @@ export async function createWorkflowDefinition(
   }
 
   await snapshotVersion(deps, id, 1, input.name, input.definition, now);
-  return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
+  return { id, name: input.name, ...(input.avatarUrl ? { avatarUrl: input.avatarUrl } : {}), definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
 }
 
 /** Immutable per-save snapshot backing the UI's version history. */
@@ -672,7 +688,7 @@ export async function updateWorkflowDefinition(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   id: string,
-  input: { name?: string; definition?: unknown },
+  input: { name?: string; definition?: unknown; avatarUrl?: string | null },
 ): Promise<WorkflowDefinitionSummary | null> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
@@ -686,6 +702,7 @@ export async function updateWorkflowDefinition(
     .update(workflowDefinitions)
     .set({
       name: input.name ?? row.name,
+      ...(input.avatarUrl !== undefined ? { avatarUrl: input.avatarUrl } : {}),
       definition: input.definition !== undefined ? input.definition : row.definition,
       updatedAt: now,
     })
@@ -710,6 +727,7 @@ export async function updateWorkflowDefinition(
   return {
     id,
     name: input.name ?? row.name,
+    ...((input.avatarUrl ?? row.avatarUrl) !== null ? { avatarUrl: input.avatarUrl ?? row.avatarUrl ?? undefined } : {}),
     definition: input.definition !== undefined ? input.definition : row.definition,
     createdAt: row.createdAt,
     updatedAt: now,
@@ -987,7 +1005,7 @@ export async function copyWorkflowDefinition(
         eq(workflowDefinitions.ownerId, destination.teamId), eq(workflowDefinitions.name, name),
       )).limit(1);
       if (existing) throw new ValidationError("A workflow with that name already exists in the team. Choose another name.");
-      return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition: row.definition, teamId: destination.teamId });
+      return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition: row.definition, avatarUrl: row.avatarUrl ?? undefined, teamId: destination.teamId });
     });
   }
 
@@ -1004,6 +1022,7 @@ export async function copyWorkflowDefinition(
     ownerType: "user",
     ownerId: owner.userId,
     name,
+    avatarUrl: row.avatarUrl,
     definition: row.definition,
     origin: "local",
     createdAt: now,
@@ -1013,6 +1032,7 @@ export async function copyWorkflowDefinition(
   return {
     id: copyId,
     name,
+    ...(row.avatarUrl !== null ? { avatarUrl: row.avatarUrl } : {}),
     definition: row.definition,
     createdAt: now,
     updatedAt: now,

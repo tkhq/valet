@@ -38,6 +38,7 @@ import {
   type ActionPlugin,
   type CommandContext,
   type CommandDef,
+  type ChannelSenderIdentity,
   type PinnedActionSpec,
   type PluginCatalog,
   type RepoInstructions,
@@ -3660,6 +3661,7 @@ export class EngineHost {
       workspace: string;
       title?: string;
       modelId?: string;
+      outboundSender?: ChannelSenderIdentity;
     },
   ): Promise<Session> {
     const cached = this.cache.get(sessionId);
@@ -3683,6 +3685,7 @@ export class EngineHost {
       workspace: string;
       title?: string;
       modelId?: string;
+      outboundSender?: ChannelSenderIdentity;
     },
   ): Promise<Session> {
     // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
@@ -3709,7 +3712,9 @@ export class EngineHost {
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
-    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
+    const resolveOutboundSender = opts.outboundSender
+      ? async () => opts.outboundSender
+      : this.outboundSenderResolver(opts.orgId, opts.owner);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,

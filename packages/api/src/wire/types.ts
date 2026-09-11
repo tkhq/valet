@@ -1872,6 +1872,8 @@ export interface MemoryTreeEntry {
 export interface WorkflowDefinitionSummary {
   id: string;
   name: string;
+  /** Optional image for the workflow's outbound Slack posts. */
+  avatarUrl?: string;
   definition: unknown;
   createdAt: number;
   updatedAt: number;
@@ -1890,6 +1892,8 @@ export interface WorkflowDefinitionSummary {
 export interface CreateWorkflowRequest {
   name: string;
   definition: unknown;
+  /** Optional image for the workflow's outbound Slack posts. */
+  avatarUrl?: string;
   /** Create as a team-owned workflow instead of personal. A cookie session
    * must be a live member. A personal `vlt_` key cannot send this field. A
    * team key always creates as its team and may omit it. */
@@ -1908,6 +1912,8 @@ export type UpdateWorkflowResponse = WorkflowDefinitionSummary;
 export interface UpdateWorkflowRequest {
   name?: string;
   definition?: unknown;
+  /** Set null to use Slack's app or bot avatar. */
+  avatarUrl?: string | null;
 }
 
 export interface ListWorkflowsResponse {
