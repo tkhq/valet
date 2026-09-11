@@ -4,6 +4,7 @@ import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "./princ
 const ok = {
   verifyApiKey: vi.fn(async ({ key }: { key: string }) =>
     key === "vlt_good" ? { valid: true, key: { id: "k1", userId: "u1" } } : { valid: false, key: null }),
+  teamOrg: vi.fn(async () => null),
   userOrg: vi.fn(async (userId: string) => (userId === "u1" ? "org1" : null)),
 };
 
@@ -24,25 +25,33 @@ describe("resolveProxyPrincipal", () => {
     const removed = {
       verifyApiKey: vi.fn(async () => ({ valid: true, key: { id: "k9", userId: "u-removed" } })),
       userOrg: vi.fn(async () => null),
+      teamOrg: vi.fn(async () => null),
     };
     const r = await resolveProxyPrincipal(new Headers({ "x-api-key": "vlt_good" }), "anthropic", removed);
     expect(r).toBeInstanceOf(Response);
     expect((r as Response).status).toBe(401);
   });
-  it("401s a team key and names the fix — the gateway bills a user, and a team key has none", async () => {
+  it("resolves a team key without consulting its creating admin", async () => {
     const team = {
-      verifyApiKey: vi.fn(async () => ({ valid: true, key: { id: "k7", userId: "admin-1", teamId: "team_1" } })),
-      userOrg: vi.fn(async () => "org1"),
+      verifyApiKey: vi.fn(async () => ({ valid: true, key: { id: "k7", userId: "departed-admin", teamId: "team_1" } })),
+      userOrg: vi.fn(async () => "wrong-org"),
+      teamOrg: vi.fn(async () => "team-org"),
     };
-    const r = await resolveProxyPrincipal(new Headers({ "x-api-key": "vlt_team" }), "anthropic", team);
-    expect(r).toBeInstanceOf(Response);
-    const res = r as Response;
-    expect(res.status).toBe(401);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toMatch(/team API key/);
-    expect(body.error.message).toMatch(/personal/);
-    // Refused before the org lookup: the creating admin's org must never
-    // become the billing principal by accident.
+    const result = await resolveProxyPrincipal(new Headers({ authorization: "Bearer vlt_team" }), "openai", team);
+    expect(result).toEqual({ userId: null, teamId: "team_1", orgId: "team-org", keyId: "k7" });
+    expect(team.teamOrg).toHaveBeenCalledWith("team_1", "k7");
+    expect(team.userOrg).not.toHaveBeenCalled();
+  });
+
+  it("rejects a deleted team or mismatched stored key pin without falling back to the creator", async () => {
+    const team = {
+      verifyApiKey: vi.fn(async () => ({ valid: true, key: { id: "k7", userId: "admin", teamId: "gone" } })),
+      userOrg: vi.fn(async () => "org1"),
+      teamOrg: vi.fn(async () => null),
+    };
+    const result = await resolveProxyPrincipal(new Headers({ "x-api-key": "vlt_team" }), "anthropic", team);
+    if (!(result instanceof Response)) throw new Error("Expected an authentication failure");
+    expect(result.status).toBe(401);
     expect(team.userOrg).not.toHaveBeenCalled();
   });
 

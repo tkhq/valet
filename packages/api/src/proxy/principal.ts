@@ -59,6 +59,7 @@ export interface ProxyApiKeyRecord {
 export interface PrincipalDeps {
   verifyApiKey: (opts: { key: string }) => Promise<{ valid: boolean; key: ProxyApiKeyRecord | null }>;
   userOrg: (userId: string) => Promise<string | null>;
+  teamOrg: (teamId: string, keyId: string) => Promise<string | null>;
 }
 
 /**
@@ -67,11 +68,8 @@ export interface PrincipalDeps {
  * record (userId), NOT an org (spec finding 2). Returns a wire-correct 401
  * Response on any failure so the harness shows a clean message.
  *
- * A team key is refused. The gateway records usage and spend against a
- * user, and the only user on a team key is the creating admin, kept for
- * audit — billing them would charge a person for a team's traffic. The
- * refusal stands until a team billing principal exists; the message names
- * the fix a caller has today.
+ * Team ownership comes from the live team and the key's stored team pin.
+ * The creating admin is audit data, never the billing identity.
  */
 export async function resolveProxyPrincipal(
   headers: Headers, kind: ProviderKind, deps: PrincipalDeps,
@@ -81,11 +79,9 @@ export async function resolveProxyPrincipal(
   const result = await deps.verifyApiKey({ key });
   if (!result.valid || !result.key) return wireError(kind, 401, "Invalid API key. Create a proxy key in valet Settings.");
   if (result.key.teamId !== undefined) {
-    return wireError(
-      kind,
-      401,
-      "This is a team API key. Team API keys cannot use the LLM gateway; create a personal key in valet Settings.",
-    );
+    const orgId = await deps.teamOrg(result.key.teamId, result.key.id);
+    if (!orgId) return wireError(kind, 401, "Team API key is no longer valid. Ask a team admin to create a new key.");
+    return { userId: null, teamId: result.key.teamId, orgId, keyId: result.key.id };
   }
   const orgId = await deps.userOrg(result.key.userId);
   if (!orgId) return wireError(kind, 401, "API key is not linked to an organization. Contact your organization administrator.");

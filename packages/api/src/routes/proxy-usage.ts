@@ -88,7 +88,8 @@ interface AggRow {
 }
 
 interface UserAggRow extends AggRow {
-  user_id: string;
+  user_id: string | null;
+  team_id: string | null;
 }
 
 interface ModelAggRow extends AggRow {
@@ -134,7 +135,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
   // matching the pattern in routes/usage.ts.
   async function aggByUser(): Promise<{ rows: UserAggRow[] }> {
     return (await db.execute(sql`
-      SELECT user_id,
+      SELECT user_id, team_id,
              COUNT(*)                AS requests,
              SUM(input_tokens)       AS input_tokens,
              SUM(output_tokens)      AS output_tokens,
@@ -144,7 +145,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
       WHERE created_at >= ${sinceMs}
         AND ${scopeClause}
         AND total_tokens > 0
-      GROUP BY user_id
+      GROUP BY user_id, team_id
     `)) as { rows: UserAggRow[] };
   }
 
@@ -204,6 +205,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
 
   const byUser: ProxyUserBucket[] = byUserResult.rows.map((r) => ({
     userId: r.user_id,
+    teamId: r.team_id,
     ...toBucket(r),
   }));
 
@@ -257,7 +259,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
 /** Metadata-only projection returned by the /requests list query. */
 type ListRow = Pick<
   typeof llmProxyRequests.$inferSelect,
-  | "id" | "createdAt" | "orgId" | "userId" | "apiKeyId"
+  | "id" | "createdAt" | "orgId" | "userId" | "teamId" | "apiKeyId"
   | "providerKind" | "model" | "harness" | "endpoint"
   | "stream" | "statusCode"
   | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "totalTokens"
@@ -271,6 +273,7 @@ function rowToListItem(row: ListRow): ProxyRequestListItem {
     createdAt: row.createdAt,
     orgId: row.orgId,
     userId: row.userId,
+    teamId: row.teamId,
     apiKeyId: row.apiKeyId,
     providerKind: row.providerKind,
     model: row.model ?? null,
@@ -372,6 +375,7 @@ proxyUsageRouter.get("/requests", async (c) => {
       createdAt: llmProxyRequests.createdAt,
       orgId: llmProxyRequests.orgId,
       userId: llmProxyRequests.userId,
+      teamId: llmProxyRequests.teamId,
       apiKeyId: llmProxyRequests.apiKeyId,
       providerKind: llmProxyRequests.providerKind,
       model: llmProxyRequests.model,

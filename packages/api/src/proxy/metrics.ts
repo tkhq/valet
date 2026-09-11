@@ -6,11 +6,11 @@ let unpricedCounter: ReturnType<ReturnType<typeof metrics.getMeter>["createCount
 
 export function recordProxySpend(
   costUsd: number,
-  attrs: { model: string; userId: string; keyId: string; kind: string },
+  attrs: { model: string; userId?: string; teamId?: string; keyId: string; kind: string },
 ): void {
   if (!counter) {
     counter = metrics.getMeter("@valet/api").createCounter("valet.proxy.cost.usd", {
-      description: "External-harness proxy spend in USD, by user/key/model (priced calls only)",
+      description: "External-harness proxy spend in USD, by user or team, key, and model (priced calls only)",
     });
   }
   if (costUsd > 0) counter.add(costUsd, attrs);

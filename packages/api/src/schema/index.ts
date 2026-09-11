@@ -1411,10 +1411,8 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
 });
 // ─── Org action-policy engine (action-policies plan, Task 2) ───────────────
 //
-// Three tables: `action_policies` (durable org-level rules, `principalType:
-// "org"`; `principalType: "user"` rows are reserved for a future admin
-// per-user-policy rung — the adjudicated precedence order in
-// `policies/resolution.ts` only consults `principalType: "org"` rows today),
+// Three tables: `action_policies` holds org and team rules. User-principal
+// rows remain reserved; personal overrides use `action_policy_overrides`.
 // `runtime_grants` (ephemeral "allow for this session/run" quiets, always
 // `mode: "allow"`), `action_policy_overrides` (durable per-user overrides).
 // All three feed `policies/resolution.ts`'s pure `resolvePolicyDecision` —
@@ -1430,7 +1428,7 @@ export const actionPolicies = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    principalType: text("principal_type", { enum: ["org", "user"] }).notNull(),
+    principalType: text("principal_type", { enum: ["org", "user", "team"] }).notNull(),
     principalId: text("principal_id").notNull(),
     service: text("service"),
     actionId: text("action_id"),
@@ -1639,7 +1637,8 @@ export const llmProxyRequests = pgTable(
     id: text("id").primaryKey(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     orgId: text("org_id").notNull(),
-    userId: text("user_id").notNull(),
+    userId: text("user_id"),
+    teamId: text("team_id"),
     apiKeyId: text("api_key_id").notNull(),
     providerKind: text("provider_kind", { enum: ["anthropic", "openai"] }).notNull(),
     model: text("model"),
@@ -1664,7 +1663,8 @@ export const llmProxyRequests = pgTable(
     parseError: text("parse_error"),
   },
   (t) => [index("llm_proxy_requests_org_created").on(t.orgId, t.createdAt),
-          index("llm_proxy_requests_user_created").on(t.userId, t.createdAt)],
+          index("llm_proxy_requests_user_created").on(t.userId, t.createdAt),
+          index("llm_proxy_requests_team_created").on(t.teamId, t.createdAt)],
 );
 
 export type LlmProxyRequestRow = typeof llmProxyRequests.$inferSelect;

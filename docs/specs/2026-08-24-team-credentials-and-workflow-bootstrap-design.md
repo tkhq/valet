@@ -304,3 +304,29 @@ When unpinned GitHub nodes have no usable team credential, vault credential, or 
 Explicit user-pinned GitHub nodes keep team credential guidance. Usable team and vault credentials still satisfy readiness. This changes guidance only; credential resolution and installation eligibility remain unchanged.
 
 Readiness reasons remain caller-neutral. Template installation adds its next step; repository sync explains when triggers will arm.
+
+## Explicit workflow orchestrator routing (2026-09-11)
+
+The create dialog selects an orchestrator before the workflow name. Choices belong to the active workspace. Creation is disabled while choices load, fail, or are empty.
+
+`definition.assistantId` records the selection in the existing definition JSON. Each run snapshots that field with its graph. All orchestrator nodes, including repair dispatches, use the snapshotted assistant. An omitted field retains the owner's default-assistant behavior for older workflows. An unavailable, archived, or wrong-owner explicit target fails instead of silently switching assistants.
+
+Create and update validate the assistant against the workflow's organization and exact owner. Membership in another team does not permit selecting that team's assistant. Agent-created workflows inherit the creating assistant unless the definition already names an explicit target. A team assistant creates a team-owned workflow. Manual starts keep the clicking user as actor while retaining the workflow's resource owner.
+
+Canvas saves and graph updates preserve the selected assistant. Copies within the same owner preserve valid explicit routing. Copies to another workspace bind to that destination's default assistant. Existing schedule and event routing fields remain independent and unchanged. No database column or action-policy field is added.
+
+The selector uses the shared assistant naming contract, including **Default Orchestrator** for unnamed defaults. If an explicit selection disappears, creation stays disabled until the user chooses again. Changing workspaces resets the form. A late creation response from the previous workspace cannot close the new form or navigate away.
+
+The workflow editor conversation also uses the explicit assistant, checked against the workflow owner. An unavailable or cross-owner target shows an error without falling back to a personal conversation. Legacy definitions without a binding retain their existing editor assistant behavior. Remembered threads are reused only within the same assistant session.
+
+Recovery: Retry reloads the assistant list. More → Change orchestrator lets the user select another assistant in the workflow’s owner scope and saves through the existing definition update. It preserves the graph; running snapshots keep their previous target. Save or cancel graph edits before changing the target. Mirrored workflows must be edited at their source.
+
+Async completion is scoped to the routing generation and dialog opening: late thread success or failure cannot replace a newer assistant conversation, and a previous creation cannot close a reopened dialog. Team workflows link to Team Policies for approval changes managed by a team admin; they do not offer personal bulk overrides.
+
+Opening-thread publication is guarded too: only the current routing generation can store the thread and send its opening prompt. Shared creation results are claimed once across StrictMode and remounts; stale completion cannot publish over a newer session.
+
+At narrow widths, the workflow header wraps and the node palette scrolls horizontally above the graph. The graph has a fixed minimum viewing area. The assistant stays mounted below the graph and has a compact-screen toggle; selecting a node opens its settings. Desktop keeps the side-by-side palette, graph and assistant. Drawers use the screen edge on narrow layouts.
+
+On first load and in previews, partially positioned graphs place new nodes in a free column using the existing layout reconciliation. Saved node positions remain unchanged. The desktop workflow title grows into the space left by header actions.
+
+Mobile graph QA (2026-09-11): the editor permits zooming out to 10% so Fit View can show the whole graph on narrow screens. Saved viewport choices and zoom-in controls remain available.

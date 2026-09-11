@@ -13,7 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pgDbFromPglite } from "@valet/store-postgres";
 import type { DecisionResolution, PolicyInvocationRecord, PolicyResolveInput } from "@valet/engine";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, users } from "../schema/index.js";
+import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, users } from "../schema/index.js";
 import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
@@ -44,6 +44,7 @@ const pg = pgDbFromPglite(pglite);
 const db: AppDb = buildAppDb(pglite);
 
 async function reset(): Promise<void> {
+  await pg.query("DELETE FROM agent_sessions");
   await pg.query("DELETE FROM runtime_grants");
   await pg.query("DELETE FROM action_policies");
   await pg.query("DELETE FROM action_policy_overrides");
@@ -460,5 +461,29 @@ describe("loadPolicyRows", () => {
     expect(rows.policies).toHaveLength(1);
     expect(rows.grants).toHaveLength(1);
     expect(rows.overrides).toHaveLength(1);
+  });
+});
+
+
+describe("team policy ownership", () => {
+  async function seedTeamRule() {
+    await db.insert(actionPolicies).values({ id: "team-rule", orgId: ORG, principalType: "team", principalId: "team-a", service: "gmail", mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    await db.insert(actionPolicyOverrides).values({ id: "admin-personal", orgId: ORG, userId: ADMIN, service: "gmail", mode: "allow", createdAt: 1, updatedAt: 1 });
+  }
+  const input: PolicyResolveInput = { service: "gmail", actionId: "gmail.send_email", riskLevel: "low", params: {}, userId: ADMIN, orgId: ORG, sessionId: SESSION, threadId: "thread", appliesIn: "session" };
+
+  it("uses persisted team ownership without inheriting the creator's personal override", async () => {
+    await seedTeamRule();
+    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "team", ownerId: "team-a", createdAt: 1, updatedAt: 1 });
+    const resolver = buildPolicyResolver({ db, actionPluginByService: new Map() });
+    expect(await resolver.resolve(input)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+    expect(await resolver.resolve({ ...input, sessionId: "personal" })).toMatchObject({ mode: "allow", provenance: { source: "override" } });
+  });
+
+  it("carries trusted team ownership for workflow agent sessions with no app row", async () => {
+    await seedTeamRule();
+    const resolver = buildPolicyResolver({ db, actionPluginByService: new Map() });
+    expect(await resolver.resolve({ ...input, sessionId: "wf:run:triage", teamId: "team-a" })).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+    expect(await resolver.resolve({ ...input, sessionId: "wf:other:triage", teamId: "team-b" })).toMatchObject({ mode: "allow", provenance: { source: "risk_default" } });
   });
 });

@@ -312,7 +312,7 @@ export type InvokeActionResult =
   | { kind: "ok"; result: PluginActionResult }
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
-  | { kind: "denied-policy" }
+  | { kind: "denied-policy"; scope?: "team" }
   | { kind: "denied-approval"; reason?: "approval-processing-failed" }
   | { kind: "expired-approval" }
   | { kind: "pending-approval" }
@@ -488,6 +488,7 @@ export async function invokeAction(
   // the session and workflow paths.
   const policyActionId = qualifiedId(entry);
   const input: PolicyResolveInput = {
+    teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
@@ -518,6 +519,10 @@ export async function invokeAction(
   try {
     decision = await resolver.resolve(input);
   } catch {
+    // A failed read cannot establish whether the team has an absolute deny.
+    if (ctx.owner?.type === "team") {
+      return { kind: "error", message: "Could not check this team's action policies. Retry the action when policy checks are available." };
+    }
     // Fail closed but keep a human in the loop — degrade to an approval
     // gate rather than hard-deny on a transient resolver/store error.
     decision = {
@@ -533,7 +538,7 @@ export async function invokeAction(
       resolvedMode: "deny",
       provenance: decision.provenance,
     });
-    return { kind: "denied-policy" };
+    return decision.provenance.source === "team_policy" ? { kind: "denied-policy", scope: "team" } : { kind: "denied-policy" };
   }
 
   // Populated only when a gate actually opens below (require_approval), so
@@ -938,7 +943,7 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     case "resolve-failed":
       return { text: `error resolving ${outcome.service} tools: ${outcome.message}` };
     case "denied-policy":
-      return { text: `denied: ${toolId} is blocked by org policy` };
+      return { text: `denied: ${toolId} is blocked by ${outcome.scope === "team" ? "team" : "org"} policy` };
     // The LLM tool path has no distinct "pending" state — requestDecision
     // blocks until the gate resolves — so both approval outcomes collapse
     // to the same "did not approve" text.

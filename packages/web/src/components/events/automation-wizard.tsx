@@ -54,6 +54,7 @@ import {
 } from "~/components/events/filter-editor";
 import { useAssistants } from "~/api/assistants";
 import { assistantLabel } from "~/components/session/assistant-rail";
+import { orchestratorName } from "~/lib/assistant-name";
 import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
 import { useIdentityLinks } from "~/api/queries";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
@@ -148,7 +149,7 @@ function AssistantSelect({
         <option value="">
           {owned.find((a) => a.isDefault)?.name?.trim()
             ? `Default (${owned.find((a) => a.isDefault)?.name})`
-            : "Default assistant"}
+            : orchestratorName(undefined)}
         </option>
         {owned.map((a) => (
           <option key={a.id} value={a.id}>

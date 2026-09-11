@@ -515,7 +515,7 @@ describe("AutomationWizard", () => {
 
     // A team's seeded default assistant carries no name. Every other surface
     // (the rail, the chat header, the teams list, the team dashboard) calls it
-    // "Default assistant" through the shared `assistantLabel`; this wizard used
+    // "Default Orchestrator" through the shared `assistantLabel`; this wizard used
     // to call the same assistant "Untitled assistant". One name for one thing.
     const teamDefault: AssistantSummary = {
       id: "a-team-default",
@@ -548,6 +548,7 @@ describe("AutomationWizard", () => {
       const options = within(screen.getByLabelText("Assistant")).getAllByRole("option");
       const labelFor = (id: string) =>
         options.find((o) => o.getAttribute("value") === id)?.textContent;
+      expect(labelFor("")).toBe("Default Orchestrator");
       expect(labelFor("a-team-default")).toBe(assistantLabel(teamDefault));
       expect(labelFor("a-team-ops")).toBe("Ops");
     });

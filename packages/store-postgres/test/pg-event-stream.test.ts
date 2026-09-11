@@ -36,8 +36,8 @@ const FENCE_THREAD = "fence-thread";
  * `runEventStreamContract`, reusing ONE underlying `PgDb` across every test
  * in the describe block (decision 11: PGlite's wasm heap isn't reliably
  * released on `close()`, and matches how `pg-store.test.ts` shares a single
- * instance). Migrations run once; every subsequent `factory()` call
- * truncates data tables instead, giving each contract test the same
+ * instance). Migrations run once; every `factory()` call, including the
+ * first, truncates data tables. Each contract test gets the same
  * blank-slate guarantee a fresh `:memory:` sqlite db gave.
  */
 function makeHarness(db: PgDb): {
@@ -51,9 +51,9 @@ function makeHarness(db: PgDb): {
     if (!migrated) {
       await applyEngineMigrations(db);
       migrated = true;
-    } else {
-      await truncateAll(db);
     }
+    // The shared Postgres database can contain data from a previous test file.
+    await truncateAll(db);
     currentStore = new PgSessionStore(db);
     return new PgEventStream(db);
   };

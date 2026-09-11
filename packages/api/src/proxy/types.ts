@@ -6,5 +6,8 @@ export interface ProxyUsage {
 export interface ParsedUsage {
   usage: ProxyUsage; model: string | null; providerResponseId: string | null;
 }
-export interface ProxyPrincipal { userId: string; orgId: string; keyId: string; }
+export type ProxyPrincipal = { orgId: string; keyId: string } & (
+  | { userId: string; teamId?: never }
+  | { userId: null; teamId: string }
+);
 export interface Upstream { baseUrl: string; apiKey: string; }

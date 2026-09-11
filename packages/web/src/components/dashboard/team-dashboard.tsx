@@ -163,7 +163,7 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
               ))
             )}
             <Link to="/assistants" className="text-moss underline-offset-2 hover:underline">
-              Manage assistants →
+              Edit assistant
             </Link>
           </div>
         </header>

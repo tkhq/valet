@@ -37,9 +37,9 @@ function makeFactory(db: PgDb): () => Promise<PgSessionStore> {
     if (!migrated) {
       await applyEngineMigrations(db);
       migrated = true;
-    } else {
-      await truncateAll(db);
     }
+    // The shared Postgres database can contain data from a previous test file.
+    await truncateAll(db);
     return new PgSessionStore(db);
   };
 }
@@ -114,6 +114,25 @@ function runCommandResultSuite(label: string, getDb: () => PgDb) {
       expect(retrieved.command).toBe("/status");
       expect(retrieved.source).toBe("builtin");
       expect(retrieved.ok).toBe(true);
+    });
+
+    it("clears existing data on the first call of a new factory", async () => {
+      await store.saveSession({
+        id: "leftover-session",
+        owner: { type: "user", id: "u1" },
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        purpose: "interactive",
+        status: "running",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      expect(await store.getSession("leftover-session")).not.toBeNull();
+
+      // Model another test file opening the same already-migrated database.
+      const nextStore = await makeFactory(getDb())();
+      expect(await nextStore.getSession("leftover-session")).toBeNull();
     });
 
     it("preserves output text exactly, including markdown formatting", async () => {

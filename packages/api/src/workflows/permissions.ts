@@ -2,14 +2,15 @@
  * Workflow permissions preview + bulk pre-approval.
  *
  * `analyzeWorkflowPermissions` predicts, per tool node in the stored
- * definition, how the policy ladder would resolve the node's action for one
- * user if a run started now. It runs the same `resolveActionPolicy` core as
+ * definition, how the policy ladder would resolve the node's action for its
+ * stored owner if a run started now. It runs the same `resolveActionPolicy` core as
  * the run-time invoker (`plugins/action-invoker.ts`) with `appliesIn:
  * "workflow"` and NO execution id — a run that has not started has no
  * exec-scoped grants, so the grant rung never matches here.
  *
  * `allowWorkflowPermissions` writes one per-user `allow` override for each
- * gating action. The `(service, actionId)` pairs come from the stored
+ * gating action of a personal workflow. Team workflows refuse this operation;
+ * their policies are managed in the team's settings. The pairs come from the stored
  * definition, never from the request — the same server-derivation rule that
  * removed `grantActions` from the approval route (approval-UX spec,
  * Deviations #3). The bounded `upsertOverride` rejects an override that
@@ -26,6 +27,7 @@ import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
 import type {
   AllowWorkflowPermissionsResponse,
   WorkflowNodePermissionWire,
+  WorkflowDefinitionSummary,
 } from "../wire/types.js";
 import { getWorkflowDefinition, type WorkflowOwner, type WorkflowServiceDeps } from "./service.js";
 
@@ -80,7 +82,7 @@ function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | nu
   return { nodeId, service: n.service, action: n.action, params };
 }
 
-/** Predicts the policy resolution of every tool node for `owner.userId`.
+/** Predicts the policy resolution of every tool node for the stored owner.
  * Returns null when the workflow does not exist for this owner (the caller
  * 404s). Actions absent from the static plugin catalog (dynamic MCP
  * actions) report `mode: "unknown"` — no risk level exists to resolve with
@@ -93,7 +95,14 @@ export async function analyzeWorkflowPermissions(
 ): Promise<WorkflowNodePermissionWire[] | null> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
+  return analyzeDefinitionPermissions(deps, owner, summary);
+}
 
+async function analyzeDefinitionPermissions(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  summary: WorkflowDefinitionSummary,
+): Promise<WorkflowNodePermissionWire[]> {
   const refs = toolNodeRefs(summary.definition);
   if (refs.length === 0) return [];
 
@@ -103,7 +112,11 @@ export async function analyzeWorkflowPermissions(
   // grants), so a per-node `resolveActionPolicy` would re-read the same two
   // row sets N times. The pure core then decides per node from one
   // consistent snapshot.
-  const rows = await loadPolicyRows(deps.db, { orgId: owner.orgId, userId: owner.userId });
+  const rows = await loadPolicyRows(deps.db, {
+    orgId: owner.orgId,
+    userId: owner.userId,
+    teamId: summary.ownerType === "team" ? summary.ownerId : undefined,
+  });
   const nodes: WorkflowNodePermissionWire[] = [];
   for (const ref of refs) {
     const entry = deps.actionPluginByService?.get(ref.service);
@@ -144,7 +157,7 @@ export type AllowWorkflowPermissionsOutcome =
   | null;
 
 /** Writes a per-user `allow` override for each gating action of the
- * workflow (all of them, or the `actionIds` subset). Returns null when the
+ * personal workflow (all of them, or the `actionIds` subset). Returns null when the
  * workflow does not exist for this owner. */
 export async function allowWorkflowPermissions(
   deps: WorkflowServiceDeps,
@@ -152,8 +165,15 @@ export async function allowWorkflowPermissions(
   workflowId: string,
   actionIds: string[] | undefined,
 ): Promise<AllowWorkflowPermissionsOutcome> {
-  const analysis = await analyzeWorkflowPermissions(deps, owner, workflowId);
-  if (analysis === null) return null;
+  const summary = await getWorkflowDefinition(deps, owner, workflowId);
+  if (!summary) return null;
+  if (summary.ownerType === "team") {
+    return {
+      ok: false,
+      badRequest: "Personal pre-approval does not apply to team workflows. Ask a team admin to select this team's workspace and open Settings → Policies.",
+    };
+  }
+  const analysis = await analyzeDefinitionPermissions(deps, owner, summary);
 
   // Dedupe: one override per qualified actionId, however many nodes call it.
   const gating = new Map<string, string>();

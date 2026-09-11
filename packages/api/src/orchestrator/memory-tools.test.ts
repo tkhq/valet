@@ -426,7 +426,7 @@ describe("mem_copy_from_team", () => {
     expect(result.text).toContain('"ownerId":"local-user"');
     expect(result.text).toContain('"path":"knowledge/pulled.md"');
     expect((await memReadTool.execute({ path: args.to }, ctx)).text).toContain("Exact knowledge.");
-    expect((await memCopyFromTeamTool.execute(args, ctx)).text).toContain("Choose another path");
+    expect((await memCopyFromTeamTool.execute(args, ctx)).text).toContain("Ask the user whether to replace, rename, or cancel");
     const fresh = { ...args, to: "knowledge/denied.md" };
     expect((await memCopyFromTeamTool.execute(fresh, { ...ctx, owner: { type: "team", id: team.id } })).text).toContain("personal");
     expect((await memCopyFromTeamTool.execute(fresh, { ...ctx, owner: { type: "user", id: "test-member" } })).text).toContain("personal");
@@ -435,3 +435,42 @@ describe("mem_copy_from_team", () => {
     expect((await memReadTool.execute({ path: args.to }, ctx)).text).toContain("Exact knowledge.");
   });
 });
+
+for (const tool of [memCopyToTeamTool, memCopyFromTeamTool]) {
+  describe(`${tool.name} collision confirmation`, () => {
+    it("retains the conflict revision and replaces only after an explicit confirmation", async () => {
+      api = await bootTestApi();
+      const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
+        config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+      const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Confirmation", creatorUserId: "local-user" });
+      const teamCtx = { ...ctx, owner: { type: "team" as const, id: team.id } };
+      const sourceCtx = tool === memCopyToTeamTool ? ctx : teamCtx;
+      const destinationCtx = tool === memCopyToTeamTool ? teamCtx : ctx;
+      await memWriteTool.execute({ path: "notes/source.md", content: "# Source content" }, sourceCtx);
+      await memWriteTool.execute({ path: "notes/source.md", content: "# Existing destination" }, destinationCtx);
+      const args = { from: "notes/source.md", to: "notes/source.md", teamId: team.id };
+      const conflict = await tool.execute(args, ctx);
+      const details = JSON.parse(conflict.text.replace("[memory_error] ", ""));
+      expect(details).toMatchObject({ code: "MEMORY_DESTINATION_EXISTS", destinationVersion: expect.any(String) });
+      expect(details.error).toContain("Ask the user whether to replace, rename, or cancel");
+      expect((await memReadTool.execute({ path: args.to }, destinationCtx)).text).toContain("Existing destination");
+      // Exercise runtime defense as well as the schema: an unvalidated call
+      // without a user confirmation must not reach the HTTP mutation.
+      const unconfirmed = JSON.parse(JSON.stringify({ ...args, replacement: { expectedVersion: details.destinationVersion } }));
+      expect((await tool.execute(unconfirmed, ctx)).text).toContain("requires explicit user confirmation");
+      expect((await memReadTool.execute({ path: args.to }, destinationCtx)).text).toContain("Existing destination");
+      const confirmed = { ...args, replacement: { expectedVersion: details.destinationVersion, userConfirmed: true as const } };
+      const replacement = await tool.execute(confirmed, ctx);
+      expect(tool === memCopyToTeamTool ? decode(replacement.text) : JSON.parse(replacement.text)).toMatchObject({ file: { version: 2 } });
+      expect((await memReadTool.execute({ path: args.to }, destinationCtx)).text).toContain("Source content");
+      const stale = JSON.parse((await tool.execute(confirmed, ctx)).text.replace("[memory_error] ", ""));
+      expect(stale).toMatchObject({ code: "MEMORY_DESTINATION_CHANGED", destinationVersion: expect.any(String) });
+      expect(stale.destinationVersion).not.toBe(details.destinationVersion);
+      expect(tool.description).toContain("never invent a suffix");
+      expect(tool.description).toContain("original copy request does not authorize replacement");
+      expect(tool.parameters).toMatchObject({ properties: { replacement: {
+        required: ["expectedVersion", "userConfirmed"], properties: { userConfirmed: { const: true } },
+      } } });
+    });
+  });
+}

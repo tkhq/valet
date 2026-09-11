@@ -977,6 +977,8 @@ export interface SuspendedTurnState {
  * `call_tool` path; a future workflow-mode invoker (T3) passes `"workflow"`.
  */
 export interface PolicyResolveInput {
+  /** Trusted session owner; workflow agent sessions may have no app row. */
+  teamId?: string;
   service: string;
   actionId: string;
   riskLevel: RiskLevel;
@@ -999,6 +1001,7 @@ export interface PolicyResolveInput {
  */
 export type PolicyProvenanceSource =
   | "org_policy"
+  | "team_policy"
   | "runtime_grant"
   | "override"
   | "plugin_default"

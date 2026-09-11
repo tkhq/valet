@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { MODE_LABELS, RISK_LABELS, POLICY_SELECT_CLASS } from "./policy-presentation";
 import { Trash2 } from "lucide-react";
 import type { ApprovalModeWire, RiskLevelWire } from "@valet/api/wire";
 import { Badge, Button, Label } from "~/components/primitives";
@@ -83,7 +84,7 @@ export function PolicyOverridesSection() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-[--fg]">{targetLabel(o)}</span>
-                <Badge variant={MODE_BADGE[o.mode]}>{o.mode}</Badge>
+                <Badge variant={MODE_BADGE[o.mode]}>{MODE_LABELS[o.mode]}</Badge>
               </div>
             </div>
             <Button
@@ -127,7 +128,7 @@ export function PolicyOverridesSection() {
           {targetKind === "service" && (
             <div>
               <Label htmlFor="override-service">Service</Label>
-              <div className="mt-1 w-64">
+              <div className="mt-1 w-full sm:max-w-sm">
                 <ServiceActionCombobox
                   mode="service"
                   id="override-service"
@@ -141,7 +142,7 @@ export function PolicyOverridesSection() {
           {targetKind === "actionId" && (
             <div>
               <Label htmlFor="override-action">Action id</Label>
-              <div className="mt-1 w-64">
+              <div className="mt-1 w-full sm:max-w-sm">
                 <ServiceActionCombobox
                   mode="action"
                   id="override-action"
@@ -159,11 +160,11 @@ export function PolicyOverridesSection() {
                 id="override-risk"
                 value={riskLevel}
                 onChange={(e) => setRiskLevel(e.target.value as RiskLevelWire)}
-                className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+                className={`mt-1 ${POLICY_SELECT_CLASS}`}
               >
                 {RISK_LEVELS.map((r) => (
                   <option key={r} value={r}>
-                    {r}
+                    {RISK_LABELS[r]}
                   </option>
                 ))}
               </select>
@@ -176,11 +177,11 @@ export function PolicyOverridesSection() {
               id="override-mode"
               value={mode}
               onChange={(e) => setMode(e.target.value as ApprovalModeWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+              className={`mt-1 ${POLICY_SELECT_CLASS}`}
             >
               {MODES.map((m) => (
                 <option key={m} value={m}>
-                  {m}
+                  {MODE_LABELS[m]}
                 </option>
               ))}
             </select>

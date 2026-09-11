@@ -31,8 +31,8 @@ async function truncateAll(db: PgDb): Promise<void> {
  * docs/specs/2026-07-15-postgres-backend-design.md: "PGlite in-memory per
  * boot" — plus the Task 0 finding that PGlite's wasm heap isn't reliably
  * released on close(), so this file must not spin up a fresh PGlite per
- * test). Migrations run once; every subsequent factory() call truncates
- * data tables instead, giving each contract test the same blank-slate
+ * test). Migrations run once; every factory() call, including the first,
+ * truncates data tables. Each contract test gets the same blank-slate
  * guarantee a fresh `:memory:` sqlite db gave.
  */
 function makeFactory(db: PgDb): () => Promise<PgSessionStore> {
@@ -41,9 +41,9 @@ function makeFactory(db: PgDb): () => Promise<PgSessionStore> {
     if (!migrated) {
       await applyEngineMigrations(db);
       migrated = true;
-    } else {
-      await truncateAll(db);
     }
+    // The shared Postgres database can contain data from a previous test file.
+    await truncateAll(db);
     return new PgSessionStore(db);
   };
 }

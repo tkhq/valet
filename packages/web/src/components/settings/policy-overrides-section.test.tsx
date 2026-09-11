@@ -40,6 +40,18 @@ beforeEach(() => {
 });
 
 describe("PolicyOverridesSection — create", () => {
+  it("uses human approval labels without changing submitted values", async () => {
+    const user = userEvent.setup();
+    render(<PolicyOverridesSection />);
+    expect(screen.getByRole("option", { name: "Allow" })).toHaveProperty("value", "allow");
+    expect(screen.getByRole("option", { name: "Require approval" })).toHaveProperty("value", "require_approval");
+    expect(screen.getByRole("option", { name: "Deny" })).toHaveProperty("value", "deny");
+    await user.click(screen.getByRole("radio", { name: "Risk level" }));
+    await user.selectOptions(screen.getByLabelText("Mode"), "require_approval");
+    await user.click(screen.getByRole("button", { name: "Save override" }));
+    expect(putMutate).toHaveBeenCalledWith({ riskLevel: "low", mode: "require_approval" }, expect.anything());
+  });
+
   it("defaults to Service target and PUTs with only service set", async () => {
     const user = userEvent.setup();
     render(<PolicyOverridesSection />);

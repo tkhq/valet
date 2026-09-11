@@ -23,9 +23,9 @@ vi.mock("~/api/policies", async () => {
   const actual = await vi.importActual<typeof import("~/api/policies")>("~/api/policies");
   return {
     ...actual,
-    useOrgPolicies: () => ({ data: policiesData, isLoading: false, error: null }),
-    useCreateOrgPolicy: () => ({ mutate: createOrgPolicyMutate, isPending: false }),
-    useDeleteOrgPolicy: () => ({ mutate: deleteOrgPolicyMutate, isPending: false }),
+    usePolicies: () => ({ data: policiesData, isLoading: false, error: null }),
+    useCreatePolicy: () => ({ mutate: createOrgPolicyMutate, isPending: false }),
+    useDeletePolicy: () => ({ mutate: deleteOrgPolicyMutate, isPending: false }),
   };
 });
 
@@ -78,6 +78,28 @@ beforeEach(() => {
 });
 
 describe("PoliciesSection — new policy target one-of", () => {
+  it("shows human labels while submitting the original policy values", async () => {
+    const user = userEvent.setup();
+    render(<PoliciesSection />);
+    expect(screen.getByRole("option", { name: "Require approval" })).toHaveProperty("value", "require_approval");
+    expect(screen.getByRole("option", { name: "All runs" })).toHaveProperty("value", "any");
+    expect(screen.getByRole("option", { name: "Chats" })).toHaveProperty("value", "session");
+    expect(screen.getByRole("option", { name: "Workflows" })).toHaveProperty("value", "workflow");
+    expect(screen.getByText("Conditions")).toBeTruthy();
+    await user.click(screen.getByRole("radio", { name: "Risk level" }));
+    await user.selectOptions(screen.getByLabelText("Applies in"), "session");
+    await user.click(screen.getByRole("button", { name: "Add condition" }));
+    await user.type(screen.getByLabelText("Matcher path"), "priority");
+    await user.selectOptions(screen.getByLabelText("Matcher operator"), "gte");
+    expect(screen.getByRole("option", { name: "At least" })).toHaveProperty("value", "gte");
+    await user.type(screen.getByLabelText("Matcher value"), "3");
+    await user.click(screen.getByRole("button", { name: "Create policy" }));
+    expect(createOrgPolicyMutate).toHaveBeenCalledWith({
+      riskLevel: "low", mode: "require_approval", appliesIn: "session",
+      paramMatchers: [{ path: "priority", op: "gte", value: 3 }],
+    }, expect.anything());
+  });
+
   it("defaults to Service target and only sends service in the create payload", async () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
@@ -140,7 +162,7 @@ describe("PoliciesSection — matcher rows", () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
 
-    await user.click(screen.getByRole("button", { name: "Add matcher" }));
+    await user.click(screen.getByRole("button", { name: "Add condition" }));
     await user.type(screen.getByLabelText("Matcher path"), "amount");
     await user.selectOptions(screen.getByLabelText("Matcher operator"), "gt");
     await user.type(screen.getByLabelText("Matcher value"), "100");
@@ -155,7 +177,7 @@ describe("PoliciesSection — matcher rows", () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
 
-    await user.click(screen.getByRole("button", { name: "Add matcher" }));
+    await user.click(screen.getByRole("button", { name: "Add condition" }));
     await user.type(screen.getByLabelText("Matcher path"), "status");
     await user.selectOptions(screen.getByLabelText("Matcher operator"), "in");
     await user.type(screen.getByLabelText("Matcher value"), "a, b ,c");
@@ -170,7 +192,7 @@ describe("PoliciesSection — matcher rows", () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
 
-    await user.click(screen.getByRole("button", { name: "Add matcher" }));
+    await user.click(screen.getByRole("button", { name: "Add condition" }));
     await user.type(screen.getByLabelText("Matcher path"), "amount");
     await user.selectOptions(screen.getByLabelText("Matcher operator"), "gt");
     await user.type(screen.getByLabelText("Matcher value"), "not-a-number");
@@ -185,8 +207,8 @@ describe("PoliciesSection — matcher rows", () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
 
-    await user.click(screen.getByRole("button", { name: "Add matcher" }));
-    await user.click(screen.getByRole("button", { name: "Remove matcher" }));
+    await user.click(screen.getByRole("button", { name: "Add condition" }));
+    await user.click(screen.getByRole("button", { name: "Remove condition" }));
     await selectGmailService(user);
     await user.click(screen.getByRole("button", { name: "Create policy" }));
 

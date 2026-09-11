@@ -14,7 +14,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { StrictMode, type ReactNode } from "react";
-import { render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { WorkflowDefinition } from "@valet/workflow";
 import type {
@@ -23,6 +23,7 @@ import type {
   GetOrchestratorInfoResponse,
   ListAssistantsResponse,
   SendPromptResponse,
+  SendPromptRequest,
 } from "@valet/api/wire";
 
 const ASSISTANT_ID = "asst_1";
@@ -36,7 +37,7 @@ const ensureAssistantSession =
   vi.fn<(assistantId: string) => Promise<EnsureAssistantSessionResponse>>();
 const ensureOrchestrator = vi.fn<() => Promise<{ sessionId: string }>>();
 const createThread = vi.fn<(sessionId: string) => Promise<CreateThreadResponse>>();
-const sendPrompt = vi.fn<(sessionId: string) => Promise<SendPromptResponse>>();
+const sendPrompt = vi.fn<(sessionId: string, body: SendPromptRequest) => Promise<SendPromptResponse>>();
 
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
@@ -48,7 +49,7 @@ vi.mock("~/api/client", async (importOriginal) => {
       ensureAssistantSession: (assistantId: string) => ensureAssistantSession(assistantId),
       ensureOrchestrator: () => ensureOrchestrator(),
       createThread: (sessionId: string) => createThread(sessionId),
-      sendPrompt: (sessionId: string) => sendPrompt(sessionId),
+      sendPrompt: (sessionId: string, body: SendPromptRequest) => sendPrompt(sessionId, body),
     },
   };
 });
@@ -122,6 +123,66 @@ describe("useWorkflowAssistant", () => {
     sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1" });
   });
 
+  it("opens the explicitly selected team assistant and isolates its remembered thread", async () => {
+    const selected = "assistant:team-selected";
+    sessionStorage.setItem(`workflow-assistant:${WORKFLOW}`, JSON.stringify({ sessionId: SESSION, threadId: "personal-thread" }));
+    listAssistants.mockResolvedValue({ assistants: [{ id: "team-selected", owner: { type: "team", id: "team-1" }, sessionId: selected, isDefault: false, createdAt: 1 }] });
+    ensureAssistantSession.mockResolvedValue({ sessionId: selected });
+    const { result } = renderHook(() => useWorkflowAssistant(WORKFLOW, "Deploy", { assistantId: "team-selected", ownerType: "team", ownerId: "team-1" }), { wrapper });
+    await waitFor(() => expect(result.current.threadId).toBe("thread_1"));
+    expect(result.current.sessionId).toBe(selected);
+    expect(ensureAssistantSession).toHaveBeenCalledWith("team-selected");
+    expect(createThread).toHaveBeenCalledExactlyOnceWith(selected);
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(selected, expect.objectContaining({ threadId: "thread_1" }));
+    expect(ensureOrchestrator).not.toHaveBeenCalled();
+  });
+
+  it("hides an opened conversation when the target no longer matches the owner scope", async () => {
+    const { result, rerender } = renderHook(({ ownerId }) => useWorkflowAssistant(WORKFLOW, "Deploy", { assistantId: ASSISTANT_ID, ownerType: "user", ownerId }), { wrapper, initialProps: { ownerId: "user-1" } });
+    await waitFor(() => expect(result.current.threadId).toBe("thread_1"));
+    rerender({ ownerId: "other-user" });
+    expect(result.current.sessionId).toBeUndefined();
+    expect(result.current.threadId).toBeUndefined();
+    expect(result.current.error).toBeDefined();
+    expect(ensureOrchestrator).not.toHaveBeenCalled();
+    expect(createThread).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["missing", ASSISTANT_ID])("does not fall back to personal for unavailable or cross-owner target %s", async (assistantId) => {
+    const { result } = renderHook(() => useWorkflowAssistant(WORKFLOW, "Deploy", { assistantId, ownerType: "team", ownerId: "team-1" }), { wrapper });
+    await waitFor(() => expect(result.current.error).toBeDefined());
+    expect(result.current.sessionId).toBeUndefined();
+    expect(ensureAssistantSession).not.toHaveBeenCalled();
+    expect(ensureOrchestrator).not.toHaveBeenCalled();
+    expect(createThread).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(["success", "reject"])("ignores old A thread %s after B is ready", async (outcome) => {
+    const workflow = `${WORKFLOW}-${outcome}`;
+    listAssistants.mockResolvedValue({ assistants: ["a", "b"].map((id) => ({ id, owner: { type: "team", id: "team-1" }, sessionId: `assistant:${id}`, isDefault: false, createdAt: 1 })) });
+    ensureAssistantSession.mockImplementation(async (id) => ({ sessionId: `assistant:${id}` }));
+    let finishA: (value: CreateThreadResponse) => void = () => {};
+    let failA: (error: Error) => void = () => {};
+    createThread.mockImplementation((sessionId) => sessionId === "assistant:a"
+      ? new Promise((resolve, reject) => { finishA = resolve; failA = reject; })
+      : Promise.resolve({ id: "thread-b", sessionId, createdAt: 1 }));
+    const { result, rerender } = renderHook(({ assistantId }) => useWorkflowAssistant(workflow, "Deploy", { assistantId, ownerType: "team", ownerId: "team-1" }), { wrapper, initialProps: { assistantId: "a" } });
+    await waitFor(() => expect(createThread).toHaveBeenCalledWith("assistant:a"));
+    rerender({ assistantId: "b" });
+    await waitFor(() => expect(result.current.threadId).toBe("thread-b"));
+    await act(async () => {
+      if (outcome === "success") finishA({ id: "thread-a", sessionId: "assistant:a", createdAt: 1 });
+      else failA(new Error("late failure"));
+    });
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith("assistant:b", expect.objectContaining({ threadId: "thread-b" }));
+    expect(JSON.parse(sessionStorage.getItem(`workflow-assistant:${workflow}`) ?? "null")).toEqual({ sessionId: "assistant:b", threadId: "thread-b" });
+    expect(result.current.sessionId).toBe("assistant:b");
+    expect(result.current.threadId).toBe("thread-b");
+    expect(result.current.opening).toBe(false);
+    expect(result.current.error).toBeUndefined();
+  });
+
   it("reaches the ready state once the session opens and the thread exists", async () => {
     const { result } = renderHook(() => useWorkflowAssistant(WORKFLOW, "Deploy"), { wrapper });
 
@@ -157,6 +218,20 @@ describe("useWorkflowAssistant", () => {
     await waitFor(() => expect(second.result.current.threadId).toBe("thread_1"));
     expect(createThread).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("claims a creation completed while unmounted exactly once on remount", async () => {
+    let finish: (value: CreateThreadResponse) => void = () => {};
+    createThread.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const first = renderHook(() => useWorkflowAssistant("wf-remount-complete", "Deploy"), { wrapper });
+    await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
+    first.unmount();
+    await act(async () => { finish({ id: "thread-remount", sessionId: SESSION, createdAt: 1 }); });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    const second = renderHook(() => useWorkflowAssistant("wf-remount-complete", "Deploy"), { wrapper });
+    await waitFor(() => expect(second.result.current.threadId).toBe("thread-remount"));
+    expect(createThread).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(SESSION, expect.objectContaining({ threadId: "thread-remount" }));
   });
 
   it("opens the remembered thread again without a second call", async () => {

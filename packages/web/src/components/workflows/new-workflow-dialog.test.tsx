@@ -30,7 +30,8 @@
  * navigation was requested, not that a router resolved it.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ListAssistantsResponse } from "@valet/api/wire";
 import {
   collectTemplatePaths,
   renderTemplate,
@@ -44,6 +45,9 @@ import {
 
 const navigate = vi.fn();
 const createMutateAsync = vi.fn();
+let teamId: string | undefined;
+let assistantsResult: { data?: ListAssistantsResponse; isLoading: boolean; error: Error | null };
+vi.mock("~/api/assistants", () => ({ useAssistants: () => ({ ...assistantsResult, refetch: vi.fn() }) }));
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
@@ -55,7 +59,7 @@ vi.mock("~/api/workflows", () => ({
 }));
 
 vi.mock("~/lib/workspace-scope", () => ({
-  useWorkspaceScope: () => ({ teamId: undefined }),
+  useWorkspaceScope: () => ({ teamId }),
 }));
 
 import { NewWorkflowDialog, WORKFLOW_PRESETS } from "./new-workflow-dialog";
@@ -328,6 +332,13 @@ function renderDialog() {
 }
 
 beforeEach(() => {
+  teamId = undefined;
+  assistantsResult = { data: { assistants: [
+    { id: "personal", owner: { type: "user", id: "user1" }, name: "Personal", sessionId: "assistant:personal", isDefault: true, createdAt: 1 },
+    { id: "team-a", owner: { type: "team", id: "team1" }, name: "Team default", sessionId: "assistant:team-a", isDefault: true, createdAt: 1 },
+    { id: "team-b", owner: { type: "team", id: "team1" }, name: "Release bot", sessionId: "assistant:team-b", isDefault: false, createdAt: 1 },
+    { id: "other", owner: { type: "team", id: "team2" }, name: "Other team", sessionId: "assistant:other", isDefault: true, createdAt: 1 },
+  ] }, isLoading: false, error: null };
   navigate.mockReset();
   createMutateAsync.mockReset();
   createMutateAsync.mockResolvedValue({ id: "wf_new" });
@@ -349,7 +360,7 @@ describe("NewWorkflowDialog", () => {
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const body = createMutateAsync.mock.calls[0]![0] as { name: string; definition: WorkflowDefinition };
-    expect(body.definition).toEqual(WORKFLOW_PRESETS.find((p) => p.id === "parallel")!.build());
+    expect(body.definition).toEqual({ ...WORKFLOW_PRESETS.find((p) => p.id === "parallel")!.build(), assistantId: "personal" });
   });
 
   it("suggests the preset's name, and keeps a name that was typed", () => {
@@ -394,5 +405,83 @@ describe("NewWorkflowDialog", () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("workflow orchestrator selection", () => {
+  it("requires a new choice when the explicitly selected assistant disappears", async () => {
+    teamId = "team1";
+    const view = render(<NewWorkflowDialog open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Orchestrator"), { target: { value: "team-b" } });
+    assistantsResult.data = { assistants: assistantsResult.data?.assistants.filter((a) => a.id !== "team-b") ?? [] };
+    view.rerender(<NewWorkflowDialog open onOpenChange={vi.fn()} />);
+    expect(screen.getByRole("alert").textContent).toContain("Choose another orchestrator");
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    expect(createMutateAsync).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Orchestrator"), { target: { value: "team-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ definition: expect.objectContaining({ assistantId: "team-a" }) })));
+  });
+
+  it("ignores an old creation after closing and reopening the dialog", async () => {
+    let finish: (value: { id: string }) => void = () => {};
+    createMutateAsync.mockReturnValue(new Promise<{ id: string }>((resolve) => { finish = resolve; }));
+    const onOpenChange = vi.fn();
+    const view = render(<NewWorkflowDialog open onOpenChange={onOpenChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    view.rerender(<NewWorkflowDialog open={false} onOpenChange={onOpenChange} />);
+    view.rerender(<NewWorkflowDialog open onOpenChange={onOpenChange} />);
+    await act(async () => { finish({ id: "old-workflow" }); });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+  it("resets the form on workspace changes and ignores a late create response", async () => {
+    teamId = "team1";
+    let finish: (value: { id: string }) => void = () => { throw new Error("Pending create missing"); };
+    createMutateAsync.mockReturnValue(new Promise<{ id: string }>((resolve) => { finish = resolve; }));
+    const onOpenChange = vi.fn();
+    const view = render(<NewWorkflowDialog open onOpenChange={onOpenChange} />);
+    fireEvent.change(screen.getByLabelText("Orchestrator"), { target: { value: "team-b" } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Old workspace workflow" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    teamId = "team2";
+    view.rerender(<NewWorkflowDialog open onOpenChange={onOpenChange} />);
+    expect((screen.getByLabelText("Orchestrator") as HTMLSelectElement).value).toBe("other");
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Untitled workflow");
+    await act(async () => { finish({ id: "old-workflow" }); });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+  it.each([undefined, "", "   "])("uses the shared default name for an unnamed orchestrator (%s)", (name) => {
+    assistantsResult = { data: { assistants: [
+      { id: "default", owner: { type: "user", id: "user1" }, name, sessionId: "assistant:default", isDefault: true, createdAt: 1 },
+      { id: "extra", owner: { type: "user", id: "user1" }, name, sessionId: "assistant:extra", isDefault: false, createdAt: 1 },
+    ] }, isLoading: false, error: null };
+    renderDialog();
+    expect(screen.getByRole("option", { name: "Default Orchestrator (default)" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Untitled assistant" })).toBeTruthy();
+  });
+  it("places selection before the name and sends the selected team orchestrator", async () => {
+    teamId = "team1";
+    renderDialog();
+    const select = screen.getByLabelText("Orchestrator");
+    expect(select.compareDocumentPosition(screen.getByLabelText("Name")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Other team (default)" })).toBeNull();
+    expect(screen.queryByRole("option", { name: "Personal (default)" })).toBeNull();
+    fireEvent.change(select, { target: { value: "team-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: "team1", definition: expect.objectContaining({ assistantId: "team-b" }),
+    })));
+  });
+  it.each(["loading", "empty", "error"])("prevents creation when orchestrators are %s", (state) => {
+    assistantsResult = { data: { assistants: [] }, isLoading: state === "loading", error: state === "error" ? new Error("offline") : null };
+    renderDialog();
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    expect(createMutateAsync).not.toHaveBeenCalled();
+    if (state === "error") expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 });

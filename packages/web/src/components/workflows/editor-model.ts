@@ -183,7 +183,7 @@ export const NODE_META: Record<DagNodeType, NodeMeta> = {
   },
   orchestrator: {
     label: 'Orchestrator',
-    description: 'Ask the user orchestrator to do work',
+    description: 'Ask the workflow’s selected orchestrator to do work',
     defaultNode: (id): OrchestratorNode => ({ id, type: 'orchestrator', prompt: '' }),
   },
   tool: {
@@ -228,7 +228,8 @@ export function createNodeId(type: DagNodeType, existingIds: Iterable<string>): 
 // ─── definition <-> flow conversion ───────────────────────────────────────────
 
 export function toFlow(definition: WorkflowDefinition): WorkflowFlowState {
-  const savedPositions = definition.ui?.nodes;
+  // Initial loads and previews need the same reconciliation as live patches.
+  const savedPositions = positionNewNodes(definition).ui?.nodes;
   const fallbackPositions = autoLayout(definition);
 
   return {
@@ -246,7 +247,7 @@ export function toFlow(definition: WorkflowDefinition): WorkflowFlowState {
 
 export function fromFlow(
   flow: WorkflowFlowState,
-  previous?: Pick<WorkflowDefinition, 'policy'>,
+  previous?: Pick<WorkflowDefinition, 'policy' | 'assistantId'>,
 ): WorkflowDefinition {
   const ui: WorkflowEditorState = {
     nodes: Object.fromEntries(flow.nodes.map((node) => [node.id, { position: node.position }])),
@@ -258,6 +259,7 @@ export function fromFlow(
     nodes: flow.nodes.map((node) => node.data.node),
     edges: flow.edges.map(flowEdgeToWorkflowEdge),
     ...(previous?.policy ? { policy: previous.policy } : {}),
+    ...(previous?.assistantId ? { assistantId: previous.assistantId } : {}),
     ui,
   };
 }
@@ -297,6 +299,7 @@ export function graphSignature(definition: WorkflowDefinition): string {
     nodes: definition.nodes,
     edges: definition.edges,
     policy: definition.policy ?? null,
+    assistantId: definition.assistantId ?? null,
   });
 }
 

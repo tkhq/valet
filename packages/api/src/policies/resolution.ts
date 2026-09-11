@@ -12,6 +12,10 @@
  *       MOST SPECIFIC one (action > service > risk) wins; if its mode is
  *       "deny", that decision short-circuits everything below — neither a
  *       live runtime grant nor a per-user override can loosen it.
+ *   Team rules use the same specificity ranking within their scope. Team
+ *   deny is absolute after org deny. Other team rules cannot loosen a
+ *   matching org rule. Team invocations load no personal overrides.
+ *
  *   (1) A live runtime grant (`runtime_grants`, always `mode: "allow"`)
  *       quiets the invocation outright.
  *   (2) A per-user override (`action_policy_overrides`) wins next — this can
@@ -50,7 +54,7 @@ export type PolicyAppliesIn = "any" | "workflow" | "session";
  *  superset of the DB columns is fine, this is only what resolution reads. */
 export interface ActionPolicyRow {
   id: string;
-  principalType: "org" | "user";
+  principalType: "org" | "user" | "team";
   service: string | null;
   actionId: string | null;
   riskLevel: RiskLevel | null;
@@ -254,14 +258,22 @@ export function resolvePolicyDecision(
     };
   }
 
+  const teamMatch = mostSpecific(rows.policies.filter((r) => r.principalType === "team" && matchesPolicyRow(r, input)));
+  if (teamMatch?.mode === "deny") {
+    return { mode: "deny", provenance: { baseMode: "deny", matchedPolicyId: teamMatch.id, source: "team_policy" } };
+  }
+  // A team may tighten an org rule, but cannot loosen it. Session grants
+  // still approve a require_approval rule; neither org nor team deny yields.
+  const match = teamMatch && (!orgMatch || MODE_RESTRICTIVENESS[teamMatch.mode] >= MODE_RESTRICTIVENESS[orgMatch.mode]) ? teamMatch : orgMatch;
+
   // Honest base mode (rungs 3-5), computed up front so provenance can
   // report it even when a higher rung wins below.
   let baseMode: ApprovalMode;
   let baseSource: PolicyProvenanceSource;
-  const basePolicyId = orgMatch?.id;
-  if (orgMatch) {
-    baseMode = orgMatch.mode;
-    baseSource = "org_policy";
+  const basePolicyId = match?.id;
+  if (match) {
+    baseMode = match.mode;
+    baseSource = match.principalType === "team" ? "team_policy" : "org_policy";
   } else if (pluginDefault) {
     baseMode = pluginDefault;
     baseSource = "plugin_default";

@@ -97,6 +97,25 @@ describe("Editor", () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
+  it("toggles the compact assistant panel without dropping the graph, conversation or draft", () => {
+    assistantMounts = 0;
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} assistant={<AssistantStub />} />);
+    const toggle = screen.getByRole("button", { name: "Show assistant" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Hide panel" }).getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Hide panel" }));
+    fireEvent.click(screen.getByText("hello"));
+    expect(screen.getByRole("button", { name: "Hide panel" }).getAttribute("aria-expanded")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "mobile draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Hide panel" }));
+    expect(screen.queryByLabelText("Prompt")).toBeNull();
+    expect(screen.getByTestId("workflow-canvas")).toBeTruthy();
+    expect(screen.getByText("mobile draft")).toBeTruthy();
+    expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
+    expect(assistantMounts).toBe(1);
+  });
+
   it("has no unsaved indicator and a disabled Save button before any edit", () => {
     render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
     expect(screen.queryByTestId("unsaved-indicator")).toBeNull();

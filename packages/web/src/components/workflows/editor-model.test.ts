@@ -197,6 +197,21 @@ describe('toFlow / fromFlow round trip', () => {
     expect(plainEdge).toMatchObject({ id: 'trigger->start', data: {} });
   });
 
+  it('keeps a newly inserted node clear of saved positions on first load', () => {
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 'trigger', type: 'trigger' }, { id: 'review', type: 'orchestrator', prompt: 'Review' }, { id: 'stop', type: 'stop', outcome: 'success' }],
+      edges: [{ from: 'trigger', to: 'review' }, { from: 'review', to: 'stop' }],
+      ui: { nodes: { trigger: { position: { x: 0, y: 0 } }, stop: { position: { x: LAYOUT_COLUMN_GAP, y: 0 } } } },
+    };
+    const original = structuredClone(definition);
+    const flow = toFlow(definition);
+    expect(flow.nodes.find((node) => node.id === 'stop')?.position).toEqual({ x: LAYOUT_COLUMN_GAP, y: 0 });
+    expect(flow.nodes.find((node) => node.id === 'review')?.position).toEqual({ x: 2 * LAYOUT_COLUMN_GAP, y: 0 });
+    expect(definition).toEqual(original);
+    expect(toFlow(definition)).toEqual(flow);
+  });
+
   it('fills in auto-layout positions for nodes with no saved ui position', () => {
     const definition: WorkflowDefinition = {
       version: 'dag/v1',
@@ -669,4 +684,10 @@ describe('positionNewNodes', () => {
     expect(layout.draft?.x).toBe(LAYOUT_COLUMN_GAP);
     expect(layout.done?.x).toBe(LAYOUT_COLUMN_GAP * 2);
   });
+});
+
+it('preserves explicit assistant routing through canvas saves and detects external routing changes', () => {
+  const definition = { ...baseDefinition(), assistantId: 'chosen' };
+  expect(fromFlow(toFlow(definition), definition).assistantId).toBe('chosen');
+  expect(graphSignature(definition)).not.toBe(graphSignature({ ...definition, assistantId: 'other' }));
 });

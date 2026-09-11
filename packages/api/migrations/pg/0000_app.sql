@@ -1128,7 +1128,8 @@ CREATE TABLE "llm_proxy_requests" (
 	"id" text PRIMARY KEY NOT NULL,
 	"created_at" bigint NOT NULL,
 	"org_id" text NOT NULL,
-	"user_id" text NOT NULL,
+	"user_id" text,
+	"team_id" text,
 	"api_key_id" text NOT NULL,
 	"provider_kind" text NOT NULL,
 	"model" text,
@@ -1156,6 +1157,8 @@ CREATE TABLE "llm_proxy_requests" (
 CREATE INDEX "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at");
+--> statement-breakpoint
+CREATE INDEX "llm_proxy_requests_team_created" ON "llm_proxy_requests" ("team_id", "created_at");
 --> statement-breakpoint
 -- ── Plugin store (docs/specs/2026-08-29-plugin-store-design.md) ───────────
 --
@@ -1434,7 +1437,9 @@ WHERE e."usage" IS NOT NULL
 UNION ALL
 SELECT
 	p."id" AS "entry_id", NULL AS "session_id", p."created_at" AS "created_at", p."model" AS "model",
-	p."org_id" AS "org_id", p."user_id" AS "user_id", 'user' AS "owner_type", p."user_id" AS "owner_id",
+	p."org_id" AS "org_id", p."user_id" AS "user_id",
+        CASE WHEN p."team_id" IS NOT NULL THEN 'team' ELSE 'user' END AS "owner_type",
+        COALESCE(p."team_id", p."user_id") AS "owner_id",
 	NULL AS "workflow_id", NULL AS "workflow_run_id",
 	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
 	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"

@@ -4944,7 +4944,8 @@ export interface ProxyUsageBucket {
 }
 
 export interface ProxyUserBucket extends ProxyUsageBucket {
-  userId: string;
+  userId: string | null;
+  teamId?: string | null;
 }
 
 export interface ProxyModelBucket extends ProxyUsageBucket {
@@ -5000,7 +5001,8 @@ export interface ProxyRequestListItem {
   id: string;
   createdAt: number;
   orgId: string;
-  userId: string;
+  userId: string | null;
+  teamId?: string | null;
   apiKeyId: string;
   providerKind: "anthropic" | "openai";
   model: string | null;

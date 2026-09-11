@@ -5,14 +5,9 @@
  * There is no per-workflow session kind. `wf:invoke:{invocationId}` is an
  * action-context id, not a session, and `signal:workflow:{runId}` is a
  * run-scoped thread the server mints — neither is an editor conversation.
- * The panel therefore uses the caller's own default assistant, resolved the
- * way `/chat` resolves it, and gives each workflow its own thread so the
- * editing conversation does not bury the user's main chat.
- *
- * Team-owned workflows need no team assistant: `patch_workflow` authorizes
- * on the acting user, who reaches team workflows through their live
- * memberships. Routing through the team assistant would be worse, since its
- * calls carry the session's stored principal rather than the person typing.
+ * Explicit workflows use their selected assistant, checked against the
+ * workflow owner. Unbound legacy workflows retain the caller's default.
+ * Each workflow gets its own thread within that assistant's session.
  *
  * The thread id is remembered client-side. `POST /threads` mints its own
  * key and does not persist the title it is given, so there is no server
@@ -101,33 +96,27 @@ function storeThread(workflowId: string, thread: PanelThread): void {
  * that nothing ever reads. The promise is shared at module scope because
  * the rule outlives the component that starts the call.
  */
-const openingThreads = new Map<string, Promise<string>>();
+interface OpenedThread { id: string; initialized: boolean }
+const openingThreads = new Map<string, Promise<OpenedThread>>();
 
-/**
- * Gets this workflow's thread in this session, creating it once.
- *
- * The result is written to sessionStorage HERE rather than in the caller's
- * state setter, because the write must happen even when the component that
- * asked for it is gone. That is the difference between a remount picking
- * the thread back up and a remount minting a second one.
- */
+/** Share creation across StrictMode and remounts. Keep an unclaimed result
+ * until a current subscriber can initialize it; a stale subscriber must not
+ * publish storage or send through a mutation observer now bound elsewhere. */
 function openThread(
   sessionId: string,
   workflowId: string,
   create: () => Promise<{ id: string }>,
-  sendOpeningPrompt: (threadId: string) => void,
-): Promise<string> {
+): Promise<OpenedThread> {
   const key = `${sessionId} ${workflowId}`;
   const running = openingThreads.get(key);
   if (running !== undefined) return running;
-
-  const started = create()
-    .then((thread) => {
-      storeThread(workflowId, { sessionId, threadId: thread.id });
-      sendOpeningPrompt(thread.id);
-      return thread.id;
-    })
-    .finally(() => openingThreads.delete(key));
+  const started = create().then(
+    (thread) => ({ id: thread.id, initialized: false }),
+    (error: unknown) => {
+      if (openingThreads.get(key) === started) openingThreads.delete(key);
+      throw error;
+    },
+  );
   openingThreads.set(key, started);
   return started;
 }
@@ -173,6 +162,7 @@ export function openingPrompt(workflowId: string, workflowName: string): string 
 export function useWorkflowAssistant(
   workflowId: string,
   workflowName: string,
+  routing?: { assistantId?: string; ownerType: string; ownerId: string },
 ): WorkflowAssistant {
   const assistantsQ = useAssistants();
   const info = useOrchestratorInfo();
@@ -192,7 +182,11 @@ export function useWorkflowAssistant(
   // dependency that actually changes the retry would do nothing.
   const [attempt, setAttempt] = useState(0);
 
-  const own = ownDefaultAssistant(groupAssistants(assistantsQ.data?.assistants, []));
+  const explicit = routing?.assistantId !== undefined;
+  const own = explicit
+    ? assistantsQ.data?.assistants.find((assistant) => assistant.id === routing.assistantId
+      && assistant.owner.type === routing.ownerType && assistant.owner.id === routing.ownerId)
+    : ownDefaultAssistant(groupAssistants(assistantsQ.data?.assistants, []));
   // `GET /api/orchestrator/info` is the cold-load fallback, exactly as on
   // `/chat`: it still answers when the assistants list fails.
   //
@@ -203,12 +197,12 @@ export function useWorkflowAssistant(
   // the other one. So nothing resolves until the list has settled.
   const sessionId = assistantsQ.isPending
     ? undefined
-    : (own?.sessionId ?? info.data?.sessionId);
+    : (own?.sessionId ?? (explicit ? undefined : info.data?.sessionId));
 
   // Both reads have answered and neither named a session. Nothing is in
   // flight and nothing will retry, so the panel has to say so — a spinner
   // here claims work that is not happening.
-  const identityFailed = sessionId === undefined && !assistantsQ.isPending && !info.isPending;
+  const identityFailed = sessionId === undefined && !assistantsQ.isPending && (explicit || !info.isPending);
 
   // Neither the assistants list nor `GET /info` creates an engine session,
   // so mounting the conversation on the id they report would 404 with no
@@ -228,13 +222,24 @@ export function useWorkflowAssistant(
    * handlers below therefore check that this ref still names the call they
    * belong to before they write anything.
    */
+  const generation = useRef(0);
+  const creatingRef = useRef<string | null>(null);
   const ensuringRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!sessionId || openedSessionId === sessionId) return;
+    generation.current += 1;
+    ensuringRef.current = null;
+    creatingRef.current = null;
+    setError(undefined);
+    return () => { generation.current += 1; };
+  }, [sessionId, workflowId, attempt]);
+  useEffect(() => {
+    if (!sessionId) { ensuringRef.current = null; return; }
+    if (openedSessionId === sessionId) return;
     if (ensuringRef.current === sessionId) return;
     ensuringRef.current = sessionId;
     /** The identity this call is for; compared against the ref on settle. */
     const requested = sessionId;
+    const requestGeneration = generation.current;
     // `mutateAsync`, not `mutate` with per-call callbacks. React Query only
     // delivers those callbacks while the observer still has listeners, so an
     // editor page that unmounts while the call is in flight loses the one
@@ -247,7 +252,7 @@ export function useWorkflowAssistant(
       (res) => {
         // A late answer for an assistant this hook has moved off must not
         // write its session id over the current one.
-        if (ensuringRef.current !== requested) return;
+        if (generation.current !== requestGeneration || ensuringRef.current !== requested) return;
         // The server's own answer, not the id this render guessed from the
         // assistants list.
         setOpenedSessionId(res.sessionId);
@@ -256,7 +261,7 @@ export function useWorkflowAssistant(
         // Same staleness check: a superseded call's failure is not this
         // assistant's failure, and clearing the latch here would re-arm the
         // effect for an identity that is no longer current.
-        if (ensuringRef.current !== requested) return;
+        if (generation.current !== requestGeneration || ensuringRef.current !== requested) return;
         // Release the latch. It is set before the call and was cleared on no
         // path, so one failed ensure stopped this mount from ever opening a
         // session again.
@@ -271,31 +276,35 @@ export function useWorkflowAssistant(
   // The ref holds the SESSION being opened, not a flag: a change of session
   // needs its own thread, and a boolean latch would leave the new session
   // without one.
-  const creatingRef = useRef<string | null>(null);
   useEffect(() => {
-    if (openedSessionId === null) return;
+    if (openedSessionId === null || openedSessionId !== sessionId) return;
     if (thread !== null && thread.sessionId === openedSessionId) return;
     if (creatingRef.current === openedSessionId) return;
     creatingRef.current = openedSessionId;
+    const requestGeneration = generation.current;
     openThread(
       openedSessionId,
       workflowId,
       () => createThread.mutateAsync({}),
-      (threadId) =>
-        // Fire and forget. `mutate` swallows its own errors, and a thread
-        // that opens without its summary is a conversation the user can
-        // still type into — not a reason to replace the panel with an
-        // error.
-        sendPrompt.mutate({ text: openingPrompt(workflowId, workflowName), threadId }),
     ).then(
-      (threadId) => setThread({ sessionId: openedSessionId, threadId }),
+      (opened) => {
+        if (generation.current !== requestGeneration) return;
+        if (!opened.initialized) {
+          opened.initialized = true;
+          storeThread(workflowId, { sessionId: openedSessionId, threadId: opened.id });
+          forgetOpeningThread(openedSessionId, workflowId);
+          sendPrompt.mutate({ text: openingPrompt(workflowId, workflowName), threadId: opened.id });
+        }
+        setThread({ sessionId: openedSessionId, threadId: opened.id });
+      },
       () => {
+        if (generation.current !== requestGeneration) return;
         creatingRef.current = null;
         setError("Cannot start the assistant conversation. Use Retry below to try again.");
       },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openedSessionId, thread, workflowId, workflowName, attempt]);
+  }, [sessionId, openedSessionId, thread, workflowId, workflowName, attempt]);
 
   /**
    * Starts the whole sequence again, from whichever step failed.
@@ -305,20 +314,26 @@ export function useWorkflowAssistant(
    * the panel in the same stuck state it was already in.
    */
   const retry = useCallback(() => {
+    void assistantsQ.refetch();
+    if (!explicit) void info.refetch();
     setError(undefined);
     ensuringRef.current = null;
     creatingRef.current = null;
     if (openedSessionId !== null) forgetOpeningThread(openedSessionId, workflowId);
     setAttempt((n) => n + 1);
-  }, [openedSessionId, workflowId]);
+  }, [openedSessionId, workflowId, assistantsQ.refetch, info.refetch, explicit]);
 
   const threadId =
-    thread !== null && thread.sessionId === openedSessionId ? thread.threadId : undefined;
+    thread !== null && openedSessionId === sessionId && thread.sessionId === openedSessionId ? thread.threadId : undefined;
   const ready = openedSessionId !== null && threadId !== undefined;
   const shown =
-    error ?? (identityFailed ? "Cannot find your assistant. Use Retry below to try again." : undefined);
+    error ?? (identityFailed
+      ? explicit
+        ? "This workflow’s selected orchestrator is unavailable. Retry to reload the list, or use More → Change orchestrator."
+        : "Cannot find your assistant. Use Retry below to try again."
+      : undefined);
   return {
-    ...(openedSessionId !== null ? { sessionId: openedSessionId } : {}),
+    ...(openedSessionId !== null && openedSessionId === sessionId ? { sessionId: openedSessionId } : {}),
     ...(threadId !== undefined ? { threadId } : {}),
     opening: !ready && shown === undefined,
     ...(shown !== undefined ? { error: shown } : {}),
