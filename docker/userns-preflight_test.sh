@@ -55,8 +55,8 @@ grep -Fq 'Kubernetes 1.35' "$TMP/start.err" || fail 'start-docker lost the prefl
 [ ! -e "$TMP/runtime" ] && [ ! -e "$TMP/cgroup-hit" ] && [ ! -e "$TMP/dockerd-hit" ] \
   || fail 'start-docker reached cgroup or daemon setup'
 
-grep -Fxq '    && echo "dockerd:65536:65535" >> /etc/subuid \' "$ROOT/Dockerfile.sandbox-k8s" \
-  && grep -Fxq '    && echo "dockerd:65536:65535" >> /etc/subgid' "$ROOT/Dockerfile.sandbox-k8s" \
-  || fail 'Dockerfile does not declare the exact subordinate ID range'
+[ "$(grep -Fc 'echo "dockerd:65536:65535" >> /etc/subuid' "$ROOT/Dockerfile.sandbox-k8s")" -eq 1 ] \
+  && [ "$(grep -Fc 'echo "dockerd:65536:65535" >> /etc/subgid' "$ROOT/Dockerfile.sandbox-k8s")" -eq 1 ] \
+  || fail 'Dockerfile does not declare one exact subordinate ID range'
 VALET_DOCKER_USERNS=0 bash "$ROOT/userns-preflight.sh"
 echo 'userns preflight tests passed'
