@@ -162,8 +162,10 @@ and `signal` records engine-routed admissions.
   attention summary, and Slack outbound action carries the sending assistant's
   identity. This includes `reply_to_origin`, `send_message`, `dm_owner`, and
   `dm_user`. `ChannelHost` resolves the session's `assistants` row for host
-  deliveries. The engine gives actions a dynamic `resolveOutboundSender`
-  callback, so profile edits apply without a cached-session rebuild. The Slack
+  deliveries. The engine gives session actions a dynamic
+  `resolveOutboundSender` callback. Headless workflow actions resolve the
+  run owner's default assistant when they post. Both paths read the current
+  row, so profile edits apply without a cached-session rebuild. The Slack
   paths map `name` and `avatar_url` to `username` and `icon_url` on
   `chat.postMessage` with the `chat:write.customize` scope. They sanitize the
   name to Slack's 80-character limit and omit malformed avatar URLs. If Slack

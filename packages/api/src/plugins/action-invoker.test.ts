@@ -7,7 +7,7 @@
  * context resolution (`resolveRunContext`) those go through is covered
  * separately in `../workflows/engine-deps.test.ts`.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { Type } from "typebox";
@@ -22,7 +22,7 @@ import type {
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, runtimeGrants, sessionRepos, githubInstallations, orgs } from "../schema/index.js";
+import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs } from "../schema/index.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -30,6 +30,8 @@ import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword.js";
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
+import { createAssistant } from "../assistants/service.js";
+import { slackPlugin } from "@valet/plugin-slack/actions";
 
 /** Fake `OnePasswordService` — only `resolveCredential` is exercised by the invoker's credential providers. */
 function fakeOnePassword(
@@ -334,6 +336,50 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { token: "org-bot" } });
     expect(seenOwnerId).toBeUndefined();
+  });
+
+  it("workflow slack.send_message posts as the owner's configured assistant", async () => {
+    const db = await makeDb();
+    const assistant = await createAssistant(db, "org1", { type: "user", id: "u1" }, "Release bot");
+    await db
+      .update(assistants)
+      .set({ avatarUrl: "https://cdn.example.com/release-bot.png" })
+      .where(eq(assistants.id, assistant.id));
+
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]),
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: "C1", is_private: false, is_im: false, is_mpim: false } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, ts: "1.2", channel: "C1" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await invoke(
+        { service: "slack", action: "send_message", params: { channel: "C1", text: "Deploy complete" }, invocationId: "workflow:r1:slack-send" },
+        userOwner,
+      );
+
+      expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "C1" } });
+      expect(JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string)).toMatchObject({
+        channel: "C1",
+        text: "Deploy complete",
+        username: "Release bot",
+        icon_url: "https://cdn.example.com/release-bot.png",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("team-owned run: a declared service with no team credential refuses before execute", async () => {
