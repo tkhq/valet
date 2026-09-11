@@ -74,16 +74,16 @@ export function WorkflowsIndexPage() {
   const [importOpen, setImportOpen] = useState(false);
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      <div className="border-b border-line px-6 pt-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-baseline gap-3">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="min-w-0 border-b border-line px-4 pt-4 sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
               Workflows
             </h1>
             <WorkspaceClause />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <Button size="sm" variant="ghost" onClick={() => setImportOpen(true)}>
               Import
             </Button>
@@ -92,7 +92,7 @@ export function WorkflowsIndexPage() {
             </Button>
           </div>
         </div>
-        <div role="tablist" className="mt-3 flex gap-1">
+        <div role="tablist" className="mt-3 flex max-w-full gap-1 overflow-x-auto">
           {TABS.map((t) => (
             <button
               key={t.id}
@@ -104,7 +104,7 @@ export function WorkflowsIndexPage() {
                   search: t.id === "workflows" ? {} : { tab: t.id },
                 })
               }
-              className={`rounded-t px-3 py-1.5 text-sm border-b-2 ${
+              className={`shrink-0 rounded-t px-2 py-1.5 text-sm sm:px-3 border-b-2 ${
                 tab === t.id
                   ? "border-ink font-medium text-ink"
                   : "border-transparent text-muted hover:text-ink"
@@ -119,7 +119,7 @@ export function WorkflowsIndexPage() {
       <NewWorkflowDialog open={newOpen} onOpenChange={setNewOpen} />
       <ImportWorkflowDialog open={importOpen} onOpenChange={setImportOpen} />
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
         {tab === "workflows" && (
           <WorkflowsTab onNew={() => setNewOpen(true)} onImport={() => setImportOpen(true)} />
         )}
@@ -271,12 +271,12 @@ function DefinitionRow({
     // `relative` anchors the name link's stretched hit area below. The whole
     // row opens the workflow, because a row that looks like one target should
     // be one: clicking the empty space beside the name did nothing before.
-    <li className="group relative flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
+    <li className="group relative flex flex-wrap items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
       {/* The owner badge is a link of its own, so it sits beside the name
           link, not inside it. Anything interactive here must sit ABOVE the
           stretched area — nesting it inside the anchor would be invalid and
           would swallow its own click. */}
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
         <Link
           to="/workflows/$workflowId"
           params={{ workflowId: workflow.id }}
@@ -290,7 +290,7 @@ function DefinitionRow({
         {workflow.origin === "repo" && workflow.upstream && (
           <span
             title={`${workflow.upstream.repoFullName}:${workflow.upstream.path}`}
-            className="relative z-10 shrink-0 truncate rounded-full bg-ink-wash-strong px-2 py-0.5 font-mono text-xs text-muted"
+            className="relative z-10 max-w-full truncate rounded-full bg-ink-wash-strong px-2 py-0.5 font-mono text-xs text-muted"
           >
             {workflow.upstream.repoFullName}:{workflow.upstream.path}
           </span>
@@ -311,7 +311,7 @@ function DefinitionRow({
           onStarted={goToRun}
         />
       )}
-      <div className="relative z-10 flex items-center gap-2 shrink-0 flex-wrap">
+      <div className="relative z-10 flex max-w-full flex-wrap items-center gap-2">
         {scheduleCount > 0 && (
           <span
             aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}

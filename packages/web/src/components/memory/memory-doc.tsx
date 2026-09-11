@@ -63,7 +63,14 @@ export interface MemoryDocProps {
  * Share opens the artifact controls (`share-controls.tsx`); Download saves
  * the full document, frontmatter included.
  */
-export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath }: MemoryDocProps) {
+export function MemoryDoc(props: MemoryDocProps) {
+  // Every consumer gets a new draft and confirmation when the resource changes.
+  const { path, owner } = props;
+  const resourceKey = JSON.stringify([owner?.ownerType, owner?.ownerId, path]);
+  return <ResourceMemoryDoc key={resourceKey} {...props} />;
+}
+
+function ResourceMemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath }: MemoryDocProps) {
   const docQ = useMemoryDoc(path, owner);
   const queryClient = useQueryClient();
   // The active workspace's assistant — a team's default under team scope. The
@@ -118,7 +125,6 @@ export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
       queryClient.removeQueries({ queryKey: qkMemory.doc(path) });
-      onDeleted?.();
     },
   });
 
@@ -221,7 +227,8 @@ export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath
                 <span className="flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => deleteMutation.mutate()}
+                    // Per-call callbacks run only while this resource is mounted.
+                    onClick={() => deleteMutation.mutate(undefined, { onSuccess: () => onDeleted?.() })}
                     disabled={deleteMutation.isPending}
                     className="font-medium text-danger-500 hover:underline"
                   >

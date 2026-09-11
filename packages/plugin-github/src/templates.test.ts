@@ -1606,17 +1606,15 @@ describe(`${ASSIGN_ID} — card copy`, () => {
   const caveatList = template.caveats ?? [];
   const caveats = caveatList.join("\n");
 
-  it("keeps the description to two short paragraphs", () => {
-    const paragraphs = template.description.split("\n\n");
-    expect(paragraphs.length).toBe(2);
-    for (const paragraph of paragraphs) {
-      expect(paragraph.length).toBeLessThan(320);
-    }
+  it("keeps the card summary brief and names its external actions", () => {
+    expect(template.description.length).toBeLessThan(200);
+    expect(template.description).toContain("Assign reviewers");
+    expect(template.description).toContain("notify them on Slack");
   });
 
-  it("says what it needs and that triggers are a manual step, in the description", () => {
-    expect(template.description).toContain("GitHub, Google Calendar, and Slack");
-    expect(template.description).toContain("Install it, then add its GitHub triggers yourself");
+  it("keeps connection requirements in the details", () => {
+    expect(caveats).toContain("GitHub user credential, Google Calendar, and Slack");
+    expect(template.description).not.toContain("add its GitHub triggers yourself");
   });
 
   it("lists slack among the apps, now that it sends DMs", () => {

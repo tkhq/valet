@@ -65,7 +65,7 @@ export function TemplateGallery() {
   }
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
+    <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
       {templates.map((template) => (
         <TemplateCard key={template.id} template={template} refreshing={isFetching} />
       ))}
@@ -81,14 +81,14 @@ function TemplateCard({ template, refreshing }: { template: WorkflowTemplateSumm
   const scope = useWorkspaceScope();
 
   return (
-    <div className="flex flex-col rounded-lg border border-line bg-paper p-4 transition-shadow hover:shadow-sm">
+    <div className="flex min-w-0 flex-col break-words rounded-lg border border-line bg-paper p-4 transition-shadow hover:shadow-sm">
       {template.requires.length > 0 && (
-        <div className="mb-3 flex items-center gap-1.5">
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
           {/* Opacity for an unconnected service, not the grey `quiet` tile:
               grey already means "built in, nothing to connect" on the
               integrations page. */}
           {template.requires.map((req) => (
-            <span key={req.service} className="flex items-center gap-1.5">
+            <span key={req.service} className="flex min-w-0 items-center gap-1.5">
               <ServiceIcon slug={req.service} label={requirementLabel(req)} size="sm" className={req.connected ? undefined : "opacity-40"} />
               {(req.organizationProvided || req.repositoryCheckOnInstall) && <span className="text-xs text-muted">{requirementLabel(req)}</span>}
             </span>
@@ -101,13 +101,13 @@ function TemplateCard({ template, refreshing }: { template: WorkflowTemplateSumm
           install dialog carries the full description. */}
       <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted">{template.description}</p>
 
-      <div className="mt-auto flex items-end justify-between gap-3 pt-4">
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-4">
         {/* Cadence only. The service chain above already names what this
             needs, and the button already says what to connect. */}
-        <div className="min-w-0 truncate text-xs text-muted">
+        <div className="min-w-0 text-xs text-muted">
           {describeCadence(template.schedule)}
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 [&_a]:h-auto [&_a]:min-h-8 [&_a]:whitespace-normal">
           {/* Every card opens its own details, whatever its connection state.
               The steps and the limits live ONLY in this dialog, and a card
               that cannot be installed is the card whose limits matter most:

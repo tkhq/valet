@@ -422,3 +422,8 @@ Every manual or scheduled sync increments the source revision before reading. Co
 The existing poller consumes persisted invalidations after a restart. Credential and repository failures can delay reconciliation. This change does not add a timer that bypasses the normal sync policy. Repository reconciliation continues to preserve locally created triggers.
 
 Explicit IdP joins invalidate team workflow sources in the membership insert transaction. Duplicate and denied joins do not invalidate sources. Eligibility snapshots alone change no membership and need no refresh. The retired login-time membership writer and its readiness hooks are removed; SSO claim parsing remains. If invalidation fails, the join rolls back. An older sync cannot consume the join refresh.
+
+
+### Workflow hub on narrow screens (2026-09-11)
+
+The hub header and row actions wrap when space is limited. Tabs can scroll horizontally without widening the page. Template columns follow the available content width. Service labels, cadence, and setup actions remain readable without clipping. Template descriptions state the outcome briefly; steps and operational limits remain in the details dialog.

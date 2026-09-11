@@ -140,8 +140,7 @@ export const gmailTemplates: WorkflowTemplate[] = [
     id: 'gmail.inbox-sweeper',
     name: 'Inbox sweeper',
     description:
-      'Every weekday, move low-priority unread mail onto one label and out of the inbox, so what is left ' +
-      'can be read in a single pass. Newsletters and automated notices move; mail from a person stays.',
+      'Label low-priority unread mail and move it out of the inbox. Keep mail from people in the inbox.',
     category: 'inbox',
     apps: ['gmail', 'claude'],
     steps: [

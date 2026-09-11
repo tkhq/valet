@@ -3,6 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
+import { useOrg } from "~/api/settings";
 import { Badge, Button, Input, Label, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
@@ -165,6 +166,7 @@ function NewReviewCard() {
   // The nav's switcher answers "whose review is this" — same pass-through
   // the new-session dialog uses (`CreateScopeLine` states it).
   const scope = useWorkspaceScope();
+  const orgQ = useOrg({ enabled: scope.teamId !== undefined });
   const [repo, setRepo] = useState<SelectedRepo | null>(null);
   // The hub always submits a model; sonnet-4-6 is the capable default. This is
   // a fixed default, not derived from a prop, so no mount-time-state sync is
@@ -276,10 +278,19 @@ function NewReviewCard() {
               {showConnectHint ? (
                 <>
                   Type any public repo as owner/repo or a GitHub URL.{" "}
-                  <a href="/settings/connected-accounts" className="text-moss underline">
-                    Connect GitHub
-                  </a>{" "}
-                  to list your organization&apos;s repositories.
+                  {scope.teamId === undefined ? (
+                    <>
+                      <a href="/settings/connected-accounts" className="text-moss underline">Connect GitHub</a>{" "}
+                      to list your organization&apos;s repositories.
+                    </>
+                  ) : orgQ.data?.callerRole === "admin" ? (
+                    <>
+                      <a href="/settings/organization/github" className="text-moss underline">Configure the GitHub App</a>{" "}
+                      to give team reviews repository access.
+                    </>
+                  ) : (
+                    "Ask an organization admin to configure the GitHub App for team reviews."
+                  )}
                 </>
               ) : (
                 "Not in your organization? Type any public repo as owner/repo or a GitHub URL."
