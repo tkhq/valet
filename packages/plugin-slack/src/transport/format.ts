@@ -127,3 +127,104 @@ export function markdownToSlackMrkdwn(text: string): string {
 
   return result;
 }
+
+function isEscaped(text: string, index: number): boolean {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+function linkEnd(text: string, start: number): number | undefined {
+  const labelEnd = text.indexOf("](", start + 1);
+  if (labelEnd === -1) return undefined;
+
+  let depth = 1;
+  for (let cursor = labelEnd + 2; cursor < text.length; cursor += 1) {
+    if (text[cursor] === "(") depth += 1;
+    if (text[cursor] === ")") {
+      depth -= 1;
+      if (depth === 0) return cursor + 1;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Convert CommonMark's double-asterisk bold syntax in text sent through the
+ * Slack action APIs. Those APIs use mrkdwn, where bold uses one asterisk.
+ *
+ * This intentionally leaves all other Markdown untouched. In particular,
+ * existing Slack mrkdwn, code, links, and escaped delimiters retain their
+ * caller-provided form.
+ */
+export function normalizeCommonMarkBoldForSlack(text: string): string {
+  let result = "";
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const char = text[cursor];
+
+    if (char === "`") {
+      const run = text.slice(cursor).match(/^`+/)?.[0];
+      if (run) {
+        const end = text.indexOf(run, cursor + run.length);
+        if (end !== -1) {
+          result += text.slice(cursor, end + run.length);
+          cursor = end + run.length;
+          continue;
+        }
+      }
+    }
+
+    if (char === "[") {
+      const end = linkEnd(text, cursor);
+      if (end !== undefined) {
+        result += text.slice(cursor, end);
+        cursor = end;
+        continue;
+      }
+    }
+
+    if (char === "<") {
+      const end = text.indexOf(">", cursor + 1);
+      if (end !== -1 && !text.slice(cursor, end).includes("\n")) {
+        result += text.slice(cursor, end + 1);
+        cursor = end + 1;
+        continue;
+      }
+    }
+
+    if (
+      text.startsWith("**", cursor) &&
+      !isEscaped(text, cursor) &&
+      text[cursor - 1] !== "*" &&
+      text[cursor + 2] !== "*"
+    ) {
+      let closing = cursor + 2;
+      let converted = false;
+      while (closing < text.length) {
+        closing = text.indexOf("**", closing);
+        if (closing === -1) break;
+        if (
+          !isEscaped(text, closing) &&
+          text[closing - 1] !== "*" &&
+          text[closing + 2] !== "*"
+        ) {
+          result += `*${text.slice(cursor + 2, closing)}*`;
+          cursor = closing + 2;
+          converted = true;
+          break;
+        }
+        closing += 2;
+      }
+      if (converted) continue;
+    }
+
+    result += char;
+    cursor += 1;
+  }
+
+  return result;
+}

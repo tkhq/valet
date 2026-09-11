@@ -123,6 +123,25 @@ describe('slack actions', () => {
     });
   });
 
+  it('dm_user converts CommonMark bold without changing protected or Slack mrkdwn text', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D0BQQF5MBQB' } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '1789084362.931749', channel: 'D0BQQF5MBQB' }));
+
+    await action('slack.dm_user').execute(
+      {
+        user: 'U123',
+        text: '**Valet Daily Developer Digest: Unreleased Change**\n\n**Change:** ship it\n\`**code**\`\n\`\`\`\n**block**\n\`\`\`\n[**link**](https://example.com)\n\\**escaped bold\\**\n*existing Slack bold*',
+      },
+      pluginCtx(),
+    );
+
+    const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(postInit.body as string)).toMatchObject({
+      text: '*Valet Daily Developer Digest: Unreleased Change*\n\n*Change:* ship it\n\`**code**\`\n\`\`\`\n**block**\n\`\`\`\n[**link**](https://example.com)\n\\**escaped bold\\**\n*existing Slack bold*',
+    });
+  });
+
   it('dm_user posts with the current assistant identity', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }))

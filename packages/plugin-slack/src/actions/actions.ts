@@ -12,6 +12,7 @@ import { checkPrivateChannelAccess } from "./channel-access.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
+import { normalizeCommonMarkBoldForSlack } from "../transport/format.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -54,6 +55,9 @@ async function postActionMessage(
   body: Record<string, unknown>,
   ctx: PluginActionContext,
 ): Promise<{ res: Response; data: SlackPostData }> {
+  const normalizedBody = typeof body.text === "string"
+    ? { ...body, text: normalizeCommonMarkBoldForSlack(body.text) }
+    : body;
   const override = await actionIdentity(ctx);
   const post = async (postBody: Record<string, unknown>) => {
     const res = await slackFetch('chat.postMessage', token, postBody);
@@ -69,14 +73,14 @@ async function postActionMessage(
     }
   };
   const { iconUrl, ...rest } = override;
-  const first = await post({ ...body, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
+  const first = await post({ ...normalizedBody, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
   if (
     !first.providerRejected ||
     (override.username === undefined && override.iconUrl === undefined)
   ) {
     return first;
   }
-  return post(body);
+  return post(normalizedBody);
 }
 
 /** Build a descriptive error from a Slack API response. */
@@ -1074,7 +1078,7 @@ const updateMessage = action(Type.Object({
     // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
     // previously block-formatted (long) message down to short text must not leave
     // the stale blocks rendering.
-    const body: Record<string, unknown> = { channel: args.channel, ts: args.ts, text: args.text, parse: 'none' };
+    const body: Record<string, unknown> = { channel: args.channel, ts: args.ts, text: normalizeCommonMarkBoldForSlack(args.text), parse: 'none' };
     if (args.text.length > SLACK_TEXT_LIMIT) {
       body.blocks = buildContentBlocks(args.text, args.text);
       body.text = args.text.slice(0, SLACK_TEXT_LIMIT);
