@@ -14,6 +14,7 @@ import {
 import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules, nextFireAt } from "./schedule-service.js";
 import { scheduledRunId } from "./scheduler.js";
 import { InMemoryCredentialStore } from "@valet/engine";
+import { deleteTeam } from "../services/teams.js";
 
 describe("nextFireAt", () => {
   const base = Date.UTC(2026, 0, 15, 12, 30, 0); // 2026-01-15T12:30:00Z (Thursday)
@@ -234,6 +235,63 @@ describe("createWorkflowSchedule authorization", () => {
     // `scheduler.ts`'s `fire()` bills the definition's owner.
     expect(rows[0]?.ownerType).toBe("user");
     expect(rows[0]?.ownerId).toBe("org-admin");
+  });
+
+  it("creates a team orchestrator schedule only for a current same-org member", async () => {
+    await db.insert(teams).values({ id: "team_prompt", orgId: "org-1", name: "Prompt team", createdAt: 1_000 });
+    await db.insert(teamMembers).values({ teamId: "team_prompt", userId: "member-user", role: "member" });
+
+    const created = await createWorkflowSchedule(
+      armDeps(),
+      { userId: "member-user", orgId: "org-1", principal: { type: "team", id: "team_prompt" }, requireTeamMembership: true },
+      { prompt: "Review work", teamId: "team_prompt", name: "sched", cron: "0 * * * *" },
+    );
+
+    expect(created.ok).toBe(true);
+    expect(await db.select().from(workflowSchedules)).toEqual([
+      expect.objectContaining({ ownerType: "team", ownerId: "team_prompt", targetKind: "orchestrator" }),
+    ]);
+  });
+
+  it("rejects team orchestrator schedules for nonmembers, deleted teams, cross-org teams, and another team principal", async () => {
+    await db.insert(teams).values([
+      { id: "team_prompt", orgId: "org-1", name: "Prompt team", createdAt: 1_000 },
+      { id: "team_other_org", orgId: "org-2", name: "Other org team", createdAt: 1_000 },
+    ]);
+    await db.insert(teamMembers).values({ teamId: "team_prompt", userId: "former-member", role: "member" });
+    await db.delete(teamMembers).where(eq(teamMembers.userId, "former-member"));
+
+    for (const [teamId, principal] of [
+      ["team_prompt", { type: "team", id: "team_prompt" }],
+      ["deleted_team", { type: "team", id: "deleted_team" }],
+      ["team_other_org", { type: "team", id: "team_other_org" }],
+      ["team_prompt", { type: "team", id: "different_team" }],
+    ] as const) {
+      const result = await createWorkflowSchedule(
+        armDeps(),
+        { userId: "former-member", orgId: "org-1", principal, requireTeamMembership: true },
+        { prompt: "Review work", teamId, name: "sched", cron: "0 * * * *" },
+      );
+      expect(result.ok).toBe(false);
+    }
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("does not leave a team schedule behind when creation races team deletion", async () => {
+    await db.insert(teams).values({ id: "team_race", orgId: "org-1", name: "Race team", createdAt: 1_000 });
+    await db.insert(teamMembers).values({ teamId: "team_race", userId: "member-user", role: "member" });
+
+    await Promise.all([
+      createWorkflowSchedule(
+        armDeps(),
+        { userId: "member-user", orgId: "org-1", principal: { type: "team", id: "team_race" }, requireTeamMembership: true },
+        { prompt: "Review work", teamId: "team_race", name: "sched", cron: "0 * * * *" },
+      ),
+      deleteTeam(db, { teamId: "team_race" }),
+    ]);
+
+    expect(await db.select().from(teams).where(eq(teams.id, "team_race"))).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules).where(eq(workflowSchedules.ownerId, "team_race"))).toHaveLength(0);
   });
 
   it("rejects scheduling a team-owned workflow for a non-member", async () => {

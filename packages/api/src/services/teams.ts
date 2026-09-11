@@ -26,6 +26,7 @@ import {
   teamMembers,
   teams,
   workflowDefinitions,
+  workflowSchedules,
   type AssistantRow,
   type ContentSourceRow,
   type TeamRow,
@@ -660,6 +661,32 @@ export async function lockTeamForOwnership(tx: AppQueryable, teamId: string): Pr
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${teamId}))`);
 }
 
+/** Validates a prospective team owner and writes under the same transaction
+ * lock used by deletion. `principalTeamId: null` is a user/org request;
+ * another team id is a cross-team request and always fails closed. */
+export async function withAuthorizedTeamOwnership<T>(
+  db: AppDb,
+  opts: {
+    teamId: string;
+    orgId: string;
+    userId: string;
+    principalTeamId: string | null;
+    requireMembership: boolean;
+  },
+  write: (tx: AppQueryable) => Promise<T>,
+): Promise<T | null> {
+  return db.transaction(async (tx) => {
+    await lockTeamForOwnership(tx, opts.teamId);
+    const principalMatches = opts.principalTeamId === opts.teamId;
+    const trustedPrincipal = principalMatches && !opts.requireMembership;
+    const mayUseMembership = opts.principalTeamId === null || principalMatches;
+    const authorized = trustedPrincipal ||
+      (mayUseMembership && await isTeamMember(tx, opts.teamId, opts.userId));
+    if (!(await getTeamInOrg(tx, opts.orgId, opts.teamId)) || !authorized) return null;
+    return write(tx);
+  });
+}
+
 export interface DeleteTeamOptions {
   teamId: string;
   /** Reaps team-owned workflows under the ownership lock, ahead of
@@ -755,6 +782,9 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(eventSubscriptions)
       .where(and(eq(eventSubscriptions.ownerType, "team"), eq(eventSubscriptions.ownerId, opts.teamId)));
+    await tx
+      .delete(workflowSchedules)
+      .where(and(eq(workflowSchedules.ownerType, "team"), eq(workflowSchedules.ownerId, opts.teamId)));
     await tx
       .delete(channelBindings)
       .where(and(eq(channelBindings.ownerType, "team"), eq(channelBindings.ownerId, opts.teamId)));

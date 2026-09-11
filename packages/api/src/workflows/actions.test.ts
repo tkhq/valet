@@ -92,6 +92,31 @@ describe("ownerFromContext", () => {
     expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1" });
   });
 
+  it("keeps the session owner as the workflow principal", () => {
+    expect(ownerFromContext(ctx({ owner: { type: "team", id: "team1" } }))).toEqual({
+      userId: "user1",
+      orgId: "org1",
+      principal: { type: "team", id: "team1" },
+      requireTeamMembership: true,
+    });
+  });
+
+  it("trusts a workflow run's server-derived team principal", () => {
+    expect(ownerFromContext(ctx({
+      owner: { type: "team", id: "team1" },
+      sessionPurpose: "workflow",
+    }))).toEqual({
+      userId: "user1",
+      orgId: "org1",
+      principal: { type: "team", id: "team1" },
+      requireTeamMembership: false,
+    });
+  });
+
+  it("rejects a mismatched user principal", () => {
+    expect(ownerFromContext(ctx({ owner: { type: "user", id: "someone-else" } }))).toBeNull();
+  });
+
   it("returns null when the context has no user", () => {
     expect(ownerFromContext(ctx({ userId: undefined }))).toBeNull();
   });
@@ -184,9 +209,13 @@ describe("DB-backed actions", () => {
   let db: AppDb;
   let pglite: PGlite;
   let deps: WorkflowServiceDeps;
+  let runHost: StubRunHost;
 
   class StubRunHost implements RunHost {
-    async start(): Promise<void> {}
+    readonly started: Array<Parameters<RunHost["start"]>> = [];
+    async start(...args: Parameters<RunHost["start"]>): Promise<void> {
+      this.started.push(args);
+    }
     async wake(): Promise<void> {}
     async scheduleWake(): Promise<void> {}
     async terminate(): Promise<void> {}
@@ -206,12 +235,13 @@ describe("DB-backed actions", () => {
 
   beforeEach(async () => {
     await buildAppQueryable(pglite).query(
-      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs RESTART IDENTITY CASCADE`,
+      `TRUNCATE event_subscriptions, workflow_schedules, workflow_webhooks, workflow_definitions, workflow_runs RESTART IDENTITY CASCADE`,
     );
+    runHost = new StubRunHost();
     deps = {
       db,
       workflowStore: new InMemoryWorkflowStore(),
-      workflowRunHost: new StubRunHost(),
+      workflowRunHost: runHost,
       credentials: new InMemoryCredentialStore(),
     };
   });
@@ -224,6 +254,127 @@ describe("DB-backed actions", () => {
     );
     return created.id;
   }
+
+  it("stores team assistant workflows in the team scope and keeps personal creation personal", async () => {
+    const teamId = "assistant-owner-team";
+    await db.insert(teams).values({ id: teamId, orgId: "org1", name: "Assistant owner", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId, userId: "user1", role: "member" });
+
+    const plugin = workflowsActionPlugin(() => deps);
+    const save = plugin.actions.find((action) => action.id === "workflows.save_workflow");
+    const list = plugin.actions.find((action) => action.id === "workflows.list_workflows");
+    const start = plugin.actions.find((action) => action.id === "workflows.start_run");
+    const schedule = plugin.actions.find((action) => action.id === "workflows.create_schedule");
+    if (!save || !list || !start || !schedule) throw new Error("workflow action missing");
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "done" }],
+    };
+    const teamContext = ctx({ owner: { type: "team", id: teamId } });
+
+    const teamSave = await save.execute({ name: "Team workflow", definition }, teamContext);
+    if (!teamSave.success) throw new Error(teamSave.error);
+    const teamWorkflowId = (teamSave.data as { workflowId: string }).workflowId;
+    const personalSave = await save.execute(
+      { name: "Personal workflow", definition },
+      ctx({ owner: { type: "user", id: "user1" } }),
+    );
+    if (!personalSave.success) throw new Error(personalSave.error);
+    const personalWorkflowId = (personalSave.data as { workflowId: string }).workflowId;
+
+    const rows = await db.select().from(workflowDefinitions);
+    expect(rows.find((row) => row.id === teamWorkflowId)).toMatchObject({ ownerType: "team", ownerId: teamId });
+    expect(rows.find((row) => row.id === personalWorkflowId)).toMatchObject({ ownerType: "user", ownerId: "user1" });
+
+    const teamList = await list.execute({}, teamContext);
+    expect(teamList).toMatchObject({
+      success: true,
+      data: { workflows: [{ workflowId: teamWorkflowId, name: "Team workflow" }] },
+    });
+
+    const started = await start.execute({ workflow_id: teamWorkflowId }, teamContext);
+    if (!started.success) throw new Error(started.error);
+    const runId = (started.data as { runId: string }).runId;
+    expect(runHost.started.at(-1)?.[0]).toBe(runId);
+    expect(runHost.started.at(-1)?.[3]).toEqual({
+      ownerType: "team",
+      ownerId: teamId,
+      actorUserId: "user1",
+    });
+
+    const scheduled = await schedule.execute(
+      { prompt: "Review team work", name: "Team prompt", cron: "0 9 * * *" },
+      teamContext,
+    );
+    if (!scheduled.success) throw new Error(scheduled.error);
+    expect(await db.select().from(workflowSchedules)).toContainEqual(
+      expect.objectContaining({ ownerType: "team", ownerId: teamId, targetKind: "orchestrator" }),
+    );
+  });
+
+  it("rejects a channel-linked nonmember acting through a team assistant", async () => {
+    const teamId = "channel-team";
+    await db.insert(teams).values({ id: teamId, orgId: "org1", name: "Channel team", createdAt: 1 });
+    const plugin = workflowsActionPlugin(() => deps);
+    const save = plugin.actions.find((action) => action.id === "workflows.save_workflow")!;
+    const schedule = plugin.actions.find((action) => action.id === "workflows.create_schedule")!;
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "done" }],
+    };
+    const nonmemberContext = ctx({ owner: { type: "team", id: teamId } });
+
+    await expect(save.execute({ name: "Forbidden", definition }, nonmemberContext)).rejects.toThrow("not found");
+    expect(await schedule.execute(
+      { prompt: "Forbidden", name: "Forbidden", cron: "0 9 * * *" },
+      nonmemberContext,
+    )).toMatchObject({ success: false });
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("keeps team assistants out of other teams and personal workflow scopes", async () => {
+    await db.insert(teams).values([
+      { id: "scope-team-a", orgId: "org1", name: "Scope A", createdAt: 1 },
+      { id: "scope-team-b", orgId: "org1", name: "Scope B", createdAt: 1 },
+    ]);
+    await db.insert(teamMembers).values({ teamId: "scope-team-a", userId: "user1", role: "member" });
+    await db.insert(workflowDefinitions).values([
+      {
+        id: "scope-team-b-workflow", orgId: "org1", ownerType: "team", ownerId: "scope-team-b", name: "Team B",
+        definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: "scope-personal-workflow", orgId: "org1", ownerType: "user", ownerId: "user1", name: "Personal",
+        definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1,
+      },
+    ]);
+    const plugin = workflowsActionPlugin(() => deps);
+    const teamContext = ctx({ owner: { type: "team", id: "scope-team-a" } });
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "done" }],
+    };
+
+    for (const workflowId of ["scope-team-b-workflow", "scope-personal-workflow"]) {
+      for (const [actionId, args] of [
+        ["workflows.get_workflow", { workflow_id: workflowId }],
+        ["workflows.save_workflow", { workflow_id: workflowId, name: "Changed", definition }],
+        ["workflows.start_run", { workflow_id: workflowId }],
+        ["workflows.delete_workflow", { workflow_id: workflowId }],
+      ] as const) {
+        const action = plugin.actions.find((candidate) => candidate.id === actionId)!;
+        expect(await action.execute(args, teamContext)).toMatchObject({ success: false });
+      }
+    }
+    expect(await plugin.actions.find((action) => action.id === "workflows.list_workflows")!.execute({}, teamContext))
+      .toMatchObject({ success: true, data: { workflows: [] } });
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(2);
+    expect(runHost.started).toHaveLength(0);
+  });
 
   it("copies a personal graph to a team through the agent action and rejects team assistant context", async () => {
     const workflowId = await seedWorkflow();
@@ -273,7 +424,9 @@ describe("DB-backed actions", () => {
     ] as const) {
       const action = plugin.actions.find((a) => a.id === id);
       if (!action) throw new Error(`missing ${id}`);
-      expect(await action.execute(args, ctx())).toMatchObject({ success: true });
+      expect(await action.execute(args, ctx({ owner: { type: "team", id: "vault-team" } }))).toMatchObject({
+        success: true,
+      });
     }
     expect(calls).toEqual(["linear", "linear"]);
     expect(await db.select().from(workflowSchedules)).toHaveLength(1);

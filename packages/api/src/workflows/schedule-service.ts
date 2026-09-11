@@ -22,6 +22,7 @@ import {
   type WorkflowOwnerRef,
 } from "./service.js";
 import { checkAssistantForOwner } from "../assistants/service.js";
+import { withAuthorizedTeamOwnership } from "../services/teams.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
@@ -110,8 +111,8 @@ export async function createWorkflowSchedule(
     /**
      * The team that owns an orchestrator-prompt schedule, so a scheduled prompt
      * created in a team workspace fires the TEAM's assistant, not the caller's.
-     * The route validates membership before passing it. Ignored for a workflow
-     * target (owner follows the workflow).
+     * This service validates the team under its ownership lock. Ignored for a
+     * workflow target (owner follows the workflow).
      */
     teamId?: string;
     /**
@@ -190,10 +191,8 @@ export async function createWorkflowSchedule(
       if (blocked) return { ok: false, error: blocked };
     }
   } else if (input.teamId) {
-    // Orchestrator-prompt schedule created in a team workspace: the team owns
-    // it, so `deliverToOrchestrator` fires the team's assistant. Membership is
-    // the route's to check (existence-hiding 404) before this runs; without a
-    // teamId the schedule stays the caller's own, as before.
+    // The insert below validates this owner under the same lock team deletion
+    // takes. Without a teamId the schedule stays the caller's own.
     scheduleOwner = { ownerType: "team", ownerId: input.teamId };
   }
 
@@ -209,30 +208,45 @@ export async function createWorkflowSchedule(
     if (bad) return { ok: false, error: bad };
   }
 
-  const inserted = await db
-    .insert(workflowSchedules)
-    .values({
-      id: randomUUID(),
-      orgId: owner.orgId,
-      ownerType: scheduleOwner.ownerType,
-      ownerId: scheduleOwner.ownerId,
-      targetKind: hasWorkflow ? "workflow" : "orchestrator",
-      workflowId: hasWorkflow ? input.workflowId! : null,
-      prompt: hasPrompt ? input.prompt! : null,
-      // A workflow target has no assistant to name, so the column stays null
-      // there whatever the caller sent.
-      assistantId: hasPrompt ? (input.assistantId ?? null) : null,
-      name: input.name,
-      cron: input.cron,
-      timezone,
-      input: input.input ?? null,
-      enabled: true,
-      nextFireAt: next.at,
-      createdBy: owner.userId,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
+  const values = {
+    id: randomUUID(),
+    orgId: owner.orgId,
+    ownerType: scheduleOwner.ownerType,
+    ownerId: scheduleOwner.ownerId,
+    targetKind: hasWorkflow ? "workflow" as const : "orchestrator" as const,
+    workflowId: hasWorkflow ? input.workflowId! : null,
+    prompt: hasPrompt ? input.prompt! : null,
+    // A workflow target has no assistant to name, so the column stays null
+    // there whatever the caller sent.
+    assistantId: hasPrompt ? (input.assistantId ?? null) : null,
+    name: input.name,
+    cron: input.cron,
+    timezone,
+    input: input.input ?? null,
+    enabled: true,
+    nextFireAt: next.at,
+    createdBy: owner.userId,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  if (hasPrompt && input.teamId) {
+    const inserted = await withAuthorizedTeamOwnership(
+      db,
+      {
+        teamId: input.teamId,
+        orgId: owner.orgId,
+        userId: owner.userId,
+        principalTeamId: owner.principal?.type === "team" ? owner.principal.id : null,
+        requireMembership: owner.requireTeamMembership === true,
+      },
+      (tx) => tx.insert(workflowSchedules).values(values).returning(),
+    );
+    if (!inserted?.[0]) return { ok: false, error: "team not found" };
+    return { ok: true, schedule: rowToSummary(inserted[0]) };
+  }
+
+  const inserted = await db.insert(workflowSchedules).values(values).returning();
   return { ok: true, schedule: rowToSummary(inserted[0]!) };
 }
 

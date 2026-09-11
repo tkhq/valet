@@ -14,6 +14,7 @@ import {
   users,
   workflowDefinitions,
   workflowRuns,
+  workflowSchedules,
 } from "../schema/index.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
 import {
@@ -265,12 +266,29 @@ describe("teams service", () => {
     expect(teams.map((t) => t.id)).toEqual([t1.id]);
   });
 
-  it("deleteTeam removes the team and its memberships when it owns no workflows", async () => {
+  it("deleteTeam removes the team, memberships, and team orchestrator schedules", async () => {
     const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(workflowSchedules).values({
+      id: "team_schedule",
+      orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      targetKind: "orchestrator",
+      prompt: "Review work",
+      name: "Team schedule",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      enabled: true,
+      nextFireAt: 2_000,
+      createdBy: "u1",
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
     await deleteTeam(db, { teamId: team.id });
 
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
   });
 
   it("deleteTeam drops team-owned credential rows including the 1Password grant", async () => {
