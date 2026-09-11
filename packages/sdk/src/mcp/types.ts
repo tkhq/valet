@@ -16,6 +16,7 @@ export interface McpTool {
 /** Result of calling an MCP tool via tools/call. */
 export interface McpToolResult {
   content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+  structuredContent?: unknown;
   isError?: boolean;
 }
 

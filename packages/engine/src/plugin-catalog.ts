@@ -19,6 +19,7 @@ import type {
   ToolResult,
 } from "./types.js";
 import { isDecisionGateExpired } from "./decision-gate.js";
+import { encodeToolOutput } from "./tool-output.js";
 
 /**
  * Plugin catalog: indirection layer that exposes plugin actions to the LLM
@@ -861,6 +862,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
 
       const tools = entries.slice(0, limit).map((e) => {
         const toolId = qualifiedId(e);
+        const directTool = pinnedNames.get(toolId);
         return {
           service: e.service,
           tool_id: toolId,
@@ -868,23 +870,18 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
           description: e.action.description,
           riskLevel: e.action.riskLevel,
           params: e.action.parameters,
-          // Absent for every unpinned action — JSON.stringify drops it.
-          direct_tool: pinnedNames.get(toolId),
+          ...(directTool ? { direct_tool: directTool } : {}),
         };
       });
 
       const total = entries.length;
       return {
-        text: JSON.stringify(
-          {
-            tools,
-            total,
-            truncated: total > limit ? total - limit : undefined,
-            warnings: warnings.length > 0 ? warnings : undefined,
-          },
-          null,
-          2,
-        ),
+        text: encodeToolOutput({
+          tools,
+          total,
+          ...(total > limit ? { truncated: total - limit } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
+        }),
       };
     },
   };
@@ -1374,7 +1371,7 @@ function actionResultToToolResult(
     };
   }
   return {
-    text: stableJson(result.data),
+    text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
   };

@@ -11,6 +11,7 @@
  * seams — and deliberately NOT the childSpawner (dispatch goes through
  * sec_dispatch only, spec Decision 3).
  */
+import { decode } from "@toon-format/toon";
 import { describe, it, expect, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
@@ -574,7 +575,7 @@ describe("sec_wait", () => {
 });
 
 describe("sec_close", () => {
-  it("returns the manifest JSON verbatim as the tool result", async () => {
+  it("returns the structured manifest as the tool result", async () => {
     api = await bootTestApi();
     const created = await createSecuritySession(api.baseUrl);
     const { db } = api.providers;
@@ -590,7 +591,7 @@ describe("sec_close", () => {
       .where(eq(securityCells.engagementId, engagementId));
 
     const result = await secCloseTool.execute({}, toolCtx(api, created.id));
-    const manifest: unknown = JSON.parse(result.text);
+    const manifest: unknown = decode(result.text);
     expect(manifest).toMatchObject({
       engagementId,
       status: "completed",

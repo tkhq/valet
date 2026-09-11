@@ -65,6 +65,7 @@ export {
   parseAssistantSessionId,
 } from "./principal.js";
 export { extractStructuredOutput } from "./result-schema.js";
+export { encodeToolOutput } from "./tool-output.js";
 export { buildRepoInstructionsFragment } from "./repo-instructions.js";
 export {
   capturePatch,

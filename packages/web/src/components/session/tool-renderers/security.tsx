@@ -13,7 +13,7 @@ import { useMessages, useSession } from "~/api/queries";
 import { SeverityBadge } from "~/components/security/severity";
 import { Spinner } from "~/components/primitives";
 import { ToolBody, TruncatedText } from "./tool-shell";
-import { resultText, type ToolRenderer } from "./types";
+import { resultText, structuredResult, type ToolRenderer } from "./types";
 
 /**
  * Renderers for the `sec_*` engagement tools (valet-security design §Data
@@ -199,18 +199,11 @@ export const secCloseRenderer: ToolRenderer = {
   Icon: FileArchive,
   formatTarget: () => "engagement manifest",
   Body: ({ result, status, error }) => {
-    const text = resultText(result);
-    let manifest: ManifestText | null = null;
-    if (status === "completed" && text.trimStart().startsWith("{")) {
-      try {
-        const parsed: unknown = JSON.parse(text);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          manifest = parsed as ManifestText;
-        }
-      } catch {
-        manifest = null;
-      }
-    }
+    const parsed = status === "completed" ? structuredResult(result) : undefined;
+    const manifest =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as ManifestText)
+        : null;
     const distinct = manifest?.findings?.distinctBySeverity;
     const breakdown = manifest?.findings?.statusBreakdown;
     return (

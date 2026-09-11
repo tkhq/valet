@@ -1,3 +1,4 @@
+import { decode as decodeToon } from "@toon-format/toon";
 import type { LucideIcon } from "lucide-react";
 import type { FC } from "react";
 
@@ -106,6 +107,24 @@ export function lineCountSummary(text: string): string | undefined {
   if (!text) return undefined;
   const lines = text.split("\n").length;
   return `${lines} ${lines === 1 ? "line" : "lines"}`;
+}
+
+/** Decode persisted structured output. JSON wins for older entries. */
+export function structuredResult(result: unknown): unknown {
+  const text = resultText(result);
+  if (!text) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object") return parsed;
+  } catch {
+    // New structured tool output uses TOON.
+  }
+  try {
+    const parsed: unknown = decodeToon(text);
+    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

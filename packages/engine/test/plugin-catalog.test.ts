@@ -1,3 +1,4 @@
+import { decode } from "@toon-format/toon";
 import { describe, it, expect } from "vitest";
 import { ObjectOptions, Type } from "typebox";
 import type { TObject } from "typebox";
@@ -186,7 +187,7 @@ describe("pluginCatalogTools: list_tools", () => {
 
     const toolEnd = events.find((e) => e.event.type === "tool_end");
     if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
-    const payload = JSON.parse(toolEnd.event.result) as {
+    const payload = decode(toolEnd.event.result) as {
       tools: Array<{
         tool_id: string;
         riskLevel: string;
@@ -236,7 +237,7 @@ describe("pluginCatalogTools: list_tools", () => {
 
     const toolEnd = events.find((e) => e.event.type === "tool_end");
     if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
-    const payload = JSON.parse(toolEnd.event.result) as {
+    const payload = decode(toolEnd.event.result) as {
       tools: Array<{ tool_id: string }>;
     };
     expect(payload.tools.map((t) => t.tool_id)).toEqual(["github.delete_repo"]);
@@ -287,7 +288,7 @@ describe("pluginCatalogTools: list_tools", () => {
     };
     const [listTool] = pluginCatalogTools({ plugins: [github, linear] });
     const ids = (result: { text: string }): string[] =>
-      (JSON.parse(result.text) as { tools: Array<{ tool_id: string }> }).tools.map(
+      (decode(result.text) as { tools: Array<{ tool_id: string }> }).tools.map(
         (tool) => tool.tool_id,
       );
 
@@ -364,7 +365,7 @@ describe("pluginCatalogTools: list_tools", () => {
 
     const toolEnd = events.find((e) => e.event.type === "tool_end");
     if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
-    const payload = JSON.parse(toolEnd.event.result) as {
+    const payload = decode(toolEnd.event.result) as {
       tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
@@ -382,7 +383,7 @@ describe("pluginCatalogTools: list_tools", () => {
     const [listTool] = pluginCatalogTools({ plugins: [plugin] });
 
     const result = await listTool.execute({ service: "github" }, makeCtx());
-    const payload = JSON.parse(result.text) as {
+    const payload = decode(result.text) as {
       tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
@@ -403,7 +404,7 @@ describe("pluginCatalogTools: list_tools", () => {
     const [listTool] = pluginCatalogTools({ plugins: [workflowsPlugin] });
 
     const result = await listTool.execute({}, makeCtx());
-    const payload = JSON.parse(result.text) as {
+    const payload = decode(result.text) as {
       tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
@@ -442,7 +443,7 @@ describe("pluginCatalogTools: list_tools", () => {
     });
 
     const result = await listTool.execute({}, ctx);
-    const payload = JSON.parse(result.text) as {
+    const payload = decode(result.text) as {
       tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
@@ -823,7 +824,7 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
         },
       }),
     );
-    const payload = JSON.parse(result.text) as { tools: Array<{ tool_id: string }> };
+    const payload = decode(result.text) as { tools: Array<{ tool_id: string }> };
     const ids = payload.tools.map((t) => t.tool_id).sort();
     expect(ids).toEqual([
       "github.create_issue",
@@ -852,7 +853,7 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
         },
       }),
     );
-    const payload = JSON.parse(result.text) as {
+    const payload = decode(result.text) as {
       tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
@@ -918,7 +919,24 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
       makeCtx(),
     );
     expect(executed).toEqual({ query: "roadmap" });
-    expect(result.text).toContain("ok");
+    expect(decode(result.text)).toEqual({ ok: true });
+  });
+
+  it("preserves plain string action data", async () => {
+    const plugin = makeDynamicPlugin("notion", async () => [{
+      id: "notion.status",
+      name: "Status",
+      description: "Return status text.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true, data: "Ready: no changes" }),
+    }]);
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute(
+      { tool_id: "notion.status", params: {}, summary: "check status" },
+      makeCtx(),
+    );
+    expect(result.text).toBe("Ready: no changes");
   });
 });
 
@@ -1252,7 +1270,7 @@ describe("pluginCatalogTools: pinning", () => {
     const { plugin } = makePinnablePlugin();
     const [listTool] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
     const result = await listTool.execute({}, makeCtx());
-    const payload = JSON.parse(result.text) as {
+    const payload = decode(result.text) as {
       tools: Array<{ tool_id: string; direct_tool?: string }>;
     };
     const row = payload.tools.find((t) => t.tool_id === "workflows.patch_workflow");
@@ -1273,7 +1291,7 @@ describe("pluginCatalogTools: pinning", () => {
         },
       }),
     );
-    const payload = JSON.parse(result.text) as {
+    const payload = decode(result.text) as {
       tools: Array<{ tool_id: string; direct_tool?: string }>;
     };
     expect(payload.tools.every((t) => t.direct_tool === undefined)).toBe(true);
@@ -1496,7 +1514,7 @@ describe("pinned tool: same execution path as call_tool", () => {
       { policyResolver: resolver },
     );
     expect(viaPinned).toBe(viaCallTool);
-    expect(viaPinned).toContain("wf-1");
+    expect(decode(viaPinned)).toEqual({ workflowId: "wf-1" });
 
     // onInvocation is fire-and-forget, so let the microtask queue drain.
     await new Promise((r) => setTimeout(r, 0));

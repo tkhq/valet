@@ -301,6 +301,43 @@ describe('mcpActionPlugin resolveActions', () => {
 // ── execute ──────────────────────────────────────────────────────────
 
 describe('mcpActionPlugin generated action execute', () => {
+  async function executeResult(callResult: McpToolResult) {
+    vi.stubGlobal('fetch', makeFetchMock({ tools: [fixtureTools[0]], callResult }));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel: 'medium',
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok' });
+    const [action] = await plugin.resolveActions!({ credentials });
+    return action.execute({}, fakeContext(credentials));
+  }
+
+  it('prefers MCP structuredContent over text', async () => {
+    const result = await executeResult({
+      content: [{ type: 'text', text: '{"legacy":true}' }],
+      structuredContent: { canonical: true },
+    });
+    expect(result.data).toEqual({ canonical: true });
+  });
+
+  it('parses JSON text before TOON', async () => {
+    const result = await executeResult({ content: [{ type: 'text', text: '{"records":[1]}' }] });
+    expect(result.data).toEqual({ records: [1] });
+  });
+
+  it('decodes marker-gated TOON text', async () => {
+    const result = await executeResult({
+      content: [{ type: 'text', text: '[1]{id,name}:\n  issue-1,Fix login' }],
+    });
+    expect(result.data).toEqual([{ id: 'issue-1', name: 'Fix login' }]);
+  });
+
+  it('keeps ordinary colon-delimited text plain', async () => {
+    const text = 'Error: Invalid input';
+    const result = await executeResult({ content: [{ type: 'text', text }] });
+    expect(result.data).toBe(text);
+  });
   it('sends an Authorization bearer header derived from ctx.credentials.get()', async () => {
     let captured: CapturedRequest | undefined;
     vi.stubGlobal(

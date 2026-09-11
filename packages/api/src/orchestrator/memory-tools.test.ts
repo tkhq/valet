@@ -5,6 +5,7 @@
  * the tools round-trip over the honest HTTP seam rather than a mocked
  * fetch (decision 15).
  */
+import { decode } from "@toon-format/toon";
 import { describe, it, expect, afterEach } from "vitest";
 import type {
   Credential,
@@ -396,8 +397,9 @@ describe("mem_copy_to_team", () => {
     await memWriteTool.execute({ path: "notes/source.md", content: "# Source\n\nExact content.\n" }, ctx);
     const args = { from: "notes/source.md", to: "notes/team.md", teamId: team.id };
     const result = await memCopyToTeamTool.execute(args, ctx);
-    expect(result.text).toContain(`"ownerId":"${team.id}"`);
-    expect(result.text).toContain('"path":"notes/team.md"');
+    expect(decode(result.text)).toMatchObject({
+      file: { ownerId: team.id, path: "notes/team.md" },
+    });
     expect((await memCopyToTeamTool.execute(args, ctx)).text).toContain("already exists");
     await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
     expect((await memCopyToTeamTool.execute({ ...args, to: "notes/second.md" }, ctx)).text).toContain("[memory_error]");

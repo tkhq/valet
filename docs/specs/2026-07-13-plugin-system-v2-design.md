@@ -257,3 +257,22 @@ prompt changes close this gap:
 All three distinguish "not connected" from "not possible": an unconnected
 integration is reported with its corrective action (`list_tools` already emits
 that warning), never presented as a capability the agent lacks.
+
+## Structured tool output encoding (2026-09-11)
+
+The engine encodes structured tool output as Token-Oriented Object Notation
+(TOON) at the model boundary. `encodeToolOutput` is the only encoder. It uses
+pretty JSON if TOON encoding throws. Plain string results stay unchanged.
+`list_tools` omits absent optional fields before encoding because TOON maps an
+`undefined` value to `null`. Plugin actions, pinned actions, plugin command
+results, and structured built-in results use the same boundary.
+
+The web renderer reads old and new persisted results. It parses JSON first and
+then TOON. Fallback, workflow, OpenAI media, and security renderers therefore
+render both formats as the same structured value.
+
+MCP inbound data has a stricter decode order. The SDK uses `structuredContent`
+when present, then parses JSON text, then tries TOON, and finally preserves raw
+text. The TOON step requires a standalone first-line array or table marker such
+as `[2]:`, `items[2]:`, or `items[2]{id,name}:`. This gate keeps ordinary text
+such as `Error: Invalid input` as text.

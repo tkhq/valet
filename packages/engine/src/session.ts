@@ -29,6 +29,7 @@ import {
 } from "./reasoning.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
 import { recordCredentialRead } from "./metrics.js";
+import { encodeToolOutput } from "./tool-output.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type {
   BusEvent,
@@ -108,9 +109,10 @@ function formatPluginOutcome(
         return { ok: false, output: `Action failed. ${result.error ?? "Unknown error."}` };
       }
       if (result.data === undefined) return { ok: true, output: "Done." };
-      const body =
-        typeof result.data === "string" ? result.data : "```json\n" + stableJson(result.data) + "\n```";
-      return { ok: true, output: body };
+      return {
+        ok: true,
+        output: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
+      };
     }
     case "unknown":
       return {
@@ -151,15 +153,6 @@ function formatPluginOutcome(
       };
     case "error":
       return { ok: false, output: `Action failed. ${outcome.message}` };
-  }
-}
-
-/** Stable JSON stringify used for plugin-result rendering. */
-function stableJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
   }
 }
 

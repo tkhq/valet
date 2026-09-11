@@ -10,7 +10,7 @@
  * content block, so the Body can render it inline with no extra fetch.
  */
 import { Sparkles } from "lucide-react";
-import { resultText, type ToolRenderer, type ToolRendererProps } from "./types";
+import { resultText, structuredResult, type ToolRenderer, type ToolRendererProps } from "./types";
 import { ToolBody, TruncatedText } from "./tool-shell";
 
 const OPENAI_TOOL_PREFIX = "openai.";
@@ -55,17 +55,10 @@ export function imageDataUrl(result: unknown): string | undefined {
   return undefined;
 }
 
-/** The action's structured result (`{ path, text, … }`), parsed from the
- * JSON the catalog flattens into the first text block. */
+/** The action's structured result, parsed from JSON or TOON. */
 export function openaiResultData(result: unknown): Record<string, unknown> {
-  const text = resultText(result);
-  if (!text.startsWith("{")) return {};
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return isRecord(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  const parsed = structuredResult(result);
+  return isRecord(parsed) ? parsed : {};
 }
 
 function formatTarget(args: unknown): string | undefined {

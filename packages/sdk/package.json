@@ -37,6 +37,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@toon-format/toon": "^2.1.0",
     "@valet/engine": "workspace:*",
     "@valet/shared": "workspace:*",
     "typebox": "^1.1.24"

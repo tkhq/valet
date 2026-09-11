@@ -5,6 +5,7 @@
  * through `resultText`, for pi-agent-core's content-array shape AND the
  * engine's `{ text }` shape — the exact hop that has broken three times.
  */
+import { encode } from "@toon-format/toon";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -195,7 +196,7 @@ describe("sec_cell_complete + sec_close summaries", () => {
     ).toBeTruthy();
   });
 
-  it("renders the sec_close manifest headline from its JSON text", () => {
+  it.each([JSON.stringify, encode])("renders the sec_close manifest headline from structured text", (encodeManifest) => {
     const manifest = {
       engagementId: "eng-1",
       status: "completed",
@@ -209,7 +210,7 @@ describe("sec_cell_complete + sec_close summaries", () => {
       <secCloseRenderer.Body
         toolName="sec_close"
         args={{}}
-        result={contentResult(JSON.stringify(manifest, null, 2))}
+        result={contentResult(encodeManifest(manifest))}
         status="completed"
       />,
     );

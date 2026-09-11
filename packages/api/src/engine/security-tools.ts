@@ -24,7 +24,7 @@
  */
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
-import type { ToolContext, ToolDef, ToolResult } from "@valet/engine";
+import { encodeToolOutput, type ToolContext, type ToolDef, type ToolResult } from "@valet/engine";
 
 const UNAVAILABLE_TEXT = "[security_unavailable] security endpoint not configured";
 
@@ -593,9 +593,8 @@ export const secCloseTool = defineTool({
         if (manifest === undefined) {
           return { text: "[security_error] the close route returned no manifest." };
         }
-        // The manifest is the engagement's durable summary — the thread
-        // keeps it verbatim.
-        return { text: JSON.stringify(manifest, null, 2) };
+        // The manifest is the engagement's durable summary.
+        return { text: encodeToolOutput(manifest) };
       },
     );
   },

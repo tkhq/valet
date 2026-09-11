@@ -22,7 +22,7 @@
  */
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
-import { serializePrincipal, type Principal } from "@valet/engine";
+import { encodeToolOutput, serializePrincipal, type Principal } from "@valet/engine";
 import type { ToolContext, ToolDef, ToolResult } from "@valet/engine";
 import { artifactSizeError, artifactSizeErrorForBytes } from "@valet/shared";
 import { normalizePath } from "../lib/okf.js";
@@ -359,7 +359,7 @@ export const artifactCopyToTeamTool = defineTool({
     return memoryRequest(new URL("/api/artifacts/copy-to-team", cfg.apiBaseUrl), {
       method: "POST", headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
       body: JSON.stringify(args),
-    }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
+    }, async (res) => ({ text: encodeToolOutput(await parseJsonBody(res)) }));
   },
 });
 
@@ -378,7 +378,7 @@ export const memCopyToTeamTool = defineTool({
       method: "POST",
       headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
       body: JSON.stringify(args),
-    }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
+    }, async (res) => ({ text: encodeToolOutput(await parseJsonBody(res)) }));
   },
 });
 
