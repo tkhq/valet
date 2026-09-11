@@ -126,8 +126,13 @@ devices, all other capabilities are dropped, and system paths are selectively
 unmasked rather than fully exposed.
 
 In docker-enabled sandboxes the agent's commands also run as a non-root
-workload user (`dockerd`) rather than container root — a defense-in-depth
-bonus on top of the container boundary.
+workload user (`dockerd`, UID/GID 1500) rather than container root.
+
+Kubernetes user-namespace sandboxes use subordinate IDs 65536 through
+131070 for nested IDs 1 through 65535. Nested ID 0 maps to UID/GID 1500.
+The image rejects a smaller outer map before Docker starts. Do not deploy
+this image until default and large sandbox nodes run Kubernetes 1.35 with
+`userNamespaces.idsPerPod: 131072`.
 
 On Kubernetes, the `valet-docker` RuntimeClass mounts the sandbox cgroup
 read-write inside its private cgroup namespace. Valet delegates only the
