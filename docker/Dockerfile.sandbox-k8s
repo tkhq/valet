@@ -261,9 +261,10 @@ RUN (getent group docker >/dev/null || groupadd docker) \
     && echo "dockerd:2000:63536" >> /etc/subuid \
     && echo "dockerd:2000:63536" >> /etc/subgid
 
+COPY docker/cgroup-delegation.sh /cgroup-delegation.sh
 COPY docker/start-docker.sh /start-docker.sh
 COPY docker/start-headless.sh /start-headless.sh
-RUN chmod +x /start-docker.sh /start-headless.sh
+RUN chmod +x /cgroup-delegation.sh /start-docker.sh /start-headless.sh
 
 COPY docker/start-full.sh /start-full.sh
 RUN chmod +x /start-full.sh

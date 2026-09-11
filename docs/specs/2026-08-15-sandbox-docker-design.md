@@ -195,11 +195,27 @@ root. Consequences:
     but cannot fix ownership, and a fresh cgroup2 mount over the
     mountpoint is refused (fs already mounted).
   - Bootstrap: before dockerd starts, `start-docker.sh` bind-remounts
-    the cgroupfs rw (harmless if `cgroup_writable` already did it),
-    moves every process into an `/init` leaf, and enables the
-    controllers in `cgroup.subtree_control` — the v2 "no internal
-    processes" rule forbids delegation while the root group has member
-    processes (same dance as moby `hack/dind`).
+    the cgroupfs rw. It moves every process into an `/init` leaf and
+    enables the root controllers. The v2 no-internal-process rule
+    requires the root to be empty before it can distribute controllers.
+    The script then delegates only `/init`, `cgroup.procs`,
+    `cgroup.threads`, and `cgroup.subtree_control` to the resolved
+    `dockerd` UID and GID. It does not delegate the visible root or any
+    CPU, memory, or PID limit file. Missing controllers, files, or
+    ownership stop Docker startup with a corrective error.
+  - Containment: the private cgroup namespace makes the sandbox
+    container cgroup appear as `/sys/fs/cgroup`. The kernel delegation
+    rules prevent `dockerd` from moving processes across that boundary.
+    Ancestor CPU, memory, and PID limits remain effective for every
+    nested cgroup.
+  - Rootless k3s: k3s v1.31.5+k3s1 embeds RootlessKit v1.0.1. It does
+    not use a separately installed RootlessKit binary for server startup.
+    RootlessKit creates `k3s_evac` below `/init`, moves all direct
+    `/init` processes into that leaf, and enables controllers below
+    `/init`. A cgroup move does not change a process namespace or send a
+    signal. PID 1, the gateway, dockerd, and other direct members remain
+    in the sandbox, but share the evacuation leaf. Deployment acceptance
+    must test their health across repeated k3s start and stop cycles.
 
 ### Exec identity
 
