@@ -13,4 +13,14 @@ describe("structuredResult", () => {
   it("uses JSON before TOON", () => {
     expect(structuredResult('{"items":[1]}')).toEqual({ items: [1] });
   });
+
+  it.each([
+    "Error: Invalid input",
+    "linear.create_issue failed: Invalid input",
+    "Ready: no changes",
+    "https://example.com/issues/1",
+    "Usage: run <command>",
+  ])("preserves plain text: %s", (text) => {
+    expect(structuredResult(text)).toBeUndefined();
+  });
 });

@@ -111,7 +111,10 @@ function formatPluginOutcome(
       if (result.data === undefined) return { ok: true, output: "Done." };
       return {
         ok: true,
-        output: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
+        output:
+          typeof result.data === "string"
+            ? result.data
+            : `\`\`\`toon\n${encodeToolOutput(result.data)}\n\`\`\``,
       };
     }
     case "unknown":

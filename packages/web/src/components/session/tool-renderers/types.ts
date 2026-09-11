@@ -109,6 +109,8 @@ export function lineCountSummary(text: string): string | undefined {
   return `${lines} ${lines === 1 ? "line" : "lines"}`;
 }
 
+const TOON_MARKER = /^[\w.-]*\[\d+\](?:\{[^}]*\})?:\s*$/;
+
 /** Decode persisted structured output. JSON wins for older entries. */
 export function structuredResult(result: unknown): unknown {
   const text = resultText(result);
@@ -119,6 +121,8 @@ export function structuredResult(result: unknown): unknown {
   } catch {
     // New structured tool output uses TOON.
   }
+  const firstLine = text.split("\n").find((line) => line.trim().length > 0)?.trim();
+  if (!firstLine || !TOON_MARKER.test(firstLine)) return undefined;
   try {
     const parsed: unknown = decodeToon(text);
     return parsed !== null && typeof parsed === "object" ? parsed : undefined;

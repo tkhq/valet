@@ -6,6 +6,12 @@ describe("encodeToolOutput", () => {
     expect(encodeToolOutput({ items: [{ id: 1 }] })).toBe("items[1]{id}:\n  1");
   });
 
+  it("falls back to a string when TOON and JSON reject circular data", () => {
+    const data: { self?: unknown } = {};
+    data.self = data;
+    expect(encodeToolOutput(data)).toBe("[object Object]");
+  });
+
   it("falls back to pretty JSON when TOON encoding throws", () => {
     let calls = 0;
     const data = {

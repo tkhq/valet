@@ -267,9 +267,11 @@ pretty JSON if TOON encoding throws. Plain string results stay unchanged.
 `undefined` value to `null`. Plugin actions, pinned actions, plugin command
 results, and structured built-in results use the same boundary.
 
-The web renderer reads old and new persisted results. It parses JSON first and
-then TOON. Fallback, workflow, OpenAI media, and security renderers therefore
-render both formats as the same structured value.
+The web renderer reads old and new persisted results. It parses JSON first. It
+parses TOON only when the first non-empty line has an array or table marker.
+Fallback, workflow, OpenAI media, and security renderers therefore render both
+formats as the same structured value without changing plain text. Plugin
+commands wrap structured output in a `toon` code fence to preserve line breaks.
 
 MCP inbound data has a stricter decode order. The SDK uses `structuredContent`
 when present, then parses JSON text, then tries TOON, and finally preserves raw

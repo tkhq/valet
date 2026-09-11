@@ -198,6 +198,7 @@ describe("sec_cell_complete + sec_close summaries", () => {
 
   it.each([JSON.stringify, encode])("renders the sec_close manifest headline from structured text", (encodeManifest) => {
     const manifest = {
+      cells: [],
       engagementId: "eng-1",
       status: "completed",
       findings: {

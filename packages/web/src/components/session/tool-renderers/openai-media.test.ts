@@ -56,10 +56,10 @@ describe("openai-media renderer", () => {
     expect(imageDataUrl(persistedImageResult)).toBe(`data:image/png;base64,${B64}`);
   });
 
-  it("parses JSON and TOON structured data from flattened text", () => {
+  it("parses JSON and marker-gated TOON from flattened text", () => {
     const data = { path: "/workspace/generated-images/1-fox.png", bytes: 5 };
     expect(openaiResultData(persistedImageResult)).toEqual(data);
-    expect(openaiResultData({ text: encode(data) })).toEqual(data);
+    expect(openaiResultData({ text: encode({ items: [], ...data }) })).toEqual({ items: [], ...data });
   });
 
   it("returns no image for text-only results (transcription, tts)", () => {

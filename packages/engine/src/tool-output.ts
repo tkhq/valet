@@ -5,6 +5,10 @@ export function encodeToolOutput(data: unknown): string {
   try {
     return encode(data);
   } catch {
-    return JSON.stringify(data, null, 2);
+    try {
+      return JSON.stringify(data, null, 2);
+    } catch {
+      return String(data);
+    }
   }
 }
