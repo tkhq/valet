@@ -771,3 +771,8 @@ A product review pass the same day promoted triage from a table to a surface:
 9. **Findings review UI**: master-detail with evidence, provenance, fingerprint siblings, keyboard-first triage, and human verify/refute — a findings list the user cannot act on is a demo, not a product.
 10. **Export in v1**: Markdown, SARIF 2.1.0 (suppressions carry refutations), JSON; filter-scoped; audit-logged. The former SARIF non-goal narrowed to the GitHub code-scanning *upload*.
 11. **Issue filing in v1**: Linear and GitHub through existing integration actions (Decision 11), `security_finding_links` for idempotent linkage, digest issues for bulk — with the egress rule that only humans file or export (Decision 10).
+
+
+### Team GitHub setup navigation (2026-09-11)
+
+When the repository picker needs GitHub access in a team workspace, organization admins open GitHub App settings. Other members see an instruction to ask an organization admin. Personal workspaces keep the personal Connected accounts link. Team recovery links must not point to personal settings, which redirect to Team General.

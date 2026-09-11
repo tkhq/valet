@@ -17,6 +17,14 @@ import type {
 } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
 
+let selectedTeamId: string | undefined;
+let orgCallerRole = "member";
+
+vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/lib/workspace-scope")>(),
+  useWorkspaceScope: () => ({ key: selectedTeamId ?? "user", teamId: selectedTeamId }),
+}));
+
 const reviewsData: { sessions: SessionSummary[] } = { sessions: [] };
 
 const engagementsBySession: Record<string, GetSessionSecurityResponse> = {
@@ -115,7 +123,7 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
   useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
-  useOrg: () => ({ data: { features: { organizations: false } }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { callerRole: orgCallerRole, features: { organizations: false } }, isLoading: false, error: null }),
   // No org catalog here, so the hub falls back to the curated MODEL_CATALOG.
   useModels: () => ({ data: undefined, isLoading: false, error: null }),
 }));
@@ -141,6 +149,9 @@ function pickRepo() {
 
 beforeEach(() => {
   window.localStorage.clear();
+  selectedTeamId = undefined;
+  orgCallerRole = "member";
+  reposData.connected = true;
   reviewsData.sessions = [];
   navigate.mockClear();
   createMutateAsync.mockClear();
@@ -324,5 +335,34 @@ describe("SecurityIndexPage", () => {
     });
     // No ref — the setup page and server resolve the default branch HEAD.
     expect(call.search.ref).toBeUndefined();
+  });
+});
+
+
+describe("GitHub connection recovery", () => {
+  it("keeps personal GitHub setup in personal connected accounts", () => {
+    reposData.connected = false;
+    renderPage();
+    expect(screen.getByRole("link", { name: "Connect GitHub" }).getAttribute("href"))
+      .toBe("/settings/connected-accounts");
+  });
+
+  it("takes team org admins directly to GitHub App settings", () => {
+    selectedTeamId = "team-a";
+    orgCallerRole = "admin";
+    reposData.connected = false;
+    renderPage();
+    expect(screen.getByRole("link", { name: "Configure the GitHub App" }).getAttribute("href"))
+      .toBe("/settings/organization/github");
+    expect(screen.queryByRole("link", { name: "Connect GitHub" })).toBeNull();
+  });
+
+  it("tells team members who can configure repository access", () => {
+    selectedTeamId = "team-a";
+    reposData.connected = false;
+    renderPage();
+    expect(screen.getByText(/Ask an organization admin to configure the GitHub App/)).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Connect GitHub" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Configure the GitHub App" })).toBeNull();
   });
 });
