@@ -222,6 +222,9 @@ importers:
       '@opentelemetry/sdk-trace-base':
         specifier: ^2.10.0
         version: 2.10.0(@opentelemetry/api@1.9.1)
+      '@toon-format/toon':
+        specifier: ^2.1.0
+        version: 2.1.0
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.39
@@ -370,6 +373,9 @@ importers:
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
+      '@toon-format/toon':
+        specifier: ^2.1.0
+        version: 2.1.0
       '@valet/shared':
         specifier: workspace:*
         version: link:../shared
@@ -1050,6 +1056,9 @@ importers:
 
   packages/sdk:
     dependencies:
+      '@toon-format/toon':
+        specifier: ^2.1.0
+        version: 2.1.0
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
@@ -1148,6 +1157,9 @@ importers:
       '@tanstack/react-router':
         specifier: ^1.151.0
         version: 1.151.6(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+      '@toon-format/toon':
+        specifier: ^2.1.0
+        version: 2.1.0
       '@valet/api':
         specifier: workspace:*
         version: link:../api

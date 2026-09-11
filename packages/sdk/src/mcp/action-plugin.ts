@@ -1,6 +1,8 @@
+import { decode as decodeToon } from '@toon-format/toon';
 import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
 import type { ActionPlugin, CredentialProvider, PluginAction, RiskLevel } from '@valet/engine';
+import { hasToonCollectionMarker } from '@valet/shared';
 import { McpClient } from './client.js';
 import type { McpTool, McpToolResult } from './types.js';
 
@@ -159,8 +161,37 @@ function mapToolResult(result: McpToolResult): { success: boolean; data?: unknow
     return { success: false, error: errorText || 'MCP tool returned an error' };
   }
 
-  const textParts = result.content.filter((c) => c.type === 'text' && c.text).map((c) => c.text as string);
-  const data = textParts.length === 1 ? textParts[0] : textParts.join('\n');
+  if (result.structuredContent !== undefined) {
+    return { success: true, data: result.structuredContent };
+  }
 
-  return { success: true, data };
+  const textParts = result.content
+    .filter((c): c is typeof c & { text: string } => c.type === 'text' && typeof c.text === 'string' && c.text.length > 0)
+    .map((c) => c.text);
+  const text = textParts.length === 1 ? textParts[0] : textParts.join('\n');
+  return { success: true, data: tryParseJson(text) ?? tryDecodeToon(text) ?? text };
+}
+
+function asStructured(value: unknown): unknown {
+  return value !== null && typeof value === 'object' ? value : undefined;
+}
+
+function tryParseJson(text: string): unknown {
+  const trimmed = text.trimStart();
+  if (trimmed[0] !== '{' && trimmed[0] !== '[') return undefined;
+  try {
+    return asStructured(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}
+
+function tryDecodeToon(text: string): unknown {
+  // MCP text remains collection-only because it has no trusted engine boundary.
+  if (!hasToonCollectionMarker(text)) return undefined;
+  try {
+    return asStructured(decodeToon(text));
+  } catch {
+    return undefined;
+  }
 }

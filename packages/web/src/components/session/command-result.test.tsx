@@ -82,4 +82,14 @@ describe("CommandResult — plugin source", () => {
     expect(screen.getByText("/pr")).toBeTruthy();
     expect(screen.getByText("plugin:github")).toBeTruthy();
   });
+
+  it("preserves multi-line TOON in a code block", () => {
+    const toon = "items[2]{id,name}:\n  1,Ada\n  2,Lin";
+    const message = baseMessage({
+      content: `\`\`\`toon\n${toon}\n\`\`\``,
+      command: { name: "issues", source: "plugin:linear", ok: true },
+    });
+    const { container } = render(<CommandResult message={message} />);
+    expect(container.querySelector("pre")?.textContent).toContain(toon);
+  });
 });

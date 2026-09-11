@@ -1,3 +1,4 @@
+import { encode } from "@toon-format/toon";
 import { describe, expect, it } from "vitest";
 import {
   attemptedDefinition,
@@ -76,12 +77,11 @@ describe("pickRenderer routing", () => {
 });
 
 describe("workflowRefsFrom", () => {
-  it("pulls workflowId/runId out of a persisted call_tool result", () => {
+  it("pulls workflowId/runId out of persisted JSON and object-rooted TOON", () => {
     const data = { workflowId: "wf1", runId: "r1", status: "pending" };
-    expect(workflowRefsFrom({ text: JSON.stringify(data) })).toEqual({
-      workflowId: "wf1",
-      runId: "r1",
-    });
+    for (const text of [JSON.stringify(data), encode(data)]) {
+      expect(workflowRefsFrom({ text })).toEqual({ workflowId: "wf1", runId: "r1" });
+    }
   });
 
   it("returns empty refs for failure text / missing / malformed results", () => {

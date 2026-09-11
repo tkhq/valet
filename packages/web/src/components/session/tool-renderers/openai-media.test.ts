@@ -1,3 +1,4 @@
+import { encode } from "@toon-format/toon";
 import { describe, expect, it } from "vitest";
 import { pickRenderer } from "./index";
 import {
@@ -55,11 +56,14 @@ describe("openai-media renderer", () => {
     expect(imageDataUrl(persistedImageResult)).toBe(`data:image/png;base64,${B64}`);
   });
 
-  it("parses the structured data (saved path) from the flattened text", () => {
-    expect(openaiResultData(persistedImageResult)).toEqual({
-      path: "/workspace/generated-images/1-fox.png",
-      bytes: 5,
-    });
+  it("parses JSON and object-rooted TOON from flattened text", () => {
+    const data = { path: "/workspace/generated-images/1-fox.png", bytes: 5 };
+    const toonResult = { text: encode(data) };
+    expect(openaiResultData(persistedImageResult)).toEqual(data);
+    expect(openaiResultData(toonResult)).toEqual(data);
+    expect(openaiMediaRenderer.formatSummary?.(callArgs, toonResult, "completed", "call_tool")).toBe(
+      "1-fox.png",
+    );
   });
 
   it("returns no image for text-only results (transcription, tts)", () => {

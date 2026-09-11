@@ -29,7 +29,7 @@ import {
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { relativeTime } from "~/lib/relative-time";
-import { resultText, type ToolRenderer, type ToolRendererProps } from "./types";
+import { resultText, structuredResult, type ToolRenderer, type ToolRendererProps } from "./types";
 import { ToolBody } from "./tool-shell";
 
 const WORKFLOW_TOOL_PREFIX = "workflows.";
@@ -70,24 +70,12 @@ export interface WorkflowRefs {
   runId?: string;
 }
 
-/**
- * Ids out of a persisted `call_tool` result. Success results are
- * `{ text: JSON.stringify(PluginActionResult.data) }` (see the engine's
- * `actionResultToToolResult`), so parse the text and pull the id fields the
- * workflows actions always include. Failure/running/malformed → `{}`.
- */
-/** Parse a persisted `call_tool` result's JSON payload, or null. */
+/** Parse a persisted `call_tool` result's JSON or TOON payload. */
 export function parsedResultData(result: unknown): Record<string, unknown> | null {
-  const text = resultText(result);
-  if (!text) return null;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
+  const parsed = structuredResult(result);
+  return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : null;
 }
 
 export function workflowRefsFrom(result: unknown): WorkflowRefs {

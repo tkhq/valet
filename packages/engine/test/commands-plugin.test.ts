@@ -1,3 +1,4 @@
+import { decode } from "@toon-format/toon";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { Type } from "typebox";
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -116,7 +117,10 @@ describe("Session.prompt plugin command execution", () => {
 
     const last = lastEntry(await store.getEntries(session.id, threadId));
     expect(last?.type === "command_result" && last.ok).toBe(true);
-    expect(last?.type === "command_result" ? last.output : "").toContain("hello");
+    const output = last?.type === "command_result" ? last.output : "";
+    const fenced = /^```toon\n([\s\S]+)\n```$/.exec(output);
+    expect(fenced).not.toBeNull();
+    expect(decode(fenced?.[1] ?? "")).toEqual({ echoed: "/testplug:echo hello" });
 
     // The queue never took a submission for the command.
     const unsettled = await store.listUnsettledSubmissions(session.id);

@@ -29,6 +29,7 @@
  *      directly (via `pluginSessionExtras`) with a minimal `ToolContext`
  *      built from the booted providers — no model involved.
  */
+import { decode } from "@toon-format/toon";
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -364,7 +365,7 @@ describe("api integration: plugin system exit criteria — credential-unavailabl
 
     // Unfiltered listing: tools hidden, warning explains why + the fix.
     const result = await listTools!.execute({}, ctx);
-    const parsed = JSON.parse(result.text) as {
+    const parsed = decode(result.text) as {
       tools: Array<{ service: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };
@@ -376,7 +377,7 @@ describe("api integration: plugin system exit criteria — credential-unavailabl
 
     // Explicit service filter: schemas stay inspectable, warning persists.
     const filtered = await listTools!.execute({ service: "demo" }, ctx);
-    const filteredParsed = JSON.parse(filtered.text) as {
+    const filteredParsed = decode(filtered.text) as {
       tools: Array<{ tool_id: string }>;
       warnings?: Array<{ service: string; reason: string }>;
     };

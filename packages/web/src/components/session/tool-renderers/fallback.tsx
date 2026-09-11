@@ -2,7 +2,7 @@ import { Hexagon } from "lucide-react";
 import { useState } from "react";
 import { cn } from "~/lib/cn";
 import { CopyButton, ToolBody } from "./tool-shell";
-import { resultText, type ToolRenderer } from "./types";
+import { resultText, structuredResult, type ToolRenderer } from "./types";
 
 /**
  * Generic renderer used when no built-in matches the tool name. Designed
@@ -34,9 +34,10 @@ export const fallbackRenderer: ToolRenderer = {
         : null;
     const entries = isObj ? Object.entries(isObj) : [];
     const text = error ?? resultText(result);
+    const data = error ? undefined : structuredResult(result);
     const objResult =
-      result && typeof result === "object" && !Array.isArray(result)
-        ? (result as Record<string, unknown>)
+      data && typeof data === "object" && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
         : null;
 
     return (
@@ -50,7 +51,7 @@ export const fallbackRenderer: ToolRenderer = {
         )}
 
         {/* Result */}
-        {status !== "running" && (text || objResult) && (
+        {status !== "running" && Boolean(text || data) && (
           <div
             className={cn(
               "px-3 py-2 border-t",
@@ -65,12 +66,14 @@ export const fallbackRenderer: ToolRenderer = {
               </SectionLabel>
               <CopyButton
                 label={error ? "Copy error" : "Copy result"}
-                getText={() => text || (objResult ? compactJson(objResult) : "")}
+                getText={() => (data ? compactJson(data) : text)}
                 className="-mt-1"
               />
             </div>
-            {objResult && !text ? (
+            {objResult ? (
               <KeyValueTable entries={Object.entries(objResult)} />
+            ) : data ? (
+              <CollapsedJson value={data} />
             ) : (
               <CollapsedText text={text || "(no output)"} tone={error ? "danger" : undefined} />
             )}
