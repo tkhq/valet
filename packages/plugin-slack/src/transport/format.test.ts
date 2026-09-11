@@ -240,6 +240,14 @@ describe("markdownToSlackMrkdwn", () => {
         .toBe("&lt;!channel> &lt;!here> &lt;!everyone>");
     });
 
+
+    it("preserves nested broadcast text in native span labels", () => {
+      const options = { preserveSlackNativeSpans: true };
+      expect(markdownToSlackMrkdwn("<@U123|<!channel>", options)).toBe("<@U123|<!channel>");
+      expect(markdownToSlackMrkdwn("<https://x.com|hi <!channel>", options))
+        .toBe("<https://x.com|hi <!channel>");
+    });
+
     it("strips a forged bold placeholder NUL sequence", () => {
       expect(markdownToSlackMrkdwn("forge \x00BD7\x00 and text")).toBe("forge BD7 and text");
     });

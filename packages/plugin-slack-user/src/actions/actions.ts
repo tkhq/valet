@@ -443,7 +443,7 @@ const sendDm = action(
     }
     const postRes = await slackFetch("chat.postMessage", token, {
       channel: openData.channel.id,
-      text: markdownToSlackMrkdwn(p.text),
+      text: markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
     });
     if (!postRes.ok) return readSlackError(postRes);
@@ -478,7 +478,7 @@ const postMessage = action(
     if (!token) return { success: false, error: notConnectedError() };
     const body: Record<string, unknown> = {
       channel: p.channel,
-      text: markdownToSlackMrkdwn(p.text),
+      text: markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
     };
     if (p.thread_ts) body.thread_ts = p.thread_ts;
@@ -593,7 +593,7 @@ const uploadFile = action(
       files: [p.title ? { id: urlData.file_id, title: p.title } : { id: urlData.file_id }],
     };
     if (channelId) completeBody.channel_id = channelId;
-    if (p.initial_comment) completeBody.initial_comment = markdownToSlackMrkdwn(p.initial_comment);
+    if (p.initial_comment) completeBody.initial_comment = markdownToSlackMrkdwn(p.initial_comment, { preserveSlackNativeSpans: true });
 
     const doneRes = await slackFetch("files.completeUploadExternal", token, completeBody);
     if (!doneRes.ok) return readSlackError(doneRes);
