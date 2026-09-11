@@ -82,6 +82,19 @@ async function seedMcpClient(): Promise<void> {
 }
 
 describe("OAuthRefreshingCredentialStore", () => {
+  it("refreshes a team token without changing the same service on a personal account", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    const team: CredentialOwner = { type: "team", id: "team-1" };
+    await inner.save(team, "linear", { type: "oauth2", accessToken: "team-old", refreshToken: "team-refresh", expiresAt: NOW });
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "personal", expiresAt: NOW + 3_600_000 });
+    fake.tokenResponse = { access_token: "team-new", refresh_token: "team-rotated", expires_in: 3600 };
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+    expect(await store.get(team, "linear")).toMatchObject({ accessToken: "team-new", refreshToken: "team-rotated" });
+    expect(fake.tokenRequests[0]).toMatchObject({ refresh_token: "team-refresh" });
+    expect(await inner.get(OWNER, "linear")).toMatchObject({ accessToken: "personal" });
+  });
+
   it("returns non-expiring credentials untouched", async () => {
     const inner = memoryStore();
     await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "fresh", refreshToken: "rt", expiresAt: NOW + 3_600_000 });

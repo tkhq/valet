@@ -214,7 +214,8 @@ class TemplatePass implements CollectorPass {
       const template = toTemplate(file);
       if (row === undefined) {
         try {
-          await db.insert(workflowTemplates).values({
+          // A handled collision rolls back only this write.
+          await db.transaction((tx) => tx.insert(workflowTemplates).values({
             id: newWorkflowId("wftpl"),
             orgId: source.orgId,
             ownerType: source.ownerType,
@@ -227,7 +228,7 @@ class TemplatePass implements CollectorPass {
             template,
             createdAt: now(),
             updatedAt: now(),
-          });
+          }));
         } catch (err) {
           // `workflow_templates_owner_template` spans every source that
           // shares an owner, and the two guards above see only the shipped
@@ -246,10 +247,10 @@ class TemplatePass implements CollectorPass {
       }
       if (row.contentSha === candidate.blobSha && row.templateId === templateId) continue;
       try {
-        await db
+        await db.transaction((tx) => tx
           .update(workflowTemplates)
           .set({ templateId, template, contentSha: candidate.blobSha, updatedAt: now() })
-          .where(eq(workflowTemplates.id, row.id));
+          .where(eq(workflowTemplates.id, row.id)));
       } catch (err) {
         // Same index, reached the other way: a file that CHANGES its declared
         // id to one another source holds.

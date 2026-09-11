@@ -31,6 +31,7 @@ import {
   workflowSchedules,
   workflowVersions,
 } from "../../schema/index.js";
+import { addMember, removeMember } from "../teams.js";
 import { createContentSource } from "../content-sources.js";
 import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
 import { ContentSyncService } from "./service.js";
@@ -1022,6 +1023,145 @@ describe("workflow collector", () => {
       ].join("\n");
     }
 
+    it("disarms and restores delegated schedules after membership changes at the same commit", async () => {
+      await credentials.save({ type: "user", id: "u1" }, "github", { type: "oauth2", accessToken: "personal-token" });
+      await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", metadata: { delegatedFrom: "u1" } });
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
+      const id = await teamSource();
+      await serviceFor(f).syncOnce(id);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      await removeMember(db, { teamId: TEAM, userId: "u1" });
+      await serviceFor(f).pollOnce();
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      await addMember(db, { teamId: TEAM, userId: "u1", role: "member" });
+      await serviceFor(f).pollOnce();
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      expect(await mirrored()).toHaveLength(1);
+    });
+
+    function barrier() {
+      let release = () => {};
+      const promise = new Promise<void>((resolve) => { release = resolve; });
+      return { promise, release };
+    }
+
+    it.each([false, true])("preserves readiness invalidation across an older writer (newer finishes first: %s)", async (newerFirst) => {
+      await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", accessToken: "team-token" });
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport().replace("definition:", "events:\n  - eventKeys: [github.push]\ndefinition:") } });
+      const id = await teamSource();
+      const service = serviceFor(f, [githubPlugin]);
+      await service.stop();
+      await service.syncOnce(id);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+      await service.resyncTeamWorkflowSources(TEAM);
+
+      const prepared = barrier();
+      const resume = barrier();
+      const collector = new WorkflowCollector({ plugins: [githubPlugin], credentials });
+      const discover = collector.discover.bind(collector);
+      collector.discover = (ctx) => {
+        const pass = discover(ctx);
+        const prepare = pass.prepareReconcile;
+        pass.prepareReconcile = async (ctx) => {
+          if (!prepare) throw new Error("Workflow collector must prepare readiness before writes");
+          const write = await prepare.call(pass, ctx);
+          prepared.release();
+          await resume.promise;
+          return write;
+        };
+        return pass;
+      };
+      const older = new ContentSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }), collectors: [collector] });
+      const pending = older.syncOnce(id);
+      await prepared.promise;
+      await credentials.delete({ type: "team", id: TEAM }, "github");
+      await service.resyncTeamWorkflowSources(TEAM);
+      // A new service reads the durable request without any process-local state.
+      const newer = serviceFor(f, [githubPlugin]);
+      try {
+        if (newerFirst) await newer.pollOnce();
+      } finally {
+        resume.release();
+      }
+      expect((await pending)?.notice).toContain("superseded");
+      if (!newerFirst) {
+        const [dirty] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+        expect(dirty.discoveryScan).toBeNull();
+        expect(dirty.lastManifestHash).toBeNull();
+        expect(dirty.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+        await newer.pollOnce();
+      }
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+      expect(await mirrored()).toHaveLength(1);
+      const [done] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+      expect(done.lastSha).toBe("c1");
+      expect(done.discoveryScan).not.toBeNull();
+      expect(done.lastError).toContain("Settings → Organization → GitHub");
+    });
+
+    it.each([false, true])("does not consume an invalidation while an old head read settles (failure: %s)", async (failure) => {
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
+      const id = await teamSource();
+      const service = serviceFor(f);
+      await service.stop();
+      await service.syncOnce(id);
+      const reached = barrier();
+      const resume = barrier();
+      const reader = new GitHubSkillRepoReader({ apiUrl: f.url });
+      const head = reader.head.bind(reader);
+      reader.head = async (...args) => {
+        const result = await head(...args);
+        reached.release();
+        await resume.promise;
+        if (failure) throw new Error("old transport failure");
+        return result;
+      };
+      const older = new ContentSyncService({ db, reader, collectors: [new WorkflowCollector({ plugins: [], credentials })] });
+      const pending = older.syncOnce(id);
+      await reached.promise;
+      await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", accessToken: "new-token" });
+      await service.resyncTeamWorkflowSources(TEAM);
+      resume.release();
+      await pending;
+      const [dirty] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+      expect(dirty.discoveryScan).toBeNull();
+      expect(dirty.lastManifestHash).toBeNull();
+      expect(dirty.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+      expect(dirty.status).not.toBe("error");
+      await serviceFor(f).pollOnce();
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+    });
+
+    it("rolls back collector writes when a later write fails", async () => {
+      await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", accessToken: "team-token" });
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
+      const id = await teamSource();
+      const collector = new WorkflowCollector({ plugins: [], credentials });
+      const discover = collector.discover.bind(collector);
+      collector.discover = (ctx) => {
+        const pass = discover(ctx);
+        const prepare = pass.prepareReconcile;
+        pass.prepareReconcile = async (ctx) => {
+          if (!prepare) throw new Error("Missing readiness preparation");
+          const write = await prepare.call(pass, ctx);
+          return async (db) => {
+            await write(db);
+            throw new Error("write failed after triggers were inserted");
+          };
+        };
+        return pass;
+      };
+      const service = new ContentSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }), collectors: [collector] });
+      expect((await service.syncOnce(id))?.status).toBe("error");
+      expect(await mirrored()).toHaveLength(0);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      expect(await db.select().from(workflowVersions)).toHaveLength(0);
+      await serviceFor(f).syncOnce(id);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+    });
+
     it("arms a team file with tool nodes when the team can act as each service", async () => {
       await credentials.save({ type: "team", id: TEAM }, "github", {
         type: "oauth2",
@@ -1048,7 +1188,8 @@ describe("workflow collector", () => {
       expect(warning).toContain("report.yaml");
       // The sync has no template to install: the readiness reason is
       // caller-neutral and the collector names its own next step.
-      expect(warning).toContain("Connect github for this team. Valet arms it after you connect the service.");
+      expect(warning).toContain("An admin can set up or refresh the organization GitHub App in Settings → Organization → GitHub");
+      expect(warning).toContain("Valet arms it after you connect the service.");
       expect(warning).not.toContain("install this template");
       expect(warning).not.toContain("move the repository");
     });
@@ -1130,7 +1271,7 @@ describe("workflow collector", () => {
 
       expect(await mirrored()).toHaveLength(1);
       expect(await db.select().from(workflowSchedules)).toHaveLength(0);
-      expect(outcome?.warnings.join(" ")).toContain("Connect github for this team");
+      expect(outcome?.warnings.join(" ")).toContain("Settings → Organization → GitHub");
     });
   });
 

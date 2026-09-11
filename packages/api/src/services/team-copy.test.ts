@@ -4,9 +4,9 @@ import { InMemoryCredentialStore } from "@valet/engine";
 import { InMemoryWorkflowStore, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { memoryFiles, teams, teamMembers, workflowDefinitions, workflowSchedules, workflowWebhooks, eventSubscriptions, workflowVersions } from "../schema/index.js";
+import { memoryFiles, teams, teamMembers, orgMembers, workflowDefinitions, workflowSchedules, workflowWebhooks, eventSubscriptions, workflowVersions } from "../schema/index.js";
 import { copyArtifactToTeam, publishArtifact, getArtifactById } from "./artifacts.js";
-import { copyFileToTeam, readOwnFile, writeFile } from "./memory.js";
+import { copyFileToTeam, copyFileFromTeam, readOwnFile, writeFile } from "./memory.js";
 import { copyWorkflowDefinition, createWorkflowDefinition, type WorkflowServiceDeps } from "../workflows/service.js";
 
 const runHost: RunHost = {
@@ -24,6 +24,7 @@ beforeEach(async () => {
   const boot = await freshTestPgDb();
   db = boot.appDb; cleanup = boot.cleanup;
   deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: runHost, credentials: new InMemoryCredentialStore() };
+  await db.insert(orgMembers).values({ orgId: "org1", userId: "u1", role: "member" });
   await db.insert(teams).values({ id: "team1", orgId: "org1", name: "Team", createdAt: 1 });
   await db.insert(teamMembers).values({ teamId: "team1", userId: "u1", role: "admin" });
 });
@@ -64,6 +65,89 @@ describe("personal memory copy to team", () => {
     await expect(copyFileToTeam(db, { owner: { type: "team", id: "team1" }, actorUserId: "u1" }, input)).rejects.toThrow(/personal/);
     await writeFile(db, scope, { path: input.from, content: "own" });
     await expect(copyFileToTeam(db, scope, { ...input, to: "lib/copy.md" })).rejects.toThrow(/reserved/);
+  });
+});
+
+describe("memory transfer organization authority", () => {
+  it("preserves membership-based cross-organization memory access", async () => {
+    await db.insert(teams).values({ id: "team2", orgId: "org2", name: "Second org", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "team2", userId: "u1", role: "admin" });
+    await writeFile(db, scope, { path: "notes/personal.md", content: "Personal knowledge" });
+    const pushed = await copyFileToTeam(db, scope, { from: "notes/personal.md", to: "notes/team.md", teamId: "team2" });
+    expect(pushed).toMatchObject({ ownerId: "team2", orgId: "org2" });
+    const pulled = await copyFileFromTeam(db, scope, { from: "notes/team.md", to: "notes/pulled.md", teamId: "team2" });
+    expect(pulled).toMatchObject({ ownerId: "u1", orgId: "", content: "Personal knowledge" });
+  });
+
+  it("uses only the target org's admin grant and rejects demotion or removed team membership", async () => {
+    await db.update(teamMembers).set({ role: "member" });
+    await db.insert(orgMembers).values({ orgId: "org2", userId: "u1", role: "admin" });
+    await writeFile(db, scope, { path: "notes/source.md", content: "Personal knowledge" });
+    const input = { from: "notes/source.md", to: "notes/team.md", teamId: "team1" };
+    await expect(copyFileToTeam(db, scope, input)).rejects.toThrow(/team admin/);
+    await db.update(orgMembers).set({ role: "admin" }).where(eq(orgMembers.orgId, "org1"));
+    expect(await copyFileToTeam(db, scope, input)).toMatchObject({ ownerId: "team1" });
+    await db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.orgId, "org1"));
+    await expect(copyFileToTeam(db, scope, { ...input, to: "notes/denied.md" })).rejects.toThrow(/team admin/);
+    await db.update(orgMembers).set({ role: "admin" }).where(eq(orgMembers.orgId, "org1"));
+    await db.delete(teamMembers);
+    await expect(copyFileToTeam(db, scope, { ...input, to: "notes/denied.md" })).rejects.toThrow(/not found/);
+  });
+});
+
+describe("team memory pull into personal memory", () => {
+  const teamScope = { owner: { type: "team", id: "team1" } as const, actorUserId: "u1" };
+  const input = { from: "knowledge/source.md", to: "notes/pulled.md", teamId: "team1" };
+
+  it("allows a member to pull exact knowledge and metadata without changing the original", async () => {
+    await writeFile(db, teamScope, { path: input.from, content: "# Knowledge\n\n[Link](other.md)\n",
+      tags: ["knowledge"], description: "Team context", pinned: true, sensitivity: "shareable", origin: "user-stated" });
+    await writeFile(db, teamScope, { path: input.from, content: "# Updated\n\n[Link](other.md)\n" });
+    const before = await readOwnFile(db, teamScope, input.from);
+    await db.update(teamMembers).set({ role: "member" });
+    const copy = await copyFileFromTeam(db, scope, input);
+    expect(copy).toMatchObject({ ownerType: "user", ownerId: "u1", orgId: "", path: input.to, version: 1,
+      content: before?.content, tags: before?.tags, description: "Team context", pinned: true,
+      sensitivity: "shareable", origin: "user-stated", sourceSessionId: "", sourceId: null,
+      upstreamPath: null, contentSha: null });
+    expect(await readOwnFile(db, teamScope, input.from)).toEqual(before);
+    await writeFile(db, scope, { path: input.to, content: "Independent personal edit" });
+    expect(await readOwnFile(db, teamScope, input.from)).toEqual(before);
+    await expect(copyFileToTeam(db, scope, { from: input.to, to: "notes/push.md", teamId: "team1" })).rejects.toThrow(/team admin/);
+  });
+
+  it("never overwrites an existing destination and serializes concurrent pulls", async () => {
+    await writeFile(db, teamScope, { path: input.from, content: "Team source" });
+    await writeFile(db, scope, { path: input.to, content: "Keep personal content" });
+    const before = await readOwnFile(db, scope, input.to);
+    await expect(copyFileFromTeam(db, scope, input)).rejects.toThrow(/Choose another path/);
+    expect(await readOwnFile(db, scope, input.to)).toEqual(before);
+    const fresh = { ...input, to: "notes/fresh.md" };
+    const results = await Promise.allSettled([copyFileFromTeam(db, scope, fresh), copyFileFromTeam(db, scope, fresh)]);
+    expect(results.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect(await db.select().from(memoryFiles)).toHaveLength(3);
+  });
+
+  it("rejects revoked membership, foreign scopes and other teams before copying", async () => {
+    await writeFile(db, teamScope, { path: input.from, content: "Team secret" });
+    await expect(copyFileFromTeam(db, teamScope, input)).rejects.toThrow(/personal/);
+    await expect(copyFileFromTeam(db, { owner: { type: "user", id: "u2" }, actorUserId: "u1" }, input)).rejects.toThrow(/personal/);
+    await expect(copyFileFromTeam(db, scope, { ...input, teamId: "other-team" })).rejects.toThrow(/not found/);
+    await db.delete(teamMembers);
+    await expect(copyFileFromTeam(db, scope, input)).rejects.toThrow(/not found/);
+    expect(await db.select().from(memoryFiles)).toHaveLength(1);
+  });
+
+  it("requires an exact team source and a writable personal destination", async () => {
+    await writeFile(db, scope, { path: input.from, content: "Personal file is not a team source" });
+    await expect(copyFileFromTeam(db, scope, input)).rejects.toThrow(/not found/);
+    await writeFile(db, teamScope, { path: input.from, content: "Team source" });
+    await expect(copyFileFromTeam(db, scope, { ...input, from: "knowledge/" })).rejects.toThrow(/not found/);
+    for (const to of ["lib/reserved.md", "team:other/copy.md", "../escape.md"]) {
+      await expect(copyFileFromTeam(db, scope, { ...input, to })).rejects.toThrow();
+    }
+    await expect(copyFileFromTeam(db, scope, { ...input, from: "team:team1/knowledge/source.md" })).rejects.toThrow();
+    expect(await db.select().from(memoryFiles)).toHaveLength(2);
   });
 });
 

@@ -8,6 +8,7 @@ import type { OnePasswordSettingsResponse, PutOnePasswordSettingsRequest } from 
 import { api } from "./client";
 
 export const onePasswordKeys = {
+  team: (teamId: string) => ["onepassword", "team", teamId] as const,
   settings: () => ["onepassword", "settings"] as const,
 };
 
@@ -29,4 +30,21 @@ export function usePutOnePasswordSettings() {
       qc.setQueryData(onePasswordKeys.settings(), data);
     },
   });
+}
+
+export function useTeamOnePasswordStatus(teamId: string) {
+  return useQuery({ queryKey: onePasswordKeys.team(teamId), queryFn: () => api.getTeamOnePasswordStatus(teamId) });
+}
+
+/** The control resets this mutation after each request; unused entries expire immediately. */
+export function useTeamOnePasswordToken(teamId: string) {
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: (token: string | null) => token === null
+      ? api.deleteCredential("onepassword", { scope: "team", teamId })
+      : api.putCredential("onepassword", { type: "service_account", apiKey: token, scope: "team", teamId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: onePasswordKeys.team(teamId) }),
+    gcTime: 0,
+  });
+  return save;
 }

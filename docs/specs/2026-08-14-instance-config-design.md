@@ -101,9 +101,6 @@ org:
   name: Turnkey
   features:
     organizations: true
-    ssoTeamSync: true                      # off unless declared; the file
-                                           #   then wins over Settings at
-                                           #   every boot
   bareSkillCommands: true
   members:
     - email: test@valet.test
@@ -203,13 +200,7 @@ both places **fails boot**:
 Two live sources of truth for admission policy is silent-drift territory;
 better to make the operator pick.
 
-`auth.sso.teams` replaces the three team-sync claim names —
-`AUTH_OIDC_TEAM_CLAIM`, `AUTH_OIDC_TEAM_ASSERTED_CLAIM` and
-`AUTH_OIDC_TEAM_ADMIN_GROUP`. They qualify on every test above: non-secret,
-identical across replicas, and they change the shape of instance state. The
-both-set guard is **per field**, not per section, because the three are
-independent and an operator may reasonably move two into the file and leave
-the third in the environment.
+`auth.sso.teams` configures the claims used for explicit team join eligibility. It replaces `AUTH_OIDC_TEAM_CLAIM`, `AUTH_OIDC_TEAM_ASSERTED_CLAIM`, and `AUTH_OIDC_TEAM_ADMIN_GROUP`. The both-set guard is per field.
 
 ```yaml
 auth:
@@ -218,49 +209,16 @@ auth:
       claim: groups                   # AUTH_OIDC_TEAM_CLAIM
       assertedClaim: groups_asserted  # AUTH_OIDC_TEAM_ASSERTED_CLAIM
       adminSubGroup: admins           # AUTH_OIDC_TEAM_ADMIN_GROUP
-      groups: [/platform, /research]  # the allowlist; no env equivalent
+      groups: [/platform, /research]  # backward-compatible, not used by joins
 ```
 
-`groups` is the allowlist. It names every group that may become a team, and
-it gives the validator the one thing a runtime check cannot have: the set of
-team names the identity provider will ask for, before any row exists.
+Each single-sign-on login reads the claim and replaces the user's server-side eligibility for existing identity-provider-backed teams. It does not create a team or change membership. The asserted marker preserves the absent-versus-empty distinction. Both states clear old eligibility when the claim cannot establish current access.
 
-The file is one of two writers. The list itself lives on the org row
-(`orgs.sso_team_groups`), where an org admin edits it per group in Settings →
-Organization → Teams and the login sync reads it per login. When the file
-declares `groups`, the boot reconciler writes the file's list over the column
-at every start and prints one line naming the file when the value changes —
-the same file-wins rule as `org.features`. A deployment that wants the list
-managed in Settings leaves the key out of the file.
+`adminSubGroup` identifies a parent team path for eligibility only. It never grants team admin. The explicit join route always inserts role `member`.
 
-It is optional in the YAML and fail-closed at run time. Omit it and the sync
-mirrors NOTHING — not every group, which was the earlier behaviour. The two
-readings differ only for a deployment that named no group, and that
-deployment cannot have decided which of its provider's groups are Valet
-teams. An identity provider carries `/everyone`, `/vpn-users` and groups from
-projects that ended years ago, and no rule can separate those from the ones
-an operator wants; the claim-name defaults match Keycloak's stock mapper, so
-"mirror everything" was reachable with no file at all. Nothing is silently
-stopped by the change, because team mirroring itself is now off unless
-`org.features.ssoTeamSync` is set (`docs/specs/2026-07-14-auth-v2-design.md`);
-an operator who turns that on lists the groups in the same edit. The api
-prints one boot line when the gate is on and the list is empty.
+The `groups` list and `org.features.ssoTeamSync` remain valid headless configuration for backward compatibility. The reconciler can still store them, but runtime login provisioning does not use them. They do not enable team creation or membership reconciliation. The Organization → Teams page does not expose controls for these fields.
 
-Taking a group OFF the list stops mirroring that group; it deprovisions
-nobody. The sync filters its removal set by the list as well as its desired
-set, so a de-listed team keeps its members and everything it owns, and one
-boot line names it. See `docs/specs/2026-07-14-auth-v2-design.md`, "The list
-gates writes, not removals".
-
-The validator rejects four shapes that would otherwise be inert or unsafe at
-run time, none of which produces a visible symptom: a `claim` equal to
-`assertedClaim` (which collapses the absent-versus-empty test the sync's
-whole safety property rests on), a `/` inside `adminSubGroup` (ambiguous
-paths — see `docs/environment-variables.md`), a `groups` entry that is not a
-top-level path (the sync mirrors nothing deeper), and a blank value. The
-run-time side now demands the same rooted shape of the claim: a group name
-with no leading `/` is ignored, because it cannot be told from a nested group
-of the same name.
+The validator still requires rooted group paths and distinct claim names. This keeps old configuration deterministic while operators remove the unused compatibility fields.
 
 Values that stay in env vars: everything with a secret sibling (OIDC
 issuer/client/secret, `BETTER_AUTH_SECRET`) and everything genuinely
@@ -328,20 +286,15 @@ reconciler calls `ensureOrg`, then:
   now fails config validation with a corrective "unknown key" message
   instead of being silently accepted and reconciled.)
 
-  Two feature keys are typed today: `organizations` and `ssoTeamSync`. Each
-  reads as false when absent, which is what makes a gate default to off for
-  an operator who declares nothing. `ssoTeamSync` turns identity-provider
-  groups into teams — see `docs/specs/2026-07-14-auth-v2-design.md`.
+  Two feature keys are typed today: `organizations` and the compatibility
+  field `ssoTeamSync`. Each reads as false when absent. `ssoTeamSync` no
+  longer creates identity-provider teams or changes membership. See
+  `docs/specs/2026-07-14-auth-v2-design.md`.
 
-  A declared flag is also STICKY in two ways the settings page does not show.
-  The file wins at every boot, so a flag an admin turns off in Settings comes
-  back at the next api restart; and the merge only adds, so a value written
-  once survives the key being deleted from the file. `reconcileOrgPass`
-  therefore prints one line naming the file for each declared flag whose value
-  it changes, and prints nothing when the file and the database agree. A
-  deployment that wants a flag controlled from Settings must not declare it.
-  `config/valet.dev.yaml` keeps `ssoTeamSync` commented out for the same
-  reason: `make dev-local` loads that file for every dev.
+  A declared flag is sticky. The file wins at every boot, and the merge only
+  adds, so a value survives deletion of its key from the file.
+  `reconcileOrgPass` logs each declared flag that it changes. The product no
+  longer shows `ssoTeamSync`; operators can remove that compatibility field.
 - **`members`** — desired memberships, keyed by email:
   - Email matches an existing user → upsert the `org_members` row to the
     declared role. A demotion that would leave the org with zero admins
@@ -411,51 +364,11 @@ recreates the team empty, which reads as data loss. The teams page therefore
 keeps the member controls on a declared team, drops the delete item, and
 shows a note that a restart puts the declared members back.
 
-#### Collisions with the identity-provider team sync
+#### Existing identity-provider-backed teams
 
-Teams are reconciled by two subsystems: this file at boot, and
-`services/team-sync.ts` at every single-sign-on login. The invariant that
-keeps them apart is one sentence:
+Login no longer writes `team_members` rows. An `origin='idp'` team keeps its provenance and supports explicit join suggestions, but people manage its membership through the normal team routes.
 
-> A team's `origin` names exactly one writer of its `team_members` rows.
-
-`config` rows are written only by the teams pass and by the first-sign-in
-bind, and neither ever deletes. `idp` rows are written only by the sync,
-which adds, changes role, and removes — removal is what offboarding means.
-`local` rows are written only by the teams routes. No row has two writers,
-so no membership has two opinions, and nothing can oscillate.
-
-Without that scope the two passes flap. The reconciler would find an `idp`
-team by name, adopt it, and assert the declared members onto it; the next
-login would remove every one of them that the group claim omits; the next
-boot would add them back. One write per restart, one per sign-in, forever.
-
-Both sources want a name — `teams[].name: platform` and a group `/platform`
-— is therefore an error, never a merge. It is caught in three places, in
-this order:
-
-1. **Statically, in the validator**, when `auth.sso.teams.groups` is
-   declared. The check is **case-insensitive** although `teams_org_name` is
-   not, and that is the point: `Platform` and `/platform` do NOT collide in
-   Postgres, so they would create two rows that read as one team in the
-   teams page. A near-collision nobody can see is worse than one that fails
-   loudly. Making the index case-insensitive instead would be a migration
-   plus a behavior change for teams that already exist.
-2. **At boot, in the reconciler**, when a declared name is already held by
-   an `origin: idp` row. This is the ordering that loses data — the group
-   was mirrored first, then somebody added the team to the file — so the api
-   refuses to start and names both fixes.
-3. **At run time, in the sync**, for a group the file never listed. The sync
-   skips the group and leaves the declared team untouched
-   (`name_taken_by_config_team`). Skipping loses a team nobody has yet;
-   adopting would lose access people already have. It is also the rule the
-   sync already applies to `local` teams — *the sync never takes over a team
-   it did not create* — rather than a second rule.
-
-The corrective action differs per origin, so `reportCollision` switches
-exhaustively on it. The `local` branch's advice ("rename or delete that
-team") is wrong for a `config` team and would loop: delete it, the next boot
-recreates it, the same warning returns.
+The current validator and reconciler still reject a declared config team whose name collides with `auth.sso.teams.groups` or an existing `origin='idp'` row. This backward-compatible restriction prevents an old configuration from changing ownership during an upgrade. It can be relaxed separately after the compatibility fields are removed.
 
 ### `llmProviders` section
 
@@ -728,8 +641,5 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
    for a `config` team — the file identifies a team by `teams[].name`, which
    `teams_org_name` already keeps unique, and a second column holding a copy
    of the first would buy no constraint.
-4. Should `auth.sso.teams.groups` become required in the YAML? Not in v1. It
-   is already required in effect: an absent list mirrors nothing, so the
-   failure is a no-op rather than a surprise, and `org.features.ssoTeamSync`
-   is the gate an operator sets deliberately. A `version: 2` could make the
-   pair — gate on, list empty — a boot error instead of a boot warning.
+4. Remove `auth.sso.teams.groups` and `org.features.ssoTeamSync` in a later
+   config version. They remain accepted only for backward compatibility.

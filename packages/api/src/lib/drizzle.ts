@@ -169,6 +169,36 @@ interface SchemaRepair {
  * statement then stops its boot. Do not rename or drop here.
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "team deletion requests", probe: { kind: "table", table: "team_deletion_requests" }, sql: `CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "team_id" text NOT NULL,
+  "resource_type" text NOT NULL, "resource_id" text NOT NULL, "resource_label" text NOT NULL,
+  "requested_by" text NOT NULL, "reason" text, "requested_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL, "status" text NOT NULL DEFAULT 'pending',
+  "decided_by" text, "decided_at" bigint, "decision_note" text, "last_refusal" text
+);` },
+  { describe: "team_deletion_requests_pending", probe: { kind: "index", index: "team_deletion_requests_pending" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';` },
+  { describe: "team_deletion_requests_team_status", probe: { kind: "index", index: "team_deletion_requests_team_status" }, sql: `CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");` },
+
+  {
+    describe: "skill_sources.sync_revision column",
+    probe: { kind: "column", table: "skill_sources", column: "sync_revision" },
+    sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "sync_revision" bigint DEFAULT 0 NOT NULL',
+  },
+  {
+    describe: "team_join_eligibilities table",
+    probe: { kind: "table", table: "team_join_eligibilities" },
+    sql: `CREATE TABLE IF NOT EXISTS "team_join_eligibilities" (
+      "team_id" text NOT NULL,
+      "user_id" text NOT NULL,
+      "observed_at" bigint NOT NULL,
+      PRIMARY KEY("team_id", "user_id")
+    )`,
+  },
+  {
+    describe: "team_join_eligibilities_user index",
+    probe: { kind: "index", index: "team_join_eligibilities_user" },
+    sql: 'CREATE INDEX IF NOT EXISTS "team_join_eligibilities_user" ON "team_join_eligibilities" ("user_id")',
+  },
   {
     describe: "skill_invocations table",
     probe: { kind: "table", table: "skill_invocations" },

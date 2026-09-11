@@ -412,3 +412,13 @@ Workflow downloads use an ASCII filename fallback and a UTF-8 `filename*` parame
 - Repository kind selections reset when the owner or admin permission changes. Submission excludes disabled kinds.
 - Team sources permit workflows and templates for team admins and org admins, matching the server gate.
 - Workflow list and detail responses include the source ref. File links encode that ref and each path segment; unpinned sources use HEAD.
+
+### Readiness invalidation and concurrent sync (TKAI-442, 2026-09-10)
+
+`content-sync/invalidation.ts` owns readiness invalidation for enabled team workflow sources. Team and organization mutations select only the affected ownership scope. Invalidation increments `sync_revision`, clears the discovery and manifest markers, and marks healthy sources due. Transport errors keep their backoff.
+
+Every manual or scheduled sync increments the source revision before reading. Collectors can prepare external prerequisites before the write transaction. The workflow collector uses this phase for credential and readiness checks. The write transaction locks the source row, verifies the revision, and commits all collector changes with the source report. An older pass cannot write after a newer pass or consume a readiness invalidation. Failed collector writes roll back together. Handled skill and template name collisions use savepoints, so one conflicting file does not abort the pass. A stale transport failure cannot overwrite pending work.
+
+The existing poller consumes persisted invalidations after a restart. Credential and repository failures can delay reconciliation. This change does not add a timer that bypasses the normal sync policy. Repository reconciliation continues to preserve locally created triggers.
+
+Explicit IdP joins invalidate team workflow sources in the membership insert transaction. Duplicate and denied joins do not invalidate sources. Eligibility snapshots alone change no membership and need no refresh. The retired login-time membership writer and its readiness hooks are removed; SSO claim parsing remains. If invalidation fails, the join rolls back. An older sync cannot consume the join refresh.

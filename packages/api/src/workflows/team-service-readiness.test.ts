@@ -11,7 +11,6 @@ import type { AppDb } from "../lib/drizzle.js";
 import { githubInstallations, teamMembers, workflowDefinitions } from "../schema/index.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
-import { UNGRANTED_TEAM_OP_REF } from "../services/team-onepassword-grant.js";
 import { teamArmRefusals, teamServiceReadiness } from "./team-service-readiness.js";
 
 const ORG = "org-1";
@@ -69,6 +68,7 @@ function vaultWith(
     findCandidates: unused,
     findCredentialForService: async (scope, ctx, service) => {
       calls.push({ scope, ctx, service });
+      if (scope === "team" && !items.team) throw new OnePasswordAuthError("No team token", "no_token");
       return items[scope]?.[service] ?? null;
     },
   };
@@ -235,23 +235,21 @@ describe("teamServiceReadiness", () => {
       expect(result.blocked).toEqual([]);
     });
 
-    it("is blocked naming the admin grant when the reference is outside the team's lease", async () => {
+    it("ignores obsolete grants when the reference resolves", async () => {
       await saveReferenceRow();
       await credentials.save({ type: "team", id: TEAM }, "onepassword", {
         type: "service_account",
         metadata: { refs: ["op://Shared/Something Else/token"] },
       });
-      const onePassword = vaultWith({}, [], async () => {
-        throw new Error("must not resolve a reference outside the lease");
-      });
+      const onePassword = vaultWith({}, [], async (row) => ({ ...row, apiKey: "resolved" }));
 
       const result = await teamServiceReadiness(
         { ...deps([linearPlugin]), onePassword },
         { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear") },
       );
 
-      expect(result.ready).toEqual([]);
-      expect(result.blocked).toEqual([{ service: "linear", reason: UNGRANTED_TEAM_OP_REF }]);
+      expect(result.ready).toEqual(["linear"]);
+      expect(result.blocked).toEqual([]);
     });
 
     it("is blocked when no 1Password client is configured to resolve it", async () => {
@@ -370,7 +368,7 @@ describe("teamServiceReadiness", () => {
     ).rejects.toThrow(/network/);
   });
 
-  it("treats a GitHub App pin as ready when an App is configured", async () => {
+  it("requires an active installation for a GitHub App pin", async () => {
     await saveAppConfig({ credentials }, ORG, appConfig);
 
     const result = await teamServiceReadiness(deps(), {
@@ -379,8 +377,36 @@ describe("teamServiceReadiness", () => {
       definition: toolDefinition("github", "app"),
     });
 
-    expect(result.ready).toEqual(["github"]);
-    expect(result.blocked).toEqual([]);
+    expect(result.ready).toEqual([]);
+    expect(result.blocked).toHaveLength(1);
+    await db.insert(githubInstallations).values({
+      id: "app-pin", orgId: ORG, installationId: 1, accountLogin: "acme",
+      accountType: "Organization", repositorySelection: "selected", suspended: false,
+      createdAt: 1000, updatedAt: 1000,
+    });
+    const ready = await teamServiceReadiness(deps(), {
+      orgId: ORG, teamId: TEAM, definition: toolDefinition("github", "app"),
+    });
+    expect(ready.ready).toEqual(["github"]);
+    expect(ready.organizationProvided).toEqual(["github"]);
+    await db.update(githubInstallations).set({ suspended: true });
+    expect((await teamServiceReadiness(deps(), {
+      orgId: ORG, teamId: TEAM, definition: toolDefinition("github", "app"),
+    })).blocked).toHaveLength(1);
+  });
+
+  it("does not let a team token satisfy an App pin or a mismatched installation owner", async () => {
+    await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", accessToken: "team-token" });
+    const definition = toolDefinition("github", "app");
+    expect((await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition })).blocked).toHaveLength(1);
+    await saveAppConfig({ credentials }, ORG, appConfig);
+    await db.insert(githubInstallations).values({
+      id: "wrong-owner", orgId: ORG, installationId: 1, accountLogin: "other",
+      accountType: "Organization", repositorySelection: "all", suspended: false,
+      createdAt: 1000, updatedAt: 1000,
+    });
+    for (const node of definition.nodes) if (node.type === "tool") node.params = { owner: "acme", repo: "platform" };
+    expect((await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition })).blocked).toHaveLength(1);
   });
 
   it("blocks a GitHub App pin when no App is configured", async () => {
@@ -480,11 +506,8 @@ describe("teamServiceReadiness", () => {
       ]);
     });
 
-    // No App, or an App with no installation recorded, is the plain
-    // "connect" state: the run's refusal names both fixes, and the
-    // collector and the install path each add their own next step to the
-    // caller-neutral reason.
-    it("is blocked with the connect reason when no App is configured", async () => {
+    it.each([false, true])("points to organization setup when no installation resolves (App configured=%s)", async (configured) => {
+      if (configured) await installApp([]);
       const result = await teamServiceReadiness(deps(), {
         orgId: ORG,
         teamId: TEAM,
@@ -492,7 +515,18 @@ describe("teamServiceReadiness", () => {
       });
 
       expect(result.ready).toEqual([]);
-      expect(result.blocked).toEqual([{ service: "github", reason: "Connect github for this team." }]);
+      expect(result.blocked).toEqual([{ service: "github", reason: "An admin can set up or refresh the organization GitHub App in Settings → Organization → GitHub." }]);
+      expect(result.organizationProvided).toEqual(["github"]);
+    });
+
+    it.each([undefined, "user"] as const)("keeps a team vault credential ready for a %s pin", async (pin) => {
+      const onePassword = vaultWith({ team: { github: "ghp_fixture" } });
+      const result = await teamServiceReadiness({ ...deps(), onePassword }, {
+        orgId: ORG, teamId: TEAM, definition: toolDefinition("github", pin),
+      });
+      expect(result.ready).toEqual(["github"]);
+      expect(result.blocked).toEqual([]);
+      expect(result.organizationProvided).toBeUndefined();
     });
 
     it("stays on the team row for a user pin, whatever the App holds", async () => {
@@ -506,6 +540,7 @@ describe("teamServiceReadiness", () => {
 
       expect(result.ready).toEqual([]);
       expect(result.blocked).toEqual([{ service: "github", reason: "Connect github for this team." }]);
+      expect(result.organizationProvided).toBeUndefined();
     });
   });
 
@@ -526,7 +561,7 @@ describe("teamServiceReadiness", () => {
     expect(result.blocked).toEqual([]);
     // The org scope alone, as the run reads it: a team run never borrows a
     // member's personal vault, and no member is the actor here.
-    expect(calls).toEqual([{ scope: "org", ctx: { orgId: ORG, userId: "" }, service: "linear" }]);
+    expect(calls).toEqual(["team", "org"].map((scope) => ({ scope, ctx: { orgId: ORG, teamId: TEAM, userId: "" }, service: "linear" })));
   });
 
   // The invoker refuses a service whose org prerequisite is missing before

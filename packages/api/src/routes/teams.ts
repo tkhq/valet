@@ -1,3 +1,4 @@
+import { deleteTeamResources } from "../services/team-resource-deletion.js";
 /**
  * Teams — org membership structure (orchestrator spec, "Identity").
  *
@@ -24,15 +25,10 @@
  * 404, same as a caller outside the org — existence-hiding applies to
  * authz, not just org membership.
  *
- * Origin-gated: DELETE /:id and the three /members routes refuse a team
- * whose `origin` is `idp` WHILE the org's `ssoTeamSync` feature gate is on.
- * Such a team mirrors an identity-provider group, and the login-time sync
- * owns it. With the gate off no sync runs, so the same team is a dormant
- * mirror and the four routes work on it again — see `isLiveIdpMirror`
- * (`services/teams.ts`). PATCH /:id is deliberately NOT origin-gated: the
- * identity provider owns membership and `valet.yaml` declares members, but
- * `default_model` is Valet-local state neither source ever writes, so no
- * sync can undo it.
+ * Identity-provider-backed teams keep their provenance, but login does not
+ * own their membership. The normal administration gate controls their team
+ * and membership mutations. `isLiveIdpMirror` remains as a compatibility
+ * seam while old headless configuration fields remain accepted.
  *
  * A `config` team — declared in `valet.yaml` — is gated for DELETE only. The
  * file asserts its declared members at each boot but never removes anybody,
@@ -48,7 +44,6 @@
 import { Hono, type Context } from "hono";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
-import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import {
@@ -61,6 +56,7 @@ import {
   type TeamRow,
 } from "../schema/index.js";
 import { listWorkflowSources } from "../services/content-sources.js";
+import { joinEligibleTeam, listSuggestedTeams } from "../services/team-join-eligibility.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
@@ -97,27 +93,19 @@ import type {
   AddTeamMemberRequest,
   CreateTeamRequest,
   CreateTeamResponse,
-  DeleteTeamOnePasswordRefsResponse,
   EnsureOrchestratorResponse,
   GetTeamChildrenResponse,
   TeamChildSummary,
+  JoinSuggestedTeamResponse,
+  ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
   PatchTeamResponse,
-  PutTeamOnePasswordRefsResponse,
   SetTeamMemberRoleRequest,
   SkillSourceSummary,
-  TeamOnePasswordRefsResponse,
   TeamRole,
   TeamSummary,
 } from "../wire/types.js";
-import { ONEPASSWORD_SERVICE } from "../services/onepassword.js";
-import {
-  loadTeamOnePasswordRefs,
-  parseTeamOnePasswordRefs,
-  withGrantRefs,
-  withoutGrantRefs,
-} from "../services/team-onepassword-grant.js";
 
 export const teamsRouter = new Hono<AppEnv>();
 
@@ -165,28 +153,7 @@ function isTeamRole(v: unknown): v is TeamRole {
   return v === "admin" || v === "member";
 }
 
-/**
- * Builds the refusal body for a mutation on a team that mirrors an
- * identity-provider group, or null when the team is Valet's own.
- *
- * The status is 409, not 403 and not 404. The caller has already passed both
- * the org gate and the team-admin gate, and the team plainly exists — what
- * stops the write is the team's own state, exactly like `team_name_conflict`
- * and `team_owns_workflows` above it. 403 in this API means "your role is too
- * low", which is not the problem and would send an admin looking for a
- * permission to grant. 404 is reserved for cross-org and unauthorized
- * callers, where hiding existence is the point; here the caller may see the
- * team, so a 404 would be a lie they cannot act on.
- *
- * The message comes from `IdpManagedTeamError`, the same class the service
- * throws, so the route and the service never word the fix differently.
- *
- * `isLiveIdpMirror` is what decides, not `origin` alone. A mirror whose org
- * has `ssoTeamSync` off is dormant: nothing reasserts it, so refusing the
- * mutation would leave a team nobody can change. Asking the service keeps
- * the route and the service on ONE rule — a route that tested `origin` here
- * would refuse writes the service is willing to make.
- */
+/** Compatibility refusal for any future live external team writer. */
 async function idpManagedRefusal(
   db: AppEnv["Variables"]["providers"]["db"],
   row: TeamRow,
@@ -267,6 +234,31 @@ teamsRouter.get("/", async (c) => {
     teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id))),
   };
   return c.json(body);
+});
+
+// ── Explicit identity-provider join suggestions ──────────────────────────
+
+teamsRouter.get("/suggestions", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const body: ListSuggestedTeamsResponse = {
+    teams: await listSuggestedTeams(db, user.orgId, user.id),
+  };
+  return c.json(body);
+});
+
+teamsRouter.post("/:id/join", async (c) => {
+  const refused = refuseTeamApiKey(c);
+  if (refused) return refused;
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const joined = await joinEligibleTeam(db, {
+    orgId: user.orgId,
+    userId: user.id,
+    teamId: c.req.param("id"),
+  });
+  if (!joined) return c.json({ error: "team not found" }, 404);
+  return c.json({ joined: true } satisfies JoinSuggestedTeamResponse);
 });
 
 // ── Orchestrator (get-or-create) ────────────────────────────────────────────
@@ -568,49 +560,16 @@ teamsRouter.delete("/:id", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const team = await loadTeamInOrg(db, id, user.orgId);
-  if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
-
-  const refusal = (await idpManagedRefusal(db, team, "delete")) ?? configManagedDeleteRefusal(team);
-  if (refusal) return c.json(refusal, 409);
-
-  // A team's assistants die with it (TKAI-296). Read their session ids
-  // before the rows go: deleteTeam retires the assistants and soft-deletes
-  // the sessions in its transaction, and the engine teardown below needs
-  // the ids after that.
-  const teamAssistants = await db
-    .select({ sessionId: assistants.sessionId })
-    .from(assistants)
-    .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, id)));
-
-  // The transaction commits FIRST. It takes the ownership lock, reaps idle
-  // workflows, refuses on an unsettled run, and retires the assistants.
-  // Only a committed delete destroys engine sessions: a refusal inside the
-  // transaction after the sessions were torn down would leave a team whose
-  // rows survived but whose conversations are gone.
+  let sessionIds: string[];
   try {
-    await deleteTeam(db, {
-      teamId: id,
-      reapOwnedWorkflows: (tx) => reapTeamWorkflows(tx, id),
-    });
+    sessionIds = await deleteTeamResources(db, { orgId: user.orgId, userId: user.id }, id);
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
-
-  // Tear down the engine sessions and sandboxes after the commit. The
-  // rows are retired, so a wake cannot rebuild a torn-down session.
-  // `engineHost.destroy` handles a session that is already soft-deleted:
-  // its cold branch deletes the durable engine rows and revokes the
-  // session's tokens and grants. A destroy that fails here is covered by
-  // the sandbox reconcile sweep, whose orphan rule reclaims a sandbox
-  // whose owning session is gone (CLAUDE.md, 2026-08-22 precedent).
-  for (const row of teamAssistants) {
-    await engineHost.destroy(row.sessionId).catch((err) => {
-      console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
-    });
+  for (const sessionId of sessionIds) {
+    await engineHost.destroy(sessionId).catch((err) => console.error(`engineHost.destroy(${sessionId}) failed:`, err));
   }
   return c.json({ ok: true });
 });
@@ -716,69 +675,4 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
-});
-
-// ── 1Password refs (TKAI-361) ────────────────────────────────────────────
-
-teamsRouter.get("/:id/onepassword-refs", async (c) => {
-  const { db, engineCredentials } = c.var.providers;
-  const user = c.var.user;
-  const id = c.req.param("id");
-  const team = await loadTeamInOrg(db, id, user.orgId);
-  if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canViewTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
-  const refs = [...((await loadTeamOnePasswordRefs(engineCredentials, id)) ?? [])];
-  return c.json({ refs } satisfies TeamOnePasswordRefsResponse);
-});
-
-teamsRouter.put("/:id/onepassword-refs", async (c) => {
-  const { db, engineCredentials } = c.var.providers;
-  const user = c.var.user;
-  const id = c.req.param("id");
-  const team = await loadTeamInOrg(db, id, user.orgId);
-  if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
-
-  let raw: unknown;
-  try {
-    raw = await c.req.json();
-  } catch {
-    return c.json({ error: "invalid JSON body" }, 400);
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return c.json({ error: "Send refs as an array of op://vault/item/field strings." }, 400);
-  }
-  const parsed = parseTeamOnePasswordRefs("refs" in raw ? raw.refs : undefined);
-  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-  const owner = { type: "team", id } satisfies CredentialOwner;
-  const existing = await engineCredentials.get(owner, ONEPASSWORD_SERVICE);
-  if (parsed.refs.length === 0) {
-    await clearTeamOnePasswordRefs(engineCredentials, owner, existing);
-    return c.json({ refs: [] } satisfies PutTeamOnePasswordRefsResponse);
-  }
-  await engineCredentials.save(owner, ONEPASSWORD_SERVICE, withGrantRefs(existing, parsed.refs));
-  return c.json({ refs: parsed.refs } satisfies PutTeamOnePasswordRefsResponse);
-});
-
-/** Drops the grant. A token that shares the row stays; a grant-only row goes. */
-async function clearTeamOnePasswordRefs(
-  store: CredentialStore,
-  owner: CredentialOwner,
-  existing: StoredCredential | null,
-): Promise<void> {
-  const remaining = withoutGrantRefs(existing);
-  if (remaining) await store.save(owner, ONEPASSWORD_SERVICE, remaining);
-  else await store.delete(owner, ONEPASSWORD_SERVICE);
-}
-
-teamsRouter.delete("/:id/onepassword-refs", async (c) => {
-  const { db, engineCredentials } = c.var.providers;
-  const user = c.var.user;
-  const id = c.req.param("id");
-  const team = await loadTeamInOrg(db, id, user.orgId);
-  if (!team) return c.json({ error: "team not found" }, 404);
-  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
-  const owner = { type: "team", id } satisfies CredentialOwner;
-  await clearTeamOnePasswordRefs(engineCredentials, owner, await engineCredentials.get(owner, ONEPASSWORD_SERVICE));
-  return c.json({ ok: true } satisfies DeleteTeamOnePasswordRefsResponse);
 });

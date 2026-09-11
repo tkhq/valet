@@ -349,7 +349,8 @@ describe("createOnePasswordService", () => {
       expect(message).not.toContain("secret-for-");
       expect(log).toHaveBeenCalled();
       const logged = String(log.mock.calls[0]?.[0]);
-      expect(logged).toContain("op://Vault/Item/field");
+      expect(logged).not.toContain("op://Vault/Item/field");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("item not found");
     } finally {
       log.mockRestore();
     }

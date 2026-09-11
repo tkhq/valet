@@ -321,3 +321,16 @@ describe("computeCollisions — target policy", () => {
     expect(report.overlapping).toHaveLength(0);
   });
 });
+
+
+describe("team mention collisions", () => {
+  it("detects overlapping team rules without creator filters, including interim rows", () => {
+    const candidate: CollisionCandidate = {
+      ownerType: "team", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "orchestrator" },
+    };
+    const existing = { ...candidate, filters: [...candidate.filters, { field: "user", op: "eq", value: "U_CREATOR" } satisfies SubscriptionFilter] };
+    expect(computeCollisions(candidate, [existing], CATALOG).blocking).toHaveLength(1);
+    expect(computeCollisions(existing, [candidate], CATALOG).blocking).toHaveLength(1);
+  });
+});

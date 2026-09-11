@@ -694,7 +694,7 @@ function buildCredentialProvider(
           : owner.type === "team"
             ? await resolveTeamCredentialRead(
                 deps,
-                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team") },
+                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id) },
                 svc,
                 fallback,
               )

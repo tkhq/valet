@@ -12,6 +12,7 @@ import { isOrgAdmin } from "./org.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
+  DailyAgentActivityResponse,
   UsageBucket,
   UsageDrillItem,
   UsageSessionRow,
@@ -227,18 +228,102 @@ async function getSkillBreakdown(
   }));
 }
 
+/** Distinct sessions with positive token usage, grouped into UTC calendar days.
+ * Reads retained usage; page views, idle sessions and proxy calls do not count.
+ */
+export async function getDailyAgentActivity(
+  db: AppDb,
+  opts: { windowMs: number; scope: UsageScope; now?: number },
+): Promise<DailyAgentActivityResponse> {
+  const now = opts.now ?? Date.now();
+  const since = Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS;
+  const where = scopeWhere("ce.", since, opts.scope);
+  type ActivityRow = {
+    day_ms: unknown; team_id: string | null; team_name: string | null;
+    kind: "assistant" | "child" | "workflow" | "session"; active_agents: unknown;
+  };
+  // AppDb abstracts Postgres and PGlite; the selected columns define this result.
+  const rows = await db.execute(sql`
+    SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+      CASE WHEN ce.owner_type = 'team' THEN ce.owner_id END AS team_id,
+      t.name AS team_name,
+      CASE
+        WHEN ce.use_case = 'workflow' THEN 'workflow'
+        WHEN ce.session_id LIKE 'orchestrator:%' OR EXISTS (
+          SELECT 1 FROM assistants a WHERE a.session_id = ce.session_id AND a.org_id = ce.org_id
+        ) THEN 'assistant'
+        WHEN EXISTS (
+          SELECT 1 FROM child_watches w WHERE w.child_session_id = ce.session_id AND w.org_id = ce.org_id
+        ) THEN 'child'
+        ELSE 'session'
+      END AS kind,
+      COUNT(DISTINCT ce.session_id) AS active_agents
+    FROM cost_entries ce
+    LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
+    WHERE ${where} AND ce.created_at <= ${now}
+      AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
+    GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
+  `) as { rows: ActivityRow[] };
+  return {
+    scope: opts.scope.scope,
+    timezone: "UTC",
+    days: rows.rows.map((r) => ({
+      dayMs: toNum(r.day_ms), teamId: r.team_id, teamName: r.team_name,
+      kind: r.kind, activeAgents: toNum(r.active_agents),
+    })),
+  };
+}
+
 // ── Breakdown ────────────────────────────────────────────────────────────────
+
+/** Count session-days per actor, not turns or distinct sessions over the range.
+ * Shared assistants must not be credited to the first member who opened them.
+ * A session used by two members on one day counts once for each member.
+ */
+async function getMemberAgentDays(db: AppDb, scope: UsageScope, since: number, now: number) {
+  // The raw query result type describes columns selected below on both DB backends.
+  const result = await db.execute(sql`
+    WITH active AS (
+      SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+        ce.session_id,
+        COALESCE(NULLIF(q.author::jsonb->>'id', ''), NULLIF(cw.actor_user_id, ''),
+          CASE WHEN a.id IS NULL AND ce.session_id NOT LIKE 'orchestrator:%'
+            THEN ce.user_id END) AS actor_id
+      FROM cost_entries ce
+      JOIN engine_entries e ON e.id = ce.entry_id AND e.session_id = ce.session_id
+      LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
+      LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id AND cw.org_id = ce.org_id
+      LEFT JOIN assistants a ON a.session_id = ce.session_id AND a.org_id = ce.org_id
+      WHERE ${scopeWhere("ce.", since, scope)} AND ce.created_at <= ${now}
+        AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
+    ), daily AS (
+      SELECT actor_id, day_ms, COUNT(DISTINCT session_id) AS active_agents
+      FROM active GROUP BY actor_id, day_ms
+    )
+    SELECT actor_id, SUM(active_agents) AS agent_days FROM daily GROUP BY actor_id
+  `) as { rows: { actor_id: string | null; agent_days: unknown }[] };
+  return result.rows;
+}
 
 /** All-use-case spend for a window: totals, by use case, by model, by day, and
  * (org scope) by member. */
 export async function getUsageBreakdown(
   db: AppDb,
-  opts: { windowMs: number; scope: UsageScope },
+  opts: { windowMs: number; scope: UsageScope; now?: number },
 ): Promise<UsageBreakdownResponse> {
-  const since = Date.now() - opts.windowMs;
+  const now = opts.now ?? Date.now();
+  const since = now - opts.windowMs;
   const where = scopeWhere("", since, opts.scope);
+  const agentWindow = opts.scope.scope === "team" && opts.scope.byMember
+    ? {
+        days: opts.windowMs / DAY_MS,
+        sinceMs: Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS,
+        untilMs: now,
+        timezone: "UTC" as const,
+      }
+    : undefined;
 
-  const [byUseCase, byModel, byDay, totals, byUser, skillBreakdown] = await Promise.all([
+  const [byUseCase, byModel, byDay, totals, byUser, skillBreakdown, agentDays] = await Promise.all([
     db.execute(sql`SELECT use_case, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY use_case`) as Promise<{ rows: (BucketRow & { use_case: string })[] }>,
     db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
     // `floor` truncates the day index deterministically whether Postgres infers
@@ -253,18 +338,25 @@ export async function getUsageBreakdown(
         (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
       : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
     getSkillBreakdown(db, since, opts.scope),
+    agentWindow ? getMemberAgentDays(db, opts.scope, agentWindow.sinceMs, now) : Promise.resolve([]),
   ]);
 
   const total = toBucket(totals.rows[0]);
-  let byUserOut: (UsageBucket & { userId: string; name: string })[] | undefined;
+  let byUserOut: UsageBreakdownResponse["byUser"];
   if (opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)) {
-    const ids = byUser.rows.map((r) => r.user_id).filter((id): id is string => id !== null);
+    const memberBuckets = new Map(byUser.rows.map((r) => [r.user_id, toBucket(r)]));
+    const agentDaysByUser = new Map(agentDays.map((r) => [r.actor_id, toNum(r.agent_days)]));
+    // Prompt actors can differ from the member billed for a shared session.
+    // Keep their activity even when they have no attributed spend.
+    for (const r of agentDays) if (!memberBuckets.has(r.actor_id)) memberBuckets.set(r.actor_id, toBucket(undefined));
+    const ids = [...memberBuckets.keys()].filter((id): id is string => id !== null);
     const userRows = ids.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, ids));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
-    byUserOut = byUser.rows.map((r) => ({
-      userId: r.user_id ?? "shared",
-      name: r.user_id === null ? "Team / shared" : (nameById.get(r.user_id) ?? r.user_id),
-      ...toBucket(r),
+    byUserOut = [...memberBuckets].map(([userId, bucket]) => ({
+      userId: userId ?? "shared",
+      name: userId === null ? "Team / shared" : (nameById.get(userId) ?? userId),
+      ...bucket,
+      ...(agentWindow ? { avgDailyActiveAgents: (agentDaysByUser.get(userId) ?? 0) / agentWindow.days } : {}),
     }));
   }
 
@@ -283,6 +375,7 @@ export async function getUsageBreakdown(
     byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
     byModel: byModel.rows.map((r) => ({ model: r.model, ...toBucket(r) })),
     byUser: byUserOut,
+    dailyAgentWindow: agentWindow,
     byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
   };
 }

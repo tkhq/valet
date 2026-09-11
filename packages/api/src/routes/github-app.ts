@@ -49,6 +49,7 @@
  * webhook secret, then `resolveEnvFallbackOrgId` routes the delivery by
  * `installation.id` (or to the oldest org). Same single-org caveat.
  */
+import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
@@ -386,6 +387,7 @@ githubAppRouter.get("/setup", async (c) => {
   if (!config) return c.json({ error: "malformed response from GitHub" }, 502);
 
   await saveAppConfig({ credentials: engineCredentials }, verified.orgId, config);
+  await invalidateWorkflowSources(db, { orgId: verified.orgId });
 
   // Best-effort: a transient discovery failure shouldn't strand the admin
   // on an error page after the app itself saved successfully — `POST
@@ -518,6 +520,7 @@ githubAppRouter.post("/credential", async (c) => {
     process.env,
   );
   await saveAppConfig({ credentials: c.var.providers.engineCredentials }, orgId, config);
+  await invalidateWorkflowSources(c.var.providers.db, { orgId });
 
   // Best-effort, same as `GET /setup`: the credential is already stored, so a
   // transient discovery failure must not read as a failed connect. `POST
@@ -568,7 +571,11 @@ githubAppRouter.delete("/", async (c) => {
   // reporting `configured: true, source: "environment"` until the operator
   // unsets the variables.
   await engineCredentials.delete({ type: "org", id: orgId }, "github_app");
-  await db.delete(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+  await db.transaction(async (tx) => {
+    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+    await tx.delete(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+    await invalidateWorkflowSources(tx, { orgId });
+  });
   return c.body(null, 204);
 });
 
@@ -647,18 +654,18 @@ async function handleInstallationEvent(deps: GithubAppDeps, orgId: string, paylo
   const installationId = installation.id;
   if (typeof installationId !== "number") return;
 
-  if (action === "deleted") {
-    await deps.db
-      .delete(githubInstallations)
-      .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
-    return;
-  }
-
-  if (action === "suspend" || action === "unsuspend") {
-    await deps.db
-      .update(githubInstallations)
-      .set({ suspended: action === "suspend", updatedAt: Date.now() })
-      .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
+  if (action === "deleted" || action === "suspend" || action === "unsuspend") {
+    await deps.db.transaction(async (tx) => {
+      await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+      const scope = and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId));
+      const changed = action === "deleted"
+        ? await tx.delete(githubInstallations).where(scope).returning({ id: githubInstallations.id })
+        : await tx.update(githubInstallations)
+          .set({ suspended: action === "suspend", updatedAt: Date.now() })
+          .where(and(scope, eq(githubInstallations.suspended, action !== "suspend")))
+          .returning({ id: githubInstallations.id });
+      if (changed.length > 0) await invalidateWorkflowSources(tx, { orgId });
+    });
     return;
   }
 

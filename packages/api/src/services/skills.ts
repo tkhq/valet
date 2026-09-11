@@ -16,6 +16,7 @@
  * try/catch, so a throw during skill assembly would stop the owner from
  * starting ANY session.
  */
+import { lockTeamDeletionAccess, TeamAdminRequiredError } from "./team-deletion-access.js";
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, ilike, inArray, not, or, sql, type SQL } from "drizzle-orm";
 import { validateSkillFrontmatter, BUILTIN_COMMAND_NAMES, type Principal, type SkillSource } from "@valet/engine";
@@ -658,13 +659,22 @@ export async function deleteSkill(
   id: string,
   opts: { isOrgAdmin?: boolean } = {},
 ): Promise<DeleteSkillResult> {
-  const row = await ownedSkillRow(db, owner, id, opts);
-  if (!row) return "not_found";
-  if (row.origin !== "local") return "not_local";
-  const removed = await db.delete(skills).where(writeScope(owner, row)).returning({ id: skills.id });
-  // Same reasoning as `updateSkill`: the write carries its own authority
-  // check, and a row that stopped matching reports not found.
-  return removed.length > 0 ? "deleted" : "not_found";
+  return db.transaction(async (tx) => {
+    const [candidate] = await tx.select().from(skills).where(and(eq(skills.id, id), eq(skills.orgId, owner.orgId))).limit(1);
+    if (!candidate) return "not_found";
+    const row = candidate.ownerType === "team" ? candidate : await ownedSkillRow(tx, owner, id, opts);
+    if (!row) return "not_found";
+    if (row.ownerType === "team" && !(await lockTeamDeletionAccess(tx, owner, row.ownerId))) {
+      throw new TeamAdminRequiredError(row.ownerId, "skill", id);
+    }
+    if (row.origin !== "local") return "not_local";
+    const removed = await tx.delete(skills).where(row.ownerType === "team"
+      ? and(eq(skills.id, id), eq(skills.orgId, owner.orgId), eq(skills.ownerType, "team"), eq(skills.ownerId, row.ownerId), eq(skills.origin, "local"))
+      : writeScope(owner, row)).returning({ id: skills.id });
+    // Same reasoning as `updateSkill`: the write carries its own authority
+    // check, and a row that stopped matching reports not found.
+    return removed.length > 0 ? "deleted" : "not_found";
+  });
 }
 
 /**

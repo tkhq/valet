@@ -40,11 +40,6 @@ import {
   type OnePasswordService,
   OnePasswordScope,
 } from "./onepassword.js";
-import {
-  isTeamOpRefGranted,
-  loadTeamOnePasswordRefs,
-  refuseUngrantedTeamOpRef,
-} from "./team-onepassword-grant.js";
 
 /** Internal services that must never surface as ordinary session/workflow
  * credentials. `onepassword` rows are the service-account tokens themselves;
@@ -82,14 +77,15 @@ export interface CredentialReadCtx {
  * session reaches the personal scope; an unknown owner gets the org scope
  * alone, which is the safe side of the mistake.
  */
-export function onePasswordScopesFor(ownerType: string | undefined): readonly OnePasswordScope[] {
+export function onePasswordScopesFor(ownerType: string | undefined, teamId?: string): readonly OnePasswordScope[] {
+  if (ownerType === "team" && teamId) return ["team", "org"];
   return ownerType === "user" ? ["org", "personal"] : ["org"];
 }
 
 /** A read made as a specific user: `orgId`, `userId`, and the scopes the
  * session's owner allows (`onePasswordScopesFor`). Required, so no caller can
  * reach the personal vault by forgetting to decide. */
-export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId" | "scopes">>;
+export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId" | "scopes">> & { teamId?: string };
 
 /**
  * Resolves a raw store row through 1Password when applicable. `onePassword`
@@ -117,7 +113,7 @@ export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId" | 
 async function resolveRow(
   deps: CredentialReadDeps,
   row: StoredCredential | null,
-  ctx: { orgId: string; userId: string; scopes: readonly OnePasswordScope[] },
+  ctx: UserReadCtx,
   excluded: "skip" | "resolve",
 ): Promise<StoredCredential | null> {
   if (!row) return null;
@@ -202,7 +198,7 @@ export async function resolveUserCredentialRead(
  * rather than a null and a hidden tool. Nothing is written — the value is
  * read at the moment it is needed, the same as a stored reference.
  *
- * The match is on the item title, so whoever can name items in a granted
+ * The match is on the item title, so whoever can name items in an accessible
  * vault decides what an integration authenticates as. That is why the vaults
  * a service account may read are the security boundary here, and why the
  * token should be scoped to vaults chosen for this.
@@ -216,17 +212,21 @@ export async function lookupInOnePassword(
   service: string,
 ): Promise<StoredCredential | null> {
   if (!deps.onePassword) return null;
-  // Org first: a shared token is the configured path for a whole org. A
-  // personal token only answers for the person it belongs to, and only when
-  // the session is theirs (`onePasswordScopesFor`).
+  // Team is authoritative when configured; only no_token permits fallback.
+  // User sessions retain org/personal ordering. Explicit rows bypass discovery.
   for (const scope of ctx.scopes) {
     try {
       const secret = await deps.onePassword.findCredentialForService(scope, {
         orgId: ctx.orgId,
         userId: ctx.userId,
+        teamId: ctx.teamId,
       }, service);
       if (secret) return { type: "api_key", apiKey: secret };
-    } catch {
+      if (scope === "team") return null;
+    } catch (err) {
+      if (err instanceof OnePasswordAuthError && err.kind === "ambiguous") throw err;
+      // A configured team token must not silently substitute org credentials.
+      if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) throw err;
       // No token for this scope, or 1Password refused. Neither is an error
       // for a credential read: it just means this scope has no answer.
     }
@@ -261,11 +261,9 @@ export async function resolveOrgCredentialRead(
  * `"none"` stops there and skips the vaults too, the same escalation line
  * the user read draws.
  *
- * When no row answers, the vaults are searched by service name on the
- * scopes the caller passed (`onePasswordScopesFor("team")` is the org
- * scope alone). That is not an org-row fallback: an org-connected 1Password
- * token is the configured path for the whole org, and a team session read
- * it before team rows existed. A plain org credential row stays invisible.
+ * When no row answers, a configured team token is authoritative for discovery.
+ * An absent token preserves org discovery. Plain org rows remain restricted
+ * to the existing org-provided policy.
  *
  * `ctx.teamId` is the team principal. `ctx.userId` is unused for the team
  * row itself; a personal-tokenScope 1Password pointer on a team row fails
@@ -278,29 +276,16 @@ export async function resolveTeamCredentialRead(
   orgFallback: OrgFallback,
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
-  const scopes = ctx.scopes ?? ["org"];
-  const readCtx = { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes };
+  const scopes = (ctx.scopes ?? onePasswordScopesFor("team", ctx.teamId)).filter((scope) => scope !== "personal");
+  const readCtx = { orgId: ctx.orgId, teamId: ctx.teamId, userId: ctx.userId ?? "", scopes };
   const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
-  // The team lease, when an admin wrote one, gates every op:// ref this read
-  // dereferences: the team row and the org-provided row alike. The by-name
-  // vault search below stays on the org scope; a title match yields no ref
-  // to check, and `team-service-readiness.ts` mirrors that search as is.
-  const granted = await loadTeamOnePasswordRefs(deps.credentials, ctx.teamId);
-  refuseUngrantedReference(granted, teamRow);
   const fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
   if (fromTeam) return fromTeam;
   if (orgFallback === "none") return null;
   if (orgFallback === "org-provided") {
     const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-    refuseUngrantedReference(granted, orgRow);
     const fromOrg = await resolveRow(deps, orgRow, readCtx, "resolve");
     if (fromOrg) return fromOrg;
   }
   return lookupInOnePassword(deps, readCtx, service);
-}
-
-/** Throws the typed refusal when `row` points at a ref outside the team lease. */
-function refuseUngrantedReference(granted: readonly string[] | null, row: StoredCredential | null): void {
-  const meta = row ? onePasswordMeta(row) : null;
-  if (meta && !isTeamOpRefGranted(granted, meta.reference)) refuseUngrantedTeamOpRef();
 }

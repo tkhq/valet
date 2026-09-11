@@ -17,6 +17,7 @@ import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from ".
 import { teams, teamMembers, eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore } from "@valet/engine";
+import { OnePasswordAuthError } from "../services/onepassword.js";
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -206,7 +207,7 @@ describe("DB-backed actions", () => {
 
   beforeEach(async () => {
     await buildAppQueryable(pglite).query(
-      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs RESTART IDENTITY CASCADE`,
+      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs, workflow_schedules, event_subscriptions RESTART IDENTITY CASCADE`,
     );
     deps = {
       db,
@@ -238,11 +239,12 @@ describe("DB-backed actions", () => {
     expect(await copy.execute(args, ctx())).toMatchObject({ success: false, error: expect.stringContaining("already exists") });
   });
 
-  it("uses the configured org vault for agent schedules and event triggers", async () => {
-    await db.insert(teams).values({ id: "vault-team", orgId: "org1", name: "Vault team", createdAt: 1 });
-    await db.insert(teamMembers).values({ teamId: "vault-team", userId: "user1", role: "member" });
+  it.each([false, true])("agent schedules and event triggers prefer team vaults and retain org fallback without a team token (team token: %s)", async (teamToken) => {
+    const teamId = `vault-team-${teamToken}`;
+    await db.insert(teams).values({ id: teamId, orgId: "org1", name: teamId, createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId, userId: "user1", role: "member" });
     await db.insert(workflowDefinitions).values({
-      id: "vault-workflow", orgId: "org1", ownerType: "team", ownerId: "vault-team", name: "Vault workflow",
+      id: "vault-workflow", orgId: "org1", ownerType: "team", ownerId: teamId, name: "Vault workflow",
       definition: {
         version: "dag/v1",
         nodes: [
@@ -260,10 +262,11 @@ describe("DB-backed actions", () => {
       tokenConnected: unused, listVaults: unused, resolveReference: unused,
       resolveCredential: unused, findCandidates: unused,
       findCredentialForService: async (scope, owner, service) => {
-        expect(scope).toBe("org");
         expect(owner.orgId).toBe("org1");
-        calls.push(service);
-        return "vault-secret";
+        expect(owner.teamId).toBe(teamId);
+        calls.push(`${scope}:${service}`);
+        if (scope === "team" && !teamToken) throw new OnePasswordAuthError("No team token", "no_token");
+        return `fixture-${scope}-value`;
       },
     };
     const plugin = workflowsActionPlugin(() => deps);
@@ -275,7 +278,9 @@ describe("DB-backed actions", () => {
       if (!action) throw new Error(`missing ${id}`);
       expect(await action.execute(args, ctx())).toMatchObject({ success: true });
     }
-    expect(calls).toEqual(["linear", "linear"]);
+    expect(calls).toEqual(teamToken
+      ? ["team:linear", "team:linear"]
+      : ["team:linear", "org:linear", "team:linear", "org:linear"]);
     expect(await db.select().from(workflowSchedules)).toHaveLength(1);
     expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
   });

@@ -44,7 +44,7 @@
  * delete — a stale mirror is recoverable, a deleted row is not.
  * `CollectorReconcileContext.discovery` is how a collector learns of one.
  */
-import { and, asc, eq, inArray, lte } from "drizzle-orm";
+import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDb } from "../../lib/drizzle.js";
 import { contentSources, type ContentSourceRow } from "../../schema/index.js";
 import {
@@ -66,6 +66,9 @@ import {
   type ContentDiscoveryMode,
 } from "./collector.js";
 import { SkillCollector } from "./skill-collector.js";
+import { invalidateWorkflowSources } from "./invalidation.js";
+
+class SupersededSync extends Error {}
 
 /** Next poll for a healthy source. An unchanged poll costs one API call, so
  * this fits four per hour inside the 60-per-hour anonymous budget. */
@@ -331,64 +334,55 @@ export class ContentSyncService {
     return due.length;
   }
 
-  /**
-   * Marks every enabled workflow source the team owns for a full pass, then
-   * nudges the sweep. Returns how many rows it marked.
-   *
-   * A team credential write changes which mirrored team files may arm
-   * (`teamServiceReadiness`, team-credentials design decision 15), and
-   * nothing in the repository moves to make the sync notice: compare 1
-   * stops at the recorded head, and compare 2 at the recorded manifest.
-   * Clearing `discovery_scan` and `last_manifest_hash` takes the source past
-   * both, so the next pass reconciles at the unchanged commit and the
-   * trigger gate reads the credential as it now stands. Both columns already
-   * mean "re-read": a NULL scan mark is what an upgrade leaves, and a NULL
-   * manifest hash is what an incomplete sync leaves.
-   *
-   * A source in `error` is left on its backoff, as `onPush` leaves it; an
-   * errored source skips both compares on its retry anyway.
-   */
+  /** Persist the refresh before nudging the sweep. A running pass cannot
+   * consume this request because invalidation advances its revision. */
   async resyncTeamWorkflowSources(teamId: string): Promise<number> {
-    const rows = await this.deps.db
-      .select()
-      .from(contentSources)
-      .where(
-        and(
-          eq(contentSources.ownerType, "team"),
-          eq(contentSources.ownerId, teamId),
-          eq(contentSources.enabled, true),
-        ),
-      );
-    const due = rows.filter((row) => row.status !== "error" && row.kinds.includes("workflows"));
-    if (due.length === 0) return 0;
-    const now = this.now();
-    await this.deps.db
-      .update(contentSources)
-      .set({ nextAttemptAt: now, discoveryScan: null, lastManifestHash: null, updatedAt: now })
-      .where(
-        inArray(
-          contentSources.id,
-          due.map((row) => row.id),
-        ),
-      );
+    const count = await invalidateWorkflowSources(this.deps.db, { teamId }, this.now());
     void this.pollOnce();
-    return due.length;
+    return count;
+  }
+
+  async resyncOrgWorkflowSources(orgId: string): Promise<number> {
+    const count = await invalidateWorkflowSources(this.deps.db, { orgId }, this.now());
+    void this.pollOnce();
+    return count;
   }
 
   async syncOnce(sourceId: string): Promise<ContentSyncOutcome | null> {
     const { db } = this.deps;
-    const [source] = await db
-      .select()
-      .from(contentSources)
-      .where(eq(contentSources.id, sourceId))
-      .limit(1);
+    // Every entry point, including manual sync, gets a database fence.
+    const [source] = await db.update(contentSources)
+      .set({ syncRevision: sql`${contentSources.syncRevision} + 1` })
+      .where(eq(contentSources.id, sourceId)).returning();
     if (!source) return null;
 
     try {
       return await this.run(source);
     } catch (err) {
+      if (err instanceof SupersededSync) {
+        return {
+          status: "warning", changed: false, headSha: null,
+          imported: 0, updated: 0, deleted: 0, warnings: [],
+          notice: "A newer sync or readiness change superseded this pass. Valet will use the newer result or pending refresh.",
+          discovered: 0, excluded: 0, discovery: null, error: null,
+        };
+      }
       return this.recordFailure(source, err);
     }
+  }
+
+  /** Serialize collector writes and completion across processes. External
+   * reads run before this transaction, so credential stores can use their
+   * own connection without waiting on a PGlite transaction. */
+  private async commitPass<T>(source: ContentSourceRow, write: (db: AppDb) => Promise<T>): Promise<T> {
+    return this.deps.db.transaction(async (tx) => {
+      const [current] = await tx.select({ revision: contentSources.syncRevision })
+        .from(contentSources).where(and(
+          eq(contentSources.id, source.id), eq(contentSources.orgId, source.orgId),
+        )).for("update");
+      if (!current || current.revision !== source.syncRevision) throw new SupersededSync();
+      return write(tx);
+    });
   }
 
   /** The collectors this source's `kinds` enables, in registration order.
@@ -420,13 +414,13 @@ export class ContentSyncService {
       // Nothing was re-read, so this poll learned nothing that could clear the
       // last report. Without `carryWarning` a source whose files are all broken
       // flips to a silent "ok" one interval later.
-      return this.recordSuccess(source, {
+      return this.commitPass(source, (db) => this.recordSuccess(db, source, {
         headSha: head.sha,
         manifestHash: source.lastManifestHash,
         changed: false,
         complete: true,
         carryWarning: true,
-      });
+      }));
     }
 
     // Everything below reads at `head`, never at the moving ref.
@@ -440,7 +434,7 @@ export class ContentSyncService {
     if (manifestHash === source.lastManifestHash && !reportIsStale) {
       // No file was read, so only the discovery warnings can be regenerated
       // here. `carryWarning` covers the per-file ones.
-      return this.recordSuccess(source, {
+      return this.commitPass(source, (db) => this.recordSuccess(db, source, {
         headSha: head.sha,
         manifestHash,
         changed: false,
@@ -455,36 +449,46 @@ export class ContentSyncService {
           source,
           scan.passes.map((pass) => ({ pass, result: NOTHING_RECONCILED })),
         ),
-      });
+      }));
     }
 
     const read = await this.readContents(source, head.sha, reader, scan);
-    const applied = await this.reconcile(source, scan, read.text, head.sha);
-    const totals = totalOf(applied);
-    return this.recordSuccess(source, {
-      headSha: head.sha,
-      manifestHash,
-      changed: totals.imported + totals.updated + totals.deleted > 0,
-      // A file discovery found and the sync could not read leaves the manifest
-      // hash describing files nobody read. Recording it would make compare 2
-      // skip the whole commit forever. A pass that deferred work is incomplete
-      // for the same reason: nothing in the repository will move to trigger
-      // the retry.
-      complete:
-        read.unread.length === 0 &&
-        applied.every((entry) => (entry.result.deferred?.length ?? 0) === 0),
-      discovered: totalDiscovered(scan),
-      excluded: totalExcluded(scan),
-      discovery: scan.discovery,
-      imported: totals.imported,
-      updated: totals.updated,
-      deleted: totals.deleted,
-      warnings: [
-        ...scan.passes.flatMap((pass) => pass.warnings),
-        ...read.warnings,
-        ...applied.flatMap(({ result }) => result.warnings),
-      ],
-      notice: noticeOf(scan.discovery, source, applied),
+    const writers = await Promise.all(scan.passes.map(async (pass) => {
+      const ctx = { db: this.deps.db, source, commitSha: head.sha, text: read.text, discovery: scan.discovery, now: this.now };
+      const write = pass.prepareReconcile
+        ? await pass.prepareReconcile(ctx)
+        : (db: AppDb) => pass.reconcile({ ...ctx, db });
+      return { pass, write };
+    }));
+    return this.commitPass(source, async (db) => {
+      const applied: AppliedPass[] = [];
+      for (const { pass, write } of writers) applied.push({ pass, result: await write(db) });
+      const totals = totalOf(applied);
+      return this.recordSuccess(db, source, {
+        headSha: head.sha,
+        manifestHash,
+        changed: totals.imported + totals.updated + totals.deleted > 0,
+        // A file discovery found and the sync could not read leaves the manifest
+        // hash describing files nobody read. Recording it would make compare 2
+        // skip the whole commit forever. A pass that deferred work is incomplete
+        // for the same reason: nothing in the repository will move to trigger
+        // the retry.
+        complete:
+          read.unread.length === 0 &&
+          applied.every((entry) => (entry.result.deferred?.length ?? 0) === 0),
+        discovered: totalDiscovered(scan),
+        excluded: totalExcluded(scan),
+        discovery: scan.discovery,
+        imported: totals.imported,
+        updated: totals.updated,
+        deleted: totals.deleted,
+        warnings: [
+          ...scan.passes.flatMap((pass) => pass.warnings),
+          ...read.warnings,
+          ...applied.flatMap(({ result }) => result.warnings),
+        ],
+        notice: noticeOf(scan.discovery, source, applied),
+      });
     });
   }
 
@@ -584,31 +588,8 @@ export class ContentSyncService {
     }
   }
 
-  /** Runs every pass's reconcile, keeping each result WITH the pass that
-   * produced it. The row's counts are the sum; a pass's notice reads only its
-   * own result. */
-  private async reconcile(
-    source: ContentSourceRow,
-    scan: SyncScan,
-    text: Map<string, string>,
-    commitSha: string,
-  ): Promise<AppliedPass[]> {
-    const applied: AppliedPass[] = [];
-    for (const pass of scan.passes) {
-      const result = await pass.reconcile({
-        db: this.deps.db,
-        source,
-        commitSha,
-        text,
-        discovery: scan.discovery,
-        now: this.now,
-      });
-      applied.push({ pass, result });
-    }
-    return applied;
-  }
-
   private async recordSuccess(
+    db: AppDb,
     source: ContentSourceRow,
     result: {
       headSha: string;
@@ -648,7 +629,7 @@ export class ContentSyncService {
         : carried
           ? source.lastError
           : null;
-    await this.deps.db
+    await db
       .update(contentSources)
       .set({
         status,
@@ -669,7 +650,7 @@ export class ContentSyncService {
         lastError: message,
         updatedAt: now,
       })
-      .where(eq(contentSources.id, source.id));
+      .where(and(eq(contentSources.id, source.id), eq(contentSources.orgId, source.orgId)));
 
     return {
       status,
@@ -712,7 +693,7 @@ export class ContentSyncService {
         discoveryScan: null,
         updatedAt: now,
       })
-      .where(eq(contentSources.id, source.id));
+      .where(and(eq(contentSources.id, source.id), eq(contentSources.orgId, source.orgId), eq(contentSources.syncRevision, source.syncRevision)));
 
     // A repository or subdirectory that vanished does not clear on its own and
     // still holds a mirror. A transient fault is visible on the source row.

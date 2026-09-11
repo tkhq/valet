@@ -507,6 +507,10 @@ export type InstallationResolution =
  * readiness predicate's view of a team-owned `auto` github node
  * (`workflows/team-service-readiness.ts`), so the two stay one rule.
  *
+ * `strictOwner` is for App-pinned nodes: a known owner must match.
+ * `dynamicOwner` defers an expression's owner match until install or run time.
+ * The template installer checks the exact repository before arming events.
+ *
  * Reads the installations table as it stands. The lazy sync that
  * `resolveInstallationApiToken` runs on an empty table needs the App's
  * signing key, which a readiness caller does not hold; an App installed in
@@ -517,6 +521,7 @@ export async function installationResolvesFor(
   deps: Pick<GithubAppDeps, "db" | "credentials" | "env">,
   orgId: string,
   repoOwner: string | undefined,
+  options: { strictOwner?: boolean; dynamicOwner?: boolean } = {},
 ): Promise<InstallationResolution> {
   if (!(await loadAppConfig(deps, orgId))) return { ok: false, gap: "no_app" };
   const rows = await deps.db
@@ -524,11 +529,12 @@ export async function installationResolvesFor(
     .from(githubInstallations)
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
   if (rows.length === 0) return { ok: false, gap: "no_installations" };
+  if (options.dynamicOwner && !repoOwner) return { ok: true };
   // Same case-insensitive match as `mintInstallationToken`.
   if (repoOwner && rows.some((row) => row.accountLogin.toLowerCase() === repoOwner.toLowerCase())) {
     return { ok: true };
   }
-  if (rows.length === 1) return { ok: true };
+  if (rows.length === 1 && !(options.strictOwner && repoOwner)) return { ok: true };
   if (repoOwner) return { ok: false, gap: "no_installation_for_owner", owner: repoOwner };
   return { ok: false, gap: "ambiguous", count: rows.length };
 }

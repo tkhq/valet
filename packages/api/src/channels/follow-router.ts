@@ -11,8 +11,11 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { findFollowedThread, touchFollowedThread } from "../events/followed-threads.js";
+import { isCurrentTeamActor } from "../events/team-slack-gate.js";
 
 export interface FollowRouterDeps {
+  /** Bot identity from the verified org credential. */
+  botUserId?: string;
   db: AppDb;
   engineHost: EngineHost;
   /**
@@ -89,6 +92,9 @@ export async function handleFollowedMessage(
 ): Promise<void> {
   const f = slackMessageFields(args.raw);
   if (!f) return;
+  // Slack emits message and app_mention envelopes for the same bot mention.
+  // Reserve addressed messages for app_mention, independent of delivery order.
+  if (deps.botUserId && f.text.includes(`<@${deps.botUserId}>`)) return;
   const key = `${args.orgId}:${f.channel}:${f.threadTs}`;
   const prior = routeChains.get(key) ?? Promise.resolve();
   const run = prior.then(() => routeFollowedMessage(deps, args.orgId, f));
@@ -113,6 +119,7 @@ async function routeFollowedMessage(
     threadTs: f.threadTs,
   });
   if (!follow) return;
+  if (follow.ownerType === "team" && !(await isCurrentTeamActor(deps.db, follow, follow.createdBy))) return;
 
   const threadKey = `slack:${f.channel}:${f.threadTs}`;
   const normalized = (await deps.normalizeChannelMessage?.("slack", { userId: f.user, text: f.text })) ?? {

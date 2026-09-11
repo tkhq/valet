@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
+import { authorizedSubscriptionMatchesEvent } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
@@ -25,7 +26,7 @@ import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../sc
 import { readOwnerFilter } from "./_owner-filter.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
-import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/match.js";
+import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { armableDefinitionRow } from "../workflows/service.js";
@@ -145,7 +146,7 @@ async function collisionsForWrite(
   db: AppDb,
   plugins: ValetPlugin[],
   orgId: string,
-  candidate: { eventKeys: string[]; filters: SubscriptionFilter[]; target: EventSubscriptionTargetWire },
+  candidate: { ownerType?: string; eventKeys: string[]; filters: SubscriptionFilter[]; target: EventSubscriptionTargetWire },
   excludeId?: string,
 ): Promise<CollisionReport<NarrowedSubscriptionRow>> {
   const rows = await db
@@ -526,7 +527,10 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
     .where(and(eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true)));
 
   const catalog = catalogForService(plugins, event.service);
-  const matched = subs.filter((sub) => subscriptionMatchesEvent(sub, event.eventKey, event.payload, catalog));
+  const matched: typeof subs = [];
+  for (const sub of subs) {
+    if (await authorizedSubscriptionMatchesEvent(db, sub, event.eventKey, event.payload, catalog)) matched.push(sub);
+  }
 
   if (matched.length > 0) {
     const now = Date.now();
@@ -626,6 +630,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (enabled) {
     const report = await collisionsForWrite(db, plugins, user.orgId, {
+      ownerType,
       eventKeys: body.eventKeys,
       filters,
       target: body.target,
@@ -785,6 +790,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // validated jsonb, same as `rowToSubscription`.
   const write = await validateSubscriptionWrite(db, plugins, merged, {
     creatorUserId: row.createdBy,
+    ownerType: row.ownerType,
     anyChannel: body.anyChannel === true,
     matchChanged: body.filters !== undefined || body.eventKeys !== undefined,
     storedAnyChannel: storedAnyChannelState(
@@ -813,6 +819,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       plugins,
       user.orgId,
       {
+        ownerType: row.ownerType,
         eventKeys: merged.eventKeys as string[],
         filters,
         // The PATCHED target: a patch that re-points the rule at a different

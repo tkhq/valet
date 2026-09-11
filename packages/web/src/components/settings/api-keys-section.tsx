@@ -101,6 +101,11 @@ function TeamApiKeysSection({ teamId }: { teamId: string }) {
   return (
     <div className="space-y-4">
       <CreateScopeLine what="API key" />
+      <p className="text-sm text-muted">
+        These keys can read, run, and change this team's sessions and workflows, and delete sessions.
+        Deleting a workflow requires a person with team or organization admin access.
+        They cannot manage organization settings or other teams. Removing the member who created a key does not revoke it.
+      </p>
       {canMutate && (
         <CreateTeamKeyRow
           onCreate={(name, onSuccess) => {

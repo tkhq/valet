@@ -149,6 +149,9 @@ export interface CollectorPass {
   readonly excluded: number;
   /** Brings this source's mirrored rows of this kind in line with the pass. */
   reconcile(ctx: CollectorReconcileContext): Promise<CollectorReconcileResult>;
+  /** Resolve external prerequisites before the rail opens its write transaction.
+   * The returned writer must use only the supplied transaction handle. */
+  prepareReconcile?(ctx: CollectorReconcileContext): Promise<(db: AppDb) => Promise<CollectorReconcileResult>>;
   /** What this pass says about the REPOSITORY, as distinct from the per-file
    * warnings. Null when there is nothing to say. */
   notice(ctx: CollectorNoticeContext): string | null;

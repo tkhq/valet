@@ -52,7 +52,7 @@ convention for documents meant to be shared, not a publish trigger.
 
 ## Visibility model
 
-An artifact has one of two visibility levels:
+Personal artifacts have one of two visibility levels. Team ownership overrides both levels: only current members of the owning team can open a team link.
 
 | Visibility | Who can open the link | How it is set |
 |---|---|---|
@@ -63,7 +63,7 @@ Rules:
 
 - The `mem_share` tool can only create `org` artifacts. The agent cannot
   create or widen to `public`.
-- Widening to `public` is a human action in the web UI. The artifact owner
+- Widening a personal artifact to `public` is a human action in the web UI. The artifact owner
   or an org admin can widen; the same actors can narrow back to `org`.
 - The public toggle is dead unless the org setting
   `allowPublicArtifacts` is on. The setting is opt-in (default off) and
@@ -170,11 +170,11 @@ share route can grow a decision gate later.
 `GET /api/artifacts/:token`
 
 1. Load by token. Missing or revoked → 404.
-2. `public` + org setting on → serve.
-3. Otherwise resolve the caller's session itself (better-auth
+2. Team-owned artifacts require a logged-in member of their team and organization. Nonmembers receive 404.
+3. Personal `public` artifacts serve anonymously when the org setting is on. Otherwise resolve the caller's session (better-auth
    `getSession` on the request headers). No session → 401. Session but
    not a member of `artifact.orgId` → 404 (do not confirm existence).
-4. Serve `{ title, content, updatedAt, visibility }`.
+4. Serve the page response, including `ownerType` for the audience label.
 5. Rate-limit by client IP before the token lookup. The IP comes from
    `x-forwarded-for` only when `VALET_TRUST_PROXY=1` (the helm chart sets
    it — the ingress overwrites the header); otherwise the socket peer
@@ -191,11 +191,11 @@ share route can grow a decision gate later.
 ### Management (authed, session or API key)
 
 - `GET /api/artifacts` — list the caller's artifacts (org admins also see
-  the org's).
+  the org's personal artifacts). All team rows require current membership.
 - `POST /api/artifacts/share` (authed variant) `{ path }` — human-initiated
   share from the memory viewer.
 - `PATCH /api/artifacts/:id` `{ visibility }` — widen or narrow. Widening
-  to `public` requires `allowPublicArtifacts` on and the caller to be the
+  a personal artifact to `public` requires `allowPublicArtifacts` on and the caller to be the
   sharer (`actorUserId`) or an org admin. Widening records `publicBy`.
   Management by other members of a team/org owner scope is not
   implemented; add it when a team asks for it.
@@ -375,7 +375,7 @@ themselves. Anything else degrades to `/`.
 
 The Artifacts list follows the selected workspace through the existing `useListOwner` hook. Stored `ownerType` and `ownerId` select rows. `actorUserId` records who published an artifact and does not define its workspace. The personal gallery therefore excludes team artifacts that the caller published.
 
-`GET /api/artifacts?ownerType=user&ownerId=<id>` requires the caller's own user id. A team filter requires a team in the caller's org and current membership. The existing org-admin read exception remains. Unknown, foreign-org, and unauthorized owners return 404. The unfiltered and `mine=1` lists retain their existing behavior.
+`GET /api/artifacts?ownerType=user&ownerId=<id>` requires the caller's own user id. A team filter requires a team in the caller's org and current membership. Org admins also require team membership. Unknown, foreign-org, and unauthorized owners return 404. The unfiltered and `mine=1` lists exclude team artifacts when the caller is no longer a member.
 
 Owner lists accept optional `limit` and `cursor` parameters. The default page size is 50, capped at 100. Paged lists omit revoked rows before pagination and sort by `updatedAt` and `id`, both descending. The opaque cursor carries both sort fields and the selected owner. A cursor from another workspace or an invalid limit returns 400. `nextCursor` is null on the last page. Requests without pagination retain the legacy response and revoked rows.
 
@@ -386,3 +386,29 @@ Public token reads, link visibility, publishing, and sharer-or-admin management 
 Validation covers owner versus actor filtering, member access, nonmember refusal, foreign owners, membership removal, cursor boundaries, revoked rows, and workspace pagination reset. Existing public-link and personal-access suites remain part of the targeted checks.
 
 The gallery offers Revoke only to the publishing user or an organization admin, matching the management API.
+
+
+## Team artifact privacy (2026-09-10)
+
+Team ownership takes precedence over stored visibility. Every human token read requires login and live rows in both `org_members` and `team_members` for the artifact's organization and team. The deployment organization on the user object does not prove membership. An org admin or the publishing actor has no membership exception. Existing team rows marked `public` follow this rule, even when public artifacts are enabled.
+
+The same gate protects source bytes, rendered pages, comments, replies, thread resolution, version history, pinning, revocation, and artifact lists. Downloads use the authorized token response; there is no separate download endpoint. Comment delivery also requires access to a source session in the same organization. Nonmembers and foreign-org callers receive 404. Signed-out token readers receive 401.
+
+Publish, memory share, and revoke-by-path validate the team scope in the service. Human callers require both live memberships. Verified internal tools can act as their owning team. A team principal never inherits its actor's or key creator's user authority. Team API keys remain excluded from artifact management and private token reads.
+
+Publish, memory share, revoke-by-path, and personal-to-team copy hold `FOR SHARE` locks on both authorizing membership rows until transaction commit. Membership deletion waits for an authorized mutation to commit. If deletion holds the row first, the mutation waits and then refuses access after deletion commits. The team ownership lock separately serializes team deletion.
+
+There is no audience-grant mechanism for team artifacts. Public widening is rejected without changing the artifact or its version pin. Personal org/public sharing retains its existing rules. Copying a personal artifact to a team creates a team-only snapshot.
+
+The gallery and page show **Team-only** for team artifacts, including legacy public rows. The team gallery explains that only current members can open its links. Team memory has no public-share control. Personal share controls exclude team snapshots even when their path and publishing actor match. A refused page asks the reader to check access with the sender.
+
+Regression checks cover members, nonmembers, nonmember admins, removed publishers, stale team rows without org membership, foreign organizations, anonymous callers, team keys, and direct service calls. UI checks cover team-only labels and personal-share collisions.
+
+Run `ARTIFACT_MEMBERSHIP_POSTGRES=1 pnpm --filter @valet/api test artifacts-membership.postgres` to check commit ordering in a disposable Postgres container. The suite checks both membership rows and both commit orders for create, refresh, revoke, and copy. It does not use an existing database.
+
+Browser verification uses synthetic accounts and an isolated test database:
+
+1. Open a team link while signed out. Confirm the login redirect.
+2. Sign in as an ordinary team member. Confirm the rendered page, Team-only label, download, and comments.
+3. Open the team gallery. Confirm its membership explanation and the absence of public-share controls.
+4. Sign in as a nonmember. Open the same link. Confirm the access explanation and absence of content and controls.

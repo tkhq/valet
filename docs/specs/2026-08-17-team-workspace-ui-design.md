@@ -215,3 +215,23 @@ The team page reuses TeamsPanel with a selected team ID. It shows only that team
 Existing team-admin, org-admin, member, and managed-team restrictions apply. This change adds no roles or persona model.
 Switching workspace remounts the settings content, discarding drafts and confirmation dialogs before a different team can become their target.
 Unavailable teams show a recovery message instead of another team's controls.
+
+### Team integration empty state
+
+An empty team credential list does not mean the team has no integrations.
+The empty state describes stored team connections. The separate Organization access section reports organization-provided integrations.
+Personal sharing is optional and grants access through that member's account.
+The copy does not claim that an organization integration is currently connected.
+
+
+### Team integration identity presentation (2026-09-10)
+
+Team Integrations separates direct connections from connections shared by members. Shared rows name the account owner and explain revocation on departure. Personal sharing stays on Personal Integrations and requires explicit consent. One service has one team connection; connecting never silently replaces it.
+
+Slack and the GitHub App stay organization-managed. Team Integrations shows compact access status and links admins to Organization settings. It does not offer a separate team connection for either service. Existing stored connections remain visible for explicit removal. OAuth connects the selected provider account; it does not create a service identity.
+
+Slack status uses the catalog's organization-derived `connect` mode, never the personal `connected` flag. GitHub status uses the member-readable organization status query. Save, delete, and refresh mutations invalidate the affected status queries using their existing keys. During refetch, the strip hides the previous status and shows loading. Failed reads show an error, not a setup or availability claim. Suspended GitHub installations are labeled suspended.
+
+Manual token entry asks for the intended account's token without assuming bot or service-account support. If the team credential read fails, the open connection form closes and discards its token and consent. Recovery does not reopen the form. Legacy Slack and GitHub removal dialogs explain that team setup cannot recreate those connections. Organization access is managed separately and can have different permissions.
+
+Workflow template setup links point to integration access. Their copy does not require sharing a personal account, because access can come from organization apps or direct team connections.

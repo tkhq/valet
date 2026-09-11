@@ -298,6 +298,15 @@ CREATE TABLE "team_members" (
 --> statement-breakpoint
 CREATE INDEX "team_members_user" ON "team_members" ("user_id");
 --> statement-breakpoint
+CREATE TABLE "team_join_eligibilities" (
+	"team_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"observed_at" bigint NOT NULL,
+	PRIMARY KEY("team_id", "user_id")
+);
+--> statement-breakpoint
+CREATE INDEX "team_join_eligibilities_user" ON "team_join_eligibilities" ("user_id");
+--> statement-breakpoint
 CREATE TABLE "assistants" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
@@ -635,6 +644,7 @@ CREATE TABLE "skill_sources" (
 	"last_sha" text,
 	"last_manifest_hash" text,
 	"discovery_scan" text,
+	"sync_revision" bigint DEFAULT 0 NOT NULL,
 	"last_synced_at" bigint,
 	"last_error" text,
 	"created_at" bigint NOT NULL,
@@ -1452,3 +1462,16 @@ CREATE UNIQUE INDEX "ratings_user_target" ON "ratings" ("user_id","target_type",
 CREATE INDEX "ratings_session" ON "ratings" ("session_id");
 --> statement-breakpoint
 CREATE INDEX "ratings_type_rating" ON "ratings" ("target_type","rating");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "team_id" text NOT NULL,
+  "resource_type" text NOT NULL, "resource_id" text NOT NULL, "resource_label" text NOT NULL,
+  "requested_by" text NOT NULL, "reason" text, "requested_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL, "status" text NOT NULL DEFAULT 'pending',
+  "decided_by" text, "decided_at" bigint, "decision_note" text, "last_refusal" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");

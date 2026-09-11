@@ -4,14 +4,21 @@
  * both OAuth declaration modes against `test-helpers/oauth-fixture.ts`'s
  * fake authorization server.
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { Pool } from "pg";
 import type { ValetPlugin } from "@valet/engine";
 import { OAuthInterpretError, type TokenInterpretation } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
 import { verifyOAuthConnectState } from "./credential-connect.js";
+import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../services/teams.js";
+import { and, eq } from "drizzle-orm";
+import { teams, credentials, orgMembers } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
+import { buildAppDb } from "../lib/drizzle.js";
+import { insertCredentialIfAbsent, lockTeamCredentialAuthority } from "../services/credential-insert.js";
 import {
   identityForExternal,
   identityForUser,
@@ -688,5 +695,258 @@ describe("verifyOAuthConnectState", () => {
   it("rejects an expired payload", () => {
     const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() - 1000 }, key);
     expect(verifyOAuthConnectState(state, key, Date.now())).toBeNull();
+  });
+});
+
+// PGlite serializes transactions. Run these with TEST_DATABASE_URL to verify
+// real writer contention on separate Postgres connections in a private schema.
+describe.skipIf(!process.env.TEST_DATABASE_URL)("team credential authority row locks", () => {
+  it.each([
+    { name: "team admin demotion", mutation: "UPDATE team_members SET role = 'member' WHERE user_id = 'actor'" },
+    { name: "team member removal", mutation: "DELETE FROM team_members WHERE user_id = 'actor'" },
+    { name: "org admin demotion", mutation: "UPDATE org_members SET role = 'member' WHERE user_id = 'actor'" },
+    { name: "org membership removal", mutation: "DELETE FROM org_members WHERE user_id = 'actor'" },
+    { name: "team organization change", mutation: "UPDATE teams SET org_id = 'other-org'" },
+    { name: "team deletion", mutation: "DELETE FROM teams" },
+  ])("holds off $name until the authorized insert commits", async ({ mutation }) => {
+    const schema = `credential_auth_${randomUUID().replaceAll("-", "")}`;
+    const connectionString = process.env.TEST_DATABASE_URL;
+    const admin = new Pool({ connectionString });
+    const pool = new Pool({ connectionString, options: `-c search_path=${schema}`, max: 3 });
+    let release = () => {};
+    let insertion: Promise<boolean> | undefined;
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      // Only the columns this boundary uses; the API tests use full migrations.
+      await pool.query(`
+        CREATE TABLE teams (id text PRIMARY KEY, org_id text NOT NULL);
+        CREATE TABLE org_members (org_id text, user_id text, role text, PRIMARY KEY (org_id, user_id));
+        CREATE TABLE team_members (team_id text, user_id text, role text, PRIMARY KEY (team_id, user_id));
+        CREATE TABLE credentials (
+          owner_type text, owner_id text, service text, type text,
+          access_token_enc text, api_key_enc text, refresh_token_enc text,
+          expires_at bigint, scopes jsonb, metadata jsonb, created_at bigint, updated_at bigint,
+          PRIMARY KEY (owner_type, owner_id, service)
+        );
+      `);
+      await pool.query("INSERT INTO teams VALUES ($1, 'org')", [schema]);
+      // Each role is independently authoritative in the corresponding test.
+      const orgAuthority = mutation.includes("org_members");
+      await pool.query("INSERT INTO org_members VALUES ('org', 'actor', $1)", [orgAuthority ? "admin" : "member"]);
+      await pool.query("INSERT INTO team_members VALUES ($1, 'actor', $2)", [schema, orgAuthority ? "member" : "admin"]);
+      const db = buildAppDb(pool);
+      let signalLocked = () => {};
+      const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      insertion = db.transaction(async (tx) => {
+        expect(await lockTeamCredentialAuthority(tx, { orgId: "org", userId: "actor", teamId: schema })).toBe(true);
+        signalLocked();
+        await released;
+        return insertCredentialIfAbsent(tx, "test-key", { type: "team", id: schema }, "demo", {
+          type: "oauth2", accessToken: "locked-access-sentinel", refreshToken: "locked-refresh-sentinel",
+        });
+      });
+      await Promise.race([locked, insertion]);
+      const writer = await pool.connect();
+      try {
+        await writer.query("SET lock_timeout = '100ms'");
+        // These ordinary UPDATE/DELETE writers take no advisory lock.
+        await expect(writer.query(mutation)).rejects.toMatchObject({ code: "55P03" });
+        release();
+        expect(await insertion).toBe(true);
+        await expect(writer.query(mutation)).resolves.toMatchObject({ rowCount: 1 });
+        const saved = await writer.query("SELECT * FROM credentials");
+        expect(saved.rows).toHaveLength(1);
+        expect(JSON.stringify(saved.rows)).not.toContain("locked-access-sentinel");
+        expect(JSON.stringify(saved.rows)).not.toContain("locked-refresh-sentinel");
+      } finally {
+        writer.release();
+      }
+    } finally {
+      release();
+      await insertion?.catch(() => undefined);
+      await pool.end();
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.end();
+    }
+  });
+});
+
+
+describe("team OAuth connections", () => {
+  async function setup() {
+    const app = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    api = app;
+    const team = await createTeam(app.providers.db, { orgId: "local-org", name: "OAuth team", creatorUserId: "local-user" });
+    return { app, team };
+  }
+
+  async function start(baseUrl: string, teamId: string, userId = "local-user") {
+    const response = await fetch(`${baseUrl}/api/credentials/linear/connect?scope=team&teamId=${teamId}`, {
+      redirect: "manual", headers: { "x-valet-test-user-id": userId },
+    });
+    expect(response.status).toBe(302);
+    return new URL(response.headers.get("location") ?? "").searchParams.get("state") ?? "";
+  }
+
+  async function finish(baseUrl: string, state: string, userId = "local-user") {
+    return fetch(`${baseUrl}/api/credentials/oauth/callback?code=team-code&state=${encodeURIComponent(state)}`, {
+      redirect: "manual", headers: { "x-valet-test-user-id": userId },
+    });
+  }
+
+  it("stores encrypted team tokens and granted scopes without replacing the personal account", async () => {
+    const { app, team } = await setup();
+    await app.providers.engineCredentials.save({ type: "user", id: "local-user" }, "linear", { type: "oauth2", accessToken: "personal" });
+    fake.tokenResponse = { access_token: "team-access", refresh_token: "team-refresh", expires_in: 3600, scope: "read" };
+    const response = await finish(app.baseUrl, await start(app.baseUrl, team.id));
+    expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&connected=linear`);
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
+      accessToken: "team-access", refreshToken: "team-refresh", scopes: ["read"],
+    });
+    expect(await app.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear")).toMatchObject({ accessToken: "personal" });
+    const rows = await app.providers.db.select().from(credentials).where(eq(credentials.ownerId, team.id));
+    expect(JSON.stringify(rows)).not.toContain("team-access");
+    expect(JSON.stringify(rows)).not.toContain("team-refresh");
+    const listed = await fetch(`${app.baseUrl}/api/credentials?scope=team&teamId=${team.id}`);
+    const publicOutput = `${response.headers.get("location")} ${await listed.text()}`;
+    expect(publicOutput).not.toContain("team-access");
+    expect(publicOutput).not.toContain("team-refresh");
+  });
+
+  it("refuses non-admins and missing teams before contacting the provider", async () => {
+    const { app, team } = await setup();
+    await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    for (const id of [team.id, "missing-team"]) {
+      const response = await fetch(`${app.baseUrl}/api/credentials/linear/connect?scope=team&teamId=${id}`, {
+        redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
+      });
+      expect(response.status).toBe(404);
+    }
+    expect(fake.registrations).toHaveLength(0);
+  });
+
+  it("refuses another organization's team even when the user has a team-admin row", async () => {
+    const { app, team } = await setup();
+    const state = await start(app.baseUrl, team.id);
+    await app.providers.db.update(teams).set({ orgId: "other-org" }).where(eq(teams.id, team.id));
+    const response = await fetch(`${app.baseUrl}/api/credentials/linear/connect?scope=team&teamId=${team.id}`, { redirect: "manual" });
+    expect(response.status).toBe(404);
+    expect((await finish(app.baseUrl, state)).headers.get("location")).toContain("error=team_access_changed");
+    expect(fake.tokenRequests).toHaveLength(0);
+  });
+
+  it("refuses a callback after the connecting admin leaves", async () => {
+    const { app, team } = await setup();
+    await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "admin" });
+    const state = await start(app.baseUrl, team.id, "test-member");
+    await removeMember(app.providers.db, { teamId: team.id, userId: "test-member" });
+    const response = await finish(app.baseUrl, state, "test-member");
+    expect(response.headers.get("location")).toContain("error=team_access_changed");
+    expect(fake.tokenRequests).toHaveLength(0);
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
+  });
+
+  it("refuses callbacks for a deleted team or a different signed-in user", async () => {
+    const { app, team } = await setup();
+    const state = await start(app.baseUrl, team.id);
+    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=oauth_state");
+    await app.providers.db.delete(teams).where(eq(teams.id, team.id));
+    expect((await finish(app.baseUrl, state)).headers.get("location")).toContain("error=team_access_changed");
+    expect(fake.tokenRequests).toHaveLength(0);
+  });
+
+  it.each(["remove", "demote", "org-demote", "org-remove", "delete-team"])(
+    "refuses a callback when %s occurs during token exchange", async (change) => {
+      const { app, team } = await setup();
+      const orgAdmin = change.startsWith("org-");
+      if (orgAdmin) {
+        await app.providers.db.update(orgMembers).set({ role: "admin" }).where(eq(orgMembers.userId, "test-member"));
+      } else {
+        await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "admin" });
+      }
+      const state = await start(app.baseUrl, team.id, "test-member");
+      const actualFetch = globalThis.fetch;
+      let revoked = false;
+      const exchange = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url === `${fake.url}/token`) {
+          if (change === "remove") await removeMember(app.providers.db, { teamId: team.id, userId: "test-member" });
+          if (change === "demote") await setRole(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+          if (change === "org-demote") await app.providers.db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.userId, "test-member"));
+          if (change === "org-remove") await app.providers.db.delete(orgMembers).where(eq(orgMembers.userId, "test-member"));
+          if (change === "delete-team") await deleteTeam(app.providers.db, { teamId: team.id });
+          revoked = true;
+        }
+        return actualFetch(input, init);
+      });
+      try {
+        const response = await finish(app.baseUrl, state, "test-member");
+        expect(revoked).toBe(true);
+        expect(response.headers.get("location")).toContain("error=team_access_changed");
+        expect(await app.providers.db.select().from(credentials).where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id)))).toEqual([]);
+      } finally {
+        exchange.mockRestore();
+      }
+    },
+  );
+
+  it("stores a confidential-client OAuth connection on the team", async () => {
+    process.env.TEST_GOOGLE_ID = "gid";
+    process.env.TEST_GOOGLE_SECRET = "gsecret";
+    const app = await bootTestApi({ plugins: [authCodePlugin(fake.url)] });
+    api = app;
+    const team = await createTeam(app.providers.db, { orgId: "local-org", name: "Google team", creatorUserId: "local-user" });
+    const response = await fetch(`${app.baseUrl}/api/credentials/gmail/connect?scope=team&teamId=${team.id}`, { redirect: "manual" });
+    const state = new URL(response.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    expect((await finish(app.baseUrl, state)).headers.get("location")).toContain("connected=gmail");
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "gmail")).toMatchObject({ accessToken: "at-1", refreshToken: "rt-1" });
+    expect(await app.providers.engineCredentials.get({ type: "user", id: "local-user" }, "gmail")).toBeNull();
+  });
+
+  it("does not turn an OAuth personal identity link into a team credential", async () => {
+    process.env.SLACKISH_ID = "sid";
+    process.env.SLACKISH_SECRET = "secret";
+    const app = await bootTestApi({ plugins: [slackishPlugin(fake.url)] });
+    api = app;
+    const team = await createTeam(app.providers.db, { orgId: "local-org", name: "Identity team", creatorUserId: "local-user" });
+    await linkIdentity(app.providers.db, { provider: "slack", externalId: "existing-slack-user", userId: "local-user" });
+    await setNotifyAttention(app.providers.db, "slack", "local-user", true);
+    const personalIdentity = await identityForUser(app.providers.db, "slack", "local-user");
+    const personalCredential = { type: "oauth2" as const, accessToken: "personal-access-sentinel", refreshToken: "personal-refresh-sentinel" };
+    await app.providers.engineCredentials.save({ type: "user", id: "local-user" }, "slackish", personalCredential);
+    fake.tokenResponse = { ok: true, authed_user: { id: "slack-user", access_token: "personal-slack", scope: "chat:write" } };
+    const response = await fetch(`${app.baseUrl}/api/credentials/slackish/connect?scope=team&teamId=${team.id}`, { redirect: "manual" });
+    const state = new URL(response.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    const callback = await finish(app.baseUrl, state);
+    expect(callback.headers.get("location")).toContain("error=team_identity_unsupported");
+    expect(callback.headers.get("location")).not.toContain("personal-slack");
+    expect(await identityForUser(app.providers.db, "slack", "local-user")).toEqual(personalIdentity);
+    expect(await identityForExternal(app.providers.db, "slack", "slack-user")).toBeNull();
+    expect(await app.providers.engineCredentials.get({ type: "user", id: "local-user" }, "slackish")).toMatchObject(personalCredential);
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "slackish")).toBeNull();
+  });
+
+  it("reports a saved connection accurately when workflow resync fails", async () => {
+    const { app, team } = await setup();
+    const resync = vi.spyOn(app.providers.contentSync, "resyncTeamWorkflowSources").mockRejectedValueOnce(new Error("sync unavailable"));
+    try {
+      const response = await finish(app.baseUrl, await start(app.baseUrl, team.id));
+      expect(response.headers.get("location")).toContain("error=team_sync_failed");
+      expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "at-1" });
+    } finally {
+      resync.mockRestore();
+    }
+  });
+
+  it("keeps an occupied team slot when two OAuth callbacks complete", async () => {
+    const { app, team } = await setup();
+    const first = await start(app.baseUrl, team.id);
+    const second = await start(app.baseUrl, team.id);
+    const responses = await Promise.all([finish(app.baseUrl, first), finish(app.baseUrl, second)]);
+    const locations = responses.map((r) => r.headers.get("location"));
+    expect(locations.filter((v) => v?.includes("connected=linear"))).toHaveLength(1);
+    expect(locations.filter((v) => v?.includes("error=team_connection_exists"))).toHaveLength(1);
+    expect(await app.providers.db.select().from(credentials).where(eq(credentials.ownerId, team.id))).toHaveLength(1);
   });
 });

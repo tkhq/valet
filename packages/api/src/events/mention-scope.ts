@@ -5,6 +5,10 @@
  * subscription". At write time it is scoped two ways, so it cannot collect
  * other users' mentions or silently listen across the whole Slack workspace:
  *
+ * Team assistant rules replace creator scope with live membership checks in
+ * `team-slack-gate.ts`. Their stored user filters are removed on match edits.
+ * The following creator rules apply to personal, org, and workflow targets.
+ *
  * 1. **User scope.** The filters must carry a `user` filter equal to the
  *    creator's linked Slack user id. Absent, the server injects it; present
  *    with any other value, the write is refused. A creator with no linked
@@ -100,6 +104,7 @@ export async function enforceMentionScope(
     filters: SubscriptionFilter[];
     anyChannel: boolean;
     storedAnyChannel?: boolean;
+    teamAssistant?: boolean;
   },
 ): Promise<MentionScopeResult> {
   if (!selectsSlackMention(args.eventKeys)) return { ok: true, filters: args.filters };
@@ -114,7 +119,7 @@ export async function enforceMentionScope(
     return {
       ok: false,
       error:
-        `A mention subscription is scoped to your own @-mentions, so it cannot also subscribe ` +
+        `A mention subscription cannot also subscribe ` +
         `to ${entry.key}. Create a separate subscription for ${entry.key}.`,
     };
   }
@@ -146,6 +151,12 @@ export async function enforceMentionScope(
         "A mention subscription needs at least one channel filter (equals, or is one of). " +
         'Select channels, or choose "Any channel" to listen in every channel the app can see.',
     };
+  }
+
+  // Team assistant rules use current membership at match time. Remove the
+  // creator filter from interim rows when they are edited.
+  if (args.teamAssistant) {
+    return { ok: true, filters: args.filters.filter((f) => f.field !== "user") };
   }
 
   const identity = await identityForUser(db, "slack", creatorUserId);

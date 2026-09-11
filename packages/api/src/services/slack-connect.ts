@@ -25,7 +25,7 @@ const AUTH_TEST_TIMEOUT_MS = 10_000;
 export interface SlackWorkspaceIdentity {
   teamId: string;
   teamName?: string;
-  botUserId?: string;
+  botUserId: string;
   /**
    * Scopes the installed app granted, from Slack's `x-oauth-scopes`
    * response header. `null` when the header was absent — that is "unknown",
@@ -105,12 +105,20 @@ export async function verifySlackBotToken(token: string, env: NodeJS.ProcessEnv 
     };
   }
 
+  const botUserId = stringField(payload, "user_id");
+  if (botUserId === undefined) {
+    return {
+      ok: false,
+      error: "Slack did not report the bot user identity (user_id). Reinstall the app in your workspace. Copy the Bot User OAuth Token from OAuth & Permissions, then connect again.",
+    };
+  }
+
   return {
     ok: true,
     identity: {
       teamId,
       teamName: stringField(payload, "team"),
-      botUserId: stringField(payload, "user_id"),
+      botUserId,
       grantedScopes: parseGrantedScopes(response.headers.get("x-oauth-scopes")),
     },
   };

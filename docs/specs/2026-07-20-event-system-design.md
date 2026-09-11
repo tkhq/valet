@@ -355,3 +355,10 @@ job.
 - Sources beyond GitHub and Linear (the contract supports them; none built).
 - Per-event user-level webhook config — installation-level only.
 - Outbound webhooks (Valet emitting events to external URLs).
+
+
+## Team Slack mention routing (2026-09-10)
+
+Team assistant subscriptions use the organization Slack bot and authorize the linked sender against current team membership.
+Ingress and redelivery share this check before creating deliveries. The dispatcher checks again and attributes delivery to the mentioner.
+Personal and workflow mention rules remain creator-scoped. See `2026-09-04-team-slack-mention-subscriptions-design.md`.

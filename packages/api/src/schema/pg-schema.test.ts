@@ -915,6 +915,7 @@ describe("pg app schema + migrations", () => {
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
       { table: "agent_sessions", column: "sandbox_resource_overrides" },
+      { table: "skill_sources", column: "sync_revision" },
       { table: "mcp_oauth_clients", column: "registered_scopes" },
       { table: "mcp_oauth_clients", column: "scopes_supported" },
       { table: "security_engagements", column: "base_ref" },

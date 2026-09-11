@@ -610,7 +610,7 @@ describe("resolveTeamCredentialRead", () => {
   // The org-provided row is the other place a team read dereferences an
   // op:// ref. A lease narrows that read too, or the grant is a fence with a
   // gate left open for every service a plugin declares org-provided.
-  it("refuses an ungranted 1Password reference on the org-provided row", async () => {
+  it("ignores obsolete grants for a 1Password reference on the org-provided row", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "team", id: teamId }, "onepassword", {
       type: "service_account",
@@ -620,12 +620,10 @@ describe("resolveTeamCredentialRead", () => {
       type: "bot_token",
       metadata: { onepassword: { reference: "op://Shared/Other/bot", tokenScope: "org" } },
     });
-    const onePassword = fakeOnePassword(async () => {
-      throw new Error("must not resolve an ungranted ref");
-    });
+    const onePassword = fakeOnePassword(async (row) => ({ ...row, apiKey: "resolved" }));
     await expect(
       resolveTeamCredentialRead({ credentials, onePassword }, { orgId, teamId }, "slack", "org-provided"),
-    ).rejects.toMatchObject({ message: expect.stringContaining("Ask a team admin") });
+    ).resolves.toMatchObject({ apiKey: "resolved" });
   });
 
   it("resolves a granted 1Password reference on the org-provided row", async () => {
@@ -643,7 +641,7 @@ describe("resolveTeamCredentialRead", () => {
     expect(got?.accessToken).toBe("bot-from-vault");
   });
 
-  it("refuses an ungranted 1Password reference on a team row", async () => {
+  it("ignores obsolete grants for a 1Password reference on a team row", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "team", id: teamId }, "onepassword", {
       type: "service_account",
@@ -653,9 +651,7 @@ describe("resolveTeamCredentialRead", () => {
       type: "api_key",
       metadata: { onepassword: { reference: "op://Shared/Other/password", tokenScope: "org" } },
     });
-    const onePassword = fakeOnePassword(async () => {
-      throw new Error("must not resolve an ungranted ref");
-    });
+    const onePassword = fakeOnePassword(async (row) => ({ ...row, apiKey: "resolved" }));
     await expect(
       resolveTeamCredentialRead(
         { credentials, onePassword },
@@ -663,9 +659,7 @@ describe("resolveTeamCredentialRead", () => {
         "linear",
         "reference-only",
       ),
-    ).rejects.toMatchObject({
-      message: expect.stringContaining("Ask a team admin"),
-    });
+    ).resolves.toMatchObject({ apiKey: "resolved" });
   });
 
   it("returns null for denied services", async () => {

@@ -9,7 +9,7 @@
  *    explicit "Any channel" opt-out), which assistant answers, and a "Keep
  *    following the thread" toggle. POSTs an event subscription on
  *    `slack.app_mention` with an orchestrator target that carries `follow`.
- *    The server scopes the rule to the creator's linked Slack user
+ *    The server scopes personal rules to the creator's linked Slack user
  *    (TKAI-299, `events/mention-scope.ts`), so the step says so up front.
  *  - Run a workflow on an event → the event picker, then a workflow target.
  *  - Send a notification → the event picker, then an orchestrator target.
@@ -312,15 +312,7 @@ export function AutomationWizard({
     return t.kind === "orchestrator" ? t : { kind: "orchestrator", orchestrator: "user" };
   }
 
-  // A mention rule cannot target a team until the membership gate ships
-  // (docs/specs/2026-09-04-team-slack-mention-subscriptions-design.md,
-  // decision 7). The workspace seed and the Then step can still hold a team
-  // target, so the reply step, its review line and the create all read this
-  // narrowed value: the team falls back to the caller's own assistant.
-  function mentionTargetFrom(t: TargetChoice): OrchestratorChoice {
-    const chosen = orchestratorTargetFrom(t);
-    return chosen.orchestrator === "team" ? { kind: "orchestrator", orchestrator: "user" } : chosen;
-  }
+  const mentionTargetFrom = orchestratorTargetFrom;
 
   function submit(allowCollision = false) {
     if (!canCreate) return;
@@ -607,7 +599,7 @@ const OUTCOMES: { value: Outcome; title: string; hint: string }[] = [
   {
     value: "reply",
     title: "Reply to Slack mentions",
-    hint: "An assistant answers when you @-mention the app in Slack.",
+    hint: "An assistant answers Slack @-mentions.",
   },
   {
     value: "workflow",
@@ -658,12 +650,9 @@ function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Ou
  * The reply outcome's one config step: the channels to reply in (required,
  * unless "Any channel" is chosen), which assistant answers, and the follow
  * toggle. No raw event key is shown — the event is always
- * `slack.app_mention`. The server also scopes the rule to the creator's
- * linked Slack user, so the step says so and warns when no link exists.
+ * `slack.app_mention`. Personal rules need the creator's linked Slack user.
  *
- * The team's assistant is listed but disabled: a team-owned mention rule
- * still fires only for its creator, so offering it would promise a team-wide
- * rule the gate does not deliver yet (spec 2026-09-04, decision 7).
+ * Team assistant rules accept mentions from linked, current team members.
  */
 function ReplyStep({
   channels,
@@ -695,10 +684,12 @@ function ReplyStep({
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted">
-        This rule fires only when <span className="text-ink">you</span> @-mention the app.
-        Mentions by other people do not reach {reach}.
+        {target.orchestrator === "team"
+          ? "This rule uses the organization’s Slack bot. It fires when any linked team member @-mentions the app. Unlinked senders and nonmembers cannot invoke the team assistant."
+          : <>This rule fires only when <span className="text-ink">you</span> @-mention the app.
+            Mentions by other people do not reach {reach}.</>}
       </p>
-      {slackUnlinked && (
+      {slackUnlinked && target.orchestrator !== "team" && (
         <p className="text-xs text-danger-500">
           Your Slack account is not linked, so this rule cannot fire for you yet. Link it in
           Settings → Connected accounts, then create the rule.
@@ -723,7 +714,7 @@ function ReplyStep({
           <span>
             Any channel
             <span className="block text-xs text-muted">
-              Reply wherever you @-mention the app, in every channel it can see.
+              Reply to eligible @-mentions in every channel the app can see.
             </span>
           </span>
         </label>
@@ -752,14 +743,16 @@ function ReplyStep({
           )}
           {scopedTeam && (
             <div>
-              <label className="flex items-center gap-2 text-sm text-muted">
-                <input type="radio" name="automation-reply-target" disabled />
+              <label className="flex items-center gap-2 text-sm text-ink">
+                <input type="radio" name="automation-reply-target"
+                  checked={target.orchestrator === "team"}
+                  onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })} />
                 {scopedTeam.name}&apos;s assistant
               </label>
-              <p className="ml-6 text-xs text-muted">
-                Team-wide mentions are not available yet. This rule would only answer your own
-                mentions.
-              </p>
+              {target.orchestrator === "team" && (
+                <AssistantSelect owner={{ type: "team", id: scopedTeam.id }} value={target.assistantId}
+                  onChange={(assistantId) => onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id, assistantId })} />
+              )}
             </div>
           )}
           <label className="flex items-center gap-2 text-sm text-ink">
@@ -1066,7 +1059,7 @@ export function EventMatchStep({
               <span>
                 Any channel
                 <span className="block text-xs text-muted">
-                  A mention rule fires only for your own @-mentions and needs a channel filter.
+                  Personal rules accept your own mentions. Team assistant rules accept linked team members. A channel filter is required.
                   Check this to listen in every channel the app can see instead.
                 </span>
               </span>
@@ -1361,6 +1354,9 @@ export function summarize(args: {
         ? ` in ${names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`}`
         : "";
     const trailing = args.follow ? " Later thread messages reach the assistant too." : "";
+    if (args.target.kind === "orchestrator" && args.target.orchestrator === "team") {
+      return `When any linked team member @-mentions the app${where}, ${then}. Unlinked senders and nonmembers do not fire it.${trailing}`;
+    }
     return `When you @-mention the app${where}, ${then}. Mentions by other people do not fire it.${trailing}`;
   }
 

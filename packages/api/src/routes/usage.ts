@@ -10,6 +10,7 @@ import type { AppEnv } from "../env.js";
 import type { UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
 import {
   getUsageBreakdown,
+  getDailyAgentActivity,
   getUsageDrillItems,
   getUsageExportCsv,
   getUsageSessions,
@@ -54,6 +55,14 @@ usageRouter.get("/summary", async (c) => {
     now: Date.now(),
   });
   return c.json(body);
+});
+
+usageRouter.get("/daily-agents", async (c) => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  return c.json(await getDailyAgentActivity(c.var.providers.db, {
+    windowMs: windowMsFrom(c.req.query("window")), scope,
+  }));
 });
 
 usageRouter.get("/breakdown", async (c) => {

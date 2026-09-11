@@ -1,3 +1,4 @@
+import type { ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
  * `@valet/api/wire` so server + web agree on the shape.
@@ -131,12 +132,10 @@ import type {
   DeleteSkillSourceResponse,
   SkillResponse,
   DeleteSkillResponse,
+  JoinSuggestedTeamResponse,
+  ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
-  DeleteTeamOnePasswordRefsResponse,
-  PutTeamOnePasswordRefsRequest,
-  PutTeamOnePasswordRefsResponse,
-  TeamOnePasswordRefsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   GetTeamChildrenResponse,
@@ -151,6 +150,7 @@ import type {
   InstallWorkflowTemplateResponse,
   MeResponse,
   OnePasswordSettingsResponse,
+  TeamOnePasswordStatusResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
@@ -503,6 +503,10 @@ export interface WorkflowRunFilter extends WorkflowRunPage {
 }
 
 export const api = {
+  listTeamDeletionRequests: (teamId: string) => request<ListTeamDeletionRequestsResponse>("GET", `/teams/${encodeURIComponent(teamId)}/deletion-requests`),
+  listTeamDeletionTargets: (teamId: string) => request<ListTeamDeletionTargetsResponse>("GET", `/teams/${encodeURIComponent(teamId)}/deletion-requests/targets`),
+  submitTeamDeletionRequest: (teamId: string, body: SubmitTeamDeletionRequest) => request<{ request: { id: string }; created: boolean }>("POST", `/teams/${encodeURIComponent(teamId)}/deletion-requests`, body),
+  decideTeamDeletionRequest: (teamId: string, id: string, decision: "approve" | "decline" | "withdraw", note?: string) => request<{ ok: true }>("POST", `/teams/${encodeURIComponent(teamId)}/deletion-requests/${encodeURIComponent(id)}/${decision}`, { note }),
   // auth
   getAuthConfig: () => fetchAuthConfig(),
 
@@ -793,6 +797,10 @@ export const api = {
   // without rewriting it.
   writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }, owner?: OwnerFilter) =>
     request<unknown>("PUT", `/memory${ownerQuery(owner)}`, body),
+  copyMemoryFile: (direction: "push" | "pull", body: { from: string; to: string; teamId: string }) =>
+    request<{ file: { path: string; ownerType: string; ownerId: string } }>(
+      "POST", `/memory/copy-${direction === "push" ? "to" : "from"}-team`, body,
+    ),
   deleteMemoryDoc: (path: string, owner?: OwnerFilter) =>
     request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}${ownerSuffix(owner)}`),
   // `owner` scopes the bundle to a workspace, like every other memory read:
@@ -1186,6 +1194,10 @@ export const api = {
 
   // teams (org membership structure — first UI over the existing router)
   listTeams: () => request<ListTeamsResponse>("GET", "/teams"),
+  listSuggestedTeams: () =>
+    request<ListSuggestedTeamsResponse>("GET", "/teams/suggestions"),
+  joinSuggestedTeam: (id: string) =>
+    request<JoinSuggestedTeamResponse>("POST", `/teams/${encodeURIComponent(id)}/join`),
   createTeam: (body: CreateTeamRequest) =>
     request<CreateTeamResponse>("POST", "/teams", body),
   patchTeam: (id: string, body: PatchTeamRequest) =>
@@ -1209,19 +1221,6 @@ export const api = {
     ),
   ensureTeamOrchestrator: (id: string) =>
     request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
-  listTeamOnePasswordRefs: (id: string) =>
-    request<TeamOnePasswordRefsResponse>("GET", `/teams/${encodeURIComponent(id)}/onepassword-refs`),
-  putTeamOnePasswordRefs: (id: string, body: PutTeamOnePasswordRefsRequest) =>
-    request<PutTeamOnePasswordRefsResponse>(
-      "PUT",
-      `/teams/${encodeURIComponent(id)}/onepassword-refs`,
-      body,
-    ),
-  deleteTeamOnePasswordRefs: (id: string) =>
-    request<DeleteTeamOnePasswordRefsResponse>(
-      "DELETE",
-      `/teams/${encodeURIComponent(id)}/onepassword-refs`,
-    ),
   listTeamApiKeys: (id: string) =>
     request<ListTeamApiKeysResponse>("GET", `/teams/${encodeURIComponent(id)}/api-keys`),
   createTeamApiKey: (id: string, body: CreateTeamApiKeyRequest) =>
@@ -1272,6 +1271,8 @@ export const api = {
   // service-account token to browse with — "org" (open to any org member
   // once the org token is connected) or "personal" (gated server-side by
   // the org's allowPersonal toggle).
+  getTeamOnePasswordStatus: (teamId: string) =>
+    request<TeamOnePasswordStatusResponse>("GET", `/onepassword/team-status?teamId=${encodeURIComponent(teamId)}`),
   getOnePasswordSettings: () =>
     request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
   putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>

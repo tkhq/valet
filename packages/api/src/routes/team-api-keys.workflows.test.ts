@@ -110,6 +110,31 @@ async function bootFixture(): Promise<Fixture> {
 }
 
 describe("team API key workflow reach", () => {
+  it("hides other teams' deletion state and refuses machine approval authority", async () => {
+    const f = await bootFixture();
+    const otherTeam = await createTeam(f.baseUrl, f.cookie, "Other team");
+    const otherKey = await mintTeamKey(f.baseUrl, f.cookie, otherTeam);
+    const otherWorkflow = await createWorkflow(f.baseUrl, { "x-api-key": otherKey }, "confidential");
+    const request = await fetch(`${f.baseUrl}/api/teams/${otherTeam}/deletion-requests`, {
+      method: "POST", headers: { cookie: f.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ resourceType: "workflow", resourceId: otherWorkflow }),
+    });
+    expect(request.status).toBe(201);
+    for (const id of [otherWorkflow, f.personalWorkflowId, "missing-workflow"]) {
+      const response = await fetch(`${f.baseUrl}/api/workflows/${id}`, { method: "DELETE", headers: { "x-api-key": f.teamKey } });
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body).not.toHaveProperty("teamId");
+      expect(body).not.toHaveProperty("requestId");
+    }
+    const own = await fetch(`${f.baseUrl}/api/workflows/${f.teamWorkflowId}`, { method: "DELETE", headers: { "x-api-key": f.teamKey } });
+    expect(own.status).toBe(403);
+    expect(await own.json()).toMatchObject({ code: "team_admin_required", teamId: f.teamId });
+    for (const suffix of ["", "/targets"]) {
+      expect((await fetch(`${f.baseUrl}/api/teams/${f.teamId}/deletion-requests${suffix}`, { headers: { "x-api-key": f.teamKey } })).status).toBe(403);
+    }
+  });
+
   it("lists only its team's triggers, never the admin's personal schedule", async () => {
     const f = await bootFixture();
     const headers = { "x-api-key": f.teamKey };

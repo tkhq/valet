@@ -21,7 +21,7 @@ import type { Principal } from "@valet/engine";
 import { NotFoundError, parseSearchQuery, ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { extractLinkTargets, isPathShaped, rewriteLinkTargets } from "../lib/memory-graph.js";
-import { memoryFiles, teamMembers, teams, type MemoryFileRow } from "../schema/index.js";
+import { memoryFiles, teamMembers, teams, orgMembers, type MemoryFileRow } from "../schema/index.js";
 import { listTeamsForUser, canAdministerTeam, lockTeamForOwnership } from "./teams.js";
 import {
   assertWritablePath,
@@ -32,6 +32,7 @@ import {
   type RenderableConcept,
 } from "../lib/okf.js";
 
+/** Personal memory spans organizations; team access follows live membership, not an active org. */
 export interface MemoryScope {
   owner: Principal;
   actorUserId: string;
@@ -659,33 +660,69 @@ export async function readOwnFile(db: AppDb, scope: MemoryScope, path: string): 
   return rows[0] ?? null;
 }
 
-/** Copy an explicit personal file into team memory without rewriting its body. */
+/** Push one personal memory file to a team. */
 export async function copyFileToTeam(
   db: AppDb,
   scope: MemoryScope,
   input: { from: string; to: string; teamId: string },
 ): Promise<MemoryFileRow> {
+  return copyTeamFile(db, scope, input, "push");
+}
+
+/** Pull one team memory file into the acting user's personal memory. */
+export async function copyFileFromTeam(
+  db: AppDb,
+  scope: MemoryScope,
+  input: { from: string; to: string; teamId: string },
+): Promise<MemoryFileRow> {
+  return copyTeamFile(db, scope, input, "pull");
+}
+
+async function copyTeamFile(
+  db: AppDb,
+  scope: MemoryScope,
+  input: { from: string; to: string; teamId: string },
+  direction: "push" | "pull",
+): Promise<MemoryFileRow> {
   if (scope.owner.type !== "user" || scope.owner.id !== scope.actorUserId) {
-    throw new ValidationError("Copy personal memory from your personal assistant or workspace.");
+    throw new ValidationError("Copy memory from your personal assistant or workspace.");
   }
-  const source = await readOwnFile(db, scope, input.from);
-  if (!source) throw new NotFoundError("memory file", input.from);
+  const from = normalizePath(input.from);
   const path = normalizePath(input.to);
   assertWritablePath(path);
   return db.transaction(async (tx) => {
     await lockTeamForOwnership(tx, input.teamId);
-    if (!(await isTeamMember(tx, input.teamId, scope.actorUserId))) {
-      throw new NotFoundError("team", input.teamId);
-    }
-    if (!(await canAdministerTeam(tx, input.teamId, scope.actorUserId))) {
-      throw new ValidationError("Ask a team admin to copy this file into team memory.");
-    }
-    const [team] = await tx.select().from(teams).where(eq(teams.id, input.teamId)).limit(1);
+    // Hold membership through the insert, including concurrent removal or demotion.
+    const [membership] = await tx.select().from(teamMembers).where(and(
+      eq(teamMembers.teamId, input.teamId), eq(teamMembers.userId, scope.actorUserId),
+    )).for("share");
+    if (!membership) throw new NotFoundError("team", input.teamId);
+    const [team] = await tx.select().from(teams).where(eq(teams.id, input.teamId)).limit(1).for("share");
     if (!team) throw new NotFoundError("team", input.teamId);
+    if (direction === "push") {
+      // An org-admin grant can authorize a plain team member. Protect it from demotion too.
+      const [orgMembership] = await tx.select().from(orgMembers).where(and(
+        eq(orgMembers.orgId, team.orgId), eq(orgMembers.userId, scope.actorUserId),
+      )).for("share");
+      // A grant inserted after the lock query must not authorize this copy without a lock.
+      const hasLockedGrant = membership.role === "admin" || orgMembership?.role === "admin";
+      if (!hasLockedGrant || !(await canAdministerTeam(tx, input.teamId, scope.actorUserId))) {
+        throw new ValidationError("Ask a team admin or an admin of this team's organization to copy this file. Team membership is also required.");
+      }
+    }
+    const teamOwner: Principal = { type: "team", id: team.id };
+    const sourceOwner = direction === "push" ? scope.owner : teamOwner;
+    const destinationOwner = direction === "push" ? teamOwner : scope.owner;
+    const [source] = await tx.select().from(memoryFiles).where(and(
+      eq(memoryFiles.ownerType, sourceOwner.type), eq(memoryFiles.ownerId, sourceOwner.id),
+      eq(memoryFiles.path, from),
+    )).limit(1);
+    if (!source) throw new NotFoundError("memory file", input.from);
     const now = Date.now();
     const [file] = await tx.insert(memoryFiles).values({
       ...source,
-      ownerType: "team", ownerId: team.id, path, orgId: team.orgId,
+      ownerType: destinationOwner.type, ownerId: destinationOwner.id, path,
+      orgId: direction === "push" ? team.orgId : "",
       actorUserId: scope.actorUserId, sourceSessionId: "", version: 1,
       sourceId: null, upstreamPath: null, contentSha: null,
       createdAt: now, updatedAt: now,

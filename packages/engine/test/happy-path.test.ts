@@ -7,6 +7,7 @@ import {
   VirtualSandboxProvider,
   type BusEvent,
   type ToolDef,
+  type CredentialOwner,
 } from "../src/index.js";
 
 function makeEngine() {
@@ -184,6 +185,34 @@ describe("engine: single-thread happy path", () => {
     expect(receivedCtx?.threadId).toBe(receipt.threadId);
     expect(receivedCtx?.origin).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2" });
 
+    faux.unregister();
+  });
+
+  it.each(["user", "team"] as const)("uses queued actors without changing %s credentials", async (ownerType) => {
+    const faux = registerFauxProvider({ provider: "turn-actors" });
+    const { engine, events } = makeEngine();
+    const actors: string[] = [];
+    const credentialOwners: CredentialOwner[] = [];
+    const session = await engine.createSession({
+      userId: "credential-owner", owner: { type: ownerType, id: "credential-owner" },
+      orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      credentialResolver: async (owner) => { credentialOwners.push(owner); return null; },
+      tools: [{ name: "actor", description: "record actor", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        actors.push(ctx.userId); await ctx.credentials.get("slack"); return { text: "ok" };
+      } }],
+    });
+    for (const actor of ["member-b", "member-c", undefined]) {
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("actor", {}, { id: `tool-${actor}` })], { stopReason: "toolUse" }),
+        fauxAssistantMessage("done"),
+      ]);
+      events.length = 0;
+      const receipt = await session.prompt("record", { author: actor ? { id: actor } : undefined });
+      await waitForStatus(events, receipt.threadId, "idle");
+    }
+    expect(actors).toEqual(["member-b", "member-c", "credential-owner"]);
+    expect(credentialOwners).toEqual(Array.from({ length: 3 }, () => ({ type: ownerType, id: "credential-owner" })));
+    expect(session.options.userId).toBe("credential-owner");
     faux.unregister();
   });
 

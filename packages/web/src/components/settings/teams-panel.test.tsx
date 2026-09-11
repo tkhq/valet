@@ -35,6 +35,13 @@ function RouterLinkStub({
   );
 }
 
+// The request panel has its own real-query integration tests. Keep this suite
+// focused on team settings and authority controls.
+vi.mock("./team-deletion-requests", () => ({
+  TeamDeletionRequests: ({ teamId, canManage }: { teamId: string; canManage: boolean }) =>
+    <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
+}));
+
 vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
 }));
@@ -58,9 +65,6 @@ const deleteTeamReset = vi.fn(() => {
 let callerRole: "admin" | "member" | null = "member";
 let orgRole: "admin" | "member" = "member";
 let origin: "local" | "config" | "idp" = "local";
-/** The org's team-sync gate. Off is the product default, so it is the default here. */
-let ssoTeamSync = false;
-
 let selectedTeamsOverride: TeamSummary[] | undefined;
 let selectedTeamsLoading = false;
 let selectedTeamsError: Error | null = null;
@@ -111,11 +115,6 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: selectedTeamsOverride ? { teams: selectedTeamsOverride } : teamsData(), isLoading: selectedTeamsLoading, error: selectedTeamsError }),
   useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
-  useOrg: () => ({
-    data: { features: { organizations: true, ssoTeamSync } },
-    isLoading: false,
-    error: null,
-  }),
   useTeamMembers: () => ({
     data: {
       members: [
@@ -141,13 +140,6 @@ vi.mock("~/api/settings", () => ({
   useRemoveTeamMember: () => ({ mutate: vi.fn(), isPending: false }),
   useSetTeamMemberRole: () => ({ mutate: vi.fn(), isPending: false }),
   usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false, error: null }),
-  useTeamOnePasswordRefs: () => ({
-    data: { refs: teamOpRefs },
-    isLoading: false,
-    error: null,
-  }),
-  usePutTeamOnePasswordRefs: () => ({ mutate: putOpRefsMutate, isPending: false, error: null }),
-  useDeleteTeamOnePasswordRefs: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   // The default-model combobox reads the org catalog through this hook.
   useModels: () => ({
     data: {
@@ -185,8 +177,6 @@ vi.mock("~/api/settings", () => ({
   useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
 }));
 
-let teamOpRefs: string[] = [];
-const putOpRefsMutate = vi.fn();
 
 let teamCredentials: Array<{
   service: string;
@@ -238,11 +228,7 @@ function openTeam() {
   return view;
 }
 
-/**
- * A mirrored team hides its controls only while the sync actually runs. The
- * gate is the org's `ssoTeamSync` feature, so the same row reads two ways.
- */
-describe("TeamsPanel — mirrored teams follow the team-sync gate", () => {
+describe("TeamsPanel — identity-provider provenance", () => {
   beforeEach(() => {
     callerRole = "admin";
     orgRole = "admin";
@@ -251,25 +237,11 @@ describe("TeamsPanel — mirrored teams follow the team-sync gate", () => {
 
   afterEach(() => {
     origin = "local";
-    ssoTeamSync = false;
   });
 
-  it("hides the controls while team sync is on", () => {
-    ssoTeamSync = true;
+  it("shows provenance and keeps manual membership controls", () => {
     openTeam();
     expect(screen.getByText("Identity provider")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
-  });
-
-  it("returns the controls, and says why, while team sync is off", () => {
-    // Nothing reasserts this team any more, so a hidden control would leave
-    // a team nobody can change. The badge and the note are what stop that
-    // reading as "this team was never mirrored".
-    ssoTeamSync = false;
-    openTeam();
-    expect(screen.getByText("Identity provider (paused)")).toBeTruthy();
-    expect(screen.getByText(/team sync is off/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Add member/ })).toBeTruthy();
   });
@@ -362,13 +334,21 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
 });
 
 describe("TeamsPanel role gating", () => {
-  it("hides mutation controls from a plain team member", () => {
+  it("offers a request instead of deletion to a plain team member", async () => {
     callerRole = "member";
     orgRole = "member";
     openTeam();
-    expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Platform actions" }));
+    expect(screen.getByRole("menuitem", { name: "Request deletion" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Delete team" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Deletion requests", hidden: true }).getAttribute("data-can-manage")).toBe("false");
+    await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Remove One/ })).toBeNull();
+    // Both roster roles render as badges, never dropdown triggers. This
+    // includes the caller's own row, so the UI offers no self-promotion path.
+    expect(screen.queryByRole("button", { name: "Admin" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Member" })).toBeNull();
   });
 
   it("shows mutation controls to a team admin", () => {
@@ -377,6 +357,7 @@ describe("TeamsPanel role gating", () => {
     openTeam();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Add member/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Member" })).toBeTruthy();
   });
 
   it("shows mutation controls to an org admin who is not on the team", () => {
@@ -384,6 +365,7 @@ describe("TeamsPanel role gating", () => {
     orgRole = "admin";
     openTeam();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Member" })).toBeTruthy();
   });
 });
 
@@ -460,36 +442,21 @@ describe("TeamsPanel — deleting a team", () => {
   });
 });
 
-describe("TeamsPanel — 1Password references", () => {
-  beforeEach(() => {
-    teamOpRefs = ["op://Shared/Acme/credential"];
-    putOpRefsMutate.mockClear();
-  });
-
-  afterEach(() => {
-    teamOpRefs = [];
-  });
-
-  it("lets a team admin grant a reference", () => {
+describe("TeamsPanel — 1Password connection", () => {
+  it("removes reference preferences and shows team token controls", () => {
     callerRole = "admin";
     orgRole = "member";
     openTeam();
-    fireEvent.change(screen.getByLabelText("Grant 1Password reference to Platform"), {
-      target: { value: "op://Shared/Other/password" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Grant" }));
-    expect(putOpRefsMutate).toHaveBeenCalledWith({
-      teamId: "team_1",
-      body: { refs: ["op://Shared/Acme/credential", "op://Shared/Other/password"] },
-    });
+    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
+    expect(screen.queryByText("1Password references")).toBeNull();
+    expect(screen.getByLabelText("1Password service account token for Platform")).toBeTruthy();
   });
-
-  it("hides the grant control from a plain member", () => {
+  it("does not expose token controls to a member", () => {
     callerRole = "member";
     orgRole = "member";
     openTeam();
-    expect(screen.getByText("op://Shared/Acme/credential")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Connect token" })).toBeNull();
+    expect(screen.getByText("No team token connected. Team sessions use the organization token when available.")).toBeTruthy();
   });
 });
 
@@ -678,7 +645,7 @@ describe("TeamsPanel — team credentials", () => {
 
   it("names the empty place when the team has no credentials", () => {
     openTeam();
-    expect(screen.getByText("No credentials in Platform yet. Share one from Integrations.")).toBeTruthy();
+    expect(screen.getByText(/No connections added to this team yet/)).toBeTruthy();
   });
 
   it("lists a delegated row with the delegator name and a broken badge", () => {
@@ -909,7 +876,6 @@ describe("TeamsPanel selected workspace", () => {
     selectedTeamsError = null;
     orgRole = "member";
     origin = "local";
-    ssoTeamSync = false;
     deleteTeamMutate.mockClear();
     patchTeamMutate.mockClear();
   });
@@ -933,7 +899,7 @@ describe("TeamsPanel selected workspace", () => {
     selectedTeamsOverride = [team("team_1", "Platform"), team("team_2", "Support", "member")];
     render(<TeamsPanel orgMembers={orgMembers} teamId="team_2" />);
     expect(screen.getByText("Support")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Support actions" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Deletion requests" }).getAttribute("data-can-manage")).toBe("false");
     expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
   });
@@ -977,3 +943,8 @@ describe("TeamsPanel selected workspace", () => {
     expect(screen.getByRole("button", { name: "Collapse Support" })).toBeTruthy();
   });
 });
+
+vi.mock("~/api/onepassword", () => ({
+  useTeamOnePasswordStatus: () => ({ data: { tokenConnected: false }, isPending: false, isError: false, isSuccess: true }),
+  useTeamOnePasswordToken: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
+}));

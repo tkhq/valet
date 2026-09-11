@@ -373,7 +373,7 @@ describe("MemoryDoc", () => {
    * paths are conventional, so a path-only match can land on a colleague's
    * artifact — Revoke would then kill the colleague's live link. The panel
    * must match on the sharer too. */
-  it("shares: the panel shows the caller's own artifact, not a colleague's at the same path", async () => {
+  it("shares: the panel shows the personal artifact despite team and colleague snapshots at the same path", async () => {
     const rendered = '---\ntype: "note"\n---\n\nBody.\n';
     docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
     const me = vi.spyOn(api, "getMe").mockResolvedValue(meFixture);
@@ -381,6 +381,14 @@ describe("MemoryDoc", () => {
     const list = vi.spyOn(api, "listArtifacts").mockResolvedValue({
       artifacts: [
         {
+          ownerType: "team", id: "team-snapshot", path: "preferences/style.md",
+          title: "Team copy", format: "markdown", icon: "", version: 1,
+          sharedVersion: null, token: "team-token", url: "https://valet.test/a/team-token",
+          visibility: "public", actorUserId: "user-me", revoked: false,
+          createdAt: 0, updatedAt: 2,
+        },
+        {
+          ownerType: "user",
           id: "a-colleague",
           path: "preferences/style.md",
           title: "Writing style",
@@ -397,6 +405,7 @@ describe("MemoryDoc", () => {
           updatedAt: 1,
         },
         {
+          ownerType: "user",
           id: "a-mine",
           path: "preferences/style.md",
           title: "Writing style",
@@ -420,6 +429,7 @@ describe("MemoryDoc", () => {
 
     const input = (await screen.findByLabelText("Share link")) as HTMLInputElement;
     expect(input.value).toBe("https://valet.test/a/my-token");
+    expect(screen.getByRole("switch", { name: "Allow anyone with the link" }).getAttribute("aria-checked")).toBe("false");
 
     me.mockRestore();
     org.mockRestore();

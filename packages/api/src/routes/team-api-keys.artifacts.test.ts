@@ -4,6 +4,8 @@
  * there must not read as the creating admin: it may read a public artifact
  * as an anonymous caller, and nothing else (TKAI-396 done-when 5).
  */
+import { eq } from "drizzle-orm";
+import { artifacts } from "../schema/index.js";
 import { describe, expect, it, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { CreateTeamApiKeyResponse, CreateTeamResponse, ShareArtifactResponse } from "../wire/types.js";
@@ -90,6 +92,7 @@ interface Fixture {
   baseUrl: string;
   cookie: string;
   teamKey: string;
+  teamId: string;
   artifactId: string;
   readUrl: string;
 }
@@ -100,10 +103,41 @@ async function bootFixture(): Promise<Fixture> {
   const teamId = await createTeam(api.baseUrl, cookie, "Platform");
   const teamKey = await mintTeamKey(api.baseUrl, cookie, teamId);
   const { id, readUrl } = await shareArtifact(api.baseUrl, cookie);
-  return { baseUrl: api.baseUrl, cookie, teamKey, artifactId: id, readUrl };
+  return { baseUrl: api.baseUrl, cookie, teamKey, teamId, artifactId: id, readUrl };
 }
 
 describe("team API key on the public artifact router", () => {
+  it("never uses a team key's minting admin for team pages or share management", async () => {
+    const f = await bootFixture();
+    const published = await fetch(`${f.baseUrl}/api/artifacts/share?ownerType=team&ownerId=${f.teamId}`, {
+      method: "POST", headers: { cookie: f.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ key: "team.md", content: "Team secret" }),
+    });
+    expect(published.status).toBe(200);
+    // The response comes from the real share route, asserted above.
+    const shared = await published.json() as ShareArtifactResponse;
+    const token = new URL(shared.url).pathname.replace(/^\/a\//, "");
+    const readUrl = `${f.baseUrl}/api/artifacts/${token}`;
+    expect((await fetch(readUrl, { headers: { cookie: f.cookie } })).status).toBe(200);
+    if (!api) throw new Error("Test API is unavailable");
+    // A pre-fix public flag must never grant anonymous or team-key access.
+    await api.providers.db.update(artifacts).set({ visibility: "public" }).where(eq(artifacts.id, shared.id));
+    await widenToPublic(f.baseUrl, f.cookie, f.artifactId);
+    expect((await fetch(readUrl)).status).toBe(401);
+    expect((await fetch(`${readUrl}/comments`)).status).toBe(401);
+    const keyHeaders: Record<string, string>[] = [{ "x-api-key": f.teamKey }];
+    // API keys authenticate through x-api-key; unsupported bearer input is anonymous.
+    expect((await fetch(readUrl, { headers: { authorization: `Bearer ${f.teamKey}` } })).status).toBe(401);
+    for (const header of keyHeaders) {
+      expect((await fetch(readUrl, { headers: header })).status).toBe(403);
+      expect((await fetch(`${readUrl}/comments`, { headers: header })).status).toBe(403);
+      expect((await fetch(`${readUrl}/comments/fake/resolve`, { method: "POST", headers: header })).status).toBe(403);
+      expect((await fetch(`${f.baseUrl}/api/artifacts/${shared.id}/versions`, { headers: header })).status).toBe(403);
+      expect((await fetch(`${f.baseUrl}/api/artifacts/${shared.id}`, { method: "PATCH", headers: { ...header, "content-type": "application/json" }, body: JSON.stringify({ visibility: "public" }) })).status).toBe(403);
+      expect((await fetch(`${f.baseUrl}/api/artifacts/share`, { method: "POST", headers: { ...header, "content-type": "application/json" }, body: JSON.stringify({ key: "team.md", revoke: true }) })).status).toBe(403);
+    }
+  });
+
   it("cannot read an org-visibility artifact as the creating admin", async () => {
     const f = await bootFixture();
     const asAdmin = await fetch(f.readUrl, { headers: { cookie: f.cookie } });

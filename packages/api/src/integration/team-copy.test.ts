@@ -2,9 +2,36 @@ import { describe, expect, it } from "vitest";
 import { bootTestApi } from "./_setup.js";
 import { publishArtifact, getArtifactById } from "../services/artifacts.js";
 import { createTeam } from "../services/teams.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { writeFile } from "../services/memory.js";
+import { teamMembers, workflowDefinitions } from "../schema/index.js";
 
 describe("team copy HTTP endpoints", () => {
+  it("pulls through session auth and rejects malformed requests, collisions and revoked membership", async () => {
+    const api = await bootTestApi();
+    try {
+      const team = await createTeam(api.providers.db, { orgId: "local-org", creatorUserId: "local-user", name: "Source" });
+      await writeFile(api.providers.db, { owner: { type: "team", id: team.id }, actorUserId: "local-user" },
+        { path: "notes/team.md", content: "Exact team knowledge" });
+      const post = (body: string, query = "") => fetch(`${api.baseUrl}/api/memory/copy-from-team${query}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body,
+      });
+      const body = JSON.stringify({ teamId: team.id, from: "notes/team.md", to: "notes/personal.md" });
+      const response = await post(body);
+      expect(response.status).toBe(201);
+      expect(await response.json()).toMatchObject({ file: { ownerType: "user", ownerId: "local-user",
+        path: "notes/personal.md", content: "Exact team knowledge", version: 1 } });
+      expect((await post(body)).status).toBe(400);
+      for (const invalid of ["{", "null", "{}", JSON.stringify({ teamId: "", from: "a.md", to: "b.md" })]) {
+        expect((await post(invalid)).status).toBe(400);
+      }
+      expect((await post(body, "?ownerType=user&ownerId=test-member")).status).toBe(404);
+      await api.providers.db.delete(teamMembers);
+      expect((await post(body)).status).toBe(404);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
   it("returns a destination workflow ID, rejects conflicts and hides another user's source", async () => {
     const api = await bootTestApi();
     try {

@@ -16,8 +16,12 @@
  * `/api/plugins` applies to `missingEnv`, and this route is the other
  * surface that can name them (integration-availability design).
  */
+import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
+import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
+import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
+import { insertCredentialIfAbsent, lockTeamCredentialAuthority } from "../services/credential-insert.js";
 import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -45,6 +49,8 @@ export const credentialConnectRouter = new Hono<AppEnv>();
 
 interface OAuthConnectState {
   userId: string;
+  teamId?: string;
+  orgId?: string;
   service: string;
   codeVerifier?: string;
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
@@ -57,13 +63,14 @@ interface OAuthConnectState {
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, returnTo, nonce, exp } = payload;
+    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId } = payload;
+    if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (exp < nowMs) return null;
-    return { userId, service, codeVerifier, returnTo, nonce, exp };
+    return { userId, service, codeVerifier, returnTo, nonce, exp, ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}) };
   });
 }
 
@@ -113,11 +120,29 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   const found = findOAuthDeclaration(plugins, service);
   if (!found) return c.json({ error: `no OAuth-capable declaration for service "${service}"` }, 404);
 
+  const scope = c.req.query("scope");
+  if (scope !== undefined && scope !== "team" && scope !== "user") {
+    return c.json({ error: "Choose Personal or a team before connecting." }, 400);
+  }
+  const teamId = c.req.query("teamId");
+  if (scope === "user" && teamId !== undefined) {
+    return c.json({ error: "Remove the team selection to connect a personal account." }, 400);
+  }
+  if (c.req.query("scope") === "team" && !teamId) return c.json({ error: "Choose a team before connecting." }, 400);
+  if (teamId !== undefined) {
+    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await canAdministerTeam(db, teamId, user.id))) {
+      return c.json({ error: "Team not found. Ask a team admin to connect this service." }, 404);
+    }
+    if (service === "slack-user" || found.decl.requires?.orgCredential) {
+      return c.json({ error: "This connection cannot be used for a team. Connect a dedicated team token instead." }, 400);
+    }
+  }
   const redirectUri = callbackUrl(c.req.url);
   const key = deriveSecretKey(encryptionKey);
   const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
   const base: Omit<OAuthConnectState, "codeVerifier"> = {
     userId: user.id,
+    ...(teamId ? { teamId, orgId: user.orgId } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
@@ -130,7 +155,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       clientRow = await ensureMcpOAuthClient({ db }, service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
     } catch (err) {
       console.error(`oauth connect: MCP client registration failed for ${service}:`, err);
-      return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
+      return c.redirect(`${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}error=oauth_failed`, 302);
     }
     const { codeVerifier, codeChallenge } = await generatePkceChallenge();
     const state = signState<OAuthConnectState>({ ...base, codeVerifier }, key);
@@ -201,15 +226,22 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     return c.redirect("/integrations?error=oauth_state", 302);
   }
   const returnTo = verified.returnTo ?? "";
+  const teamId = verified.teamId;
+  const landing = `${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}`;
+  const teamFailure = (error: string) => c.redirect(`${landing}error=${error}`, 302);
+  if (teamId && (verified.orgId !== user.orgId || !(await getTeamInOrg(db, user.orgId, teamId)) || !(await canAdministerTeam(db, teamId, user.id)))) {
+    return teamFailure("team_access_changed");
+  }
+
 
   const providerError = c.req.query("error");
   if (providerError) {
-    return c.redirect(`${returnTo}/integrations?error=${encodeURIComponent(providerError)}`, 302);
+    return c.redirect(`${landing}error=${encodeURIComponent(providerError)}`, 302);
   }
 
   const code = c.req.query("code");
   const found = findOAuthDeclaration(plugins, verified.service);
-  if (!code || !found) return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
+  if (!code || !found) return c.redirect(`${landing}error=oauth_failed`, 302);
 
   const redirectUri = callbackUrl(c.req.url);
   interface SavedCredential {
@@ -224,7 +256,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   const now = Date.now();
   try {
     if (found.oauth.mode === "mcp") {
-      if (!verified.codeVerifier) return c.redirect(`${returnTo}/integrations?error=oauth_state`, 302);
+      if (!verified.codeVerifier) return c.redirect(`${landing}error=oauth_state`, 302);
       const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
@@ -273,9 +305,41 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     // response bodies — those stay in the server log above.
     if (err instanceof OAuthInterpretError) {
       const detail = encodeURIComponent(err.message.slice(0, 300));
-      return c.redirect(`${returnTo}/integrations?error=oauth_failed&detail=${detail}`, 302);
+      return c.redirect(`${landing}error=oauth_failed&detail=${detail}`, 302);
     }
-    return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
+    return c.redirect(`${landing}error=oauth_failed`, 302);
+  }
+
+  if (teamId) {
+    // Personal identity links (Slack mentions, notifications) never become team identity.
+    if (saved.identity || verified.service === "slack-user" || found.decl.requires?.orgCredential) {
+      return teamFailure("team_identity_unsupported");
+    }
+    let outcome: string | null;
+    try {
+      outcome = await db.transaction(async (tx) => {
+        if (verified.orgId !== user.orgId || !(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId }))) {
+          return "team_access_changed";
+        }
+        const inserted = await insertCredentialIfAbsent(tx, encryptionKey, { type: "team", id: teamId }, verified.service, {
+          type: "oauth2", accessToken: saved.accessToken, refreshToken: saved.refreshToken,
+          expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,
+        });
+        if (inserted) await invalidateWorkflowSources(tx, { teamId });
+        return inserted ? null : "team_connection_exists";
+      });
+    } catch (err) {
+      console.error(`oauth callback: team credential save failed for ${verified.service}:`, err);
+      return teamFailure("oauth_failed");
+    }
+    if (outcome) return teamFailure(outcome);
+    try {
+      await c.var.providers.contentSync.resyncTeamWorkflowSources(teamId);
+    } catch (err) {
+      console.error(`oauth callback: team workflow resync failed for ${verified.service}:`, err);
+      return teamFailure("team_sync_failed");
+    }
+    return c.redirect(`${landing}connected=${encodeURIComponent(verified.service)}`, 302);
   }
 
   let restoreLink: (() => Promise<void>) | null = null;
@@ -284,7 +348,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     try {
       const existing = await identityForExternal(db, identity.provider, identity.externalId);
       if (existing && existing.userId !== user.id) {
-        return c.redirect(`${returnTo}/integrations?error=identity_conflict`, 302);
+        return c.redirect(`${landing}error=identity_conflict`, 302);
       }
       const prior = await identityForUser(db, identity.provider, user.id);
       await linkIdentity(db, {
@@ -307,7 +371,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
       }
     } catch (err) {
       console.error(`oauth callback: identity link failed for ${verified.service}:`, err);
-      return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
+      return c.redirect(`${landing}error=oauth_failed`, 302);
     }
   }
   try {
@@ -322,7 +386,13 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   } catch (err) {
     console.error(`oauth callback: credential save failed for ${verified.service}:`, err);
     if (restoreLink) await restoreLink().catch(() => undefined); // best-effort compensation
-    return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
+    return c.redirect(`${landing}error=oauth_failed`, 302);
+  }
+
+  try {
+    await refreshCredentialReadiness(c.var.providers, { type: "user", id: user.id }, verified.service);
+  } catch (err) {
+    console.error(`oauth callback: delegated workflow resync failed for ${verified.service}:`, err);
   }
 
   return c.redirect(`${returnTo}/integrations?connected=${encodeURIComponent(verified.service)}`, 302);

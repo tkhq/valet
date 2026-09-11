@@ -16,11 +16,11 @@
  *
  * Visibility rules live in `decideArtifactAccess`, a pure function so the
  * whole matrix is unit-testable without an HTTP server: `org` needs a
- * logged-in member of the artifact's org; `public` needs the org's
- * `allow_public_artifacts` opt-in, live-checked on every read.
+ * logged-in member of the artifact's org; personal `public` pages need the
+ * org opt-in. Team ownership always requires live membership.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNull, lt, or } from "drizzle-orm";
+import { and, asc, desc, eq, exists, isNull, lt, ne, or } from "drizzle-orm";
 import { marked } from "marked";
 import {
   NotFoundError,
@@ -31,16 +31,49 @@ import {
   resolveArtifactTitle,
   type ArtifactFormat,
 } from "@valet/shared";
+import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { normalizePath } from "../lib/okf.js";
-import { artifactComments, artifactVersions, artifacts, orgs } from "../schema/index.js";
-import { getTeamInOrg, isTeamMember, lockTeamForOwnership } from "./teams.js";
+import { artifactComments, artifactVersions, artifacts, orgMembers, orgs, teamMembers, teams } from "../schema/index.js";
+import { getTeamInOrg, lockTeamForOwnership } from "./teams.js";
 import { readFile, type MemoryScope } from "./memory.js";
 
 export type ArtifactRow = typeof artifacts.$inferSelect;
 export type ArtifactVersionRow = typeof artifactVersions.$inferSelect;
 export type ArtifactCommentRow = typeof artifactComments.$inferSelect;
 export type ArtifactVisibility = "org" | "public";
+
+export interface ArtifactScope extends MemoryScope {
+  /** Verified caller. Internal tools use their authenticated owner principal. */
+  principal?: Principal;
+}
+
+/** Both rows authorize a human. Mutation callers hold SHARE locks until commit,
+ * so deleting either membership cannot race a successful publication or revoke. */
+function artifactMemberships(db: AppDb, orgId: string, teamId: string, userId: string) {
+  return db.select({ userId: orgMembers.userId }).from(orgMembers)
+    .innerJoin(teamMembers, eq(teamMembers.userId, orgMembers.userId))
+    .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+    .where(and(
+      eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId),
+      eq(teams.orgId, orgId), eq(teams.id, teamId),
+    ));
+}
+
+async function requireTeamArtifactScope(db: AppDb, scope: ArtifactScope, orgId: string, lockMemberships = false): Promise<void> {
+  const caller = scope.principal ?? { type: "user", id: scope.actorUserId };
+  if (caller.type === "team" && (scope.owner.type !== "team" || scope.owner.id !== caller.id)) {
+    throw new NotFoundError("owner", scope.owner.id);
+  }
+  if (scope.owner.type !== "team") return;
+  if (caller.type === "team") {
+    if (!await getTeamInOrg(db, orgId, scope.owner.id)) throw new NotFoundError("owner", scope.owner.id);
+    return;
+  }
+  const memberships = artifactMemberships(db, orgId, scope.owner.id, caller.id);
+  const rows = await (lockMemberships ? memberships.for("share", { of: [orgMembers, teamMembers] }) : memberships);
+  if (!rows.length) throw new NotFoundError("owner", scope.owner.id);
+}
 
 /** 128 bits of entropy, base64url — the whole capability for a `public`
  * artifact, so no shorter. */
@@ -102,7 +135,8 @@ interface PublishInput {
  * `visibility: "org"` on create; a refresh keeps the stored visibility —
  * widening is a separate, human-only action (`setArtifactVisibility`).
  */
-export async function shareArtifact(db: AppDb, scope: MemoryScope, opts: ShareArtifactOpts): Promise<ArtifactRow> {
+export async function shareArtifact(db: AppDb, scope: ArtifactScope, opts: ShareArtifactOpts): Promise<ArtifactRow> {
+  await requireTeamArtifactScope(db, scope, opts.orgId);
   if (opts.path.startsWith("team:")) {
     throw new ValidationError(
       "Team-prefixed virtual paths cannot be shared. Share from the team scope itself, or copy the file into your own memory first.",
@@ -131,7 +165,7 @@ export async function shareArtifact(db: AppDb, scope: MemoryScope, opts: ShareAr
  * publish-key namespace with memory shares, which is the point — one key, one
  * artifact, one URL.
  */
-export async function publishArtifact(db: AppDb, scope: MemoryScope, opts: PublishArtifactOpts): Promise<ArtifactRow> {
+export async function publishArtifact(db: AppDb, scope: ArtifactScope, opts: PublishArtifactOpts): Promise<ArtifactRow> {
   if (!isArtifactFormat(opts.format)) {
     throw new ValidationError("format must be 'markdown' or 'html'.");
   }
@@ -175,9 +209,9 @@ export async function copyArtifactToTeam(
   if (key.endsWith("/")) throw new ValidationError("Choose a file-like key for the team artifact.");
   return db.transaction(async (tx) => {
     await lockTeamForOwnership(tx, input.teamId);
-    if (!(await getTeamInOrg(tx, orgId, input.teamId)) || !(await isTeamMember(tx, input.teamId, scope.actorUserId))) {
-      throw new NotFoundError("team", input.teamId);
-    }
+    await requireTeamArtifactScope(tx, {
+      owner: { type: "team", id: input.teamId }, actorUserId: scope.actorUserId,
+    }, orgId, true);
     const now = Date.now();
     const [copy] = await tx.insert(artifacts).values({
       id: randomUUID(), token: mintToken(), ownerType: "team", ownerId: input.teamId,
@@ -202,7 +236,15 @@ export async function copyArtifactToTeam(
  * Reactivation also clears `shared_version`: the pin was part of the revoked
  * audience decision.
  */
-async function upsertArtifact(db: AppDb, scope: MemoryScope, input: PublishInput): Promise<ArtifactRow> {
+async function upsertArtifact(db: AppDb, scope: ArtifactScope, input: PublishInput): Promise<ArtifactRow> {
+  return db.transaction(async (tx) => {
+    if (scope.owner.type === "team") await lockTeamForOwnership(tx, scope.owner.id);
+    await requireTeamArtifactScope(tx, scope, input.orgId, true);
+    return writeArtifact(tx, scope, input);
+  });
+}
+
+async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInput): Promise<ArtifactRow> {
   const rendered = renderArtifactBody(input.content, input.format);
   const now = Date.now();
   const existingRows = await db
@@ -213,6 +255,7 @@ async function upsertArtifact(db: AppDb, scope: MemoryScope, input: PublishInput
         eq(artifacts.ownerType, scope.owner.type),
         eq(artifacts.ownerId, scope.owner.id),
         eq(artifacts.sourceMemoryPath, input.key),
+        eq(artifacts.orgId, input.orgId),
       ),
     )
     .limit(1);
@@ -242,7 +285,7 @@ async function upsertArtifact(db: AppDb, scope: MemoryScope, input: PublishInput
           ? { visibility: "org" as const, publicBy: null, sharedVersion: null }
           : {}),
       })
-      .where(eq(artifacts.id, existing.id))
+      .where(and(eq(artifacts.id, existing.id), eq(artifacts.orgId, input.orgId)))
       .returning();
     if (!row) throw new NotFoundError("artifact", existing.id);
     await appendVersion(db, row, scope.actorUserId, now);
@@ -293,28 +336,20 @@ async function appendVersion(db: AppDb, row: ArtifactRow, actorUserId: string, n
 
 /** Revoke the active artifact for `path` in this scope. 404 when nothing
  * is shared at that path. */
-export async function revokeArtifactByPath(db: AppDb, scope: MemoryScope, path: string): Promise<void> {
-  // Rows store the CANONICAL publish key (share reads through `readFile`,
-  // which normalizes; publish normalizes here). Normalize too, or a caller
-  // who shared with '/x.md' and revokes with the same string misses the row —
-  // a 404 while the link stays live. Throws ReservedPathError for garbage,
-  // same as the share path.
+export async function revokeArtifactByPath(db: AppDb, scope: ArtifactScope, path: string, orgId: string): Promise<void> {
   const normalized = normalizePath(path);
-  const rows = await db
-    .select()
-    .from(artifacts)
-    .where(
-      and(
-        eq(artifacts.ownerType, scope.owner.type),
-        eq(artifacts.ownerId, scope.owner.id),
-        eq(artifacts.sourceMemoryPath, normalized),
-        isNull(artifacts.revokedAt),
-      ),
-    )
-    .limit(1);
-  const row = rows[0];
-  if (!row) throw new NotFoundError("artifact", normalized);
-  await db.update(artifacts).set({ revokedAt: Date.now() }).where(eq(artifacts.id, row.id));
+  await db.transaction(async (tx) => {
+    if (scope.owner.type === "team") await lockTeamForOwnership(tx, scope.owner.id);
+    await requireTeamArtifactScope(tx, scope, orgId, true);
+    const rows = await tx.update(artifacts).set({ revokedAt: Date.now() }).where(and(
+      eq(artifacts.orgId, orgId),
+      eq(artifacts.ownerType, scope.owner.type),
+      eq(artifacts.ownerId, scope.owner.id),
+      eq(artifacts.sourceMemoryPath, normalized),
+      isNull(artifacts.revokedAt),
+    )).returning({ id: artifacts.id });
+    if (!rows.length) throw new NotFoundError("artifact", normalized);
+  });
 }
 
 export async function getArtifactByToken(db: AppDb, token: string): Promise<ArtifactRow | undefined> {
@@ -428,6 +463,7 @@ export async function setArtifactSharedVersion(
  * `content`: a list of shares must not drag every snapshot body out of
  * the database. */
 export interface ArtifactSummaryRow {
+  ownerType: string;
   id: string;
   token: string;
   sourceMemoryPath: string;
@@ -444,6 +480,7 @@ export interface ArtifactSummaryRow {
 }
 
 const summaryColumns = {
+  ownerType: artifacts.ownerType,
   id: artifacts.id,
   token: artifacts.token,
   sourceMemoryPath: artifacts.sourceMemoryPath,
@@ -460,12 +497,26 @@ const summaryColumns = {
 };
 
 /** The caller's own shares — the rows where they were the sharing actor.
- * Org admins additionally see every artifact in the org. */
+ * Org admins additionally see personal artifacts in the org. Team rows
+ * always require current membership, including for the publishing actor. */
 export async function listArtifacts(
   db: AppDb,
   caller: { id: string; orgId: string; orgAdmin: boolean },
 ): Promise<ArtifactSummaryRow[]> {
-  const where = caller.orgAdmin ? eq(artifacts.orgId, caller.orgId) : eq(artifacts.actorUserId, caller.id);
+  const where = and(
+    eq(artifacts.orgId, caller.orgId),
+    caller.orgAdmin ? undefined : eq(artifacts.actorUserId, caller.id),
+    or(
+      ne(artifacts.ownerType, "team"),
+      exists(db.select({ id: teams.id }).from(teams)
+        .innerJoin(teamMembers, eq(teamMembers.teamId, teams.id))
+        .innerJoin(orgMembers, and(eq(orgMembers.orgId, teams.orgId), eq(orgMembers.userId, teamMembers.userId)))
+        .where(and(
+          eq(teams.id, artifacts.ownerId), eq(teams.orgId, caller.orgId),
+          eq(teamMembers.userId, caller.id),
+        ))),
+    ),
+  );
   return db.select(summaryColumns).from(artifacts).where(where).orderBy(desc(artifacts.updatedAt));
 }
 
@@ -512,7 +563,8 @@ export async function setArtifactVisibility(
       publicBy: visibility === "public" ? actorUserId : null,
       updatedAt: Date.now(),
     })
-    .where(eq(artifacts.id, id))
+    // No existing grant mechanism authorizes an audience outside a team.
+    .where(and(eq(artifacts.id, id), visibility === "public" ? ne(artifacts.ownerType, "team") : undefined))
     .returning();
   if (!row) throw new NotFoundError("artifact", id);
   return row;
@@ -643,14 +695,31 @@ export type ArtifactAccess =
  * routes follow.
  */
 export function decideArtifactAccess(opts: {
-  artifact: Pick<ArtifactRow, "orgId" | "visibility" | "revokedAt"> | undefined;
+  artifact: Pick<ArtifactRow, "ownerType" | "orgId" | "visibility" | "revokedAt"> | undefined;
   allowPublicArtifacts: boolean;
+  teamMember?: boolean;
   user: { orgId: string } | undefined;
 }): ArtifactAccess {
   const { artifact, user } = opts;
   if (!artifact || artifact.revokedAt !== null) return { kind: "not_found" };
+  if (artifact.ownerType === "team") {
+    if (!user) return { kind: "login" };
+    if (user.orgId !== artifact.orgId || opts.teamMember !== true) return { kind: "not_found" };
+    return { kind: "serve" };
+  }
   if (artifact.visibility === "public" && opts.allowPublicArtifacts) return { kind: "serve" };
   if (!user) return { kind: "login" };
   if (user.orgId !== artifact.orgId) return { kind: "not_found" };
   return { kind: "serve" };
+}
+
+/** Team ownership takes precedence over actor and visibility on every surface. */
+export async function hasArtifactTeamAccess(
+  db: AppDb,
+  artifact: Pick<ArtifactRow, "ownerType" | "ownerId" | "orgId">,
+  user: { id: string; orgId: string } | undefined,
+): Promise<boolean> {
+  if (artifact.ownerType !== "team") return true;
+  if (!user || user.orgId !== artifact.orgId) return false;
+  return (await artifactMemberships(db, artifact.orgId, artifact.ownerId, user.id)).length > 0;
 }

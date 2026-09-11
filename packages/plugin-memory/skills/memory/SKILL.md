@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Playbooks for creating memories well and working on the memory store itself — write style, cross-linking, dedup/merge, journal distillation, reorganization, and expiry hygiene with the mem_* tools.
+description: Playbooks for creating memories well and working on the memory store itself — write style, cross-linking, dedup/merge, journal distillation, reorganization, personal/team knowledge transfers, and expiry hygiene with the mem_* tools.
 ---
 
 # Memory Creation & Curation
@@ -10,11 +10,28 @@ Load this skill when the task is *about the memory store itself*: writing new me
 ## Mental model (30 seconds)
 
 - Memory is a bundle of typed markdown files. Metadata (`type`, `tags`, `description`, `resource`, `sensitivity`, `origin`, `expires`, `pinned`) lives in columns; the frontmatter you see on `mem_read` is a **projection** — set metadata via `mem_write` params, never by writing YAML into the body. Embedded frontmatter is stripped on write.
-- The tool surface is seven tools: `mem_write`, `mem_patch`, `mem_read`, `mem_search`, `mem_move`, `mem_links`, `mem_rm`.
+- Memory tools include: `mem_write`, `mem_patch`, `mem_read`, `mem_search`, `mem_move`, `mem_links`, `mem_rm`, `mem_copy_to_team`, `mem_copy_from_team`.
 - Directories imply a default `type`: `preferences/` → preference, `projects/` → project-note, `workflows/` → workflow, `journal/` → journal-entry, `people/` → person; anything else → note. Paths cap at 5 levels — flatten under `projects/<name>/` rather than nesting deeper.
 - Markdown links between memory files build a derived graph — there is no stored links table; edges are read from your markdown on demand. Relative (`../people/alice.md`) and absolute (`/projects/valet/overview.md`) targets both resolve. `mem_links` shows one file's inbound and outbound edges; the memory UI renders the whole graph.
 - Pinned files load in full at orchestrator wake, alongside recent journal entries and the memory index. Pins cost context every session — keep them few and short.
-- Reads union in team memories under a virtual `team:{teamId}/` prefix. You can read those; writes only ever touch your own scope.
+- Reads union in team memories under a virtual `team:{teamId}/` prefix. You can read those; ordinary writes only touch your own scope. Explicit copy tools transfer files between personal and team memory.
+
+## Pull and push team knowledge
+
+Use explicit copies when the user asks to pull knowledge from a team or push personal memory to a team.
+Knowledge here means a memory file, including notes under `artifacts/`.
+
+1. Use `mem_read` with an empty path to discover accessible team IDs.
+2. Read `team:{teamId}/` to find team files. Use `mem_search` to find relevant personal or team files.
+3. Select the exact source file, team ID, and destination path from the user's request.
+4. To pull, call `mem_copy_from_team` with `{ teamId, from, to }`. Use a team-relative `from` without the virtual prefix.
+5. To push, call `mem_copy_to_team` with `{ teamId, from, to }`. Use a personal `from` and team-relative `to`.
+6. If the destination exists, ask the user to choose another path or skip the copy.
+
+Run either tool from the personal assistant. Pull requires current team membership. Push also requires team-admin or target-organization-admin authority.
+Each copy preserves the original and copies its current content and metadata exactly. Do not reconstruct the file with `mem_write`.
+Links remain unchanged. Dependencies, history, share links, and mirror bindings do not transfer.
+A copy is independent. Later edits do not sync. Never replace a conflicting file or start background transfers without explicit instructions.
 
 ## Creating memories well
 

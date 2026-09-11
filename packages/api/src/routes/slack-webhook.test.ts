@@ -6,18 +6,27 @@
  * transport, assertions against actual DB rows. The fan-out runs after the
  * 200 is returned, so assertions on its effects poll.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, events, eventSubscriptions, teams, orgMembers, teamMembers, userIdentityLinks } from "../schema/index.js";
 import { __resetSlackWebhookThrottle } from "./slack-webhook.js";
 import { __resetIngestDropThrottle } from "../events/ingest.js";
 
 let api: TestApi | undefined;
 
 beforeEach(() => {
+  // The real transport must never send test messages to Slack.
+  const fetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (new URL(url).hostname === "slack.com") {
+      return Promise.resolve(Response.json({ ok: false, error: "invalid_auth" }));
+    }
+    return fetch(input, init);
+  });
   __resetSlackWebhookThrottle();
   __resetIngestDropThrottle();
 });
@@ -25,6 +34,7 @@ beforeEach(() => {
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.restoreAllMocks();
 });
 
 const SECRET = "slack-signing-secret";
@@ -426,6 +436,28 @@ describe("POST /api/channels/slack/webhook", () => {
 
     await expect.poll(() => eventCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
     await expect.poll(() => deliveryCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("routes another team member through the org bot without a team credential", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    await a.providers.eventDispatcher.stop();
+    await seedRunningTransport(a);
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team-mention", orgId: "local-org", name: "Mentions", createdAt: now });
+    await a.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "member-b", role: "member" });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team-mention", userId: "member-b", role: "member" });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "member-link", provider: "slack", externalId: "U100", userId: "member-b", createdAt: now });
+    await a.providers.db.insert(eventSubscriptions).values({
+      id: "team-sub", orgId: "local-org", ownerType: "team", ownerId: "team-mention",
+      name: "Team mentions", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C500" }, { field: "user", op: "eq", value: "U_CREATOR" }],
+      target: { kind: "orchestrator", follow: true }, createdBy: "member-a", enabled: true, createdAt: now, updatedAt: now,
+    });
+    const body = envelope(appMention(), "Ev-team-member");
+    expect((await post(a.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => deliveryCount(a, "Ev-team-member"), { timeout: 5_000 }).toBe(1);
+    expect(await a.providers.engineCredentials.get({ type: "team", id: "team-mention" }, "slack")).toBeNull();
   });
 
   it("fails closed on a legacy app_mention subscription with no user filter", async () => {

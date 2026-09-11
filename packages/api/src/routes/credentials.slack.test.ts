@@ -119,6 +119,18 @@ describe("PUT /api/credentials/slack?scope=org", () => {
     expect(await storedSlackCredential(api)).toBeNull();
   });
 
+  it.each([undefined, ""])("rejects a bot token with missing or empty user_id (%s)", async (userId) => {
+    api = await bootTestApi();
+    useFixture(startSlackFixture({ body: { ok: true, team_id: "T0FIXTURE", bot_id: "B0FIXTURE", user_id: userId } }));
+    const res = await put(api.baseUrl, orgBody());
+    expect(res.status).toBe(400);
+    const error = await errorOf(res);
+    expect(error).toContain("user_id");
+    expect(error).toContain("Reinstall the app");
+    expect(error).toContain("Bot User OAuth Token");
+    expect(await storedSlackCredential(api)).toBeNull();
+  });
+
   it("rejects an install that never granted assistant:write, naming the missing scope", async () => {
     api = await bootTestApi();
     useFixture(

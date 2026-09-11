@@ -61,9 +61,10 @@ visibility rules.
 Three things do not change:
 
 - Sharing is explicit. Writing a file never publishes it.
-- The tool surface can only create `org` visibility. Widening to `public` is a
-  human action in the web UI, gated on the org's `allowPublicArtifacts`
-  opt-in.
+- The tool surface can only create `org` visibility. Personal artifacts can
+  widen to `public` through the web UI with the org's `allowPublicArtifacts`
+  opt-in. Team artifacts always require current team membership. The gallery
+  and page show Team-only, regardless of their stored visibility.
 - An artifact is a snapshot, never a live reference.
 
 ## What we take from Claude Code artifacts, and what we reject

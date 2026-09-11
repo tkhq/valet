@@ -20,7 +20,7 @@
  * Known `OnePasswordAuthError` cases (missing token, personal toggle off)
  * carry a typed hint. SDK/network failures never interpolate `err.message`
  * or the secret reference into that message — the client sees a fixed
- * `"1Password request failed"`; the original is logged server-side only.
+ * `"1Password request failed"`; logs contain fixed operation labels only.
  */
 
 import { createHash } from "node:crypto";
@@ -35,9 +35,7 @@ export const ONEPASSWORD_SERVICE = "onepassword";
  * may contain spaces ("ProDex Labs" is an ordinary vault name) but not a
  * slash or a control character. The prefix and the segment count keep this
  * from becoming a general read primitive: a path, an env var name, or a URL
- * does not match. The credential write path, the sandbox broker, and the
- * team grant all test with this, so a reference one of them stores is one
- * the others accept.
+ * does not match. Credential writes and the sandbox broker share this grammar.
  */
 export const OP_REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+(?:\/[^/\u0000-\u001f]+){1,2}$/;
 
@@ -86,9 +84,11 @@ export interface OpClient {
   };
 }
 
-export type OnePasswordScope = "org" | "personal";
+export type OnePasswordScope = "org" | "personal" | "team";
 
 export interface OnePasswordCtx {
+  /** Trusted team principal, never the frozen actor. Required for team scope. */
+  teamId?: string;
   orgId: string;
   userId: string;
 }
@@ -101,7 +101,7 @@ export interface OnePasswordCtx {
  * the token worked and THIS reference did not resolve: a typo, or an item the
  * service account cannot read. The two are different corrective actions, so
  * a caller must not report one as the other. */
-export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope" | "reference";
+export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope" | "reference" | "ambiguous";
 
 export class OnePasswordAuthError extends Error {
   constructor(message: string, readonly kind: OnePasswordErrorKind = "sdk") {
@@ -192,7 +192,7 @@ export function onePasswordMeta(row: StoredCredential): OnePasswordMeta | null {
   const candidate = meta as Record<string, unknown>;
   const { reference, tokenScope } = candidate;
   if (typeof reference !== "string") return null;
-  if (tokenScope !== "org" && tokenScope !== "personal") return null;
+  if (tokenScope !== "org" && tokenScope !== "personal" && tokenScope !== "team") return null;
   return { reference, tokenScope };
 }
 
@@ -255,6 +255,10 @@ export function titleNamesService(title: string, service: string): boolean {
 // ── Service factory ───────────────────────────────────────────────────────
 
 function tokenOwner(scope: OnePasswordScope, ctx: OnePasswordCtx): CredentialOwner {
+  if (scope === "team") {
+    if (!ctx.teamId) throw new OnePasswordAuthError("Team identity is missing. Start a team-owned session.", "scope");
+    return { type: "team", id: ctx.teamId };
+  }
   return scope === "org" ? { type: "org", id: ctx.orgId } : { type: "user", id: ctx.userId };
 }
 
@@ -263,10 +267,8 @@ const SDK_REQUEST_FAILED = "1Password request failed";
 /**
  * Wraps any SDK rejection as `OnePasswordAuthError` with a fixed client
  * message. Already-typed errors (missing token, disabled toggle, a prior
- * wrap) pass through unchanged — never double-wrapped. The original
- * rejection and `context` are logged server-side only; neither
- * `err.message` nor a secret reference is interpolated into the
- * client-visible text.
+ * wrap) pass through unchanged. Logs contain a fixed operation label only;
+ * upstream errors can contain secrets and must not be logged.
  */
 function wrapSdkError(
   err: unknown,
@@ -274,7 +276,7 @@ function wrapSdkError(
   kind: OnePasswordErrorKind = "sdk",
 ): OnePasswordAuthError {
   if (err instanceof OnePasswordAuthError) return err;
-  console.error(`onepassword: ${context}:`, err);
+  console.error(`onepassword: ${context}`);
   return new OnePasswordAuthError(SDK_REQUEST_FAILED, kind);
 }
 
@@ -282,16 +284,16 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
   const createClient = deps.createClient ?? defaultCreateClient;
   const now = deps.now ?? Date.now;
 
-  // Keyed by token string so a rotated token evicts the stale client.
+  // Keyed by token string so rotation selects a new client.
   const clientCache = new Map<string, Promise<OpClient>>();
-  // Keyed by `${scope}:${ownerId}:${reference}`.
+  // Keyed by org, scope, owner, token digest, and reference.
   const resolveCache = new Map<string, { value: string; at: number }>();
 
   async function requireToken(scope: OnePasswordScope, ctx: OnePasswordCtx): Promise<string> {
     const owner = tokenOwner(scope, ctx);
     const row = await deps.credentials.get(owner, ONEPASSWORD_SERVICE);
     if (!row?.apiKey) {
-      const kind = scope === "org" ? "organization" : "personal";
+      const kind = scope === "org" ? "organization" : scope;
       throw new OnePasswordAuthError(
         `This org has no ${kind} 1Password service account token connected.`,
         "no_token",
@@ -348,7 +350,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
   ): Promise<string> {
     const { client, token } = await clientFor(scope, ctx);
     const owner = tokenOwner(scope, ctx);
-    const cacheKey = `${scope}:${owner.id}:${tokenTag(token)}:${reference}`;
+    const cacheKey = `${ctx.orgId}:${scope}:${owner.id}:${tokenTag(token)}:${reference}`;
     const cached = resolveCache.get(cacheKey);
     const nowMs = now();
     if (cached && nowMs - cached.at < RESOLVE_TTL_MS) {
@@ -363,7 +365,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       // what failed. `clientFor` above throws its own typed error for a token
       // problem, and `wrapSdkError` passes typed errors through, so the two
       // stay distinguishable for a caller that reports a corrective action.
-      throw wrapSdkError(err, `resolution failed for ${reference}`, "reference");
+      throw wrapSdkError(err, "reference resolution failed", "reference");
     }
   }
 
@@ -395,7 +397,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
    * common case for an unconnected service is that nothing matches.
    */
   const lookupCache = new Map<string, { secret: string | null; at: number }>();
-  // Keyed by `${scope}:${ownerId}`: item titles for every vault the token can read.
+  // Inventory keys include org, scope, owner, and token digest.
   const inventoryCache = new Map<string, { items: { vaultId: string; id: string; title: string }[]; at: number }>();
 
   /**
@@ -475,14 +477,14 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       // scope with no token throws here, before any vault is touched.
       const { client, token } = await clientFor(scope, ctx);
       const owner = tokenOwner(scope, ctx);
-      const cacheKey = `${scope}:${owner.id}:${tokenTag(token)}:${service}`;
+      const cacheKey = `${ctx.orgId}:${scope}:${owner.id}:${tokenTag(token)}:${service}`;
       const nowMs = now();
       const cached = lookupCache.get(cacheKey);
       if (cached && nowMs - cached.at < RESOLVE_TTL_MS) return cached.secret;
 
       // Titles only, fetched once per scope: N services asking in one turn
       // must not walk the vaults N times.
-      const inventoryKey = `${scope}:${owner.id}:${tokenTag(token)}`;
+      const inventoryKey = `${ctx.orgId}:${scope}:${owner.id}:${tokenTag(token)}`;
       let inventory = inventoryCache.get(inventoryKey);
       if (!inventory || nowMs - inventory.at < 0 || nowMs - inventory.at >= RESOLVE_TTL_MS) {
         const items: { vaultId: string; id: string; title: string }[] = [];
@@ -497,7 +499,8 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
             for (const item of await client.items.list(vault.id)) {
               items.push({ vaultId: vault.id, id: item.id, title: item.title });
             }
-          } catch {
+          } catch (err) {
+            if (scope === "team") throw wrapSdkError(err, "team vault listing failed");
             // A vault this token cannot read is not an error for a lookup:
             // the secret may well be in the next one.
           }
@@ -506,7 +509,14 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
         inventoryCache.set(inventoryKey, inventory);
       }
 
-      const match = inventory.items.find((i) => titleNamesService(i.title, service));
+      const matches = inventory.items.filter((i) => titleNamesService(i.title, service));
+      if (matches.length > 1) {
+        throw new OnePasswordAuthError(
+          "Multiple 1Password items match this service. Use valet-secrets find and select an explicit scope and reference.",
+          "ambiguous",
+        );
+      }
+      const match = matches[0];
       if (!match) {
         lookupCache.set(cacheKey, { secret: null, at: nowMs });
         return null;
@@ -548,7 +558,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       }
       const vaultTitle = new Map(vaults.map((v) => [v.id, v.title]));
 
-      const inventoryKey = `${scope}:${owner.id}:${tokenTag(token)}`;
+      const inventoryKey = `${ctx.orgId}:${scope}:${owner.id}:${tokenTag(token)}`;
       const nowMs = now();
       let inventory = inventoryCache.get(inventoryKey);
       if (!inventory || nowMs - inventory.at < 0 || nowMs - inventory.at >= RESOLVE_TTL_MS) {
@@ -558,7 +568,8 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
             for (const item of await client.items.list(vault.id)) {
               items.push({ vaultId: vault.id, id: item.id, title: item.title });
             }
-          } catch {
+          } catch (err) {
+            if (scope === "team") throw wrapSdkError(err, "team vault listing failed");
             // A vault this token cannot read is not an error for a search.
           }
         }
@@ -567,20 +578,35 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       }
 
       const matches = inventory.items.filter((i) => titleNamesService(i.title, trimmed)).slice(0, limit);
+      // Duplicate titles cannot be resolved unambiguously by name. Count
+      // the full inventory before applying the result limit.
+      const vaultNames = new Map<string, number>();
+      for (const vault of vaults) {
+        const name = vault.title.toLowerCase();
+        vaultNames.set(name, (vaultNames.get(name) ?? 0) + 1);
+      }
+      const itemNames = new Map<string, number>();
+      for (const item of inventory.items) {
+        const name = `${item.vaultId}:${item.title.toLowerCase()}`;
+        itemNames.set(name, (itemNames.get(name) ?? 0) + 1);
+      }
       const out: OpCandidate[] = [];
       for (const match of matches) {
         let detail: SdkItem;
         try {
           detail = await client.items.getWithSecrets(match.vaultId, match.id);
-        } catch {
+        } catch (err) {
+          if (scope === "team") throw wrapSdkError(err, "team item read failed");
           // One unreadable item does not spoil the search.
           continue;
         }
         const field = itemSecretSegment(detail);
         if (!field) continue;
         out.push({
-          vault: referenceSegment(vaultTitle.get(match.vaultId), match.vaultId),
-          item: referenceSegment(match.title, match.id),
+          vault: (vaultNames.get((vaultTitle.get(match.vaultId) ?? "").toLowerCase()) ?? 0) > 1
+            ? match.vaultId : referenceSegment(vaultTitle.get(match.vaultId), match.vaultId),
+          item: (itemNames.get(`${match.vaultId}:${match.title.toLowerCase()}`) ?? 0) > 1
+            ? match.id : referenceSegment(match.title, match.id),
           field,
         });
       }

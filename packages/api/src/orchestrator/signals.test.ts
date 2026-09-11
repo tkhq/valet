@@ -10,7 +10,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { admitSignal, SignalEdgeDeniedError, type AdmitSignalDeps } from "./signals.js";
 import { agentSessions, eventDropLog } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
-import type { OnePasswordService } from "../services/onepassword.js";
+import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 
 let api: TestApi | undefined;
 
@@ -254,7 +254,7 @@ describe("admitSignal edge ACL", () => {
   // "user" even for a team-owned session; taking ownership from there would
   // grant the frozen actor's personal scope on a session the whole team can
   // prompt. The app row is the truth.
-  it("a team-owned session rebuilt by a signal reads on the org scope alone", async () => {
+  it.each([false, true])("a rebuilt team session prefers its token and falls back to org only without one (team token: %s)", async (teamToken) => {
     const scopesTried: string[] = [];
     const unused = (): never => {
       throw new Error("not exercised by this suite");
@@ -265,9 +265,12 @@ describe("admitSignal edge ACL", () => {
       resolveReference: unused,
       resolveCredential: async (row) => row,
       findCandidates: async () => [],
-      findCredentialForService: async (scope) => {
+      findCredentialForService: async (scope, owner) => {
+        expect(owner.teamId).toBe("team-1");
+        expect(owner.orgId).toBe("local-org");
         scopesTried.push(scope);
-        return null;
+        if (scope === "team" && !teamToken) throw new OnePasswordAuthError("No team token", "no_token");
+        return `fixture-${scope}-value`;
       },
     };
     api = await bootTestApi({ onePassword });
@@ -324,7 +327,8 @@ describe("admitSignal edge ACL", () => {
       docker: true,
       resources: { cpu: 2, memory: "4Gi" },
     });
-    await rebuilt.credentialProvider().get("linear");
-    expect(scopesTried).toEqual(["org"]);
+    const credential = await rebuilt.credentialProvider().get("linear");
+    expect(credential?.accessToken).toBe(teamToken ? "fixture-team-value" : "fixture-org-value");
+    expect(scopesTried).toEqual(teamToken ? ["team"] : ["team", "org"]);
   });
 });

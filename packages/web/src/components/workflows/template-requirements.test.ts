@@ -6,8 +6,10 @@
 import { describe, expect, it } from "vitest";
 import {
   isInstallable,
+  requirementLabel,
   missingNote,
   missingServices,
+  needsOrganizationGithubSetup,
   connectLabel,
   unconfiguredNote,
   unconfiguredServices,
@@ -39,7 +41,7 @@ describe("missingNote", () => {
 
   it("sends a team gap to the team's connections, not the reader's", () => {
     expect(missingNote(["Linear"], "team_1")).toBe(
-      "Linear is not connected for this team. Connect Linear on the Integrations page and share it with the team, then install this template.",
+      "Linear is not connected for this team. Set up access on the Integrations page, then install this template.",
     );
   });
 
@@ -48,7 +50,7 @@ describe("missingNote", () => {
       "Linear, Slack are not connected on your account. Connect them on the Integrations page, then install this template.",
     );
     expect(missingNote(["Linear", "Slack"], "team_1")).toBe(
-      "Linear, Slack are not connected for this team. Connect them on the Integrations page and share them with the team, then install this template.",
+      "Linear, Slack are not connected for this team. Set up access on the Integrations page, then install this template.",
     );
   });
 });
@@ -60,8 +62,8 @@ describe("connectLabel", () => {
   });
 
   it("names the sharing control a team gap is fixed with", () => {
-    expect(connectLabel(["Linear"], "team_1")).toBe("Share Linear with the team");
-    expect(connectLabel(["Linear", "Slack"], "team_1")).toBe("Share integrations with the team");
+    expect(connectLabel(["Linear"], "team_1")).toBe("Set up Linear access");
+    expect(connectLabel(["Linear", "Slack"], "team_1")).toBe("Set up integrations access");
   });
 });
 
@@ -71,4 +73,20 @@ describe("unconfiguredNote", () => {
       "Slack is not configured for this organization. An admin can set this up in Settings → Organization.",
     );
   });
+});
+
+it("distinguishes organization App access from a team connection and leaves repository access unverified", () => {
+  const requirement = { service: "github", connected: false, organizationProvided: true, repositoryCheckOnInstall: true } as const;
+  expect(requirementLabel(requirement)).toBe("Organization GitHub App · repository access checked on install");
+  expect(missingServices([requirement])).toEqual([]);
+  expect(isInstallable([requirement])).toBe(false);
+  expect(requirementLabel({ service: "github", connected: true })).toBe("GitHub");
+});
+
+it("routes missing organization GitHub access separately from team credential gaps", () => {
+  const github = { service: "github", connected: false, organizationProvided: true } as const;
+  expect(needsOrganizationGithubSetup([github])).toBe(true);
+  expect(needsOrganizationGithubSetup([{ ...github, connected: true }])).toBe(false);
+  expect(needsOrganizationGithubSetup([{ service: "github", connected: false }])).toBe(false);
+  expect(missingServices([github, { service: "linear", connected: false }])).toEqual(["Linear"]);
 });

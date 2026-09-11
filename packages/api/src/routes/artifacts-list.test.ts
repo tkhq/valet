@@ -21,7 +21,11 @@ async function setup() {
     { id: "team-b", orgId: "local-org", name: "B", createdAt: 1 },
     { id: "foreign-team", orgId: "foreign-org", name: "Foreign", createdAt: 1 },
   ]);
-  await db.insert(teamMembers).values({ teamId: "team-a", userId: "test-member", role: "member" });
+  await db.insert(teamMembers).values([
+    { teamId: "team-a", userId: "test-member", role: "member" },
+    { teamId: "team-a", userId: "local-user", role: "member" },
+    { teamId: "team-b", userId: "local-user", role: "member" },
+  ]);
   const publish = async (owner: { type: "user" | "team"; id: string }, key: string, actor = "local-user") => {
     const row = await publishArtifact(db, { owner, actorUserId: actor }, {
       orgId: "local-org", key, content: `# ${key}`, format: "markdown",
@@ -36,6 +40,7 @@ async function setup() {
   const revoked = await publish({ type: "team", id: "team-a" }, "revoked");
   await db.update(artifacts).set({ revokedAt: 100, updatedAt: 9999 }).where(eq(artifacts.id, revoked.id));
   await publish({ type: "team", id: "team-b" }, "other-team");
+  await db.delete(teamMembers).where(eq(teamMembers.userId, "local-user"));
   return { target, personal, otherPersonal, teamRows, revoked };
 }
 
@@ -75,8 +80,8 @@ describe("workspace artifact lists", () => {
       });
       expect(response.status).toBe(404);
     }
-    // Preserve the existing org-admin read exception.
-    expect((await list(target, "ownerType=team&ownerId=team-b")).artifacts).toHaveLength(1);
+    // Org admin authority does not grant team artifact access.
+    expect((await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-b`)).status).toBe(404);
     await target.providers.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
     const removed = await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-a&limit=50`, {
       headers: { "x-valet-test-user-id": "test-member" },
@@ -97,10 +102,11 @@ describe("workspace artifact lists", () => {
     const ids = [...first.artifacts, ...second.artifacts].map((row) => row.id);
     expect(ids).toEqual(teamRows.map((row) => row.id).sort().reverse());
     expect(ids).not.toContain(revoked.id);
+    await target.providers.db.insert(teamMembers).values({ teamId: "team-b", userId: "local-user", role: "member" });
     const wrongWorkspace = await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-b&limit=2&cursor=${cursor}`);
     expect(wrongWorkspace.status).toBe(400);
     // Non-paged callers keep the legacy list, including revoked rows.
-    expect((await list(target, "ownerType=team&ownerId=team-a")).artifacts).toHaveLength(4);
+    expect((await list(target, "ownerType=team&ownerId=team-a", "test-member")).artifacts).toHaveLength(4);
   });
 
   it("rejects malformed owners, limits, and cursors", async () => {

@@ -144,6 +144,7 @@ export interface SubscriptionWriteScope {
   creatorUserId: string;
   /** The request's explicit any-channel opt-out. */
   anyChannel: boolean;
+  ownerType?: "user" | "team" | "org";
   /** Whether this write changes what the subscription matches. Creates always
    * pass true. Patches pass whether `eventKeys` or `filters` were provided —
    * false skips the mention gate, so a rename or an enable toggle is not
@@ -176,5 +177,9 @@ export async function validateSubscriptionWrite(
     filters,
     anyChannel: scope.anyChannel,
     storedAnyChannel: scope.storedAnyChannel,
+    teamAssistant: typeof body.target === "object" && body.target !== null &&
+      "kind" in body.target && body.target.kind === "orchestrator" &&
+      (scope.ownerType === "team" || (scope.ownerType === undefined &&
+        "orchestrator" in body.target && body.target.orchestrator === "team")),
   });
 }

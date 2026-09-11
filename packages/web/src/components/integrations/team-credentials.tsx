@@ -3,6 +3,7 @@ import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@vale
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
+import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
 
 /**
@@ -38,10 +39,12 @@ export function TeamCredentials({
   team,
   orgMembers,
   canMutate,
+  cards = false,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
+  cards?: boolean;
 }) {
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
@@ -54,6 +57,10 @@ export function TeamCredentials({
 
   function removalNote(row: CredentialSummary): string {
     const service = displayName(row.service);
+    if (!row.delegatedFrom && (row.service === "slack" || row.service === "github")) {
+      return `This deletes the ${service} credential stored on ${team.name}. Team Integrations cannot recreate this connection. ` +
+        "An organization admin manages organization access in Organization settings. Its permissions can differ from this stored connection.";
+    }
     const loss = `Sessions and workflows that run as ${team.name} lose access to ${service}.`;
     return row.delegatedFrom
       ? `${loss} This removes the team's link only. ${nameFor(row.delegatedFrom)} keeps their own ` +
@@ -64,24 +71,37 @@ export function TeamCredentials({
 
   return (
     <div>
-      <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Credentials</h4>
+      <h4 className="text-xs font-medium uppercase tracking-wide text-muted">{cards ? "Team connections" : "Credentials"}</h4>
       {credsQ.isLoading && <LoadingRow label="Loading credentials…" className="py-2 text-xs" />}
       {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
       {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
-        <EmptyRow>No credentials in {team.name} yet. Share one from Integrations.</EmptyRow>
+        <EmptyRow>
+          No connections added to this team yet. Connect an account for this team.
+        </EmptyRow>
       )}
-      <ul className="mt-1 space-y-1">
-        {rows.map((row) => {
+      {(cards ? [
+        { title: null, rows: rows.filter((row) => !row.delegatedFrom) },
+        { title: "Shared by members", rows: rows.filter((row) => row.delegatedFrom) },
+      ] : [{ title: null, rows }]).filter((group) => group.rows.length > 0).map((group) => <div key={group.title ?? "direct"}>
+      {group.title && group.rows.length > 0 && <h4 className="mt-6 text-xs font-medium uppercase tracking-wide text-muted">{group.title}</h4>}
+      <ul className={cards ? "grid gap-3 pt-4 sm:grid-cols-2" : "mt-1 space-y-3"}>
+        {group.rows.map((row) => {
           const removal = removalLabels(row, team.name);
           return (
-            <li key={row.service} className="flex items-center justify-between gap-2 py-1">
+            <li key={row.service}>
+              <div className={cards ? "flex h-full flex-col rounded-lg border border-line bg-paper p-4" : "flex items-center justify-between gap-4 py-2"}>
               <div className="min-w-0">
-                <p className="truncate text-sm text-ink">{displayName(row.service)}</p>
+                {cards ? <CardHeading title={displayName(row.service)} slug={row.service} /> : <p className="truncate text-sm text-ink">{displayName(row.service)}</p>}
                 <p className="text-xs text-muted">
                   {row.delegatedFrom
                     ? `Shared by ${nameFor(row.delegatedFrom)}`
                     : "Stored on the team"}
                   {row.referenceBroken ? " · broken" : ""}
+                </p>
+                <p className="text-xs text-muted">
+                  {row.delegatedFrom
+                    ? `Team actions use ${nameFor(row.delegatedFrom)}’s account. Access ends if they stop sharing or leave the team.`
+                    : "Used by team sessions and workflows."}
                 </p>
                 {row.referenceBroken && (
                   <p className="text-xs text-danger-500">
@@ -90,7 +110,7 @@ export function TeamCredentials({
                   </p>
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className={cards ? "mt-auto flex items-center justify-end gap-2 pt-4" : "flex shrink-0 items-center gap-2 whitespace-nowrap"}>
                 {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
                 {canMutate && (
                   <Button
@@ -109,10 +129,12 @@ export function TeamCredentials({
                   </Button>
                 )}
               </div>
+              </div>
             </li>
           );
         })}
       </ul>
+      </div>)}
 
       {canMutate && !credsQ.error && removing && dialogLabels && (
         <ConfirmDialog

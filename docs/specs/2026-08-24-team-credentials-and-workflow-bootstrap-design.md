@@ -242,7 +242,7 @@ Recorded 2026-09-06. The design shipped as the stacked series PRs #572 to #591. 
 
 15. **The OpenAI probe for a team session reads under the service's fallback policy.** Decision 6 routes every service other than GitHub and Slack through the owner read. The OpenAI probe (`services/openai-key.ts`) is its own path, because the org LLM-provider key comes first, and its team branch read the team row with no org fallback at all. A team workflow's openai node reads through the generic team resolver under `orgFallbackPolicy`, which for `openai` is `reference-only` and so reaches an org-scoped 1Password item by name (deviation 1). The probe now takes the same policy from the host, so a team session and a team workflow find the same org-scoped OpenAI item. The org credential row stays out of reach on both paths, because `openai` declares no org credential and the org LLM-provider key is the org-wide path for this service. Product decision 2026-09-07.
 
-16. **The readiness predicate reads a team row the way a run reads it.** Decision 15 counts a team credential row as ready when the team holds one, and deviation 3 refined that to a row the run's decorator follows. What shipped goes through `resolveTeamCredentialRead` stopped at the team row, so the team's 1Password lease (`docs/specs/2026-09-04-team-onepassword-vaults-design.md`, decision 5) and the scope rule apply to readiness as they do on the run. A reference outside the lease is blocked with the refusal the run gives, and a reference in a deployment with no 1Password client is blocked naming the token to connect, where the row's presence alone used to arm a trigger that failed on every fire. The org-provided fallback and the by-name vault search stay separate conditions with their own reasons. Recorded 2026-09-07.
+16. **The readiness predicate reads a team row the way a run reads it.** Readiness uses `resolveTeamCredentialRead` and the same service-name lookup as execution. A configured team 1Password token is authoritative, including misses and failures; only an absent token permits org discovery. Stored references retain their explicit scope. A reference needs a configured client to become ready. Reference grant preferences were retired on 2026-09-10; legacy `metadata.refs` does not gate readiness. See `docs/specs/2026-09-04-team-onepassword-vaults-design.md`.
 
 17. **An unpinned github node is ready through an App installation.** Decision 15 lists the App among the ready conditions only for a node that pins `credential: "app"`. The invoker's team branch (`plugins/action-invoker.ts`) serves an unpinned github node the same way after the team row misses: the installation for the node's `owner` parameter, or the org's sole installation. Readiness refused those nodes with the generic connect message, so a team template on a sole-installation org could not be installed. What shipped adds `installationResolvesFor` to `services/github-tokens.ts`, the same rule as `resolveInstallationApiToken` without a mint, and readiness treats an unpinned github node as ready when it holds for that node's literal `owner`. A templated owner is known only at fire time and is checked as absent. A `"user"` pin stays on the team row. An App that cannot pick an installation for the node is blocked with a reason naming the mismatch: the owner with no installation, or several installations and no owner parameter. No App, or an App with no installation recorded, keeps the plain connect reason, because the helper reads the installations table as it stands and does not run the lazy sync, which needs the App signing key a readiness caller does not hold. Recorded 2026-09-07.
 
@@ -255,3 +255,52 @@ Recorded 2026-09-06. The design shipped as the stacked series PRs #572 to #591. 
 21. **Repository readiness uses the incoming commit's definitions.** The collector validates all incoming files and trigger declarations before checking readiness. Its resolver substitutes incoming definitions for this source's existing workflow IDs after checking exact team ownership. Removed, invalid, and unreadable files cannot certify a parent against an older mirror. A partial directory scan retains database resolution for files outside that scan. Calls to other sources or local workflows keep the database resolver. Parents therefore see changed callees even when the parent sorts first. Partial scans delete no rows; the workflow sync rail currently refuses truncated trees. New workflow IDs are generated on insertion, and the file envelope cannot assign them. A repository call must reference a previously imported workflow ID; same-pass references to newly created workflows are not supported. Recorded 2026-09-10 (#625).
 
 22. **Team gallery summaries include nested requirements and call refusals.** Requirements come from the readiness result for the complete call closure. Services that share a credential key count as connected only when all are ready. Summary blockers carry the predicate's corrective copy, including unreadable calls. The gallery and install dialog use these blockers to disable installation. When blockers are present, their detailed reasons replace the generic unconfigured-service paragraph. Recorded 2026-09-10 (#625).
+
+23. **Readiness changes request a durable repository refresh (TKAI-442).** Team credential writes, shares, revocations, and token changes invalidate the team's enabled workflow sources. Replacing a personal credential refreshes its delegated teams. Personal GitHub disconnect also refreshes the teams whose shares it removes. Delegation removal and invalidation share a transaction. Manual and IdP membership removal or addition invalidate sources in the membership transaction. Organization credential writes and deletions invalidate enabled team workflow sources within that organization. This includes reference-backed credentials. GitHub App setup and replacement invalidate sources even if installation discovery fails. Installation creation, deletion, suspension, and restoration also invalidate sources. Shared discovery covers manual refresh, background discovery, and lazy discovery. Discovery invalidates readiness when installation identity, account login, or suspension changes. Repository-selection changes keep the existing transport retry policy. Discovery and installation lifecycle webhooks lock the organization row before comparing or changing installations.
+
+   Credential-store writes and their invalidation commit in one SQL statement. Explicit team insertion transactions also invalidate before commit. Token vault permissions define accessible references; this refresh mechanism does not depend on manual reference grants. Invalidation advances `skill_sources.sync_revision`, clears both comparison markers, and marks healthy sources due. Sources with transport errors retain their retry backoff. Every sync entry point advances the revision before reading. Workflow readiness checks finish before the write transaction starts. That transaction locks the source row and rejects a pass whose revision has changed. It commits collector writes and completion together. A stale failure cannot replace a newer report or pending refresh. A request during a write transaction runs after that transaction and remains due. The persisted request survives an API restart and another worker can consume it. Refresh remains asynchronous; repository access failures can delay disarming. Local triggers remain outside repository reconciliation.
+
+   The schema adds a defaulted revision column and a matching boot repair for existing databases. Tests cover unchanged-commit arming and disarming, both concurrent completion orders, stale failures, rollback, tenant isolation, and PostgreSQL row contention. Recorded 2026-09-10.
+
+## Team integrations setup (2026-09-10)
+
+The team Integrations page uses the personal catalog's card layout and per-service Connect controls. It shows stored team connections, organization apps, and available services separately. Personal connection status never certifies team access. Slack user identity linking and the reserved 1Password token service are excluded from team setup.
+
+A team admin can paste a dedicated account token after confirming that team members may use its permissions. This does not create an account at the provider or prove the token belongs to a bot. The setup request uses `createOnly: true`; an atomic insert refuses an occupied team service slot with 409, including concurrent submissions. Existing PUT callers retain replacement behavior. Existing direct and delegated connections keep their resolution rules.
+
+Personal sharing remains available from Personal Integrations and requires an explicit acknowledgement. Team cards identify stored connections and the member who shared a connection. Removal keeps the existing confirmation and authorization checks. Switching workspace unmounts connection drafts.
+
+### Template GitHub access prerequisites (TKAI-438, 2026-09-10)
+
+Team template requirements distinguish organization-provided access from a team
+connection. App-pinned GitHub nodes require an active organization installation;
+App configuration alone, a suspended installation, or a team token cannot satisfy
+that pin. A literal repository owner must match an installation. Auto and personal
+credential selection retain their existing fallback rules.
+
+The gallery labels this access as **Organization GitHub App**. GitHub event
+templates state that repository access is checked on install. This listing uses
+local installation state and does not claim that a selected repository is already
+verified. Changes to organization App configuration or refreshed installations
+invalidate template listings; a refreshing gallery disables installation while
+keeping an open dialog and its entered fields intact.
+
+Before a team template writes its workflow, version, or GitHub subscriptions, the
+installer requires an exact repository filter and checks `GET /repos/{owner}/{repo}/installation`
+using the organization's App JWT. This proves installation on the repository,
+where a public repository metadata read would not. There is no personal-token or
+anonymous fallback. Missing or suspended access refuses installation with an admin
+setup message. Provider errors, timeouts, and malformed responses refuse with a
+retry message and write no rows. The check is per install and not cached.
+
+This is installation-time verification, not a guarantee of future webhook delivery:
+GitHub may revoke access afterward, and webhook configuration/event permissions
+still apply. Manual personal template installs retain their existing behavior.
+
+### Missing team GitHub template guidance (2026-09-11)
+
+When unpinned GitHub nodes have no usable team credential, vault credential, or App installation, template guidance points to Settings → Organization → GitHub. An org admin can configure or refresh the App there. The gallery links to that page instead of offering GitHub Connect in Integrations. Other missing services keep their own setup links.
+
+Explicit user-pinned GitHub nodes keep team credential guidance. Usable team and vault credentials still satisfy readiness. This changes guidance only; credential resolution and installation eligibility remain unchanged.
+
+Readiness reasons remain caller-neutral. Template installation adds its next step; repository sync explains when triggers will arm.

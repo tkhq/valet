@@ -68,6 +68,21 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const },
   });
 
+  it("persists each delivery actor on a cached session without rebinding its owner", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    for (const actor of ["member-b", "member-c"]) {
+      const threadKey = `slack:C1:${actor}`;
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner: OWNER, actorUserId: actor, threadKey,
+        signal: channelSignal(actor), dispatchId: actor, mismatchReason: "test",
+      });
+      expect(await firstUserEntry(deps, threadKey)).toMatchObject({ author: { id: actor } });
+    }
+    expect(session.options.userId).toBe(USER);
+    expect(session.owner).toEqual(OWNER);
+  });
+
   it("uses the current assistant default for new Slack threads after restore", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const assistant = await createAssistant(testDb.appDb, ORG, OWNER, "Channel assistant");

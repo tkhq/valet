@@ -223,13 +223,17 @@ class WorkflowPass implements CollectorPass {
    * workflow away.
    */
   async reconcile(ctx: CollectorReconcileContext): Promise<CollectorReconcileResult> {
+    return (await this.prepareReconcile(ctx))(ctx.db);
+  }
+
+  async prepareReconcile(ctx: CollectorReconcileContext): Promise<(db: AppDb) => Promise<CollectorReconcileResult>> {
     const { db, source, text, discovery, commitSha, now } = ctx;
     const warnings: string[] = [];
     let imported = 0;
     let updated = 0;
 
     if (source.ownerType === "user") {
-      return { imported, updated, deleted: 0, keptStale: [], warnings };
+      return async () => ({ imported, updated, deleted: 0, keptStale: [], warnings });
     }
 
     const existing = await db
@@ -288,6 +292,7 @@ class WorkflowPass implements CollectorPass {
       definitions.set(row.id, incoming.get(row.upstreamPath)?.file.definition ?? null);
     }
 
+    const plans = new Map<string, TriggerPlan>();
     for (const candidate of this.candidates) {
       const parsed = incoming.get(candidate.path);
       if (!parsed) continue;
@@ -319,140 +324,148 @@ class WorkflowPass implements CollectorPass {
       }
       if (gated !== null) warnings.push(`${candidate.path}: ${gated}`);
 
-      const plan = gated === null ? parsed.plan : NO_TRIGGERS;
+      plans.set(candidate.path, gated === null ? parsed.plan : NO_TRIGGERS);
+    }
 
-      const name = parsed.file.name ?? candidate.name;
-      const row = byPath.get(candidate.path);
-      if (row === undefined) {
-        const id = newWorkflowId("wf");
-        await db.insert(workflowDefinitions).values({
-          id,
-          // A mirrored row copies its owner from the source: a team source
-          // produces team-owned workflows, an org source org-owned ones.
-          orgId: source.orgId,
-          ownerType: source.ownerType,
-          ownerId: source.ownerId,
-          name,
-          definition: parsed.file.definition,
-          origin: "repo",
-          sourceId: source.id,
-          upstreamPath: candidate.path,
-          contentSha: candidate.blobSha,
-          createdAt: now(),
-          updatedAt: now(),
-        });
-        await snapshot(db, id, 1, name, parsed.file.definition, commitSha, now());
-        for (const keys of await armTriggers(db, source, id, plan, now())) {
+    return async (db) => {
+      for (const candidate of this.candidates) {
+        const parsed = incoming.get(candidate.path);
+        const plan = plans.get(candidate.path);
+        if (!parsed || !plan) continue;
+
+        const name = parsed.file.name ?? candidate.name;
+        const row = byPath.get(candidate.path);
+        if (row === undefined) {
+          const id = newWorkflowId("wf");
+          await db.insert(workflowDefinitions).values({
+            id,
+            // A mirrored row copies its owner from the source: a team source
+            // produces team-owned workflows, an org source org-owned ones.
+            orgId: source.orgId,
+            ownerType: source.ownerType,
+            ownerId: source.ownerId,
+            name,
+            definition: parsed.file.definition,
+            origin: "repo",
+            sourceId: source.id,
+            upstreamPath: candidate.path,
+            contentSha: candidate.blobSha,
+            createdAt: now(),
+            updatedAt: now(),
+          });
+          await snapshot(db, id, 1, name, parsed.file.definition, commitSha, now());
+          for (const keys of await armTriggers(db, source, id, plan, now())) {
+            warnings.push(
+              `${candidate.path} declares two event blocks for ${keys}. Valet armed the first and ignored the rest; give them different event keys, or merge their filters.`,
+            );
+          }
+          imported += 1;
+          continue;
+        }
+
+        // The blob sha decides whether the FILE changed; the definition hash
+        // decides whether a VERSION is worth minting. A rename of the file's
+        // `name` key changes the row and mints nothing, matching the product
+        // edit path.
+        // The triggers reconcile on every pass, not only when the file moved:
+        // they are rows another surface can change, and the file is the
+        // authority for the ones it declares.
+        for (const keys of await armTriggers(db, source, row.id, plan, now())) {
           warnings.push(
             `${candidate.path} declares two event blocks for ${keys}. Valet armed the first and ignored the rest; give them different event keys, or merge their filters.`,
           );
         }
-        imported += 1;
-        continue;
+        if (row.contentSha === candidate.blobSha && row.name === name) continue;
+        await db
+          .update(workflowDefinitions)
+          .set({
+            name,
+            definition: parsed.file.definition,
+            contentSha: candidate.blobSha,
+            updatedAt: now(),
+          })
+          .where(eq(workflowDefinitions.id, row.id));
+        if (canonicalJson(parsed.file.definition) !== canonicalJson(row.definition)) {
+          await snapshot(
+            db,
+            row.id,
+            await nextVersion(db, row.id),
+            name,
+            parsed.file.definition,
+            commitSha,
+            now(),
+          );
+        }
+        updated += 1;
       }
 
-      // The blob sha decides whether the FILE changed; the definition hash
-      // decides whether a VERSION is worth minting. A rename of the file's
-      // `name` key changes the row and mints nothing, matching the product
-      // edit path.
-      // The triggers reconcile on every pass, not only when the file moved:
-      // they are rows another surface can change, and the file is the
-      // authority for the ones it declares.
-      for (const keys of await armTriggers(db, source, row.id, plan, now())) {
+      const stale = [...byPath.values()].filter(
+        (row) => row.upstreamPath !== null && !upstream.has(row.upstreamPath),
+      );
+      // A narrower scan's absences prove nothing, so a cut tree deletes nothing.
+      if (discovery === "directory-walk") {
+        return {
+          imported,
+          updated,
+          deleted: 0,
+          keptStale: stale.map((row) => row.name),
+          warnings,
+          deferred: unchecked,
+        };
+      }
+
+      let deleted = 0;
+      const disarmed: string[] = [];
+      const unsettled = await workflowsWithUnsettledRuns(
+        db,
+        stale.map((row) => row.id),
+      );
+      for (const row of stale) {
+        if (unsettled.has(row.id)) {
+          // The run keeps its own snapshot of the definition, so it finishes
+          // either way. Deleting the row would orphan it from every list view,
+          // so disarm instead: nothing new starts, and the next sync after the
+          // run settles deletes the row.
+          await disarmWorkflowTriggers(db, source.orgId, row.id);
+          disarmed.push(row.name);
+          continue;
+        }
+        // Scoped by source and origin a second time, so this delete stays off a
+        // local workflow and off another source's rows even if the ids were
+        // wrong.
+        const confirmed = await db
+          .select({ id: workflowDefinitions.id })
+          .from(workflowDefinitions)
+          .where(
+            and(
+              eq(workflowDefinitions.id, row.id),
+              eq(workflowDefinitions.sourceId, source.id),
+              eq(workflowDefinitions.origin, "repo"),
+            ),
+          );
+        if (confirmed.length === 0) continue;
+        await purgeWorkflowRows(db, source.orgId, row.id);
+        deleted += 1;
+      }
+      this.disarmed = disarmed;
+      for (const name of disarmed) {
         warnings.push(
-          `${candidate.path} declares two event blocks for ${keys}. Valet armed the first and ignored the rest; give them different event keys, or merge their filters.`,
+          `${name}: this workflow's file is gone from the repository, and a run of it has not settled. Valet turned its triggers off and kept it. It is removed on the first sync after the run settles.`,
         );
       }
-      if (row.contentSha === candidate.blobSha && row.name === name) continue;
-      await db
-        .update(workflowDefinitions)
-        .set({
-          name,
-          definition: parsed.file.definition,
-          contentSha: candidate.blobSha,
-          updatedAt: now(),
-        })
-        .where(eq(workflowDefinitions.id, row.id));
-      if (canonicalJson(parsed.file.definition) !== canonicalJson(row.definition)) {
-        await snapshot(
-          db,
-          row.id,
-          await nextVersion(db, row.id),
-          name,
-          parsed.file.definition,
-          commitSha,
-          now(),
-        );
-      }
-      updated += 1;
-    }
 
-    const stale = [...byPath.values()].filter(
-      (row) => row.upstreamPath !== null && !upstream.has(row.upstreamPath),
-    );
-    // A narrower scan's absences prove nothing, so a cut tree deletes nothing.
-    if (discovery === "directory-walk") {
+      // A disarmed workflow waits on a run, and no commit will land to move the
+      // manifest when it settles. Reporting it deferred keeps the sync
+      // incomplete, so the next poll re-reads and retries the delete. An
+      // unchecked file is deferred for the same reason.
       return {
         imported,
         updated,
-        deleted: 0,
-        keptStale: stale.map((row) => row.name),
+        deleted,
+        keptStale: [],
         warnings,
-        deferred: unchecked,
+        deferred: [...disarmed, ...unchecked],
       };
-    }
-
-    let deleted = 0;
-    const disarmed: string[] = [];
-    const unsettled = await workflowsWithUnsettledRuns(
-      db,
-      stale.map((row) => row.id),
-    );
-    for (const row of stale) {
-      if (unsettled.has(row.id)) {
-        // The run keeps its own snapshot of the definition, so it finishes
-        // either way. Deleting the row would orphan it from every list view,
-        // so disarm instead: nothing new starts, and the next sync after the
-        // run settles deletes the row.
-        await disarmWorkflowTriggers(db, source.orgId, row.id);
-        disarmed.push(row.name);
-        continue;
-      }
-      // Scoped by source and origin a second time, so this delete stays off a
-      // local workflow and off another source's rows even if the ids were
-      // wrong.
-      const confirmed = await db
-        .select({ id: workflowDefinitions.id })
-        .from(workflowDefinitions)
-        .where(
-          and(
-            eq(workflowDefinitions.id, row.id),
-            eq(workflowDefinitions.sourceId, source.id),
-            eq(workflowDefinitions.origin, "repo"),
-          ),
-        );
-      if (confirmed.length === 0) continue;
-      await purgeWorkflowRows(db, source.orgId, row.id);
-      deleted += 1;
-    }
-    this.disarmed = disarmed;
-    for (const name of disarmed) {
-      warnings.push(
-        `${name}: this workflow's file is gone from the repository, and a run of it has not settled. Valet turned its triggers off and kept it. It is removed on the first sync after the run settles.`,
-      );
-    }
-
-    // A disarmed workflow waits on a run, and no commit will land to move the
-    // manifest when it settles. Reporting it deferred keeps the sync
-    // incomplete, so the next poll re-reads and retries the delete. An
-    // unchecked file is deferred for the same reason.
-    return {
-      imported,
-      updated,
-      deleted,
-      keptStale: [],
-      warnings,
-      deferred: [...disarmed, ...unchecked],
     };
   }
 

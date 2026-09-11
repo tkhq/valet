@@ -32,7 +32,7 @@ import type {
 
 export const notificationsRouter = new Hono<AppEnv>();
 
-const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval"];
+const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review"];
 
 function rowToSummary(row: NotificationRow): NotificationSummary {
   return {

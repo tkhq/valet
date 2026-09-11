@@ -154,7 +154,7 @@ describe("InstallTemplateDialog", () => {
       );
       expect(
         screen.getByText(
-          "Linear is not connected for this team. Connect Linear on the Integrations page and share it with the team, then install this template.",
+          "Linear is not connected for this team. Set up access on the Integrations page, then install this template.",
         ),
       ).toBeTruthy();
     });

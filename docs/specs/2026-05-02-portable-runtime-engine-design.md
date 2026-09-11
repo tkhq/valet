@@ -778,6 +778,12 @@ Tool names are globally unique within a session after registration. Built-in too
 
 #### ToolContext
 
+For a queued turn, `userId` is the running submission's `author.id`.
+Authorless submissions fall back to the session user, including submissions saved before author tracking.
+Hosts must supply the authenticated or authorized internal actor as the author.
+This actor selection does not change session ownership or the credential provider's owner.
+Overheard digests retain the author and merge only submissions with the same actor.
+
 Every tool execution receives a context object from the engine:
 
 ```typescript

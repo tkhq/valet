@@ -32,12 +32,11 @@ export function ShareControls({ path }: { path: string }) {
   const patchMutation = usePatchArtifact();
   const revokeMutation = useRevokeArtifact();
 
-  // Match on the sharer too, not just the path: an org admin's list holds
-  // every member's artifacts, and paths are conventional, so a path-only
-  // match can land on a colleague's link — and Revoke would kill it.
+  // This control is personal-only. Team memory hides it. Exclude team
+  // snapshots even when the same actor published the same path.
   const me = meQ.data?.id;
   const artifact = me
-    ? artifactsQ.data?.artifacts.find((a) => a.path === path && a.actorUserId === me && !a.revoked)
+    ? artifactsQ.data?.artifacts.find((a) => a.ownerType === "user" && a.path === path && a.actorUserId === me && !a.revoked)
     : undefined;
   const allowPublic = orgQ.data?.allowPublicArtifacts ?? false;
   const busy = shareMutation.isPending || patchMutation.isPending || revokeMutation.isPending;

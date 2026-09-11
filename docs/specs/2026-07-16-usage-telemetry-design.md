@@ -62,3 +62,25 @@ Run a handful of sessions (some web, one long-running with a >60s job, one error
 - OpenTelemetry/external export (possible later sink for the same projector).
 - Backfilling telemetry for sessions that predate the feature.
 - User-level privacy controls beyond admin-gating (single-org trust model today).
+
+## Daily active agents (2026-09-10)
+
+`GET /api/usage/daily-agents?scope=org&window=30d` returns daily activity for collection outside Valet. It uses the existing usage scope checks. Org reads require an org admin; team reads require membership. The response contains aggregate counts, not session IDs.
+
+An active agent is a distinct engine session with positive recorded token usage on a UTC calendar day. Repeated turns and threads count once per session per day. Children and workflow agents count separately from their parent assistant. Kinds are `assistant`, `child`, `workflow`, and `session`. Idle sessions, page views, zero-token entries, and external proxy calls do not count. Unpriced usage counts.
+
+Each row contains `dayMs`, `teamId`, `teamName`, `kind`, and `activeAgents`. Team attribution uses the session or workflow owner from `cost_entries`, never the actor's team memberships. A null team ID means no team owner. Names reflect current team names. Sum the kinds for a team's daily total; do not sum daily counts to compute monthly unique agents.
+
+Windows include the current partial UTC day and the preceding calendar days: `24h`, `7d`, `30d`, or `90d`. Missing day/group rows mean zero. This endpoint reads retained usage and ownership rows. Deletion can remove historical observations, and removing child-watch metadata can change classification. Collect completed-day snapshots externally if history must survive cleanup. No per-agent Prometheus labels or new telemetry writes are added.
+
+## Team member daily active agents (2026-09-10)
+
+The team Usage page adds **Avg daily active agents** to **By member**. The breakdown API returns `byUser[].avgDailyActiveAgents` and `dailyAgentWindow` only when the caller administers the team. Existing membership and org checks apply.
+
+An active agent is a distinct engine session with positive recorded token usage on a UTC day. Children and workflow node sessions, including separate iteration sessions, count individually. Repeated turns and threads count once per session, actor, and day. Unpriced turns count. Idle sessions, zero-token entries, and proxy requests do not count.
+
+The average divides session-days by all calendar days in the selected window: 1, 7, 30, or 90. This includes days without activity and the current partial UTC day. The `24h` selection means today for this metric. Spend retains its existing rolling window.
+
+Team ownership comes from `cost_entries`, never the actor's memberships. Member activity uses the recorded queue prompt author, then the child's spawning actor. Ordinary sessions without either stamp use the existing session user. Shared assistants without an actor and team workflows without an actor appear under **Team / shared**. Activity can differ from billing attribution in the adjacent spend columns. A shared session used by two members counts once for each member that day; summing member averages is not a unique team total.
+
+This adapts PR635's retained-usage session counting without adding another UI query, telemetry writes, or agent metric labels. Deleted usage and ownership rows remove history. Removing queue or child metadata can change attribution. These are retained-data observations, not permanent audit records.

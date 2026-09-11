@@ -30,6 +30,7 @@ import type { ChannelOrigin, SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
+import { isTeamAssistantMention, teamMentionActor } from "./team-slack-gate.js";
 import { upsertFollowedThread } from "./followed-threads.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
@@ -50,8 +51,8 @@ export interface OrchestratorDeliverFn {
      * The human the delivery acts for. NOT `ownerId`: on a team or org
      * subscription the owner is a team/org id, and this value is written to
      * `agent_sessions.user_id`, which holds a user. The subscription's
-     * author is the only real user an event delivery has — nobody is at a
-     * keyboard when it fires.
+     * author is the actor for ordinary events. Team mentions use the linked
+     * sender, after the live membership check.
      */
     actorUserId: string;
     signal: SignalContent;
@@ -195,6 +196,13 @@ export class EventDispatcher {
       if (target.kind === "workflow" && target.workflowId) {
         await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
       } else if (target.kind === "orchestrator") {
+        const teamMention = isTeamAssistantMention(sub, event.eventKey);
+        const actorUserId = teamMention ? await teamMentionActor(db, sub, event.payload) : sub.createdBy;
+        if (event.orgId !== sub.orgId || actorUserId === null) {
+          await db.update(eventDeliveries).set({ status: "dead", lastError: "Team mention denied. Check the sender's Slack identity link and team membership." })
+            .where(eq(eventDeliveries.id, deliveryId));
+          return;
+        }
         // A channel event routes a reply back: stamp the origin, and render the
         // message as the agent should read it — the sender's name and the clean
         // text, not the machine summary or raw `<@U…>` markup and ids.
@@ -223,7 +231,7 @@ export class EventDispatcher {
           orgId: event.orgId,
           ownerType: sub.ownerType,
           ownerId: sub.ownerId,
-          actorUserId: sub.createdBy,
+          actorUserId,
           signal: {
             kind: "signal",
             signalType: event.eventKey,
@@ -247,7 +255,8 @@ export class EventDispatcher {
               threadTs: parts[2],
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
-              createdBy: sub.createdBy,
+              createdBy: actorUserId,
+              preserveBinding: teamMention,
               // Whichever assistant just answered keeps the thread, so a later
               // overheard message does not fall back to the owner's default.
               assistantId: target.assistantId,

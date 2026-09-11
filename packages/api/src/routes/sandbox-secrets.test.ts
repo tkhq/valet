@@ -6,10 +6,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, teams } from "../schema/index.js";
 import { ONEPASSWORD_SERVICE, OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
-import { UNGRANTED_TEAM_OP_REF } from "../services/team-onepassword-grant.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -187,10 +186,11 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       resolveReference: async (scope: string, _ctx: unknown, reference: string) => {
         scopesTried.push(scope);
         if (scope === "personal") return "PERSONAL-VAULT-VALUE";
-        throw new Error("no org token");
+        throw new OnePasswordAuthError("no token", "no_token");
       },
     };
 
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-team-1",
       userId: "user-a",
@@ -210,7 +210,7 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     const res = await resolve(["op://ok/item/field"], token);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Resp;
-    expect(scopesTried).toEqual(["org"]);
+    expect(scopesTried).toEqual(["team", "org"]);
     expect(body.values[0]).toBeNull();
     expect(body.unresolved).toEqual(["op://ok/item/field"]);
   });
@@ -224,6 +224,7 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       ...fakeOnePassword(),
       findCandidates: async () => [{ vault: "ok", item: "item", field: "field" }],
     };
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-team-nogrant",
       userId: "local-user",
@@ -250,12 +251,13 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       body: JSON.stringify({ query: "item" }),
     });
     expect(found.status).toBe(200);
-    expect(await found.text()).toBe("org\top://ok/item/field");
+    expect(await found.text()).toBe("team\top://ok/item/field");
   });
 
-  it("a team-owned session resolves a granted ref and refuses an ungranted one", async () => {
+  it("a team-owned session ignores obsolete grants for token-accessible references", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-team-grant",
       userId: "local-user",
@@ -281,8 +283,8 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     expect(decode(((await granted.json()) as Resp).values[0])).toBe("secret-for-op://ok/item/field");
 
     const refused = await resolve(["op://ok/other/field"], token);
-    expect(refused.status).toBe(403);
-    expect(((await refused.json()) as { error: string }).error).toBe(UNGRANTED_TEAM_OP_REF);
+    expect(refused.status).toBe(200);
+    expect(decode(((await refused.json()) as Resp).values[0])).toBe("secret-for-op://ok/other/field");
   });
 
   it("a user-owned session still reaches that user's personal vault", async () => {
@@ -293,10 +295,11 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       resolveReference: async (scope: string) => {
         scopesTried.push(scope);
         if (scope === "personal") return "PERSONAL-VAULT-VALUE";
-        throw new Error("no org token");
+        throw new OnePasswordAuthError("no token", "no_token");
       },
     };
 
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-user-1",
       userId: "user-a",
@@ -332,11 +335,12 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       resolveReference: async (scope: string) => {
         scopesTried.push(scope);
         if (scope === "personal") return "ACTOR-PRIVATE-VALUE";
-        throw new Error("no org token");
+        throw new OnePasswordAuthError("no token", "no_token");
       },
     };
 
     // The row after the move: owned by user-b, who now prompts the session.
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-moved-1",
       userId: "user-b",
@@ -373,10 +377,11 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       resolveReference: async (scope: string) => {
         scopesTried.push(scope);
         if (scope === "personal") return "PERSONAL-VAULT-VALUE";
-        throw new Error("no org token");
+        throw new OnePasswordAuthError("no token", "no_token");
       },
     };
 
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-legacy-1",
       userId: "user-a",
@@ -424,6 +429,7 @@ describe("POST /api/sandbox-secrets/resolve", () => {
         throw new OnePasswordAuthError("no org token", "no_token");
       },
     };
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-org-1",
       userId: "user-a",
@@ -493,6 +499,7 @@ describe("POST /api/sandbox-secrets/resolve", () => {
   it("refuses a scope the owner rule excludes, and names why", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
     await api.providers.db.insert(agentSessions).values({
       id: "sess-scope-team",
       userId: "local-user",
@@ -514,10 +521,10 @@ describe("POST /api/sandbox-secrets/resolve", () => {
       body: JSON.stringify({ references: ["op://ok/item/field"], scope: "personal" }),
     });
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toContain("organization vaults only");
+    expect(((await res.json()) as { error: string }).error).toContain("cannot use a personal 1Password token");
   });
 
-  it("rejects a scope that is not org or personal", async () => {
+  it("rejects an unknown scope", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();
     const res = await fetch(`${api.baseUrl}/api/sandbox-secrets/resolve`, {
@@ -572,5 +579,110 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     const body = (await res.json()) as Resp;
     expect(body.values[0]).toBeNull();
     expect(body.unresolved).toEqual(["op://typo/item/field"]);
+  });
+});
+
+describe("team token scope boundaries", () => {
+  async function teamSession() {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "team-scope", orgId: "local-org", name: "Scope", createdAt: Date.now() });
+    await api.providers.db.insert(agentSessions).values({
+      id: "team-scope-session", userId: "local-user", orgId: "local-org", workspace: "/workspace",
+      ownerType: "team", ownerId: "team-scope", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    return mintToken("team-scope-session");
+  }
+
+  it("discovers and resolves with the trusted team identity and ignores legacy refs", async () => {
+    const token = await teamSession();
+    const calls: string[] = [];
+    api!.providers.onePassword = {
+      ...fakeOnePassword(),
+      findCandidates: async (scope, ctx) => {
+        calls.push(scope);
+        expect(ctx.teamId).toBe("team-scope");
+        return [{ vault: "Allowed", item: "Linear", field: "token" }, { vault: "Allowed", item: "Linear API", field: "token" }];
+      },
+      resolveReference: async (scope, ctx) => {
+        calls.push(scope);
+        expect(ctx.teamId).toBe("team-scope");
+        return "fake-resolved";
+      },
+    };
+    await api!.providers.engineCredentials.save({ type: "team", id: "team-scope" }, "onepassword", {
+      type: "service_account", metadata: { refs: ["op://Old/Item/token"] },
+    });
+    const found = await fetch(`${api!.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST", headers: { ...HEADERS, "x-valet-sandbox": token }, body: JSON.stringify({ query: "linear", teamId: "attacker-supplied-team" }),
+    });
+    expect(found.status).toBe(200);
+    expect(await found.text()).toBe("team\top://Allowed/Linear/token\nteam\top://Allowed/Linear API/token");
+    expect((await resolve(["op://Allowed/Linear/token"], token)).status).toBe(200);
+    expect(calls).toEqual(["team", "team"]);
+  });
+
+  it("does not broaden an empty team search or a refused team reference to org", async () => {
+    const token = await teamSession();
+    const calls: string[] = [];
+    api!.providers.onePassword = {
+      ...fakeOnePassword(),
+      findCandidates: async (scope) => { calls.push(scope); return []; },
+      resolveReference: async (scope) => {
+        calls.push(scope);
+        if (scope === "org") return "broader-org-secret";
+        throw new OnePasswordAuthError("inaccessible vault", "reference");
+      },
+    };
+    const found = await fetch(`${api!.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST", headers: { ...HEADERS, "x-valet-sandbox": token }, body: JSON.stringify({ query: "missing" }),
+    });
+    expect(found.status).toBe(200);
+    expect(await found.text()).toBe("");
+    expect((await resolve(["op://Forbidden/Item/token"], token)).status).toBe(502);
+    expect(calls).toEqual(["team", "team"]);
+    const explicitOrg = await fetch(`${api!.baseUrl}/api/sandbox-secrets/resolve`, {
+      method: "POST", headers: { ...HEADERS, "x-valet-sandbox": token }, body: JSON.stringify({ references: ["op://Org/Item/token"], scope: "org" }),
+    });
+    expect(explicitOrg.status).toBe(200);
+    expect(calls).toEqual(["team", "team", "org"]);
+  });
+
+  it("only absent team tokens fall back; a configured team SDK failure refuses find and resolve", async () => {
+    const token = await teamSession();
+    for (const kind of ["no_token", "sdk"] as const) {
+      const calls: string[] = [];
+      api!.providers.onePassword = {
+        ...fakeOnePassword(),
+        findCandidates: async (scope) => {
+          calls.push(scope);
+          if (scope === "team") throw new OnePasswordAuthError("fake failure", kind);
+          return [{ vault: "Org", item: "Item", field: "token" }];
+        },
+        resolveReference: async (scope) => {
+          calls.push(scope);
+          if (scope === "team") throw new OnePasswordAuthError("fake failure", kind);
+          return "fake-org-value";
+        },
+      };
+      const found = await fetch(`${api!.baseUrl}/api/sandbox-secrets/find`, {
+        method: "POST", headers: { ...HEADERS, "x-valet-sandbox": token }, body: JSON.stringify({ query: "item" }),
+      });
+      expect(found.status).toBe(kind === "no_token" ? 200 : 502);
+      expect((await resolve(["op://Org/Item/token"], token)).status).toBe(kind === "no_token" ? 200 : 502);
+      expect(calls).toEqual(kind === "no_token" ? ["team", "org", "team", "org"] : ["team", "team"]);
+    }
+  });
+
+  it("refuses personal sessions requesting team scope", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = { ...fakeOnePassword(), findCandidates: async () => { throw new Error("must not call SDK"); } };
+    const token = await mintToken();
+    for (const path of ["find", "resolve"]) {
+      const response = await fetch(`${api.baseUrl}/api/sandbox-secrets/${path}`, {
+        method: "POST", headers: { ...HEADERS, "x-valet-sandbox": token },
+        body: JSON.stringify({ query: "linear", references: ["op://Team/Item/token"], scope: "team", teamId: "team-scope" }),
+      });
+      expect(response.status).toBe(403);
+    }
   });
 });

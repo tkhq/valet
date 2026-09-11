@@ -28,6 +28,7 @@
  * `userId` matches the authenticated caller — as defense in depth against
  * a stolen/replayed `state` value.
  */
+import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { eq } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import { Hono, type Context } from "hono";
@@ -256,6 +257,8 @@ githubConnectRouter.get("/callback", async (c) => {
     metadata: { login },
   });
 
+  await refreshCredentialReadiness(c.var.providers, { type: "user", id: user.id }, GITHUB_CREDENTIAL_SERVICE);
+
   // Best-effort: a transient failure here shouldn't strand the user on an
   // error page after the credential itself saved successfully — the next
   // `discoverInstallations` run (webhook/refresh) will catch up.
@@ -275,7 +278,8 @@ githubConnectRouter.delete("/", async (c) => {
   await engineCredentials.delete({ type: "user", id: user.id }, GITHUB_CREDENTIAL_SERVICE);
   // A team reference to this row goes with it (team credentials design,
   // decision 4), the same cascade `DELETE /api/credentials/github` runs.
-  await deleteDelegationsFrom(db, { userId: user.id, service: GITHUB_CREDENTIAL_SERVICE });
+  const revoked = await deleteDelegationsFrom(db, { userId: user.id, service: GITHUB_CREDENTIAL_SERVICE });
+  for (const teamId of new Set(revoked)) await c.var.providers.contentSync.resyncTeamWorkflowSources(teamId);
   await db
     .update(githubInstallations)
     .set({ linkedUserId: null, updatedAt: Date.now() })

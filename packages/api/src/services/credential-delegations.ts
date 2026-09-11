@@ -6,6 +6,7 @@
  * go with it. The references hold no secret of their own, so there is
  * nothing to revoke beyond the row.
  */
+import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { credentials } from "../schema/index.js";
@@ -38,15 +39,18 @@ export async function deleteDelegationsFrom(
   db: AppDb,
   source: { userId: string; service: string },
 ): Promise<string[]> {
-  const revoked = await db
-    .delete(credentials)
-    .where(
-      and(
-        eq(credentials.ownerType, "team"),
-        eq(credentials.service, source.service),
-        sql`${credentials.metadata}->>'delegatedFrom' = ${source.userId}`,
-      ),
-    )
-    .returning({ teamId: credentials.ownerId });
-  return revoked.map((row) => row.teamId);
+  return db.transaction(async (tx) => {
+    const revoked = await tx
+      .delete(credentials)
+      .where(
+        and(
+          eq(credentials.ownerType, "team"),
+          eq(credentials.service, source.service),
+          sql`${credentials.metadata}->>'delegatedFrom' = ${source.userId}`,
+        ),
+      )
+      .returning({ teamId: credentials.ownerId });
+    for (const { teamId } of revoked) await invalidateWorkflowSources(tx, { teamId });
+    return revoked.map((row) => row.teamId);
+  });
 }

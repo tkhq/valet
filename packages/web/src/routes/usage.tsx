@@ -286,6 +286,7 @@ export function UsagePage() {
   const modelRows = breakdown?.byModel ?? [];
   const skillRows = breakdown?.skillBreakdown ?? [];
   const byUserRows = breakdown?.byUser ?? [];
+  const dailyAgentWindow = scope === "team" ? breakdown?.dailyAgentWindow : undefined;
   const chartBuckets = breakdown?.byDay ?? [];
 
   // Cache-hit-rate = cacheReadTokens / (inputTokens + cacheReadTokens)
@@ -585,11 +586,27 @@ export function UsagePage() {
             {byUserRows.length > 0 && (
               <div>
                 <h2 className="text-sm font-medium text-ink mb-3">By member</h2>
+                {dailyAgentWindow && (
+                  <div className="text-xs text-muted mb-3 space-y-2">
+                    <p>Average agents active per day, including child agents and workflows.</p>
+                    <details>
+                      <summary className="cursor-pointer">How active agents are counted</summary>
+                      <p className="mt-2">
+                        Each session with recorded token usage counts once per member per UTC day.
+                        {" "}Averages cover {dailyAgentWindow.days} UTC calendar {dailyAgentWindow.days === 1 ? "day" : "days"}, including zero-activity days and today so far.
+                        {" "}Activity uses the prompt author, then the child’s spawning member; older ordinary sessions use the session user.
+                        {" "}Unattributed activity appears under Team / shared. An agent used by multiple members counts for each.
+                        {" "}Spend uses billing attribution and the rolling time range.
+                      </p>
+                    </details>
+                  </div>
+                )}
                 <div className="overflow-x-auto rounded border border-line">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-line bg-paper-muted">
                         <th className="px-3 py-2 text-left font-medium text-muted">Member</th>
+                        {dailyAgentWindow && <th className="px-3 py-2 text-right font-medium text-muted">Avg daily active agents</th>}
                         <th className="px-3 py-2 text-right font-medium text-muted">Turns</th>
                         <th className="px-3 py-2 text-right font-medium text-muted">Tokens</th>
                         <th className="px-3 py-2 text-right font-medium text-muted">Cost (USD)</th>
@@ -604,6 +621,11 @@ export function UsagePage() {
                           <td className="px-3 py-2 text-ink truncate max-w-[14rem]" title={row.name}>
                             {row.name || <span className="text-muted italic">unknown</span>}
                           </td>
+                          {dailyAgentWindow && (
+                            <td className="px-3 py-2 text-right tabular-nums text-muted">
+                              {row.avgDailyActiveAgents?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? "—"}
+                            </td>
+                          )}
                           <td className="px-3 py-2 text-right tabular-nums text-muted">
                             {row.turns.toLocaleString()}
                           </td>

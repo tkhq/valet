@@ -182,5 +182,8 @@ async function deliverToAssistantThreadInner(
       }
     }
   }
-  await thread.submitPrompt(signal, { dispatchId: args.dispatchId });
+  await thread.submitPrompt(signal, {
+    dispatchId: args.dispatchId,
+    author: { id: args.actorUserId },
+  });
 }

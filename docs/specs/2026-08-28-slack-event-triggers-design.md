@@ -245,16 +245,14 @@ display `labels` on the wire, so the list shows names, not raw ids).
 `slack.message` scoping is deliberately out of scope here — TKAI-302 tracks
 that product decision.
 
-**Team scope (TKAI-304, interim, added 2026-09-06).** A team-owned mention
-subscription passes the same two gates, so its stored `user` filter is the
-creator's Slack id. Only the creator wakes the team's assistant. A mention by
-another team member does not match. The design replaces the creator filter
-for team owners with a membership check at match time (decision 4 in
-`docs/specs/2026-09-04-team-slack-mention-subscriptions-design.md`). Until
-that gate ships, the AutomationWizard lists the team's assistant under the
-reply outcome as a disabled option and says that team-wide mentions are not
-available yet. A create in a team workspace posts the caller's own
-assistant. The team option goes live with the gate.
+**Team scope (TKAI-304/364, implemented 2026-09-10).** Team assistant
+mention rules use the organization bot. They need no team Slack connection.
+At match time, linked senders must be current members of the owning team.
+The matcher ignores interim creator filters for these rules. Personal and workflow
+mention rules remain creator-scoped. Redelivery uses the same membership gate.
+The dispatcher uses the mentioner as actor and preserves that actor on the follow row.
+The wizard offers the team's assistant and explains member-only routing.
+See `2026-09-04-team-slack-mention-subscriptions-design.md` for the full contract.
 
 ## Custom slash commands that route to triggers or assistants
 
