@@ -116,10 +116,10 @@ describe("EngineHost outbound sender identity", () => {
       orgId: ORG,
       owner: { type: "user", id: USER },
       workspace: "/tmp",
-      outboundSender: { displayName: "Workflow digest", avatarUrl: AVATAR_URL },
+      outboundSender: { displayName: "Workflow digest" },
     });
 
-    expect(await senderFor(session)).toEqual({ displayName: "Workflow digest", avatarUrl: AVATAR_URL });
+    expect(await senderFor(session)).toEqual({ displayName: "Workflow digest" });
   });
 
   it("uses the current parent assistant for a child-agent session", async () => {
@@ -162,18 +162,17 @@ describe("EngineHost outbound sender identity", () => {
       orgId: ORG,
       owner: { type: "user", id: USER },
       workspace: "/tmp",
-      outboundSender: { displayName: "Workflow digest", avatarUrl: AVATAR_URL },
+      outboundSender: { displayName: "Workflow digest" },
     });
 
     await expect(postThroughSession(session)).resolves.toMatchObject({
       channel: "C1",
       text: "from a workflow session",
       username: "Workflow digest",
-      icon_url: AVATAR_URL,
     });
   });
 
-  it("omits icon_url when the workflow has no avatar", async () => {
+  it("uses the workflow name and Slack's app avatar", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     api = await bootTestApi({ plugins: [slackPlugin] });

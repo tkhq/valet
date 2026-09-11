@@ -43,7 +43,6 @@ import {
   parsePrincipal,
   type ActionPlugin,
   type CredentialStore,
-  type ChannelSenderIdentity,
   type Principal,
   type SessionStore,
   type SignalContent,
@@ -167,7 +166,7 @@ interface RunContext {
   orgId: string;
   actorUserId: string;
   owner: Principal;
-  outboundSender: ChannelSenderIdentity;
+  outboundSender: { displayName: string };
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -176,7 +175,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   if (!run.owner) throw new Error(`workflow engine-deps: run ${runId} has no recorded owner`);
 
   const defRows = await opts.db
-    .select({ orgId: workflowDefinitions.orgId, name: workflowDefinitions.name, avatarUrl: workflowDefinitions.avatarUrl })
+    .select({ orgId: workflowDefinitions.orgId, name: workflowDefinitions.name })
     .from(workflowDefinitions)
     .where(eq(workflowDefinitions.id, run.params.workflowId))
     .limit(1);
@@ -196,10 +195,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     orgId: defRow.orgId,
     actorUserId: actorUserIdFor(owner),
     owner,
-    outboundSender: {
-      displayName: defRow.name,
-      ...(defRow.avatarUrl !== null ? { avatarUrl: defRow.avatarUrl } : {}),
-    },
+    outboundSender: { displayName: defRow.name },
   };
 }
 

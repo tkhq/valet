@@ -31,6 +31,7 @@ import {
   type CredentialOwner,
   type CredentialProvider,
   type CredentialStore,
+  type ChannelSenderIdentity,
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,

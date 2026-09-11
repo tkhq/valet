@@ -364,11 +364,13 @@ describe("buildActionInvoker", () => {
       );
 
       expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "C1" } });
-      expect(JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string)).toMatchObject({
+      const body = JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
+      expect(body).toMatchObject({
         channel: "C1",
         text: "Deploy complete",
         username: "Workflow digest",
       });
+      expect(body.icon_url).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }

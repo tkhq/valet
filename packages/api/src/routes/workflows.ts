@@ -43,7 +43,6 @@ import {
   retryWorkflowRun,
   startWorkflowRun,
   updateWorkflowDefinition,
-  validateWorkflowAvatar,
   validateDefinitionInput,
   RUN_OUTCOME_VALUES,
   RUN_PAGE_LIMIT_MAX,
@@ -172,8 +171,6 @@ workflowsRouter.post("/", async (c) => {
   if (!body.name || typeof body.name !== "string") {
     return c.json({ error: "name is required" }, 400);
   }
-  const avatarError = validateWorkflowAvatar(body.avatarUrl);
-  if (avatarError) return c.json({ error: avatarError }, 400);
   if (body.definition === undefined || body.definition === null) {
     return c.json({ error: "definition is required" }, 400);
   }
@@ -199,7 +196,6 @@ workflowsRouter.post("/", async (c) => {
     created = await createWorkflowDefinition(deps, owner, {
       name: body.name,
       definition: body.definition,
-      avatarUrl: body.avatarUrl,
       teamId: createdOwner.owner.type === "team" ? createdOwner.owner.id : undefined,
       skipMembershipCheck: principal.type === "team",
     });
@@ -488,9 +484,6 @@ workflowsRouter.put("/:id", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const avatarError = validateWorkflowAvatar(body.avatarUrl);
-  if (avatarError) return c.json({ error: avatarError }, 400);
-
   if (body.definition !== undefined) {
     const validation = validateDefinitionInput(body.definition, env);
     if (!validation.ok) {
@@ -501,7 +494,6 @@ workflowsRouter.put("/:id", async (c) => {
   const updated = await updateWorkflowDefinition(deps, owner, id, {
     name: body.name,
     definition: body.definition,
-    avatarUrl: body.avatarUrl,
   });
   if (!updated) return c.json({ error: "workflow not found" }, 404);
 

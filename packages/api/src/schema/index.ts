@@ -1185,8 +1185,6 @@ export const workflowDefinitions = pgTable(
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
-    /** Optional image used for this workflow's outbound Slack posts. */
-    avatarUrl: text("avatar_url"),
     definition: jsonb("definition").notNull(),
     /** `repo` rows mirror one workflow file and are read-only in the product:
      * editing the file is the edit, deleting the file is the delete. */
