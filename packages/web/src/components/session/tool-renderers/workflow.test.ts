@@ -77,9 +77,9 @@ describe("pickRenderer routing", () => {
 });
 
 describe("workflowRefsFrom", () => {
-  it("pulls workflowId/runId out of persisted JSON and marker-gated TOON", () => {
+  it("pulls workflowId/runId out of persisted JSON and object-rooted TOON", () => {
     const data = { workflowId: "wf1", runId: "r1", status: "pending" };
-    for (const text of [JSON.stringify(data), encode({ items: [], ...data })]) {
+    for (const text of [JSON.stringify(data), encode(data)]) {
       expect(workflowRefsFrom({ text })).toEqual({ workflowId: "wf1", runId: "r1" });
     }
   });

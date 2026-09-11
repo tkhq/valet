@@ -268,7 +268,8 @@ pretty JSON if TOON encoding throws. Plain string results stay unchanged.
 results, and structured built-in results use the same boundary.
 
 The web renderer reads old and new persisted results. It parses JSON first. It
-parses TOON only when the first non-empty line has an array or table marker.
+parses TOON when the text has an array marker or at least two top-level object
+fields. The object rule supports engine output and rejects single-line prose.
 Fallback, workflow, OpenAI media, and security renderers therefore render both
 formats as the same structured value without changing plain text. Plugin
 commands wrap structured output in a `toon` code fence to preserve line breaks.

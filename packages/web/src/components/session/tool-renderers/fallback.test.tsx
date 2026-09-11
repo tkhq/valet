@@ -4,7 +4,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { fallbackRenderer } from "./fallback";
 
-const data = [{ status: "active", count: 12 }];
+const data = { status: "active", count: 12 };
 
 function renderResult(text: string): void {
   render(
@@ -22,7 +22,10 @@ describe("fallbackRenderer", () => {
     "renders JSON and TOON as structured fields",
     (text) => {
       renderResult(text);
-      expect(screen.getByText(JSON.stringify(data))).toBeTruthy();
+      expect(screen.getByText("status")).toBeTruthy();
+      expect(screen.getByText("active")).toBeTruthy();
+      expect(screen.getByText("count")).toBeTruthy();
+      expect(screen.getByText("12")).toBeTruthy();
     },
   );
 

@@ -118,8 +118,9 @@ describe("Session.prompt plugin command execution", () => {
     const last = lastEntry(await store.getEntries(session.id, threadId));
     expect(last?.type === "command_result" && last.ok).toBe(true);
     const output = last?.type === "command_result" ? last.output : "";
-    expect(output).toMatch(/^```toon\n[\s\S]+\n```$/);
-    expect(decode(output.slice(8, -4))).toEqual({ echoed: "/testplug:echo hello" });
+    const fenced = /^```toon\n([\s\S]+)\n```$/.exec(output);
+    expect(fenced).not.toBeNull();
+    expect(decode(fenced?.[1] ?? "")).toEqual({ echoed: "/testplug:echo hello" });
 
     // The queue never took a submission for the command.
     const unsettled = await store.listUnsettledSubmissions(session.id);

@@ -198,13 +198,18 @@ describe("sec_cell_complete + sec_close summaries", () => {
 
   it.each([JSON.stringify, encode])("renders the sec_close manifest headline from structured text", (encodeManifest) => {
     const manifest = {
-      cells: [],
       engagementId: "eng-1",
       status: "completed",
+      repoFullName: "acme/api",
+      repoRef: "abc123",
+      cells: [],
+      coverage: { assessed: 1, notAssessed: 0, gaps: [] },
+      report: null,
       findings: {
         total: 5,
         distinctBySeverity: { critical: 1, high: 2, medium: 0, low: 0, info: 0 },
         statusBreakdown: { open: 2, verified: 2, refuted: 1 },
+        filedLinks: 0,
       },
     };
     render(

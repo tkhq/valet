@@ -2,6 +2,7 @@ import { decode as decodeToon } from '@toon-format/toon';
 import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
 import type { ActionPlugin, CredentialProvider, PluginAction, RiskLevel } from '@valet/engine';
+import { hasToonCollectionMarker } from '@valet/shared';
 import { McpClient } from './client.js';
 import type { McpTool, McpToolResult } from './types.js';
 
@@ -171,8 +172,6 @@ function mapToolResult(result: McpToolResult): { success: boolean; data?: unknow
   return { success: true, data: tryParseJson(text) ?? tryDecodeToon(text) ?? text };
 }
 
-const TOON_MARKER = /^[\w.-]*\[\d+\](?:\{[^}]*\})?:\s*$/;
-
 function asStructured(value: unknown): unknown {
   return value !== null && typeof value === 'object' ? value : undefined;
 }
@@ -188,8 +187,8 @@ function tryParseJson(text: string): unknown {
 }
 
 function tryDecodeToon(text: string): unknown {
-  const firstLine = text.split('\n').find((line) => line.trim().length > 0)?.trim();
-  if (!firstLine || !TOON_MARKER.test(firstLine)) return undefined;
+  // MCP text remains collection-only because it has no trusted engine boundary.
+  if (!hasToonCollectionMarker(text)) return undefined;
   try {
     return asStructured(decodeToon(text));
   } catch {
