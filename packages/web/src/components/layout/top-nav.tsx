@@ -216,7 +216,9 @@ export function TopNav() {
         <span className="text-moss text-base leading-none" aria-hidden>
           ◈
         </span>
-        <PresenceMark name="Valet" state={presence} size="nav" />
+        <span className="hidden sm:inline-flex">
+          <PresenceMark name="Valet" state={presence} size="nav" />
+        </span>
       </Link>
 
       {/* Beside the logo, not in the sidebar: it scopes the surfaces below

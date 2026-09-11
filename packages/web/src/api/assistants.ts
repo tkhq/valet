@@ -27,6 +27,7 @@ import type { OwnerFilter } from "./client";
 import { api } from "./client";
 import { useOrchestratorInfo } from "./orchestrator";
 import { qk, refetchSessionReads } from "./queries";
+import { assistantLabel, orchestratorName } from "~/lib/assistant-name";
 
 export const qkAssistants = {
   // Derived from the central factory: useDeleteSession invalidates the same
@@ -80,10 +81,9 @@ export function useScopedAssistantName(owner?: OwnerFilter): string {
   const assistantsQ = useAssistants({ enabled: isTeam });
   if (isTeam) {
     const teamAssistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", owner.ownerId);
-    const named = teamAssistant?.name?.trim();
-    return named && named.length > 0 ? named : "the team's assistant";
+    return teamAssistant ? assistantLabel(teamAssistant) : orchestratorName(undefined);
   }
-  return info.data?.name ?? "your assistant";
+  return orchestratorName(info.data?.name);
 }
 
 export function useCreateAssistant() {

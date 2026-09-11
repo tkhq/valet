@@ -37,7 +37,7 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
    `GET /api/me` answers a team key with the team (`TeamMeResponse`: id, name, orgId, `role: "team"`, no email), not the creating admin. The route stays on the allow-list rather than refusing, because `valet login` verifies a key through it and `valet send` reads the team id off the answer to find the team's default assistant. `PATCH /api/me` stays refused.
 
-   The LLM gateway (`/proxy/*`) refuses a team key with a 401 that names the fix. The gateway bills a user, and the only user on a team key is the creating admin, kept for audit. The refusal stands until a team billing principal exists.
+   The LLM gateway (`/proxy/*`) accepts verified team keys with a live team and matching stored team pin. It records team ownership without billing the creating admin. Organization gateway enablement and credential mode still apply. Team Proxy settings reuse the team key controls. See `2026-08-26-llm-proxy-mitm-design.md`.
 
    Routes mounted before the scope gate apply it themselves. The pre-auth artifact router resolves its caller through `resolveOptionalIdentity`, which returns the principal with the user. A team key there counts as anonymous: it reads a public artifact, and it is refused with a 403 that names the fix on an org-visibility artifact and on every comment route.
 
@@ -62,7 +62,7 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 3. Extend the auth ladder to promote a team-metadata key to a team principal. Reject the key if the team is gone or belongs to another org.
 4. Session and workflow create paths use `resolveCreateOwner`. A team principal skips membership but still requires the team row under the ownership lock.
 5. Every session and workflow read gates on `c.var.principal` (`canViewSession`, `canAdministerSession`, `canResolveSessionGate`, `WorkflowOwner.principal`); the gateway proxy, sandbox replace and `sandbox-jwt` gate on `isSessionDirectOwner`.
-6. Pre-auth and out-of-band surfaces apply the scope themselves: the public artifact router treats a team key as anonymous, the LLM gateway refuses it.
+6. Pre-auth and out-of-band surfaces apply the scope themselves: the public artifact router treats a team key as anonymous, the LLM gateway resolves and records the team principal.
 7. `GET /api/me` answers a team key with `TeamMeResponse`; the CLI posts `/api/teams/:id/orchestrator` for a team identity.
 8. Web: `/settings/api-keys` follows the switcher. `CreateScopeLine`. No owner dropdown.
 
@@ -73,7 +73,7 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 - `packages/api/src/routes/team-api-keys.access.test.ts` — one admin, one personal and one team session: the key reads, rates, opens the socket, reaches the gateway and the security surface of the team session only, is refused on `sandbox-jwt`, and wakes its own team's orchestrator only.
 - `packages/api/src/routes/team-api-keys.workflows.test.ts` — the key lists, schedules and previews team workflows only.
 - `packages/api/src/routes/team-api-keys.artifacts.test.ts` — the pre-auth artifact router: public read as anonymous, org read and comments refused.
-- `packages/api/src/proxy/principal.test.ts` — the LLM gateway refuses a team key before the org lookup.
+- `packages/api/src/proxy/principal.test.ts` — the LLM gateway resolves the team without consulting the creating admin and rejects invalid team pins.
 - `packages/api/src/lib/request-principal.test.ts` — the allow-list matches path segments and the key's own team orchestrator.
 - `packages/api/src/cli/client.test.ts` — `ensureOrchestrator` follows `GET /api/me`.
 - `packages/api/src/lib/personal-api-key-list.test.ts` — the personal list drops team rows, recomputes `total`, and refuses an unknown shape.
@@ -105,3 +105,5 @@ The route regression suite completes team deletion after a real better-auth mint
 The team key form states its mutation authority and lifetime before creation. This changes the explanation, not the permission model. Existing route restrictions, approval rules, repository-owned resource guards, and unsettled-run guards still apply.
 
 TKAI-430 narrows workflow-definition deletion to human administrators. Team-key copy names this restriction; session deletion and other allowed workflow operations remain available.
+
+Team key controls discard drafts and revealed secrets after access errors or loss of admin rights. Late creation responses cannot reveal secrets after those transitions. The notice distinguishes visible key names from secrets, which are shown only once at creation.

@@ -125,7 +125,7 @@ The personal assistant can copy an explicitly named memory file or workflow
 into a destination team. These operations do not move resources. They leave
 source content, ownership, schedules, event subscriptions and webhooks unchanged.
 The caller chooses the destination team and path or name. A conflict fails with
-corrective text; the service does not overwrite an existing destination.
+corrective text; memory replacement requires the separate confirmation described below. Workflow copies do not overwrite an existing destination.
 
 - `mem_copy_to_team` calls `POST /api/memory/copy-to-team` with
   `{ from, to, teamId }`. The source must belong to the acting user. The service
@@ -186,9 +186,9 @@ Changing that rule requires a separate change to memory reads, writes, and disco
 
 Each operation copies one current file and preserves its original. Content, metadata, and links remain unchanged.
 The copy starts at version one. Source-session and mirror bindings are cleared; no share record transfers.
-A destination collision returns status 400 with an instruction to choose another path, matching the existing push contract.
-The owner/path unique key also rejects concurrent collisions. There is no overwrite, merge, or automatic rename option.
-The user can choose a new path or skip the transfer.
+A destination collision returns status 409 with `code: MEMORY_DESTINATION_EXISTS` and an opaque `destinationVersion`.
+The owner/path unique key also rejects concurrent creation. The user must choose replace, rename, or cancel.
+There is no merge or automatic rename option. The original copy request does not authorize replacement.
 
 The memory skill explains team discovery through `mem_read` and `mem_search`, with pull and push examples.
 Both tools are registered in the standard assistant memory tool list.
@@ -202,3 +202,34 @@ background sync, and outward repository publishing from the broader TKAI-432 wor
 
 Validation covers both directions, exact content and metadata, unchanged originals, collisions, concurrent pulls,
 member-only pull access, denied push access, revoked membership, forged scopes, malformed HTTP requests, and real tool/HTTP round trips.
+
+### Memory copy replacement confirmation (2026-09-11)
+
+Both copy endpoints accept optional `replacement: { expectedVersion }`, where `expectedVersion` is the opaque
+`destinationVersion` returned by a conflict. Initial requests omit replacement. Default to the source path;
+the assistant must not invent a suffix or choose another name after a collision. It asks the user to replace,
+rename, or cancel. The tools require `replacement.userConfirmed: true`, set only after the user explicitly approves
+replacing that destination revision. The HTTP payload carries only `expectedVersion`. Tool errors retain the conflict
+code and revision in their text so the assistant can make the approved retry.
+
+The service rechecks the existing personal-scope and team permissions before inspecting the destination.
+Its transaction locks the destination row through revision comparison and replacement, serializing against ordinary
+updates and deletes as well as other copies. The SHA-256 revision includes the complete row: owner/path, integer
+version, content, metadata and timestamps. A delete/recreate that resets the integer version does not reuse approval
+for changed content or timestamps. A stale approval returns 409 `MEMORY_DESTINATION_CHANGED` with the current revision,
+or `destinationVersion: null` if the destination was deleted. The caller must ask again; a missing destination cannot
+be silently recreated using the old replacement approval. The token is a concurrency guard, never an access grant.
+
+Replacement copies current source content and metadata, preserves the destination creation time, increments its
+version, and records the acting user as the writer. Memory has no separate historical-version or creator table.
+Source-session and mirror bindings are cleared as for new copies. The source stays unchanged. Reserved paths,
+including repository-backed `lib/` files, follow the same `assertWritablePath` protection as `writeFile`.
+
+The web collision dialog offers Replace, Choose another path, and Cancel. Only Replace sends the captured revision. Changing
+source owner/path resets the dialog lifetime; changing destination team/path clears confirmation. Pending requests
+freeze the selected resource. A stale conflict needs a new choice; a deleted destination returns to the ordinary
+copy flow. Generic errors never expose a replacement action.
+
+Focused tests cover both directions, untouched collisions, confirmed replacement, stale edits, deletion/recreation,
+one winner for concurrent approved retries, revoked membership, malformed replacements, protected library paths,
+and HTTP/tool conflict revisions that survive to a confirmed retry.

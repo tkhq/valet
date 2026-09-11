@@ -414,3 +414,28 @@ describe("GET/PUT /api/proxy/settings — governance (enabled + mode)", () => {
     expect(bad2.status).toBe(400);
   });
 });
+
+
+describe("team proxy record visibility", () => {
+  it("projects team ownership for org admins without exposing team records to a personal member", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(llmProxyRequests).values([
+      makeRow({ id: "shared-team-1", userId: null, teamId: "team-1" }),
+      makeRow({ id: "shared-team-2", userId: null, teamId: "team-2" }),
+    ]);
+    const list = await fetch(`${api.baseUrl}/api/proxy/requests`);
+    expect(await list.json()).toMatchObject({ requests: [
+      expect.objectContaining({ userId: null, teamId: expect.any(String) }),
+      expect.objectContaining({ userId: null, teamId: expect.any(String) }),
+    ] });
+    const summary = await fetch(`${api.baseUrl}/api/proxy/usage/summary`);
+    expect(await summary.json()).toMatchObject({ totalRequests: 2, byUser: expect.arrayContaining([
+      expect.objectContaining({ userId: null, teamId: "team-1", requests: 1 }),
+      expect.objectContaining({ userId: null, teamId: "team-2", requests: 1 }),
+    ]) });
+    const headers = { "x-valet-test-user-id": "test-member" };
+    const member = await fetch(`${api.baseUrl}/api/proxy/requests`, { headers });
+    expect(await member.json()).toMatchObject({ requests: [] });
+    expect((await fetch(`${api.baseUrl}/api/proxy/requests/shared-team-1`, { headers })).status).toBe(404);
+  });
+});

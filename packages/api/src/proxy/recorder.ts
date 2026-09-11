@@ -19,7 +19,7 @@ export interface RecorderDeps {
   insert: (row: Record<string, unknown>) => Promise<void>;
   now: () => number;
   id: () => string;
-  metric: (costUsd: number, attrs: { model: string; userId: string; keyId: string; kind: string }) => void;
+  metric: (costUsd: number, attrs: { model: string; userId?: string; teamId?: string; keyId: string; kind: string }) => void;
   /** Records a successful-but-unpriced call so unbilled traffic is visible.
    * Deliberately no model label — it is unbounded (see recordProxyUnpriced). */
   unpriced: (attrs: { kind: string; endpoint: string; reason: string }) => void;
@@ -153,6 +153,7 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
       createdAt: now,
       orgId: ctx.principal.orgId,
       userId: ctx.principal.userId,
+      teamId: ctx.principal.teamId ?? null,
       apiKeyId: ctx.principal.keyId,
       providerKind: ctx.kind,
       model,
@@ -181,7 +182,7 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
     // model — the metric layer no-ops on 0), labeled with the model actually
     // priced so the metric reconciles with the rate.
     if (cost !== null && pricedModel) {
-      deps.metric(cost, { model: pricedModel, userId: ctx.principal.userId, keyId: ctx.principal.keyId, kind: ctx.kind });
+      deps.metric(cost, { model: pricedModel, ...(ctx.principal.teamId ? { teamId: ctx.principal.teamId } : { userId: ctx.principal.userId ?? undefined }), keyId: ctx.principal.keyId, kind: ctx.kind });
     }
 
     // Alert on a SUCCESSFUL call whose spend we failed to capture — unbilled

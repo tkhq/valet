@@ -32,9 +32,9 @@ async function truncateAll(db: PgDb): Promise<void> {
  * underlying `PgDb` across every test in the describe block (decision 11 +
  * the Task 0 finding that PGlite's wasm heap isn't reliably released on
  * `close()` — matches `pg-store.test.ts`/`pg-event-stream.test.ts`).
- * Migrations run once; every subsequent `factory()` call truncates data
- * tables, giving each contract test the same blank-slate guarantee a fresh
- * `:memory:` sqlite db gave.
+ * Migrations run once; every `factory()` call, including the first,
+ * truncates data tables. Each contract test gets the same blank-slate
+ * guarantee a fresh `:memory:` sqlite db gave.
  */
 function makeHarness(db: PgDb): {
   factory: () => Promise<{ store: PgSessionStore; stream: PgEventStream }>;
@@ -45,9 +45,9 @@ function makeHarness(db: PgDb): {
       if (!migrated) {
         await applyEngineMigrations(db);
         migrated = true;
-      } else {
-        await truncateAll(db);
       }
+      // The shared Postgres database can contain data from a previous test file.
+      await truncateAll(db);
       return { store: new PgSessionStore(db), stream: new PgEventStream(db) };
     },
   };

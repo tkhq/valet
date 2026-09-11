@@ -1,3 +1,4 @@
+import { orchestratorName } from "~/lib/assistant-name";
 import { useState } from "react";
 import { Pencil } from "lucide-react";
 import type { GetOrchestratorInfoResponse, OrchestratorPresence } from "@valet/api/wire";
@@ -38,7 +39,7 @@ export function IdentityHeader({ info }: { info: GetOrchestratorInfoResponse }) 
     );
   }
 
-  const name = info.name ?? "Valet";
+  const name = orchestratorName(info.name);
 
   return (
     <div className="flex items-start justify-between gap-4">

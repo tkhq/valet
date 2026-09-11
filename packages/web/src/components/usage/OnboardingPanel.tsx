@@ -12,6 +12,7 @@
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { errorText } from "~/lib/error-text";
 import { useCreateApiKey, type CreatedApiKey } from "~/api/api-keys";
 
 function CopyButton({ text }: { text: string }) {
@@ -34,12 +35,12 @@ function CopyButton({ text }: { text: string }) {
 
 function CodeBlock({ label, code }: { label: string; code: string }) {
   return (
-    <div className="mb-4">
+    <div className="mb-4 min-w-0 max-w-full">
       <div className="flex items-center gap-2 mb-1">
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>
+        <span className="min-w-0 break-words text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>
         <CopyButton text={code} />
       </div>
-      <pre className="whitespace-pre text-xs font-mono bg-paper-muted border border-line rounded p-3 overflow-x-auto">
+      <pre tabIndex={0} aria-label={`${label} setup snippet`} className="w-full min-w-0 max-w-full whitespace-pre text-xs font-mono bg-paper-muted border border-line rounded p-3 overflow-x-auto">
         {code}
       </pre>
     </div>
@@ -95,11 +96,12 @@ function GatewayStatus({ enabled, isLoading }: GatewayStatusProps) {
 }
 
 interface ModeSnippetsProps {
-  apiKey: CreatedApiKey;
+  apiKey: Pick<CreatedApiKey, "key">;
+  team?: boolean;
   mode: "centralized" | "passthrough";
 }
 
-function ModeSnippets({ apiKey, mode }: ModeSnippetsProps) {
+export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const key = apiKey.key ?? "";
 
@@ -185,27 +187,37 @@ function ModeSnippets({ apiKey, mode }: ModeSnippetsProps) {
           `print(resp.choices[0].message.content)`,
         ].join("\n");
 
-  const baseUrlNote = `This is your Valet instance's origin — ${origin}.`;
+  function setupCode(code: string): string {
+    if (!team) return code;
+    return code
+      .replaceAll("your-own-anthropic-key", "approved-anthropic-key")
+      .replaceAll("your-own-openai-key", "approved-openai-key")
+      .replaceAll("your own key is forwarded and billed; the Valet key only identifies you", "the supplied provider key is billed; the Valet key identifies the team")
+      .replaceAll("bills you", "bills the provider account")
+      .replaceAll("your Valet", "the team's Valet")
+      .replaceAll("Your Valet", "The team's Valet");
+  }
+
+  const baseUrlNote = `Valet endpoint: ${origin}`;
 
   return (
-    <div>
+    <div className="min-w-0 max-w-full overflow-hidden">
+      <p className="mb-4 break-all text-xs text-muted">{baseUrlNote}</p>
       {/* Claude Code */}
       <h4 className="text-sm font-medium text-ink mb-1">Claude Code</h4>
-      <p className="text-xs text-muted mb-2">{baseUrlNote}</p>
-      <CodeBlock label="Shell env" code={claudeCodeSnippet} />
+      <CodeBlock label="Shell env" code={setupCode(claudeCodeSnippet)} />
 
       {/* Codex */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">Codex</h4>
-      <p className="text-xs text-muted mb-2">{baseUrlNote}</p>
-      <CodeBlock label="~/.codex/config.toml" code={codexTomlSnippet} />
-      <CodeBlock label="Shell env" code={codexEnvSnippet} />
+      <CodeBlock label="~/.codex/config.toml" code={setupCode(codexTomlSnippet)} />
+      <CodeBlock label="Shell env" code={setupCode(codexEnvSnippet)} />
 
       {/* Self-service SDK */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenAI SDK (scripts)</h4>
       <p className="text-xs text-muted mb-2">
         Point any OpenAI-SDK script at Valet — `chat.completions`, `responses`, and legacy `completions` are all recorded.
       </p>
-      <CodeBlock label="Python" code={openaiSdkSnippet} />
+      <CodeBlock label="Python" code={setupCode(openaiSdkSnippet)} />
     </div>
   );
 }
@@ -331,7 +343,7 @@ export function OnboardingPanel({ settingsQuery, showGatewayStatus = true }: Onb
             recording proxy. Usage is tracked per key.
           </p>
           {createKey.error && (
-            <p className="mb-3 text-sm text-danger-600">{createKey.error.message}</p>
+            <p role="alert" className="mb-3 text-sm text-danger-600">{errorText(createKey.error)}</p>
           )}
           <button
             type="button"

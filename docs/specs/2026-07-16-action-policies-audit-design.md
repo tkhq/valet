@@ -170,3 +170,30 @@ Fix (`plugin-catalog.ts`): when the args JSON exceeds 256 characters, the key's 
 - Pure JS hash — the engine imports no node builtins.
 
 The hash is 64-bit, not cryptographic. A collision only matters when two different large-args calls to the same tool collide within one (session, queue item) scope; with the length prefix the probability is negligible. The gate `body` still carries the full args JSON for display — `body` is an unindexed text column.
+
+## Team policies (2026-09-11)
+
+Team workspaces expose Policies beside General, API keys, and Proxy. Members
+can read the team's rules. Team admins and org admins can create, edit, and
+revoke them. These operations require an acting user; a team key cannot change
+its own policy. Settings reuse the existing rule form and matcher semantics.
+
+Rules use the existing `action_policies` principal columns with type `team`.
+Org CRUD filters by the org principal, so it cannot list or mutate team rows.
+Team CRUD filters by org, principal type, and team id. Team deletion removes
+its rules under the same ownership lock used by policy writes.
+
+Within each scope, the existing specificity and tie-breaking rules apply.
+A matching org deny wins first, then a matching team deny. Neither yields to
+a runtime grant. For other matching org and team rules, the stricter mode wins.
+A runtime grant can approve `require_approval`. Team runs do not use a member's
+personal overrides. With no team rule, existing org and plugin defaults apply.
+
+Both workflow tool calls and interactive sessions use the shared resolver.
+Session ownership comes from the persisted row when one exists. Workflow agent
+sessions without an app row carry their trusted engine owner into resolution.
+The acting member remains the audit actor and does not choose policy scope.
+Policy edits apply on the next action; no session restart is required.
+
+If a team policy read fails, chat and workflow actions remain blocked until
+a successful check. A prior approval cannot bypass an unread team deny.

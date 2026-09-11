@@ -425,11 +425,9 @@ export async function getUsageDrillItems(
     }));
   }
   // proxy — group the raw proxy rows by harness (cost_entries has no harness).
-  // Proxy rows are always user-owned (the view stamps owner_type='user'), so a
-  // team scope matches none — and `llm_proxy_requests` has no owner columns,
-  // so the team WHERE clause would not even parse against it.
-  if (scope.scope === "team") return [];
-  const whereProxy = scopeWhere("", since, scope);
+  const whereProxy = scope.scope === "team"
+    ? sql`created_at >= ${since} AND org_id = ${scope.orgId} AND team_id = ${scope.teamId}`
+    : scopeWhere("", since, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
     SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns

@@ -234,7 +234,7 @@ describe("GET /api/usage — scope=team", () => {
     expect(await foreign.json()).toEqual(await unknown.json());
   });
 
-  it("drill-down lists the team's sessions only, and the proxy drill is empty", async () => {
+  it("drill-down includes team proxy spend without personal, other-team, or foreign-org rows", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await seedTeamSpend(api, now);
@@ -245,11 +245,25 @@ describe("GET /api/usage — scope=team", () => {
       stream: false, statusCode: 200, requestBody: "{}", inputTokens: 50, outputTokens: 10, totalTokens: 60, costUsd: 0.001,
     });
 
+    const proxyBase = {
+      createdAt: now, userId: null, apiKeyId: "shared", providerKind: "openai" as const,
+      model: "gpt-4o-mini", endpoint: "/v1/responses", stream: false, statusCode: 200,
+      requestBody: "{}", inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsd: 0.5,
+    };
+    await api.providers.db.insert(llmProxyRequests).values([
+      { ...proxyBase, id: "team-proxy", orgId: "local-org", teamId: "team-x", harness: "codex" },
+      { ...proxyBase, id: "other-team-proxy", orgId: "local-org", teamId: "team-y", harness: "other-team" },
+      { ...proxyBase, id: "foreign-proxy", orgId: "other-org", teamId: "team-x", harness: "foreign-org" },
+    ]);
     const sess = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=session&scope=team&teamId=team-x`)).json()) as UsageDrillResponse;
     expect(sess.items.map((i) => i.sessionId)).toEqual(["s-team"]);
 
     const px = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=proxy&scope=team&teamId=team-x`)).json()) as UsageDrillResponse;
-    expect(px.items).toEqual([]);
+    expect(px.items).toEqual([expect.objectContaining({ id: "codex", turns: 1, totalTokens: 120, costUsd: 0.5 })]);
+    const rejected = await fetch(`${api.baseUrl}/api/usage/items?useCase=proxy&scope=team&teamId=team-x`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(rejected.status).toBe(404);
   });
 
   it("CSV export carries the team's rows only, names the team in the filename, and withholds user_id from a plain member", async () => {

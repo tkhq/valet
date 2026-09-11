@@ -43,6 +43,7 @@ import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   copyFileToTeam,
   copyFileFromTeam,
+  MemoryCopyConflictError,
   exportFiles,
   importFiles,
   linksForFile,
@@ -232,9 +233,22 @@ for (const [route, copy] of [
           !("to" in body) || typeof body.to !== "string" || !("teamId" in body) || typeof body.teamId !== "string" || !body.teamId.trim()) {
         throw new ValidationError("Provide from, to and teamId to copy a memory file.");
       }
-      const file = await copy(c.var.providers.db, scope, { from: body.from, to: body.to, teamId: body.teamId });
+      let replacement: { expectedVersion: string } | undefined;
+      if ("replacement" in body) {
+        const value = body.replacement;
+        if (!value || typeof value !== "object" || Array.isArray(value) ||
+            !("expectedVersion" in value) || typeof value.expectedVersion !== "string" ||
+            !/^[a-f0-9]{64}$/.test(value.expectedVersion)) {
+          throw new ValidationError("Provide the destinationVersion from the copy conflict as replacement.expectedVersion.");
+        }
+        replacement = { expectedVersion: value.expectedVersion };
+      }
+      const file = await copy(c.var.providers.db, scope, { from: body.from, to: body.to, teamId: body.teamId, replacement });
       return c.json({ file }, 201);
     } catch (err) {
+      if (err instanceof MemoryCopyConflictError) {
+        return c.json({ error: err.message, code: err.code, destinationVersion: err.destinationVersion }, 409);
+      }
       const mapped = handleServiceError(err);
       if (mapped) return c.json(mapped.body, mapped.status);
       throw err;

@@ -1,3 +1,4 @@
+import { orchestratorName } from "~/lib/assistant-name";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import type { MemoryTreeEntry } from "@valet/api/wire";
@@ -50,7 +51,7 @@ export function memoryStats(entries: readonly MemoryTreeEntry[]): MemoryStats {
  */
 export function MemoryCard() {
   const info = useOrchestratorInfo();
-  const name = info.data?.name ?? "your assistant";
+  const name = orchestratorName(info.data?.name);
   const treeQ = useMemoryTree();
   const summaryQ = useQuery({
     queryKey: ["memory", "journal-summary"],

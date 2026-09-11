@@ -660,11 +660,33 @@ export async function readOwnFile(db: AppDb, scope: MemoryScope, path: string): 
   return rows[0] ?? null;
 }
 
+export interface CopyMemoryFileInput {
+  from: string;
+  to: string;
+  teamId: string;
+  /** Send only after the user explicitly approves replacing this destination revision. */
+  replacement?: { expectedVersion: string };
+}
+
+/** Opaque row revision: integer versions alone can repeat after delete/recreate.
+ * Include content, metadata and timestamps as well as the owner/path identity. */
+function memoryDestinationVersion(file: MemoryFileRow): string {
+  return createHash("sha256").update(JSON.stringify(Object.entries(file).sort(([a], [b]) => a.localeCompare(b)))).digest("hex");
+}
+
+export class MemoryCopyConflictError extends Error {
+  readonly destinationVersion: string | null;
+  constructor(readonly code: "MEMORY_DESTINATION_EXISTS" | "MEMORY_DESTINATION_CHANGED", file?: MemoryFileRow) {
+    super(`${code === "MEMORY_DESTINATION_EXISTS" ? "Destination memory file already exists." : "Destination memory file changed or was deleted since confirmation."} Ask the user whether to replace, rename, or cancel. Do not choose another path or retry replacement without a new user decision.`);
+    this.destinationVersion = file ? memoryDestinationVersion(file) : null;
+  }
+}
+
 /** Push one personal memory file to a team. */
 export async function copyFileToTeam(
   db: AppDb,
   scope: MemoryScope,
-  input: { from: string; to: string; teamId: string },
+  input: CopyMemoryFileInput,
 ): Promise<MemoryFileRow> {
   return copyTeamFile(db, scope, input, "push");
 }
@@ -673,7 +695,7 @@ export async function copyFileToTeam(
 export async function copyFileFromTeam(
   db: AppDb,
   scope: MemoryScope,
-  input: { from: string; to: string; teamId: string },
+  input: CopyMemoryFileInput,
 ): Promise<MemoryFileRow> {
   return copyTeamFile(db, scope, input, "pull");
 }
@@ -681,18 +703,21 @@ export async function copyFileFromTeam(
 async function copyTeamFile(
   db: AppDb,
   scope: MemoryScope,
-  input: { from: string; to: string; teamId: string },
+  input: CopyMemoryFileInput,
   direction: "push" | "pull",
 ): Promise<MemoryFileRow> {
   if (scope.owner.type !== "user" || scope.owner.id !== scope.actorUserId) {
     throw new ValidationError("Copy memory from your personal assistant or workspace.");
+  }
+  if (input.replacement && !/^[a-f0-9]{64}$/.test(input.replacement.expectedVersion)) {
+    throw new ValidationError("Provide the destinationVersion from the copy conflict as replacement.expectedVersion.");
   }
   const from = normalizePath(input.from);
   const path = normalizePath(input.to);
   assertWritablePath(path);
   return db.transaction(async (tx) => {
     await lockTeamForOwnership(tx, input.teamId);
-    // Hold membership through the insert, including concurrent removal or demotion.
+    // Hold membership through the write, including concurrent removal or demotion.
     const [membership] = await tx.select().from(teamMembers).where(and(
       eq(teamMembers.teamId, input.teamId), eq(teamMembers.userId, scope.actorUserId),
     )).for("share");
@@ -718,16 +743,37 @@ async function copyTeamFile(
       eq(memoryFiles.path, from),
     )).limit(1);
     if (!source) throw new NotFoundError("memory file", input.from);
+    const destinationWhere = and(eq(memoryFiles.ownerType, destinationOwner.type),
+      eq(memoryFiles.ownerId, destinationOwner.id), eq(memoryFiles.path, path));
+    // The row lock serializes revision comparison with all updates and deletes,
+    // including writers that do not acquire the team ownership lock.
+    const [destination] = await tx.select().from(memoryFiles).where(destinationWhere).for("update");
+    if (input.replacement) {
+      if (!destination || memoryDestinationVersion(destination) !== input.replacement.expectedVersion) {
+        throw new MemoryCopyConflictError("MEMORY_DESTINATION_CHANGED", destination);
+      }
+    } else if (destination) {
+      throw new MemoryCopyConflictError("MEMORY_DESTINATION_EXISTS", destination);
+    }
     const now = Date.now();
-    const [file] = await tx.insert(memoryFiles).values({
+    const row: MemoryFileRow = {
       ...source,
       ownerType: destinationOwner.type, ownerId: destinationOwner.id, path,
       orgId: direction === "push" ? team.orgId : "",
-      actorUserId: scope.actorUserId, sourceSessionId: "", version: 1,
+      actorUserId: scope.actorUserId, sourceSessionId: "", version: (destination?.version ?? 0) + 1,
       sourceId: null, upstreamPath: null, contentSha: null,
-      createdAt: now, updatedAt: now,
-    }).onConflictDoNothing().returning();
-    if (!file) throw new ValidationError("Destination memory file already exists. Choose another path.");
+      createdAt: destination?.createdAt ?? now, updatedAt: now,
+    };
+    if (destination) {
+      const [file] = await tx.update(memoryFiles).set(row).where(destinationWhere).returning();
+      return file;
+    }
+    const [file] = await tx.insert(memoryFiles).values(row).onConflictDoNothing().returning();
+    if (!file) {
+      // An ordinary write may have created this path after our missing-row read.
+      const [collision] = await tx.select().from(memoryFiles).where(destinationWhere).for("update");
+      throw new MemoryCopyConflictError(collision ? "MEMORY_DESTINATION_EXISTS" : "MEMORY_DESTINATION_CHANGED", collision);
+    }
     return file;
   });
 }

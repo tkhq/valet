@@ -305,6 +305,26 @@ class ApiError extends Error {
 }
 
 
+export interface MemoryCopyRequest {
+  from: string;
+  to: string;
+  teamId: string;
+  replacement?: { expectedVersion: string };
+}
+
+/** Only a structured destination conflict can authorize a replacement choice. */
+export function memoryCopyConflict(error: unknown): { version: string | null; changed: boolean } | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const payload = error.payload;
+  if (typeof payload !== "object" || payload === null || !("code" in payload) ||
+      !("destinationVersion" in payload)) return null;
+  const changed = payload.code === "MEMORY_DESTINATION_CHANGED";
+  if (!changed && payload.code !== "MEMORY_DESTINATION_EXISTS") return null;
+  const version = payload.destinationVersion;
+  if (changed && version === null) return { version, changed };
+  return typeof version === "string" && version.length > 0 ? { version, changed } : null;
+}
+
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
 // server restart — fetched once and cached, shared by `useAuthConfig`
 // (login/signup control rendering) and the 401 guard below.
@@ -803,7 +823,7 @@ export const api = {
   // without rewriting it.
   writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }, owner?: OwnerFilter) =>
     request<unknown>("PUT", `/memory${ownerQuery(owner)}`, body),
-  copyMemoryFile: (direction: "push" | "pull", body: { from: string; to: string; teamId: string }) =>
+  copyMemoryFile: (direction: "push" | "pull", body: MemoryCopyRequest) =>
     request<{ file: { path: string; ownerType: string; ownerId: string } }>(
       "POST", `/memory/copy-${direction === "push" ? "to" : "from"}-team`, body,
     ),
@@ -1404,8 +1424,15 @@ export const api = {
   deleteIdentityLink: (provider: string) =>
     request<{ ok: true }>("DELETE", `/me/identity-links/${encodeURIComponent(provider)}`),
 
-  // org action policies (action-policies plan, Task 4/5): admin CRUD +
-  // preview, keyset-paginated action log.
+  // Team policies reuse the org wire shapes, with no preview endpoint.
+  listTeamPolicies: (teamId: string) => request<ListOrgPoliciesResponse>("GET", `/teams/${encodeURIComponent(teamId)}/policies`),
+  createTeamPolicy: (teamId: string, body: CreateOrgPolicyRequest) =>
+    request<CreateOrgPolicyResponse>("POST", `/teams/${encodeURIComponent(teamId)}/policies`, body),
+  patchTeamPolicy: (teamId: string, id: string, body: PatchOrgPolicyRequest) =>
+    request<PatchOrgPolicyResponse>("PATCH", `/teams/${encodeURIComponent(teamId)}/policies/${encodeURIComponent(id)}`, body),
+  deleteTeamPolicy: (teamId: string, id: string) =>
+    request<DeleteOrgPolicyResponse>("DELETE", `/teams/${encodeURIComponent(teamId)}/policies/${encodeURIComponent(id)}`),
+  // Org policy CRUD and preview; action log below.
   listOrgPolicies: () => request<ListOrgPoliciesResponse>("GET", "/org/policies"),
   createOrgPolicy: (body: CreateOrgPolicyRequest) =>
     request<CreateOrgPolicyResponse>("POST", "/org/policies", body),

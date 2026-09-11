@@ -18,8 +18,8 @@ import { recordProxyCall } from "../proxy/recorder.js";
 import { recordProxySpend, recordProxyUnpriced } from "../proxy/metrics.js";
 import { OPENAI_CHAT_ENDPOINTS, isChatCompletionsEndpoint } from "../proxy/usage-parser.js";
 import { llmProxyRequests } from "../schema/index.js";
-import { orgMembers } from "../schema/index.js";
-import { asc, eq } from "drizzle-orm";
+import { apikey, teams, orgMembers } from "../schema/index.js";
+import { and, asc, eq } from "drizzle-orm";
 import type { PrincipalDeps } from "../proxy/principal.js";
 
 /** Hop-by-hop headers stripped before forwarding to the upstream provider. */
@@ -128,6 +128,13 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
 
     const principal = await resolveProxyPrincipal(c.req.raw.headers, kind, {
       verifyApiKey: deps.verifyApiKey,
+      teamOrg: async (teamId, keyId) => {
+        const [team] = await db.select({ orgId: teams.orgId })
+          .from(teams)
+          .innerJoin(apikey, and(eq(apikey.teamId, teams.id), eq(apikey.id, keyId)))
+          .where(eq(teams.id, teamId)).limit(1);
+        return team?.orgId ?? null;
+      },
       userOrg: async (userId) => {
         // The user's org comes from their org_members row. NO fallback: every
         // legitimate user gets a row at provisioning (auth signup) or seed

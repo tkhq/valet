@@ -362,6 +362,7 @@ export function Canvas({
         onMoveEnd={handleMoveEnd}
         defaultViewport={flow.viewport}
         fitView={!flow.viewport}
+        minZoom={0.1}
         // Arrowheads carry an inline fill, which outranks the stylesheet,
         // so the library's hardcoded light grey would survive into dark
         // mode. Naming the token here is the only place that colour can be

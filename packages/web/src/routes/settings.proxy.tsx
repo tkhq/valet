@@ -3,6 +3,8 @@ import { useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
 import { Section } from "~/components/settings/section";
 import { ProxyGovernance } from "~/components/proxy/proxy-governance";
+import { TeamProxySettings } from "~/components/proxy/team-proxy-settings";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { OnboardingPanel } from "~/components/usage/OnboardingPanel";
 
 /**
@@ -16,10 +18,15 @@ export const Route = createFileRoute("/settings/proxy")({
 });
 
 export function SettingsProxyPage() {
+  const { teamId } = useWorkspaceScope();
+  return teamId ? <TeamProxySettings key={teamId} teamId={teamId} /> : <PersonalProxySettings />;
+}
+
+function PersonalProxySettings() {
   const orgQ = useOrg();
   const settingsQ = useProxySettings();
 
-  const singleUser = orgQ.data?.features.organizations !== true;
+  const singleUser = orgQ.data?.features.organizations === false;
 
   return (
     <div className="space-y-10">

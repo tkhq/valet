@@ -49,7 +49,7 @@ export const actionLogRouter = new Hono<AppEnv>();
 
 const POLICY_NOT_FOUND = { error: "policy not found" } as const;
 
-function toPolicyWire(row: ActionPolicyRow): ActionPolicyWire {
+export function toPolicyWire(row: ActionPolicyRow): ActionPolicyWire {
   return {
     id: row.id,
     service: row.service,

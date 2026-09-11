@@ -36,9 +36,9 @@ function makeFactory(db: PgDb): () => Promise<PgSessionStore> {
     if (!migrated) {
       await applyEngineMigrations(db);
       migrated = true;
-    } else {
-      await truncateAll(db);
     }
+    // The shared Postgres database can contain data from a previous test file.
+    await truncateAll(db);
     return new PgSessionStore(db);
   };
 }

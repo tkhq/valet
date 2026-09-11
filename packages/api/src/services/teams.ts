@@ -16,6 +16,7 @@ import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
+  actionPolicies,
   agentSessions,
   apikey,
   assistants,
@@ -700,6 +701,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
 
   await db.transaction(async (tx) => {
     await lockTeamForOwnership(tx, opts.teamId);
+    await tx.delete(actionPolicies).where(and(eq(actionPolicies.orgId, team.orgId), eq(actionPolicies.principalType, "team"), eq(actionPolicies.principalId, opts.teamId)));
     if (opts.reapOwnedWorkflows) await opts.reapOwnedWorkflows(tx);
     await assertNoTeamOwnedWorkflows(tx, opts.teamId);
     await tx

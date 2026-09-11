@@ -20,7 +20,22 @@ describe("team copy HTTP endpoints", () => {
       expect(response.status).toBe(201);
       expect(await response.json()).toMatchObject({ file: { ownerType: "user", ownerId: "local-user",
         path: "notes/personal.md", content: "Exact team knowledge", version: 1 } });
-      expect((await post(body)).status).toBe(400);
+      const conflict = await post(body);
+      expect(conflict.status).toBe(409);
+      const details = await conflict.json();
+      expect(details).toMatchObject({ code: "MEMORY_DESTINATION_EXISTS", destinationVersion: expect.any(String) });
+      if (!details || typeof details !== "object" || !("destinationVersion" in details) || typeof details.destinationVersion !== "string") {
+        throw new Error("Missing collision revision");
+      }
+      const replace = JSON.stringify({ teamId: team.id, from: "notes/team.md", to: "notes/personal.md",
+        replacement: { expectedVersion: details.destinationVersion } });
+      expect((await post(replace)).status).toBe(201);
+      const stale = await post(replace);
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ code: "MEMORY_DESTINATION_CHANGED", destinationVersion: expect.any(String) });
+      for (const replacement of [null, true, {}, { expectedVersion: 1 }, { expectedVersion: "" }, { expectedVersion: "bad" }]) {
+        expect((await post(JSON.stringify({ teamId: team.id, from: "notes/team.md", to: "notes/unused.md", replacement }))).status).toBe(400);
+      }
       for (const invalid of ["{", "null", "{}", JSON.stringify({ teamId: "", from: "a.md", to: "b.md" })]) {
         expect((await post(invalid)).status).toBe(400);
       }

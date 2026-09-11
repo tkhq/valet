@@ -23,6 +23,8 @@ import {
   type UpdateWorkflowMutation,
 } from "~/api/workflows";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
+import { ChangeOrchestratorDialog } from "~/components/workflows/change-orchestrator-dialog";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { Editor } from "~/components/workflows/editor/editor";
 import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
@@ -99,6 +101,8 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
       // state until the next edit.
       key={workflowId}
       workflowId={workflowId}
+      ownerType={data.ownerType}
+      ownerId={data.ownerId}
       initialName={data.name}
       initialDefinition={definition}
       origin={data.origin}
@@ -119,6 +123,8 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
 const alwaysBlock = () => true;
 
 function WorkflowEditorPane({
+  ownerType,
+  ownerId,
   workflowId,
   initialName,
   initialDefinition,
@@ -134,6 +140,8 @@ function WorkflowEditorPane({
   workflowId: string;
   initialName: string;
   initialDefinition: WorkflowDefinition;
+  ownerType: string;
+  ownerId: string;
   origin?: "local" | "repo";
   upstream?: WorkflowDefinitionSummary["upstream"];
   update: UpdateWorkflowMutation;
@@ -155,9 +163,11 @@ function WorkflowEditorPane({
   // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
   // its own: describing a change is the primary way to edit a workflow, so
   // the conversation is on screen from the moment the editor is.
+  const scope = useWorkspaceScope();
+  const [changeOrchestrator, setChangeOrchestrator] = useState(false);
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
-  const assistant = useWorkflowAssistant(workflowId, initialName);
+  const assistant = useWorkflowAssistant(workflowId, initialName, { assistantId: initialDefinition.assistantId, ownerType, ownerId });
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
   useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
@@ -267,9 +277,9 @@ function WorkflowEditorPane({
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      <div className="flex items-center justify-between px-6 py-4 border-b border-line">
-        <div className="flex items-center gap-3 min-w-0">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="flex shrink-0 flex-col gap-2 border-b border-line px-3 py-3 lg:flex-row lg:items-center lg:justify-between lg:px-6 lg:py-4">
+        <div className="flex min-w-0 flex-1 flex-col gap-1 lg:flex-row lg:items-center lg:gap-3">
           <Link to="/workflows" className="text-xs text-muted hover:text-ink shrink-0">
             ← Workflows
           </Link>
@@ -279,10 +289,10 @@ function WorkflowEditorPane({
             aria-label="Workflow name"
             placeholder="Untitled workflow"
             readOnly={mirrored}
-            className="min-w-0 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 read-only:hover:border-transparent"
+            className="w-full min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 read-only:hover:border-transparent"
           />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">
           <Button
             size="sm"
             variant={drawer === "runs" ? "secondary" : "ghost"}
@@ -297,7 +307,9 @@ function WorkflowEditorPane({
           >
             Triggers
           </Button>
-          {gatingActions.length > 0 && (
+          {gatingActions.length > 0 && (ownerType === "team" ? (
+            <Link to="/settings/policies" onClick={() => scope.setKey(ownerId)} className="text-xs underline" title="A team admin can change approval rules in Team Policies.">Team Policies · {gatingActions.length} actions need approval (team admin manages rules)</Link>
+          ) : (
             <button
               type="button"
               data-testid="workflow-gate-badge"
@@ -310,6 +322,16 @@ function WorkflowEditorPane({
                 ? "1 action needs approval"
                 : `${gatingActions.length} actions need approval`}
             </button>
+          ))}
+          {changeOrchestrator && (
+            <ChangeOrchestratorDialog
+              key={`${workflowId}:${ownerType}:${ownerId}`}
+              definition={initialDefinition}
+              ownerType={ownerType}
+              ownerId={ownerId}
+              save={async (definition) => { await update.mutateAsync({ definition }); }}
+              close={() => setChangeOrchestrator(false)}
+            />
           )}
           {mirrored && (
             <Button
@@ -339,6 +361,7 @@ function WorkflowEditorPane({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              {!mirrored && <DropdownMenuItem disabled={unsaved || update.isPending} onSelect={() => setChangeOrchestrator(true)}>Change orchestrator{unsaved ? " (save or cancel edits first)" : ""}</DropdownMenuItem>}
               <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
                 Version history
               </DropdownMenuItem>
@@ -383,8 +406,8 @@ function WorkflowEditorPane({
           data-testid="preapprove-blocked"
           className="border-b border-line bg-warning-wash px-6 py-2 text-xs text-warning-fg"
         >
-          An org policy keeps {blockedActions.length === 1 ? "this action" : "these actions"} gated:{" "}
-          {blockedActions.map((b) => b.actionId).join(", ")}. Ask an org admin to allow{" "}
+          {ownerType === "team" ? "A team or organization policy keeps " : "An org policy keeps "}{blockedActions.length === 1 ? "this action" : "these actions"} gated:{" "}
+          {blockedActions.map((b) => b.actionId).join(", ")}. Ask {ownerType === "team" ? "a team admin to review Team Policies, or an org admin to allow" : "an org admin to allow"}{" "}
           {blockedActions.length === 1 ? "it" : "them"} in the organization policy settings.
         </div>
       )}
@@ -400,7 +423,7 @@ function WorkflowEditorPane({
         />
       )}
 
-      <Dialog open={preapproveOpen} onOpenChange={setPreapproveDialog}>
+      <Dialog open={ownerType !== "team" && preapproveOpen} onOpenChange={setPreapproveDialog}>
         <DialogContent
           title="Pre-approve actions"
           description={
@@ -446,7 +469,7 @@ function WorkflowEditorPane({
           The three drawers stay overlays, and they dock beside that column
           (`right-[--editor-aside]`) rather than over it — a runs list is a
           lookup, and the conversation has to survive one. */}
-      <div className="relative flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 min-w-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
           <Editor
             initialDefinition={initialDefinition}
@@ -508,7 +531,7 @@ function DrawerShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="absolute inset-y-0 right-[--editor-aside] z-10 flex w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
+    <div className="absolute inset-y-0 right-0 z-10 lg:right-[--editor-aside] flex w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
         <span className="text-sm font-medium text-ink">{title}</span>
         <button type="button" onClick={onClose} aria-label={`Close ${title.toLowerCase()}`} className="text-muted hover:text-ink">
