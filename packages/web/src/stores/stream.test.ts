@@ -8,7 +8,7 @@
  */
 import { describe, expect, it, beforeEach } from "vitest";
 import type { Message, WireEvent, WireQueueState } from "@valet/api/wire";
-import { queueBusy, useStreamStore } from "./stream";
+import { queueBusy, type StreamMessage, useStreamStore } from "./stream";
 
 const SESSION = "sess-1";
 const THREAD = "thread-1";
@@ -752,6 +752,15 @@ describe("setThreadMessages", () => {
     };
   }
 
+  function setCurrentMessages(messages: StreamMessage[]): void {
+    useStreamStore.setState((state) => ({
+      bySession: {
+        ...state.bySession,
+        [SESSION]: { ...state.bySession[SESSION], messages },
+      },
+    }));
+  }
+
   it("keeps the prefix when a bounded tail advances by one row", () => {
     const { setThreadMessages } = useStreamStore.getState();
     const initial = Array.from({ length: 200 }, (_, index) => restMessage(`m${index + 1}`));
@@ -927,6 +936,59 @@ describe("setThreadMessages", () => {
       "transient",
       "anchor",
       "new",
+    ]);
+  });
+
+  it("removes a confirmed optimistic row from a bounded-tail prefix", () => {
+    const { addUserMessage, setMessageQueueItemId, setThreadMessages } =
+      useStreamStore.getState();
+    setThreadMessages(SESSION, THREAD, [restMessage("later", 2)]);
+    const optimisticId = addUserMessage(SESSION, "persist me", THREAD);
+    setMessageQueueItemId(SESSION, optimisticId, "q-1");
+    const [later, optimistic] = useStreamStore.getState().bySession[SESSION].messages;
+    setCurrentMessages([optimistic, later]);
+
+    setThreadMessages(SESSION, THREAD, [
+      restMessage("later", 2),
+      {
+        id: "persisted-user",
+        sessionId: SESSION,
+        threadId: THREAD,
+        role: "user",
+        content: "persist me",
+        parts: [{ kind: "text", text: "persist me" }],
+        createdAt: 3,
+        queueItemId: "q-1",
+      },
+    ], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "later",
+      "persisted-user",
+    ]);
+  });
+
+  it("keeps multiple transients after an equal-time overlapping predecessor", () => {
+    const { setThreadMessages } = useStreamStore.getState();
+    const x = restMessage("x", 3);
+    const anchor = restMessage("anchor", 3);
+    const transientOne: StreamMessage = {
+      ...restMessage("transient-1", 3),
+      persistence: "streaming",
+    };
+    const transientTwo: StreamMessage = {
+      ...restMessage("transient-2", 3),
+      persistence: "streaming",
+    };
+    setThreadMessages(SESSION, THREAD, [x, anchor]);
+    setCurrentMessages([x, transientOne, transientTwo, anchor]);
+
+    setThreadMessages(SESSION, THREAD, [restMessage("x", 3)], true);
+
+    expect(useStreamStore.getState().bySession[SESSION].messages.map(({ id }) => id)).toEqual([
+      "x",
+      "transient-1",
+      "transient-2",
     ]);
   });
 

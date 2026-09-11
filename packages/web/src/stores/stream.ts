@@ -50,6 +50,8 @@ export interface StreamMessage extends Message {
   persistence?: "optimistic" | "streaming";
   /** Next canonical row seen when this client-only row first needs reconciliation. */
   restAnchor?: { id: string; createdAt: number };
+  /** Prior canonical row, used when an equal-time snapshot omits the next row. */
+  restPreviousAnchor?: { id: string; createdAt: number };
   settledOutcome?: SettledOutcome;
   /**
    * Reason for a non-clean `settledOutcome`, taken from the wire event's
@@ -902,12 +904,32 @@ export const useStreamStore = create<StreamStore>((set) => ({
       };
 
       const matchedFreshIndexes = current.map(freshIndexFor);
-      // Record the next canonical row once. The anchor survives snapshots that
-      // omit that row, so a later reconciliation cannot cement the local row
-      // at the bottom of newer history. A confirmed optimistic row contributes
-      // its canonical REST identity.
-      let nextCanonical: StreamMessage | undefined;
+      // Record both canonical neighbors once. Exact neighbors preserve order
+      // when createdAt ties and REST omits one side of the relationship.
       const anchoredCurrent = [...current];
+      let previousCanonical: StreamMessage | undefined;
+      for (let index = 0; index < anchoredCurrent.length; index++) {
+        const message = anchoredCurrent[index];
+        const matchedIndex = matchedFreshIndexes[index];
+        const canonical =
+          message.persistence === undefined
+            ? message
+            : matchedIndex !== undefined
+              ? freshMessages[matchedIndex]
+              : undefined;
+        if (canonical) {
+          previousCanonical = canonical;
+        } else if (!message.restPreviousAnchor && previousCanonical) {
+          anchoredCurrent[index] = {
+            ...message,
+            restPreviousAnchor: {
+              id: previousCanonical.id,
+              createdAt: previousCanonical.createdAt,
+            },
+          };
+        }
+      }
+      let nextCanonical: StreamMessage | undefined;
       for (let index = anchoredCurrent.length - 1; index >= 0; index--) {
         const message = anchoredCurrent[index];
         const matchedIndex = matchedFreshIndexes[index];
@@ -925,7 +947,16 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const overlap = hasMore
         ? anchoredCurrent.findIndex((message) => freshIndexById.has(message.id))
         : -1;
-      const prefix = overlap >= 0 ? anchoredCurrent.slice(0, overlap) : [];
+      const prefix =
+        overlap >= 0
+          ? anchoredCurrent
+              .slice(0, overlap)
+              .filter((message, index) =>
+                message.persistence === undefined
+                  ? true
+                  : matchedFreshIndexes[index] === undefined,
+              )
+          : [];
       const afterTailStart = overlap >= 0 ? overlap : 0;
       const afterTail = overlap >= 0 ? anchoredCurrent.slice(overlap) : anchoredCurrent;
       const beforeFresh = Array.from(
@@ -940,18 +971,23 @@ export const useStreamStore = create<StreamStore>((set) => ({
         const anchorIndex = message.restAnchor
           ? freshIndexById.get(message.restAnchor.id)
           : undefined;
+        const previousAnchorIndex = message.restPreviousAnchor
+          ? freshIndexById.get(message.restPreviousAnchor.id)
+          : undefined;
         if (anchorIndex !== undefined) beforeFresh[anchorIndex].push(message);
+        else if (previousAnchorIndex !== undefined) beforeFresh[previousAnchorIndex + 1].push(message);
         else unresolved.push(message);
       }
 
       // Anchors and REST rows are chronological. One forward cursor places
-      // missing anchors before the first newer row without a per-row search.
+      // missing anchors before the first strictly newer row. Equal timestamps
+      // have no wire tie-break, so they do not invent an order.
       let freshCursor = 0;
       for (const message of unresolved) {
         if (message.restAnchor) {
           while (
             freshCursor < freshMessages.length &&
-            freshMessages[freshCursor].createdAt < message.restAnchor.createdAt
+            freshMessages[freshCursor].createdAt <= message.restAnchor.createdAt
           ) freshCursor++;
           beforeFresh[freshCursor].push(message);
         } else {
