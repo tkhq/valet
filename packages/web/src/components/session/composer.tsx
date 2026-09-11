@@ -718,7 +718,7 @@ export function Composer({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       className={cn(
-        "border-t border-[--border] p-3 bg-[--bg]",
+        "shrink-0 border-t border-[--border] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-[--bg]",
         dragActive && "ring-2 ring-inset ring-moss",
       )}
     >
@@ -745,7 +745,7 @@ export function Composer({
       {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
       {/* `relative` anchors the command popup to the input row, so the hint
           above it never moves the popup. */}
-      <div className="relative flex gap-2 items-end">
+      <div className="relative flex flex-wrap gap-2 items-end sm:flex-nowrap">
         {(popupOpen || noticeOpen) && (
           <CommandPopup
             items={popupOpen ? popupItems : []}
@@ -768,59 +768,62 @@ export function Composer({
           onPaste={onPaste}
           placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
           rows={2}
-          className="flex-1"
+          className="min-w-0 basis-full sm:basis-auto sm:flex-1 max-h-[30dvh]"
           disabled={send.isPending || !threadId}
         />
-        {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
-          <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              // With file uploads on, the picker accepts anything; images
-              // still route to the inline image path in `addFiles`.
-              accept={FILE_UPLOADS_ENABLED ? undefined : IMAGE_ACCEPT_ATTRIBUTE}
-              multiple
-              className="hidden"
-              onChange={onPickFiles}
-              data-testid="composer-image-input"
-            />
+        <div className="flex w-full items-end justify-end gap-2 sm:w-auto">
+          {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                // With file uploads on, the picker accepts anything; images
+                // still route to the inline image path in `addFiles`.
+                accept={FILE_UPLOADS_ENABLED ? undefined : IMAGE_ACCEPT_ATTRIBUTE}
+                multiple
+                className="hidden"
+                onChange={onPickFiles}
+                data-testid="composer-image-input"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="lg"
+                className="mr-auto sm:mr-0"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={intakeBlocked}
+                aria-label={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+                title={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
+            </>
+          )}
+          {working && (
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="lg"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={intakeBlocked}
-              aria-label={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
-              title={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+              className="text-danger-600 hover:text-danger-500 dark:text-danger-500"
+              onClick={() => void stop()}
+              disabled={!threadId || abort.isPending}
+              aria-label="Stop"
+              title="Stop (Esc)"
             >
-              <Paperclip className="h-4 w-4" />
+              <Square className="h-3.5 w-3.5 fill-current" />
+              <span>Stop</span>
             </Button>
-          </>
-        )}
-        {working && (
+          )}
           <Button
-            type="button"
-            variant="secondary"
+            type="submit"
+            disabled={!canSend}
             size="lg"
-            className="text-danger-600 hover:text-danger-500 dark:text-danger-500"
-            onClick={() => void stop()}
-            disabled={!threadId || abort.isPending}
-            aria-label="Stop"
-            title="Stop (Esc)"
+            title={sendTitle}
           >
-            <Square className="h-3.5 w-3.5 fill-current" />
-            <span>Stop</span>
+            <Send className="h-4 w-4" />
+            <span>{ACTION_LABEL[action]}</span>
           </Button>
-        )}
-        <Button
-          type="submit"
-          disabled={!canSend}
-          size="lg"
-          title={sendTitle}
-        >
-          <Send className="h-4 w-4" />
-          <span>{ACTION_LABEL[action]}</span>
-        </Button>
+        </div>
       </div>
     </form>
   );

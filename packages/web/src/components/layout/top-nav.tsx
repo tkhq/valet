@@ -16,6 +16,8 @@ import {
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
 import { PresenceMark } from "~/components/assistant/presence-mark";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/primitives";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { NotificationsBell } from "./notifications-bell";
 
 /**
@@ -97,7 +99,7 @@ function SidebarToggle() {
   if (controls === null || !controls.present) return null;
 
   const buttonClass =
-    "shrink-0 rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
+    "shrink-0 min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
 
   return (
     <>
@@ -107,7 +109,7 @@ function SidebarToggle() {
         onClick={controls.openDrawer}
         className={`md:hidden inline-flex ${buttonClass}`}
       >
-        <Menu className="h-4 w-4" aria-hidden />
+        <PanelLeftOpen className="h-4 w-4" aria-hidden />
       </button>
       <button
         type="button"
@@ -127,6 +129,7 @@ function SidebarToggle() {
 }
 
 export function TopNav() {
+  const mobileNav = useResponsiveOverlay("md");
   const info = useOrchestratorInfo();
   const presence = info.data?.presence ?? "idle";
 
@@ -200,23 +203,45 @@ export function TopNav() {
     [createAssistant, navigate],
   );
 
+  const destinations = [
+    { to: "/chat", label: "Chat" },
+    { to: "/memory", label: "Memory" },
+    { to: "/artifacts", label: "Artifacts" },
+    { to: "/sessions", label: "Sessions", active: onSecuritySession ? false : undefined },
+    { to: "/workflows", label: "Workflows" },
+    ...(securityEnabled ? [{ to: "/security", label: "Security", active: onSecuritySession ? true : undefined }] : []),
+    { to: "/events", label: "Events" },
+    { to: "/usage", label: "Usage" },
+    { to: "/skills", label: "Skills" },
+    { to: "/integrations", label: "Integrations" },
+    { to: "/changelog", label: "Changelog" },
+  ];
+  const destinationLabel = (label: string) => (
+    <span className="inline-flex items-center gap-1.5">
+      {label}
+      {label === "Changelog" && changelogUnread && (
+        <span className="h-1.5 w-1.5 rounded-full bg-accent-500" aria-label="New releases" />
+      )}
+    </span>
+  );
+
   // The logo is the PRODUCT (Valet), not the orchestrator — the
   // orchestrator's chosen name shows up in its own title card (session
   // header) instead. The presence dot stays: it still reflects the
   // orchestrator's live state at a glance from anywhere in the app.
   return (
-    <header className="h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-2 px-3 sm:gap-4">
+    <header className="h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-1 px-2 md:gap-4 md:px-3">
       <SidebarToggle />
 
       <Link
         to="/"
-        className="flex shrink-0 items-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash"
+        className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash md:min-h-0 md:min-w-0"
         aria-label="Valet — dashboard"
       >
         <span className="text-moss text-base leading-none" aria-hidden>
           ◈
         </span>
-        <PresenceMark name="Valet" state={presence} size="nav" />
+        <span className="hidden md:inline-flex"><PresenceMark name="Valet" state={presence} size="nav" /></span>
       </Link>
 
       {/* Beside the logo, not in the sidebar: it scopes the surfaces below
@@ -236,49 +261,42 @@ export function TopNav() {
         onCreateAssistant={createWorkspaceAssistant}
       />
       {createAssistant.error != null && (
-        <span role="status" className="shrink-0 truncate max-w-[18rem] text-xs text-danger-500">
+        <span role="status" className="absolute left-2 right-2 top-[--nav-height] z-30 border border-line bg-paper p-2 text-xs text-danger-500 md:static md:max-w-[18rem] md:shrink md:border-0 md:p-0">
           Cannot open that workspace. Select it again to retry.
         </span>
       )}
 
-      {/*
-       * The labelled links do not fit beside the logo and the icons on a
-       * phone. The row scrolls sideways instead of overflowing the header,
-       * so every destination stays reachable at any width. `min-w-0` is
-       * what lets it shrink at all — a flex child defaults to `min-width:
-       * auto` and would otherwise push the icons off-screen. From `sm` up
-       * there is room, so the links sit right-aligned as before and the
-       * scroll never engages.
-       */}
       <nav
         aria-label="Primary"
-        className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto sm:justify-end sm:gap-2 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="hidden min-w-0 flex-1 items-center gap-2 overflow-x-auto md:flex xl:justify-end [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
-        <NavLink to="/chat">Chat</NavLink>
-        <NavLink to="/memory">Memory</NavLink>
-        <NavLink to="/artifacts">Artifacts</NavLink>
-        <NavLink to="/sessions" active={onSecuritySession ? false : undefined}>
-          Sessions
-        </NavLink>
-        <NavLink to="/workflows">Workflows</NavLink>
-        {securityEnabled && (
-          <NavLink to="/security" active={onSecuritySession ? true : undefined}>
-            Security
-          </NavLink>
-        )}
-        <NavLink to="/events">Events</NavLink>
-        <NavLink to="/usage">Usage</NavLink>
-        <NavLink to="/skills">Skills</NavLink>
-        <NavLink to="/integrations">Integrations</NavLink>
-        <NavLink to="/changelog">
-          <span className="inline-flex items-center gap-1.5">
-            Changelog
-            {changelogUnread && (
-              <span className="h-1.5 w-1.5 rounded-full bg-accent-500" aria-label="New releases" />
-            )}
-          </span>
-        </NavLink>
+        {destinations.map(({ to, label, active }) => (
+          <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
+        ))}
       </nav>
+      <div className="ml-auto shrink-0 md:hidden">
+        <DropdownMenu open={mobileNav.open} onOpenChange={mobileNav.setOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" aria-label="Open navigation" className="h-11 w-11 p-0">
+              <Menu className="h-5 w-5" aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" aria-label="Navigation" className="w-64">
+            {destinations.map(({ to, label, active }) => (
+              <DropdownMenuItem key={to} asChild>
+                <Link
+                  to={to}
+                  className={active === undefined ? undefined : active ? NAV_ACTIVE : NAV_INACTIVE}
+                  activeProps={active === undefined ? { className: NAV_ACTIVE } : {}}
+                  inactiveProps={active === undefined ? { className: NAV_INACTIVE } : {}}
+                >
+                  {destinationLabel(label)}
+                </Link>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
 
       <div className="shrink-0">
         <NotificationsBell />
@@ -286,7 +304,7 @@ export function TopNav() {
 
       <Link
         to="/settings"
-        className="shrink-0 rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
+        className="inline-flex shrink-0 min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
         activeProps={{ className: "text-ink" }}
         aria-label="Settings"
       >

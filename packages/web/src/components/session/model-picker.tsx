@@ -328,7 +328,7 @@ export function ModelPicker({
       )}
       <DropdownMenuContent
         align="end"
-        className="w-[340px] max-h-[min(70vh,560px)] overflow-hidden p-0"
+        className="w-[340px] max-h-[min(70dvh,560px,var(--radix-dropdown-menu-content-available-height))] flex flex-col overflow-hidden p-0"
         // Keyboard nav is handled locally so Radix's own arrow-key
         // handling doesn't fight ours.
         onKeyDown={onKeyDown}
@@ -341,12 +341,12 @@ export function ModelPicker({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search models…"
-              className="h-7 w-full bg-transparent text-xs text-ink placeholder:text-muted focus:outline-none"
+              className="h-7 max-sm:min-h-11 max-sm:text-base w-full bg-transparent text-xs text-ink placeholder:text-muted focus:outline-none"
               aria-label="Search models"
             />
           </div>
         </div>
-        <div ref={listRef} className="max-h-[440px] overflow-y-auto">
+        <div ref={listRef} className="min-h-0 max-h-[440px] overflow-y-auto overscroll-contain">
           {modelsQ.isLoading && (
             <div className="px-3 py-2 text-xs text-muted">Loading models…</div>
           )}
@@ -383,7 +383,7 @@ export function ModelPicker({
                       setOpen(false);
                     }}
                     className={cn(
-                      "flex w-full flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
+                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
                       isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
                     )}
                   >
@@ -433,7 +433,7 @@ export function ModelPicker({
                       setOpen(false);
                     }}
                     className={cn(
-                      "flex w-full flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
+                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
                       isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
                     )}
                   >
@@ -477,7 +477,7 @@ export function ModelPicker({
                   onSelectReasoning(null);
                 }}
                 className={cn(
-                  "rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                  "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
                   currentReasoning === undefined
                     ? "bg-moss-wash text-ink border-moss"
                     : "text-muted hover:text-ink",
@@ -500,7 +500,7 @@ export function ModelPicker({
                       onSelectReasoning(level);
                     }}
                     className={cn(
-                      "rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                      "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
                       levelDisabled
                         ? "opacity-40 cursor-not-allowed"
                         : active
@@ -522,7 +522,7 @@ export function ModelPicker({
                   {" · "}
                   <button
                     type="button"
-                    className="italic underline decoration-dotted hover:text-ink"
+                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
                     onMouseDown={(e) => {
                       e.preventDefault();
                       setShowAll(true);
@@ -538,7 +538,7 @@ export function ModelPicker({
                   {" · "}
                   <button
                     type="button"
-                    className="italic underline decoration-dotted hover:text-ink"
+                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
                     onMouseDown={(e) => {
                       e.preventDefault();
                       setShowAll(false);

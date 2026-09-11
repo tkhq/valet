@@ -15,7 +15,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
   return (
     <input
       ref={ref}
-      className={cn(FIELD_BASE, "h-9 px-3 text-sm", className)}
+      className={cn(FIELD_BASE, "h-9 px-3 text-sm max-sm:min-h-11 max-sm:text-base", className)}
       {...rest}
     />
   );
@@ -31,7 +31,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
     <textarea
       ref={ref}
       rows={rows}
-      className={cn(FIELD_BASE, "px-3 py-2 text-sm resize-y leading-relaxed", className)}
+      className={cn(FIELD_BASE, "px-3 py-2 text-sm max-sm:text-base resize-y leading-relaxed", className)}
       {...rest}
     />
   );

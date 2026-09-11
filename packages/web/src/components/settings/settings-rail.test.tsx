@@ -6,17 +6,28 @@
  * (Policies) always shows.
  */
 import type { ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { render, screen, within } from "@testing-library/react";
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
-    <a href="#" {...rest}>
+  Link: ({ children, to, ...rest }: { children: ReactNode; to: string; [key: string]: unknown }) => (
+    <a href={to} {...rest}>
       {children}
     </a>
   ),
-  useRouterState: () => "/settings/profile",
+  useRouterState: () => pathname,
 }));
+
+let pathname = "/settings/profile";
+let teamId: string | undefined;
+vi.mock("~/lib/workspace-scope", () => ({
+  useWorkspaceScope: () => ({ teamId }),
+}));
+beforeEach(() => {
+  pathname = "/settings/profile";
+  teamId = undefined;
+});
 
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined;
 
@@ -27,6 +38,41 @@ vi.mock("~/api/settings", () => ({
 import { SettingsRail } from "./settings-rail";
 
 describe("SettingsRail", () => {
+  it("opens the current section menu with only permitted organization links", async () => {
+    orgData = { callerRole: "member", features: { organizations: true } };
+    render(<SettingsRail />);
+    await userEvent.click(screen.getByRole("button", { name: "Settings section: You / Profile" }));
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Teams" })).toBeTruthy();
+    expect(within(menu).queryByRole("menuitem", { name: "Members" })).toBeNull();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Appearance" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("does not expose organization sections before the query resolves", async () => {
+    orgData = undefined;
+    render(<SettingsRail />);
+    await userEvent.click(screen.getByRole("button", { name: "Settings section: You / Profile" }));
+    expect(within(screen.getByRole("menu")).queryByText("Organization")).toBeNull();
+  });
+
+  it("distinguishes Team and Organization sections and follows the current route", async () => {
+    orgData = { callerRole: "admin", features: { organizations: true } };
+    teamId = "team-1";
+    pathname = "/settings/team";
+    const { rerender } = render(<SettingsRail />);
+    await userEvent.click(screen.getByRole("button", { name: "Settings section: Team / General" }));
+    const menu = screen.getByRole("menu");
+    const team = within(menu).getByRole("group", { name: "Team" });
+    const organization = within(menu).getByRole("group", { name: "Organization" });
+    expect(within(team).getByRole("menuitem", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(within(organization).getByRole("menuitem", { name: "General" }).getAttribute("href")).toBe("/settings/organization");
+    await userEvent.keyboard("{Escape}");
+    pathname = "/settings/organization";
+    rerender(<SettingsRail />);
+    expect(screen.getByRole("button", { name: "Settings section: Organization / General" })).toBeTruthy();
+  });
+
   it("always shows the You · Policies entry", () => {
     orgData = { callerRole: "member", features: { organizations: false } };
     render(<SettingsRail />);

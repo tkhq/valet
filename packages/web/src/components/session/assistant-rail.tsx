@@ -407,7 +407,7 @@ function AssistantGroupBlock({
               onClick={createAssistant}
               disabled={create.isPending}
               aria-label={`New assistant for ${group.label}`}
-              className="shrink-0 rounded p-0.5 text-muted transition-colors hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none disabled:opacity-50"
+              className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 text-muted transition-colors hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none disabled:opacity-50"
             >
               <Plus className="h-3 w-3" aria-hidden />
             </button>
@@ -467,7 +467,7 @@ function AssistantRow({
           // to the session you are leaving, and carrying them across would
           // point at threads that do not exist on the one you are opening.
           search={{ assistant: assistant.id, thread: undefined, child: undefined }}
-          className="flex min-w-0 flex-1 items-center gap-2 py-1.5 focus-visible:bg-ink-wash focus-visible:outline-none"
+          className="flex min-w-0 max-md:min-h-11 flex-1 items-center gap-2 py-1.5 focus-visible:bg-ink-wash focus-visible:outline-none"
         >
           {group.team ? (
             <Users className="h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -499,7 +499,7 @@ function AssistantRow({
             <button
               type="button"
               aria-label={`${label} actions`}
-              className="ml-1 shrink-0 rounded p-0.5 text-muted transition-colors hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none"
+              className="ml-1 inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 text-muted transition-colors hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none"
             >
               <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
             </button>

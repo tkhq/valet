@@ -59,9 +59,9 @@ export const DialogContent = forwardRef<ElementRef<typeof RDialog.Content>, Dial
         <RDialog.Content
           ref={ref}
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2",
+            "fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2",
             "bg-[--bg] border border-[--border] rounded-lg shadow-xl",
-            "max-h-[85vh] overflow-y-auto",
+            "max-h-[calc(100dvh-2rem)] overflow-y-auto",
             // minmax(0,1fr): wide intrinsic children (long <option> text, long
             // links) must not stretch the track past the panel width.
             "p-5 grid grid-cols-[minmax(0,1fr)] gap-4",
@@ -71,7 +71,7 @@ export const DialogContent = forwardRef<ElementRef<typeof RDialog.Content>, Dial
           {...rest}
         >
           {(title || description) && (
-            <header className="grid gap-1">
+            <header className="min-w-0 grid gap-1 pr-8">
               {title && (
                 <RDialog.Title className="text-base font-semibold tracking-tight">
                   {title}
@@ -89,7 +89,7 @@ export const DialogContent = forwardRef<ElementRef<typeof RDialog.Content>, Dial
             <RDialog.Close
               aria-label="Close"
               className={cn(
-                "absolute right-3 top-3 rounded-sm p-1 text-muted hover:text-[--fg] touch-manipulation",
+                "absolute right-1 top-1 inline-flex h-11 w-11 items-center justify-center rounded-sm p-1 sm:right-3 sm:top-3 sm:h-6 sm:w-6 text-muted hover:text-[--fg] touch-manipulation",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
               )}
             >
@@ -104,6 +104,6 @@ export const DialogContent = forwardRef<ElementRef<typeof RDialog.Content>, Dial
 
 export function DialogFooter({ className, children }: { className?: string; children: ReactNode }) {
   return (
-    <footer className={cn("flex justify-end gap-2 pt-2", className)}>{children}</footer>
+    <footer className={cn("flex flex-wrap justify-end gap-2 pt-2", className)}>{children}</footer>
   );
 }

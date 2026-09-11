@@ -3,11 +3,13 @@ import {
   useCallback,
   useContext,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
   type MouseEvent,
 } from "react";
-import { X } from "lucide-react";
+import { Dialog, DialogContent, DialogTitle } from "~/components/primitives/dialog";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 
 const COLLAPSED_KEY = "valet:sidebar-collapsed";
@@ -90,7 +92,9 @@ export function AppShell({
   children: ReactNode;
   className?: string;
 }) {
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
+  const drawerOpener = useRef<HTMLElement | null>(null);
+  const drawer = useRef<HTMLDivElement>(null);
   const [collapsed, setCollapsed] = useState<boolean>(() => loadStoredCollapsed());
 
   // Closes the drawer when a link inside it is clicked (thread/child
@@ -114,14 +118,17 @@ export function AppShell({
       present: sidebar != null,
       collapsed,
       toggleCollapsed: () => setAndStoreCollapsed(!collapsed),
-      openDrawer: () => setMobileOpen(true),
+      openDrawer: () => {
+        drawerOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        setMobileOpen(true);
+      },
     }),
-    [sidebar, collapsed, setAndStoreCollapsed],
+    [sidebar, collapsed, setAndStoreCollapsed, setMobileOpen],
   );
 
   return (
     <SidebarControlsContext.Provider value={controls}>
-      <div className={cn("h-screen w-screen flex flex-col bg-[--bg] text-[--fg]", className)}>
+      <div className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
         {topNav}
         <div className="flex-1 flex min-h-0 relative">
           {sidebar != null && (
@@ -139,31 +146,25 @@ export function AppShell({
               >
                 <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
               </aside>
-              {mobileOpen && (
-                <div className="md:hidden fixed inset-0 z-40 flex" role="dialog" aria-modal="true">
-                  <div
-                    className="absolute inset-0 bg-black/30"
-                    aria-hidden
-                    onClick={() => setMobileOpen(false)}
-                  />
-                  <div
-                    className="relative h-full w-72 max-w-[80vw] bg-paper border-r border-line flex flex-col"
-                    onClick={onDrawerClick}
-                  >
-                    <div className="flex items-center justify-end p-2">
-                      <button
-                        type="button"
-                        aria-label="Close"
-                        onClick={() => setMobileOpen(false)}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </div>
-                    <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
-                  </div>
-                </div>
-              )}
+              <Dialog open={mobileOpen} onOpenChange={setMobileOpen}>
+                <DialogContent
+                  ref={drawer}
+                  onOpenAutoFocus={(event) => {
+                    event.preventDefault();
+                    drawer.current?.focus();
+                  }}
+                  aria-describedby={undefined}
+                  className="left-0 top-0 h-dvh max-h-none w-80 max-w-[calc(100%-3rem)] translate-x-0 translate-y-0 rounded-none border-y-0 border-l-0 bg-paper p-0 pt-[max(3.5rem,env(safe-area-inset-top))] pb-[env(safe-area-inset-bottom)] flex flex-col gap-0"
+                  onClick={onDrawerClick}
+                  onCloseAutoFocus={(event) => {
+                    event.preventDefault();
+                    drawerOpener.current?.focus();
+                  }}
+                >
+                  <DialogTitle className="sr-only">Threads</DialogTitle>
+                  <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
+                </DialogContent>
+              </Dialog>
             </>
           )}
           <main className="flex-1 min-w-0 min-h-0 flex flex-col">{children}</main>
