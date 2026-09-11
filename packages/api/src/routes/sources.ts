@@ -105,6 +105,25 @@ sourcesRouter.get("/", async (c) => {
   });
 });
 
+sourcesRouter.get("/queue", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  return c.json(await c.var.providers.prebuildService.listBakeQueue(c.var.user.orgId));
+});
+
+sourcesRouter.patch("/queue", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!isRecord(body) || !Array.isArray(body.bakeIds) || !body.bakeIds.every((id): id is string => typeof id === "string")) {
+    return c.json({ error: "Send bakeIds as an array of bake IDs. Refresh the queue before you retry." }, 400);
+  }
+  if (!await c.var.providers.prebuildService.reorderBakeQueue(c.var.user.orgId, body.bakeIds)) {
+    return c.json({ error: "The queue changed or cannot be reordered. Refresh the queue, then retry with all waiting bake IDs." }, 409);
+  }
+  return c.json({ ok: true });
+});
+
 // POST / — create kind='external' or kind='base'; reject kind='repo'
 sourcesRouter.post("/", async (c) => {
   const gate = await requireOrgAdmin(c);

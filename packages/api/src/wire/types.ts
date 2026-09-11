@@ -5129,3 +5129,27 @@ export interface ListTeamDeletionRequestsResponse { requests: TeamDeletionReques
 export interface TeamDeletionTarget { resourceType: TeamDeletionResourceType; resourceId: string; label: string }
 export interface ListTeamDeletionTargetsResponse { targets: TeamDeletionTarget[] }
 export interface SubmitTeamDeletionRequest { resourceType: TeamDeletionResourceType; resourceId: string; reason?: string }
+
+export interface BakeQueueItem extends BakeSummary {
+  /** The builder finished; the next status poll persists its result. */
+  phase?: "finalizing";
+  sourceName: string;
+  sourceKind: SourceSummary["kind"];
+  repoFullName: string | null;
+}
+
+export interface BakeQueueBlockedSource {
+  sourceId: string;
+  name: string;
+  repoFullName: string | null;
+  parentName: string;
+}
+
+export interface ListBakeQueueResponse {
+  builderAvailable: boolean;
+  reorderAvailable: boolean;
+  running: BakeQueueItem[];
+  queued: BakeQueueItem[];
+  recent: BakeQueueItem[];
+  blocked: BakeQueueBlockedSource[];
+}

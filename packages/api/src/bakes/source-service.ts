@@ -1,3 +1,4 @@
+import type { BakeQueueItem, ListBakeQueueResponse } from "../wire/types.js";
 /**
  * `SourceService` — the generation-path core (sandbox-reconcile plan, Task
  * 15). Absorbs the former `PrebuildService` (docker/k8s builder dispatch,
@@ -743,6 +744,86 @@ export class SourceService {
     return this.builder?.backend ?? null;
   }
 
+  async listBakeQueue(orgId: string): Promise<ListBakeQueueResponse> {
+    // Keep ownership through a concurrent terminal persistence pass.
+    const trackedBuildIds = new Map(this.activeBuildIds);
+    const [sources, active, recentRows, pushedBases] = await Promise.all([
+      this.db.select().from(imageSources).where(eq(imageSources.orgId, orgId)),
+      this.db.select({ bake: bakes, source: imageSources }).from(bakes)
+        .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+        .where(and(eq(imageSources.orgId, orgId), inArray(bakes.status, ["queued", "building"])))
+        .orderBy(bakes.createdAt, bakes.id),
+      this.db.select({ bake: bakes, source: imageSources }).from(bakes)
+        .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+        .where(and(eq(imageSources.orgId, orgId), inArray(bakes.status, ["pushed", "failed"])))
+        .orderBy(desc(bakes.finishedAt), desc(bakes.createdAt), desc(bakes.id)).limit(8),
+      this.db.selectDistinctOn([bakes.sourceId], { sourceId: bakes.sourceId, identityHash: bakes.identityHash })
+        .from(bakes).innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+        .where(and(eq(imageSources.orgId, orgId), eq(imageSources.kind, "base"), eq(bakes.status, "pushed")))
+        .orderBy(bakes.sourceId, desc(bakes.createdAt), desc(bakes.id)),
+    ]);
+    const item = ({ bake, source }: { bake: BakeRow; source: ImageSourceRow }): BakeQueueItem => ({
+      id: bake.id, sourceId: bake.sourceId, identityHash: bake.identityHash,
+      commitSha: bake.commitSha, imageRef: bake.imageRef, status: bake.status,
+      builderBackend: bake.builderBackend, error: bake.error, logTail: bake.logTail,
+      startedAt: bake.startedAt, finishedAt: bake.finishedAt, createdAt: bake.createdAt,
+      sourceName: source.name, sourceKind: source.kind, repoFullName: source.repoFullName,
+    });
+    const snapshot = this.builder?.queueSnapshot?.();
+    const byBuildId = new Map<string, BakeQueueItem>();
+    for (const row of active) {
+      const buildId = this.activeBuildIds.get(row.bake.id) ?? trackedBuildIds.get(row.bake.id);
+      if (buildId && !recentRows.some((recent) => recent.bake.id === row.bake.id)) byBuildId.set(buildId, item(row));
+    }
+    const ordered = (ids: string[], status?: "queued") => ids.flatMap((id) => {
+      const bake = byBuildId.get(id);
+      return bake ? [{ ...bake, ...(status ? { status } : {}) }] : [];
+    });
+    const running = snapshot ? ordered(snapshot.running) : active.filter((r) => r.bake.status === "building").map(item);
+    const queued = snapshot ? ordered(snapshot.queued, "queued") : active.filter((r) => r.bake.status === "queued").map(item);
+    if (snapshot) {
+      const dispatchedOrWaiting = new Set([...snapshot.running, ...snapshot.queued]);
+      for (const [buildId, bake] of byBuildId) {
+        if (!dispatchedOrWaiting.has(buildId)) running.push({ ...bake, phase: "finalizing" });
+      }
+    }
+    const activeSources = new Set([...running, ...queued].map((bake) => bake.sourceId));
+    const bySourceId = new Map(sources.map((source) => [source.id, source]));
+    const pushedBaseIdentities = new Map(pushedBases.map((bake) => [bake.sourceId, bake.identityHash]));
+    const changingBases = new Set([...running, ...queued]
+      .filter((bake) => bake.sourceKind === "base" && pushedBaseIdentities.get(bake.sourceId) !== bake.identityHash)
+      .map((bake) => bake.sourceId));
+    const blocked: ListBakeQueueResponse["blocked"] = [];
+    for (const source of sources) {
+      if (source.kind !== "repo" || this.schedulingBlocked(source) || activeSources.has(source.id)) continue;
+      const parent = source.parentId ? bySourceId.get(source.parentId) : undefined;
+      if (parent?.kind === "base" && changingBases.has(parent.id)) {
+        blocked.push({ sourceId: source.id, name: source.name, repoFullName: source.repoFullName, parentName: parent.name });
+      }
+    }
+    return { builderAvailable: this.builder !== null, reorderAvailable: !!(this.builder?.queueSnapshot && this.builder.reorderQueue),
+      running, queued, blocked, recent: recentRows.map(item) };
+  }
+
+  async reorderBakeQueue(orgId: string, bakeIds: string[]): Promise<boolean> {
+    const builder = this.builder;
+    if (!builder?.queueSnapshot || !builder.reorderQueue) return false;
+    const before = builder.queueSnapshot().queued;
+    const owned = await this.db.select({ id: bakes.id }).from(bakes)
+      .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+      .where(and(eq(imageSources.orgId, orgId), inArray(bakes.status, ["queued", "building"])));
+    // No await between this check and mutation. New submissions or dispatches require a refresh.
+    const current = builder.queueSnapshot().queued;
+    if (before.length !== current.length || before.some((id, index) => current[index] !== id)) return false;
+    const ownedIds = new Set(owned.flatMap(({ id }) => {
+      const buildId = this.activeBuildIds.get(id);
+      return buildId ? [buildId] : [];
+    }));
+    const requested = bakeIds.map((id) => this.activeBuildIds.get(id));
+    if (requested.some((id) => id === undefined || !ownedIds.has(id))) return false;
+    return builder.reorderQueue(current.filter((id) => ownedIds.has(id)), requested.filter((id) => id !== undefined));
+  }
+
   private async loadSource(sourceId: string): Promise<ImageSourceRow> {
     const rows = await this.db.select().from(imageSources).where(eq(imageSources.id, sourceId)).limit(1);
     const source = rows[0];
@@ -1239,12 +1320,12 @@ export class SourceService {
         continue;
       }
 
-      this.activeBuildIds.delete(row.id);
       if (status.state === "pushed") {
         await this.db
           .update(bakes)
           .set({ status: "pushed", logTail: status.logTail ?? null, finishedAt: this.now() })
           .where(eq(bakes.id, row.id));
+        this.activeBuildIds.delete(row.id);
         try {
           const size = await measureBakeSize(builder.backend, row.imageRef, {
             spawnFn: spawn,
@@ -1265,6 +1346,7 @@ export class SourceService {
           .update(bakes)
           .set({ status: "failed", error: status.error ?? null, logTail: status.logTail ?? null, finishedAt: this.now() })
           .where(eq(bakes.id, row.id));
+        this.activeBuildIds.delete(row.id);
         // Retention must run on failure too. A registry at ENOSPC fails
         // every push; when retention only ran on the pushed transition, a
         // full registry could never drain itself (agents-dev, 2026-08-19).

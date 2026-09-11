@@ -678,6 +678,26 @@ describe("KubernetesImageBuilder", () => {
     expect(status.error).toBe("cancelled");
   });
 
+  it("reorders only waiting work and dispatches the selected build next", async () => {
+    const jobsApi = new FakeJobsApi();
+    const builder = newBuilder(jobsApi);
+    const first = await builder.build(baseSpec());
+    const second = await builder.build(baseSpec({ prebuildId: "pb-2" }));
+    const foreign = await builder.build(baseSpec({ prebuildId: "pb-foreign" }));
+    const third = await builder.build(baseSpec({ prebuildId: "pb-3" }));
+    expect(builder.queueSnapshot()).toEqual({ running: [first.buildId], queued: [second.buildId, foreign.buildId, third.buildId] });
+    expect(builder.reorderQueue([second.buildId, third.buildId], [third.buildId, second.buildId])).toBe(true);
+    expect(builder.queueSnapshot().queued).toEqual([third.buildId, foreign.buildId, second.buildId]);
+    expect(builder.reorderQueue([first.buildId], [first.buildId])).toBe(false);
+    await new Promise((r) => setTimeout(r, 0));
+    jobsApi.setStatus("valet-prebuild-pb-1", { succeeded: 1, conditions: [{ type: "Complete", status: "True" }] });
+    await builder.status(first.buildId);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(jobsApi.jobs.has("valet-prebuild-pb-3")).toBe(true);
+    expect(jobsApi.jobs.has("valet-prebuild-pb-2")).toBe(false);
+    expect(builder.reorderQueue([third.buildId, second.buildId], [second.buildId, third.buildId])).toBe(false);
+  });
+
   it("respects the concurrency cap: a second build queues until the first reaches a terminal state", async () => {
     const jobsApi = new FakeJobsApi();
     const builder = newBuilder(jobsApi);

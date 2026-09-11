@@ -25,6 +25,7 @@ import type {
   CreateSourceResponse,
   ListBakesResponse,
   ListSourcesResponse,
+  ListBakeQueueResponse,
   PatchSourceResponse,
   TriggerBakeResponse,
   CreateOrgPolicyRequest,
@@ -1344,6 +1345,8 @@ export const api = {
 
   // sandbox image sources (sandbox-reconciliation plan, Task 18): org-admin
   // CRUD for all source kinds (external/base/repo) and bake history.
+  listBakeQueue: () => request<ListBakeQueueResponse>("GET", "/org/sources/queue"),
+  reorderBakeQueue: (bakeIds: string[]) => request<{ ok: true }>("PATCH", "/org/sources/queue", { bakeIds }),
   listSources: () => request<ListSourcesResponse>("GET", "/org/sources"),
   createSource: (body: Record<string, unknown>) => request<CreateSourceResponse>("POST", "/org/sources", body),
   patchSource: (id: string, body: Record<string, unknown>) =>

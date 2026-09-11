@@ -132,6 +132,29 @@ describe("DockerImageBuilder lifecycle", () => {
     expect(status.logTail).toContain("failed to resolve base image");
   });
 
+  it("dispatches reordered waiting builds while preserving other slots", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tags: string[] = [];
+    const { spawnFn } = fakeSpawnFn((child, call) => {
+      if (call.args[0] !== "build") { child.emit("close", 0, null); return; }
+      tags.push(call.args[call.args.indexOf("-t") + 1]!);
+      if (tags.length === 1) void gate.then(() => child.emit("close", 0, null));
+      else child.emit("close", 0, null);
+    });
+    const builder = new DockerImageBuilder({ spawnFn });
+    const first = await builder.build(baseSpec({ imageRef: "first" }));
+    const second = await builder.build(baseSpec({ imageRef: "second" }));
+    const foreign = await builder.build(baseSpec({ imageRef: "foreign" }));
+    const third = await builder.build(baseSpec({ imageRef: "third" }));
+    expect(builder.queueSnapshot()).toEqual({ running: [first.buildId], queued: [second.buildId, foreign.buildId, third.buildId] });
+    expect(builder.reorderQueue([second.buildId, third.buildId], [third.buildId, second.buildId])).toBe(true);
+    expect(builder.reorderQueue([first.buildId], [first.buildId])).toBe(false);
+    release?.();
+    await waitForTerminal(builder, second.buildId);
+    expect(tags).toEqual(["first", "third", "foreign", "second"]);
+  });
+
   it("caps concurrency at 1 — a second build queues until the first finishes", async () => {
     let releaseFirst: (() => void) | undefined;
     const firstGate = new Promise<void>((resolve) => {

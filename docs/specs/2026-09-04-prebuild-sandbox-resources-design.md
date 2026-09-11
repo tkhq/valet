@@ -358,6 +358,31 @@ only for expanded rows and refreshes on the same interval. The status labels
 are Built, Building, Build queued, Build failed, and Not built. Older servers
 without the summary field show Status unavailable.
 
+## Bake queue overview
+
+The Bake queue panel appears before the base image editor. It shows in-progress
+builds, ordered waiting builds, and repositories waiting for a changed base image.
+Completed builds remain visible as Finalizing until their results are saved.
+Counts remain visible. Recent results include successful and failed bakes.
+The panel shows source names, commit identifiers, submission times, and available
+build output. It does not estimate completion percentages or finish times.
+
+Organization administrators can move a waiting bake up, down, or to the front
+of their organization's queue. The backend changes the builder's actual waiting
+order. Reordering preserves other organizations' slots and cannot preempt a
+build already dispatched. A stale or invalid request returns a conflict with
+instructions to refresh. Unsupported builders show a read-only queue.
+
+Docker and Kubernetes expose queue snapshots from their current process-local
+queues. The source service maps build IDs to organization-owned bake rows.
+Queue reads include at most eight recent terminal builds. Direct repository dependencies remain in a separate waiting section when their
+active base has no successful bake with the same identity.
+The existing restart recovery behavior still applies; queue order is not durable
+across an API restart. No database schema changes are required.
+
+The panel refreshes every five seconds while visible. Failed refreshes show a
+retry action and disable reorder controls until queue data is available again.
+
 ## Testing
 
 - Recipe tests cover valid, partial, malformed, zero, negative, and non-finite values.

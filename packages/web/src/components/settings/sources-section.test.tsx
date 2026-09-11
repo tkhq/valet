@@ -21,6 +21,8 @@ let sourcesLoading = false;
 let sourcesError = false;
 
 vi.mock("~/api/sources", () => ({
+  useBakeQueue: () => ({ data: { builderAvailable: sourcesData?.builderAvailable ?? true, reorderAvailable: true, running: [], queued: [], recent: [], blocked: [] }, error: null, isLoading: false }),
+  useReorderBakeQueue: () => ({ mutate: vi.fn(), isPending: false }),
   useSources: () => ({
     data: sourcesData,
     isLoading: sourcesLoading,
@@ -88,6 +90,11 @@ describe("SourcesSection", () => {
     sourcesError = false;
   });
 
+  it("puts the bake queue before the base image settings", () => {
+    render(<SourcesSection />);
+    expect(screen.getAllByRole("heading")[0].textContent).toContain("Bake queue");
+  });
+
   // ── Loading / error ──────────────────────────────────────────────────────
 
   it("shows a loading spinner while sources load", () => {
@@ -110,7 +117,7 @@ describe("SourcesSection", () => {
     sourcesData = { sources: [], builderAvailable: false };
     render(<SourcesSection />);
     expect(
-      screen.getByText(/Image builds are unavailable on this deployment/),
+      screen.getByText(/Image builds are unavailable/),
     ).toBeTruthy();
   });
 
@@ -118,7 +125,7 @@ describe("SourcesSection", () => {
     sourcesData = { sources: [], builderAvailable: true };
     render(<SourcesSection />);
     expect(
-      screen.queryByText(/Image builds are unavailable on this deployment/),
+      screen.queryByText(/Image builds are unavailable/),
     ).toBeNull();
   });
 

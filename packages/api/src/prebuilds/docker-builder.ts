@@ -1,3 +1,4 @@
+import { reorderWaitingBuilds } from "./builder.js";
 /**
  * Docker-backed `ImageBuilder` (sandbox images v2 plan, Task 2). Shells out
  * to `docker build` via `node:child_process.spawn` — mirrors
@@ -118,6 +119,14 @@ export class DockerImageBuilder implements ImageBuilder {
     // record's `state`/`error`, never thrown here.
     void this.pump();
     return { buildId };
+  }
+
+  queueSnapshot(): { running: string[]; queued: string[] } {
+    return { running: this.running ? [this.running] : [], queued: [...this.queue] };
+  }
+
+  reorderQueue(expectedBuildIds: string[], buildIds: string[]): boolean {
+    return reorderWaitingBuilds(this.queue, expectedBuildIds, buildIds);
   }
 
   async status(buildId: string): Promise<BuildStatus> {

@@ -2,6 +2,7 @@ import { Fragment, useState } from "react";
 import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch } from "~/components/primitives";
+import { BakeQueuePanel } from "~/components/settings/bake-queue-panel";
 import { Section } from "~/components/settings/section";
 import { RepoSandboxResourcesForm } from "~/components/settings/repo-sandbox-resources-form";
 import { ApiError } from "~/api/client";
@@ -50,16 +51,7 @@ export function SourcesSection() {
 
   return (
     <div className="space-y-10">
-      {/* Builder-unavailable banner */}
-      {sourcesQ.data && !builderAvailable && (
-        <div
-          role="status"
-          className="rounded border border-line bg-ink-wash px-3 py-2 text-sm text-muted"
-        >
-          Image builds are unavailable on this deployment. Contact your administrator to wire an image builder.
-        </div>
-      )}
-
+      <BakeQueuePanel />
       {/* ── Base image ─────────────────────────────────────────────────── */}
       <Section
         title="Base image"

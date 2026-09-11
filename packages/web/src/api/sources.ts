@@ -14,6 +14,8 @@ import {
 } from "@tanstack/react-query";
 import type {
   BakeSummary,
+  BakeQueueItem,
+  ListBakeQueueResponse,
   CreateSourceResponse,
   ListBakesResponse,
   ListSourcesResponse,
@@ -27,6 +29,7 @@ import { api } from "./client";
 
 export const qkSources = {
   all: () => ["sources"] as const,
+  queue: () => ["sources", "queue"] as const,
   bakes: (sourceId: string) => ["sources", sourceId, "bakes"] as const,
 };
 
@@ -37,6 +40,24 @@ export function useSources() {
     queryKey: qkSources.all(),
     queryFn: () => api.listSources(),
     refetchInterval: 5_000,
+  });
+}
+
+export function useBakeQueue() {
+  return useQuery<ListBakeQueueResponse>({
+    queryKey: qkSources.queue(),
+    queryFn: () => api.listBakeQueue(),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useReorderBakeQueue() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, string[]>({
+    mutationFn: (bakeIds) => api.reorderBakeQueue(bakeIds),
+    onSettled: () => {
+      return qc.invalidateQueries({ queryKey: qkSources.queue() });
+    },
   });
 }
 
@@ -96,4 +117,4 @@ export function useBakeSource() {
 }
 
 // Re-export wire types so callers can import from one place.
-export type { SourceSummary, BakeSummary, ListSourcesResponse, ListBakesResponse };
+export type { BakeQueueItem, ListBakeQueueResponse, SourceSummary, BakeSummary, ListSourcesResponse, ListBakesResponse };
