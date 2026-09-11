@@ -348,8 +348,16 @@ Mitigations shipped:
   without it once the ProcMountType gate is on (default from 1.33). On
   clusters with `UserNamespacesSupport` off the field is dropped at
   admission — inert today, load-bearing after the upgrade.
-- The image's `dockerd` sub-id range moved to `2000:63536` so it fits
-  inside the 65536-id pod user namespace that `hostUsers: false` creates.
+- The image assigns `dockerd:65536:65535` in `/etc/subuid` and
+  `/etc/subgid`. RootlessKit maps inner ID 0 to outer ID 1500. It maps
+  inner IDs 1 through 65535 to outer IDs 65536 through 131070. This
+  preserves all 16-bit IDs without using outer low identities.
+- `userns-preflight.sh` rejects a Kubernetes user namespace that cannot
+  represent IDs 65536 through 131070. It does not use a shorter range.
+
+> **Deployment order:** Do not deploy this image until default and large
+> sandbox nodes run Kubernetes 1.35 with `userNamespaces.idsPerPod: 131072`.
+> Older 65536-ID pods fail closed before Docker starts.
 
 Cluster requirement for FULL DinD on kubernetes: **Kubernetes >= 1.33**
 (ProcMountType + UserNamespacesSupport on by default) with a node runtime
