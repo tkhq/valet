@@ -30,6 +30,46 @@ function metricNamed(exporter: InMemoryMetricExporter, name: string) {
 }
 
 describe("prebuild lifecycle metrics", () => {
+  it("creates instruments after a provider registers when imported during boot", async () => {
+    metrics.disable();
+    vi.resetModules();
+    const lifecycle = await import("./prebuild-lifecycle.js");
+    const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const provider = new MeterProvider({
+      readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })],
+    });
+    metrics.setGlobalMeterProvider(provider);
+
+    lifecycle.recordPrebuildRequest({ sourceKind: "repo", profile: null, provider: "kubernetes" }, "accepted", "scheduler");
+    lifecycle.updatePrebuildQueueSnapshot([{ sourceKind: "repo", profile: null, provider: "kubernetes", queued: 1, active: 0, oldestQueuedAgeSeconds: 2 }]);
+    await provider.forceFlush();
+
+    expect(metricNamed(exporter, "valet.prebuild.requests")).toBeDefined();
+    expect(metricNamed(exporter, "valet.prebuild.queue.depth")).toBeDefined();
+    await provider.shutdown();
+  });
+
+  it("exports registry lifecycle metrics when the path imports before provider registration", async () => {
+    metrics.disable();
+    vi.resetModules();
+    const registry = await import("../prebuilds/registry.js");
+    const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const provider = new MeterProvider({
+      readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })],
+    });
+    metrics.setGlobalMeterProvider(provider);
+
+    await registry.prebuildImagePullable("registry.example/acme/image:tag", {
+      registryInsecure: false,
+      fetchImpl: async () => new Response(null, { status: 200 }),
+    });
+    await provider.forceFlush();
+
+    expect(metricNamed(exporter, "valet.prebuild.registry.operations")).toBeDefined();
+    expect(metricNamed(exporter, "valet.prebuild.registry.reconciliations")).toBeDefined();
+    await provider.shutdown();
+  });
+
   it("emits request, transition, latency, size, registry, and queue signals", async () => {
     const { exporter, provider, lifecycle } = await testMetrics();
     const dimensions = { sourceKind: "repo", profile: "full", provider: "kubernetes" };
@@ -70,6 +110,24 @@ describe("prebuild lifecycle metrics", () => {
     expect(queue?.dataPointType).toBe(DataPointType.GAUGE);
     if (!queue || queue.dataPointType !== DataPointType.GAUGE) throw new Error("expected queue gauge");
     expect(queue.dataPoints[0]?.value).toBe(2);
+    await provider.shutdown();
+  });
+
+  it("aggregates gauge rows that collapse to the same bounded labels", async () => {
+    const { exporter, provider, lifecycle } = await testMetrics();
+    lifecycle.updatePrebuildQueueSnapshot([
+      { sourceKind: "repo", profile: null, provider: null, queued: 1, active: 2, oldestQueuedAgeSeconds: 3, latest: { queued: 1 } },
+      { sourceKind: "repo", profile: "shared", provider: "none", queued: 4, active: 5, oldestQueuedAgeSeconds: 6, latest: { queued: 4 } },
+    ]);
+    await provider.forceFlush();
+
+    const queue = metricNamed(exporter, "valet.prebuild.queue.depth");
+    if (!queue || queue.dataPointType !== DataPointType.GAUGE) throw new Error("expected queue gauge");
+    expect(queue.dataPoints).toHaveLength(1);
+    expect(queue.dataPoints[0]).toMatchObject({
+      attributes: { source_kind: "repo", profile: "shared", provider: "none" },
+      value: 5,
+    });
     await provider.shutdown();
   });
 

@@ -13,7 +13,7 @@ groups:
             relativeTimeRange: { from: 900, to: 0 }
             datasourceUid: prometheus
             model:
-              expr: 'sum(valet_prebuild_queue_depth) > 0 and sum(increase(valet_prebuild_builds_total{outcome="started"}[15m])) == 0'
+              expr: 'sum(valet_prebuild_queue_depth) > 0 and (sum(increase(valet_prebuild_builds_total{outcome="started"}[15m])) or vector(0)) == 0'
               instant: true
               refId: A
           - refId: C
@@ -82,7 +82,7 @@ groups:
             relativeTimeRange: { from: 600, to: 0 }
             datasourceUid: prometheus
             model:
-              expr: 'sum(increase(valet_prebuild_registry_reconciliations_total{outcome=~"missing|digest_mismatch"}[10m])) > 0'
+              expr: 'sum(increase(valet_prebuild_registry_reconciliations_total{outcome="missing"}[10m])) > 0'
               instant: true
               refId: A
           - refId: C
@@ -92,5 +92,5 @@ groups:
         execErrState: Alerting
         for: 5m
         annotations:
-          summary: A bake marked available is missing from the registry or has a digest mismatch.
+          summary: A session preflight found that a bake image is missing from the registry.
         labels: { severity: critical }

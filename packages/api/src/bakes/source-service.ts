@@ -31,7 +31,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   imageSources,
@@ -728,11 +728,22 @@ export class SourceService {
    * `enforceCacheCeiling` after each per-source retention pass. */
   private readonly cacheBudgetGb: number;
   private readonly activeBuildIds = new Map<string, string>();
+  /** Builder start times observed by this process. The persisted `startedAt`
+   * keeps its existing request-time meaning for API consumers. */
+  private readonly observedBuildStartedAt = new Map<string, number>();
   private readonly bakeSpans = new Map<string, ReturnType<typeof startBakeSpan>>();
   /** Last failed-bake retention pass per source (`FAILED_RETENTION_COOLDOWN_MS`). */
   private readonly failedRetentionAt = new Map<string, number>();
   private readonly registryInsecure: boolean;
   private readonly registryPushHost: string | undefined;
+  private latestSnapshotAt: number | undefined;
+  private latestSnapshotRows: Array<{
+    sourceKind: ImageSourceRow["kind"];
+    profile: ImageSourceRow["profile"];
+    provider: string | null;
+    status: BakeRow["status"];
+    createdAt: number;
+  }> = [];
   private pollTimer?: ReturnType<typeof setInterval>;
   private schedulerTimer?: ReturnType<typeof setInterval>;
 
@@ -761,7 +772,7 @@ export class SourceService {
     return this.builder?.backend ?? null;
   }
 
-  private dimensions(source: ImageSourceRow, provider = this.builder?.backend): PrebuildDimensions {
+  private dimensions(source: ImageSourceRow, provider: string | null | undefined = this.builder?.backend): PrebuildDimensions {
     return { sourceKind: source.kind, profile: source.profile ?? (source.kind === "repo" ? "shared" : null), provider };
   }
 
@@ -933,13 +944,15 @@ export class SourceService {
     trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other" = "manual",
   ): Promise<BakeRow> {
     const source = await this.loadSource(sourceId);
-    if (!this.builder) {
-      recordPrebuildRequest(this.dimensions(source, "none"), "rejected", trigger);
-      throw new PrebuildUnavailableError();
+    try {
+      if (!this.builder) throw new PrebuildUnavailableError();
+      if (source.kind === "base") return await this.startBaseBake(source, trigger);
+      if (source.kind === "repo") return await this.startRepoBake(source, trigger);
+      throw new Error(`cannot bake source of kind '${source.kind}' (${source.id})`);
+    } catch (error) {
+      recordPrebuildRequest(this.dimensions(source, this.builder?.backend ?? "none"), "rejected", trigger);
+      throw error;
     }
-    if (source.kind === "base") return this.startBaseBake(source, trigger);
-    if (source.kind === "repo") return this.startRepoBake(source, trigger);
-    throw new Error(`cannot bake source of kind '${source.kind}' (${source.id})`);
   }
 
   private async startBaseBake(source: ImageSourceRow, trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other"): Promise<BakeRow> {
@@ -1224,15 +1237,13 @@ export class SourceService {
     trigger: "manual" | "scheduler" | "cascade" | "binding" | "seed" | "other",
   ): Promise<BakeRow> {
     const dimensions = this.dimensions(source, builder.backend);
-    const recent = await this.db
-      .select({ id: bakes.id, status: bakes.status })
+    const previous = await this.db
+      .select({ status: bakes.status })
       .from(bakes)
-      .where(eq(bakes.sourceId, source.id))
-      .orderBy(desc(bakes.createdAt))
-      .limit(2);
-    if (recent.some((candidate) => candidate.id !== row.id && candidate.status === "failed")) {
-      recordPrebuildTransition(dimensions, "retried");
-    }
+      .where(and(eq(bakes.sourceId, source.id), ne(bakes.id, row.id)))
+      .orderBy(desc(bakes.createdAt), desc(bakes.id))
+      .limit(1);
+    if (previous[0]?.status === "failed") recordPrebuildTransition(dimensions, "retried");
     const span = startBakeSpan(row.id, dimensions);
     let buildId: string;
     try {
@@ -1243,7 +1254,6 @@ export class SourceService {
         .update(bakes)
         .set({ status: "failed", error: message, finishedAt: this.now() })
         .where(eq(bakes.id, row.id));
-      recordPrebuildRequest(dimensions, "rejected", trigger);
       recordPrebuildTransition(dimensions, "failed");
       span.recordException(err instanceof Error ? err : new Error(message));
       span.end();
@@ -1276,11 +1286,16 @@ export class SourceService {
       .from(bakes)
       .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
       .where(inArray(bakes.status, ["queued", "building"]));
-    const latest = await this.db
-      .selectDistinctOn([bakes.sourceId], selection)
-      .from(bakes)
-      .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
-      .orderBy(bakes.sourceId, desc(bakes.createdAt));
+    const snapshotNow = this.now();
+    if (this.latestSnapshotAt === undefined || snapshotNow - this.latestSnapshotAt >= 60_000) {
+      this.latestSnapshotRows = await this.db
+        .selectDistinctOn([bakes.sourceId], selection)
+        .from(bakes)
+        .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+        .orderBy(bakes.sourceId, desc(bakes.createdAt));
+      this.latestSnapshotAt = snapshotNow;
+    }
+    const latest = this.latestSnapshotRows;
     const groups = new Map<string, {
       sourceKind: string;
       profile: string | null;
@@ -1323,12 +1338,19 @@ export class SourceService {
     await this.refreshObservabilitySnapshot();
     if (!this.builder) return;
     const builder = this.builder;
-    const activeRows = await this.db.select().from(bakes).where(inArray(bakes.status, ["queued", "building"]));
+    const activeRows = await this.db
+      .select({ bake: bakes, source: imageSources })
+      .from(bakes)
+      .leftJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+      .where(inArray(bakes.status, ["queued", "building"]));
 
-    for (const row of activeRows) {
+    for (const { bake: row, source } of activeRows) {
       const buildId = this.activeBuildIds.get(row.id);
       if (!buildId) continue;
-      const source = await this.loadSource(row.sourceId);
+      if (!source) {
+        console.warn(`prebuild poll: source ${row.sourceId} for bake ${row.id} no longer exists; skipping`);
+        continue;
+      }
       const dimensions = this.dimensions(source, builder.backend);
 
       let status: Awaited<ReturnType<ImageBuilder["status"]>>;
@@ -1340,26 +1362,27 @@ export class SourceService {
 
       if (status.state === "queued" || status.state === "building") {
         if (status.state !== row.status || status.logTail !== row.logTail) {
-          const startedAt = status.state === "building" && row.status === "queued" ? this.now() : row.startedAt;
+          const observedAt = this.now();
           await this.db
             .update(bakes)
-            .set({ status: status.state, logTail: status.logTail ?? null, startedAt })
+            .set({ status: status.state, logTail: status.logTail ?? null })
             .where(eq(bakes.id, row.id));
           if (status.state === "building" && row.status === "queued") {
-            recordPrebuildQueueWait(dimensions, this.now() - row.createdAt);
+            this.observedBuildStartedAt.set(row.id, observedAt);
+            recordPrebuildQueueWait(dimensions, observedAt - row.createdAt);
             recordPrebuildTransition(dimensions, "started");
-            logPrebuildEvent("bake_started", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, queueWaitMs: this.now() - row.createdAt });
+            logPrebuildEvent("bake_started", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, queueWaitMs: observedAt - row.createdAt });
           }
         }
         continue;
       }
 
       this.activeBuildIds.delete(row.id);
+      const observedStartedAt = this.observedBuildStartedAt.get(row.id);
+      this.observedBuildStartedAt.delete(row.id);
       if (row.status === "queued") {
-        // A short or cached build can finish between polls. Preserve the
-        // lifecycle count without claiming that its unobserved queue wait
-        // consumed the whole build duration.
-        recordPrebuildQueueWait(dimensions, 0);
+        // The build became terminal between polls. Count its lifecycle start,
+        // but do not fabricate queue wait or build duration observations.
         recordPrebuildTransition(dimensions, "started");
       }
       if (status.state === "pushed") {
@@ -1384,13 +1407,10 @@ export class SourceService {
           // best-effort — size measurement never blocks the push transition
         }
         recordPrebuildTransition(dimensions, "succeeded");
-        recordPrebuildCompletion(dimensions, finishedAt - (row.startedAt ?? row.createdAt), measuredSize);
-        if (builder.backend === "kubernetes") {
-          recordRegistryOperation("push", "success", finishedAt - (row.startedAt ?? row.createdAt), measuredSize);
-        }
+        recordPrebuildCompletion(dimensions, observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, measuredSize);
         this.bakeSpans.get(row.id)?.end();
         this.bakeSpans.delete(row.id);
-        logPrebuildEvent("bake_succeeded", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, durationMs: finishedAt - (row.startedAt ?? row.createdAt), imageRef: row.imageRef, identity: row.identityHash, commit: row.commitSha, sizeBytes: measuredSize });
+        logPrebuildEvent("bake_succeeded", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, durationMs: observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, imageRef: row.imageRef, identity: row.identityHash, commit: row.commitSha, sizeBytes: measuredSize });
         await this.runPostBakeRetention(row.sourceId, builder.backend);
         await this.cascadeBaseChildren(row.sourceId);
       } else {
@@ -1401,12 +1421,12 @@ export class SourceService {
           .where(eq(bakes.id, row.id));
         const canceled = status.error === "cancelled";
         recordPrebuildTransition(dimensions, canceled ? "canceled" : "failed");
-        recordPrebuildCompletion(dimensions, finishedAt - (row.startedAt ?? row.createdAt));
+        if (observedStartedAt !== undefined) recordPrebuildCompletion(dimensions, finishedAt - observedStartedAt);
         const span = this.bakeSpans.get(row.id);
         if (status.error) span?.recordException(new Error(status.error));
         span?.end();
         this.bakeSpans.delete(row.id);
-        logPrebuildEvent(canceled ? "bake_canceled" : "bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, durationMs: finishedAt - (row.startedAt ?? row.createdAt), error: status.error });
+        logPrebuildEvent(canceled ? "bake_canceled" : "bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source.repoFullName, profile: source.profile, provider: builder.backend, durationMs: observedStartedAt === undefined ? undefined : finishedAt - observedStartedAt, error: status.error });
         // Retention must run on failure too. A registry at ENOSPC fails
         // every push; when retention only ran on the pushed transition, a
         // full registry could never drain itself (agents-dev, 2026-08-19).
@@ -2036,15 +2056,28 @@ export class SourceService {
    * restart) and best-effort `cleanupOrphan`s durable cluster resources. */
   private async sweepOrphanedBuilds(): Promise<void> {
     const orphaned = await this.db
-      .select({ id: bakes.id })
+      .select({ id: bakes.id, sourceId: bakes.sourceId, provider: bakes.builderBackend })
       .from(bakes)
       .where(inArray(bakes.status, ["queued", "building"]));
     if (orphaned.length === 0) return;
 
+    const sources = await this.db
+      .select()
+      .from(imageSources)
+      .where(inArray(imageSources.id, [...new Set(orphaned.map((row) => row.sourceId))]));
+    const sourceById = new Map(sources.map((source) => [source.id, source]));
     await this.db
       .update(bakes)
       .set({ status: "failed", error: "interrupted by restart", finishedAt: this.now() })
       .where(inArray(bakes.status, ["queued", "building"]));
+    for (const row of orphaned) {
+      const source = sourceById.get(row.sourceId);
+      const dimensions = source
+        ? this.dimensions(source, row.provider)
+        : { sourceKind: "other", profile: "other", provider: row.provider };
+      recordPrebuildTransition(dimensions, "failed");
+      logPrebuildEvent("bake_failed", { buildId: row.id, bakeId: row.id, sourceId: row.sourceId, repository: source?.repoFullName, profile: source?.profile, provider: row.provider, error: "interrupted by restart" });
+    }
 
     const builder = this.builder;
     if (builder?.cleanupOrphan) {

@@ -1199,6 +1199,16 @@ describe("SourceService", () => {
   // ── ported lifecycle: poll sync + retention + orphan sweep ─────────────
 
   describe("syncActiveBuilds / retention (ported)", () => {
+    it("preserves request-time startedAt when the poll observes builder start", async () => {
+      const srcId = await seedRepoSource(db);
+      const row = await service.startBake(srcId);
+      expect(row.startedAt).toBe(NOW);
+      await service.syncActiveBuilds();
+      const [updated] = await db.select().from(bakes).where(eq(bakes.id, row.id));
+      expect(updated.status).toBe("building");
+      expect(updated.startedAt).toBe(NOW);
+    });
+
     it("transitions a build to pushed and stamps finishedAt", async () => {
       const srcId = await seedRepoSource(db);
       const row = await service.startBake(srcId);
@@ -1254,12 +1264,15 @@ describe("SourceService", () => {
       const srcId = await seedRepoSource(db);
       await seedBake(db, srcId, { id: "stuck", status: "building", finishedAt: null });
       await seedBake(db, srcId, { id: "done", status: "pushed" });
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
       await service.start();
       const rows = await db.select().from(bakes).where(eq(bakes.sourceId, srcId));
       const byId = new Map(rows.map((r) => [r.id, r]));
       expect(byId.get("stuck")?.status).toBe("failed");
       expect(byId.get("stuck")?.error).toBe("interrupted by restart");
       expect(byId.get("done")?.status).toBe("pushed");
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('"event":"bake_failed"'));
+      log.mockRestore();
     });
   });
 
