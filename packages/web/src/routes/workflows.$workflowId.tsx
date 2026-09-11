@@ -17,6 +17,8 @@ import {
   useUpdateWorkflow,
   useWorkflow,
   useWorkflowPermissions,
+  useWorkflowToolApprovals,
+  useRevokeWorkflowToolApproval,
   useWorkflowRuns,
   useWorkflowVersion,
   useWorkflowVersions,
@@ -174,6 +176,9 @@ function WorkflowEditorPane({
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
   const [preapproveOpen, setPreapproveOpen] = useState(false);
+  const [approvalsOpen, setApprovalsOpen] = useState(false);
+  const rememberedApprovals = useWorkflowToolApprovals(workflowId);
+  const revokeApproval = useRevokeWorkflowToolApproval(workflowId);
   // The last pre-approval's leftovers: gating actions an org policy keeps
   // gated, which only an org admin can change. Shown until the next attempt.
   const [blockedActions, setBlockedActions] = useState<{ actionId: string; reason: string }[]>([]);
@@ -342,6 +347,9 @@ function WorkflowEditorPane({
               <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
                 Version history
               </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setApprovalsOpen(true)}>
+                Remembered approvals
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onSelect={() => {
                   void downloadWorkflowFile(workflowId).catch((err) => {
@@ -399,6 +407,36 @@ function WorkflowEditorPane({
           onStarted={goToRun}
         />
       )}
+
+      <Dialog open={approvalsOpen} onOpenChange={setApprovalsOpen}>
+        <DialogContent
+          title="Remembered approvals"
+          description="Exact workflow actions approved for later unchanged runs. Revoke any approval to require a fresh decision."
+        >
+          {revokeApproval.error && (
+            <div className="mb-3 text-sm text-danger">{errorText(revokeApproval.error)}</div>
+          )}
+          {rememberedApprovals.isLoading ? (
+            <div className="flex items-center gap-2 text-sm text-muted"><Spinner size={14} /> Loading…</div>
+          ) : rememberedApprovals.data?.approvals.length ? (
+            <ul className="space-y-2">
+              {rememberedApprovals.data.approvals.map((approval) => (
+                <li key={approval.id} className="flex items-center justify-between gap-4 rounded border border-line p-3">
+                  <div className="min-w-0">
+                    <div className="truncate font-mono text-xs text-ink">{approval.actionId}</div>
+                    <div className="text-[11px] text-muted">Node {approval.nodeId} · expires {new Date(approval.expiresAt).toLocaleDateString()}</div>
+                  </div>
+                  <Button size="sm" variant="danger" disabled={revokeApproval.isPending} onClick={() => revokeApproval.mutate(approval.id)}>
+                    Revoke
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-sm text-muted">No active remembered approvals.</div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={preapproveOpen} onOpenChange={setPreapproveDialog}>
         <DialogContent

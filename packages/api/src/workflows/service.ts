@@ -34,9 +34,11 @@ import {
   workflowRuns,
   workflowSchedules,
   workflowVersions,
+  workflowToolApprovals,
   workflowWebhooks,
 } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
+import { writeWorkflowToolApproval } from "./tool-approvals.js";
 import {
   getTeamInOrg,
   isTeamMember,
@@ -1095,6 +1097,7 @@ export async function purgeWorkflowRows(
 ): Promise<void> {
   await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
   await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, workflowId));
+  await db.delete(workflowToolApprovals).where(eq(workflowToolApprovals.workflowId, workflowId));
   await disarmWorkflowTriggers(db, orgId, workflowId);
 }
 
@@ -1403,7 +1406,7 @@ async function ownedRun(
 
 export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
-  | "forbidden_always" | "org_mismatch" | "human_only";
+  | "forbidden_always" | "org_mismatch" | "human_only" | "not_reusable";
 
 /** Scan `definition` (unknown at runtime) for the node with `nodeId`. Searches
  * `definition.nodes` directly and, for each `type === "foreach"` node, also checks
@@ -1531,7 +1534,7 @@ export async function resolveWorkflowApproval(
     nodeId: string;
     approved: boolean;
     note?: string;
-    scope?: "once" | "run" | "always";
+    scope?: "once" | "run" | "workflow" | "always";
     iteration?: number;
     via: "web" | "agent";
   },
@@ -1563,6 +1566,35 @@ export async function resolveWorkflowApproval(
   if (input.approved && input.scope === "always" && isPolicyGate) {
     const adminOk = await isOrgAdmin(deps.db, orgId, owner.userId);
     if (!adminOk) return "forbidden_always";
+  }
+
+  let reusablePrincipal: { type: "user" | "team" | "org"; id: string } | undefined;
+  let reusableApproval: { fingerprint: string; policyRevision: string; params: Record<string, unknown> } | undefined;
+  if (input.approved && input.scope === "workflow" && isPolicyGate) {
+    // Validate the stored owner before the first-write-wins signal. Returning
+    // after signal insertion would consume the gate without persisting what
+    // the person explicitly selected.
+    const principalType = run.owner?.ownerType;
+    if (principalType !== "user" && principalType !== "team" && principalType !== "org") {
+      return "org_mismatch";
+    }
+    reusablePrincipal = { type: principalType, id: run.owner!.ownerId };
+    const checkpoints = await deps.workflowStore.getCheckpoints(input.runId);
+    const checkpoint = checkpoints.find((cp) =>
+      cp.nodeId === input.nodeId && cp.iteration === iter && cp.status === "intent"
+    );
+    const effects = checkpoint?.effects;
+    const fingerprint = effects && typeof effects.approvalFingerprint === "string"
+      ? effects.approvalFingerprint
+      : undefined;
+    const policyRevision = effects && typeof effects.policyRevision === "string"
+      ? effects.policyRevision
+      : undefined;
+    if (!fingerprint || !policyRevision || effects?.gateParamsTruncated === true) return "not_reusable";
+    const params = effects && typeof effects.gateParams === "object" && effects.gateParams !== null && !Array.isArray(effects.gateParams)
+      ? effects.gateParams as Record<string, unknown>
+      : {};
+    reusableApproval = { fingerprint, policyRevision, params };
   }
 
   // insertSignal is first-write-wins (ON CONFLICT DO NOTHING). Insert the signal
@@ -1608,6 +1640,22 @@ export async function resolveWorkflowApproval(
     const action = typeof n.action === "string" ? n.action : "";
     const actionId = action.includes(".") ? action : `${service}.${action}`;
     const now = Date.now();
+    if (input.scope === "workflow" && reusableApproval) {
+      await writeWorkflowToolApproval(deps.db, {
+        ...reusableApproval,
+        orgId,
+        owner: reusablePrincipal!,
+        workflowId: run.params.workflowId,
+        definitionVersionId: run.params.definitionVersionId,
+        nodeId: input.nodeId,
+        service,
+        actionId,
+        ...(n.credential === "auto" || n.credential === "app" || n.credential === "user" ? { credential: n.credential } : {}),
+        approvedBy: owner.userId,
+        sourceRunId: input.runId,
+        now,
+      });
+    }
     if (input.scope === "always") {
       // Admin eligibility was already checked above (before the signal insert).
       // AlwaysAllowNotAdminError should not fire here, but re-throw defensively

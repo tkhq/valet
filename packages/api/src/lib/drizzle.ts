@@ -170,6 +170,35 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "action_invocations.matched_workflow_approval_id",
+    probe: { kind: "column", table: "action_invocations", column: "matched_workflow_approval_id" },
+    sql: 'ALTER TABLE "action_invocations" ADD COLUMN "matched_workflow_approval_id" text',
+  },
+
+  {
+    describe: "workflow_tool_approvals table",
+    probe: { kind: "table", table: "workflow_tool_approvals" },
+    sql: `CREATE TABLE IF NOT EXISTS "workflow_tool_approvals" (
+      "id" text PRIMARY KEY NOT NULL, "fingerprint" text NOT NULL UNIQUE,
+      "org_id" text NOT NULL, "principal_type" text NOT NULL, "principal_id" text NOT NULL,
+      "workflow_id" text NOT NULL, "definition_version_id" text NOT NULL, "node_id" text NOT NULL,
+      "service" text NOT NULL, "action_id" text NOT NULL, "credential" text,
+      "params_hash" text NOT NULL, "policy_revision" text NOT NULL,
+      "approved_by" text NOT NULL, "source_run_id" text NOT NULL, "expires_at" bigint NOT NULL, "revoked_at" bigint,
+      "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "workflow_tool_approvals.expires_at",
+    probe: { kind: "column", table: "workflow_tool_approvals", column: "expires_at" },
+    sql: 'ALTER TABLE "workflow_tool_approvals" ADD COLUMN "expires_at" bigint NOT NULL DEFAULT 0',
+  },
+  {
+    describe: "workflow_tool_approvals_workflow index",
+    probe: { kind: "index", index: "workflow_tool_approvals_workflow" },
+    sql: 'CREATE INDEX IF NOT EXISTS "workflow_tool_approvals_workflow" ON "workflow_tool_approvals" ("org_id","workflow_id","revoked_at")',
+  },
+  {
     describe: "skill_invocations table",
     probe: { kind: "table", table: "skill_invocations" },
     sql: `CREATE TABLE IF NOT EXISTS "skill_invocations" (

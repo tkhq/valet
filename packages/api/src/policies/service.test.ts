@@ -23,6 +23,7 @@ import {
   persistInvocationAudit,
   POLICY_AUDIT_FIELD_CAP,
   resolveActionPolicy,
+  resolveActionPolicyWithRevision,
   revokeExecutionGrants,
   revokeSessionGrants,
   updateInvocationOutcome,
@@ -154,6 +155,29 @@ describe("resolveActionPolicy", () => {
     const d = await resolveActionPolicy(db, base);
     expect(d.mode).toBe("deny");
     expect(d.provenance.source).toBe("org_policy");
+  });
+
+  it("hashes policy revisions independently of database row order", async () => {
+    const rows = [
+      {
+        id: "p_z", orgId: ORG, principalType: "org" as const, principalId: ORG,
+        service: "github", actionId: null, riskLevel: null, mode: "require_approval" as const,
+        paramMatchers: [], appliesIn: "any" as const, origin: "settings" as const, managedBy: null,
+        expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: "p_a", orgId: ORG, principalType: "org" as const, principalId: ORG,
+        service: null, actionId: "create_issue", riskLevel: null, mode: "require_approval" as const,
+        paramMatchers: [], appliesIn: "any" as const, origin: "settings" as const, managedBy: null,
+        expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+      },
+    ];
+    await db.insert(actionPolicies).values(rows);
+    const first = await resolveActionPolicyWithRevision(db, base);
+    await db.delete(actionPolicies);
+    await db.insert(actionPolicies).values([...rows].reverse());
+    const second = await resolveActionPolicyWithRevision(db, base);
+    expect(second.policyRevision).toBe(first.policyRevision);
   });
 
   it("reads rows fresh each call (a policy added between calls applies immediately)", async () => {

@@ -15,6 +15,7 @@ import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import { resolveCreateOwner, type RequestPrincipal } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
+import { isOrgAdmin } from "../services/org.js";
 import {
   WorkflowCursorError,
   workflowFileBasename,
@@ -65,6 +66,7 @@ import {
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
+import { listWorkflowToolApprovals, revokeWorkflowToolApproval } from "../workflows/tool-approvals.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
   GitHubSkillRepoReader,
@@ -91,6 +93,8 @@ import type {
   GetWorkflowVersionResponse,
   ListWorkflowRunsResponse,
   ListWorkflowVersionsResponse,
+  ListWorkflowToolApprovalsResponse,
+  RevokeWorkflowToolApprovalResponse,
   ListWorkflowsResponse,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -801,6 +805,40 @@ workflowsRouter.get("/runs/:runId", async (c) => {
   return c.json(resp);
 });
 
+workflowsRouter.get("/:id/tool-approvals", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  if (!(await getWorkflowDefinition(deps, owner, id))) return c.json({ error: "workflow not found" }, 404);
+  const rows = await listWorkflowToolApprovals(deps.db, id, Date.now());
+  const resp: ListWorkflowToolApprovalsResponse = {
+    approvals: rows.map((row) => ({
+      id: row.id,
+      nodeId: row.nodeId,
+      service: row.service,
+      actionId: row.actionId,
+      approvedBy: row.approvedBy,
+      sourceRunId: row.sourceRunId,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+    })),
+  };
+  return c.json(resp);
+});
+
+workflowsRouter.delete("/:id/tool-approvals/:approvalId", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const id = c.req.param("id");
+  const workflow = await getWorkflowDefinition(deps, owner, id);
+  if (!workflow) return c.json({ error: "workflow not found" }, 404);
+  if (workflow.ownerType === "org" && !(await isOrgAdmin(deps.db, owner.orgId, owner.userId))) {
+    return c.json({ error: "Ask an org admin to revoke this workflow approval." }, 403);
+  }
+  const revoked = await revokeWorkflowToolApproval(deps.db, id, c.req.param("approvalId"), Date.now());
+  if (!revoked) return c.json({ error: "remembered approval not found" }, 404);
+  const resp: RevokeWorkflowToolApprovalResponse = { revoked: true };
+  return c.json(resp);
+});
+
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const runId = c.req.param("runId");
@@ -819,8 +857,8 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if ("grantActions" in body) {
     return c.json({ error: "grantActions is no longer supported; use scope instead" }, 400);
   }
-  if (body.scope !== undefined && !["once", "run", "always"].includes(body.scope)) {
-    return c.json({ error: "scope must be one of: once, run, always" }, 400);
+  if (body.scope !== undefined && !["once", "run", "workflow", "always"].includes(body.scope)) {
+    return c.json({ error: "scope must be one of: once, run, workflow, always" }, 400);
   }
   if (body.iteration !== undefined && (!Number.isInteger(body.iteration) || body.iteration < 0)) {
     return c.json({ error: "iteration must be a non-negative integer" }, 400);
@@ -843,6 +881,7 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (result === "forbidden_always") return c.json({ error: "Always allow requires an org admin. Ask an org admin, or approve for the rest of this run." }, 403);
   if (result === "org_mismatch") return c.json({ error: "not a member of this workflow's org" }, 403);
   if (result === "human_only") return c.json({ error: "policy gates must be resolved by a human from the run page" }, 403);
+  if (result === "not_reusable") return c.json({ code: "workflow_approval_not_reusable", error: "This gate cannot be remembered. Approve it once or for this run." }, 422);
 
   const resp: ResolveWorkflowApprovalResponse = { ok: true };
   return c.json(resp);

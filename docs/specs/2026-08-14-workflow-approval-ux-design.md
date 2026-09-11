@@ -150,16 +150,33 @@ channel deliverers get it for free and remain the mobile story for v1.
 
 ### 3. Approval scopes
 
-The gate card offers three approve scopes and deny:
+The gate card offers four approve scopes and deny:
 
 | Scope | Mechanism | Covers |
 | --- | --- | --- |
 | `once` (default) | The resolution signal itself (section 1's `approval` field). No grant row. | This one invocation. The next `foreach` iteration gates again. |
 | `run` | Run-scoped runtime grant for the gated node's `(service, qualified actionId)`, derived server-side. | All later iterations and any later node that calls the same action in this run, regardless of params. |
+| `workflow` (primary) | Durable exact-match workflow approval. | Later runs of the same immutable workflow definition, node, action, credential identity, rendered params, and policy revision. |
 | `always` | Durable org-level `allow` policy via the existing session-gate write path (`pol:approval:{orgId}:{actionId}`, qualified fqid), plus the run-scoped grant so the current run resumes immediately. Admin-only. | Every future run and session, org-wide. |
 
 Grants sit at precedence rung 1 (below org deny, above everything else) —
 unchanged. No invocation-scoped grant kind exists; `once` is signal-borne.
+
+The `workflow` scope stores an approval in `workflow_tool_approvals`. Its
+SHA-256 fingerprint covers the org, owner principal, workflow id, immutable
+definition version, node id, qualified action id, credential mode and identity,
+canonical rendered params, and current durable policy revision. Credential
+identity uses a one-way token hash when a stable row is available. GitHub App
+selection uses the org and repository target because installation tokens are
+short-lived. If credential identity resolution fails, the API does not offer a
+reusable fingerprint and the user must select `once` or `run`.
+
+The invoker resolves policy before it checks this approval. A current `deny`
+always denies. A changed policy revision, definition, action, target, params,
+credential, owner, or workflow requires a new approval. Denials never create a
+row. Rows keep approver, source run, timestamps, and a nullable revocation time.
+Deleting a workflow deletes its rows. A reused approval writes an approved
+action audit entry with the original approver.
 
 Audit: the enforcement pass that parks writes no terminal audit row. On
 resolution, the invoker's normal outcome path stamps the row; the
@@ -174,7 +191,7 @@ dangling.
 `POST /api/workflows/runs/:runId/approvals/:nodeId` body:
 
 ```ts
-{ approved: boolean; note?: string; scope?: 'once' | 'run' | 'always';
+{ approved: boolean; note?: string; scope?: 'once' | 'run' | 'workflow' | 'always';
   iteration?: number }
 ```
 
@@ -400,3 +417,11 @@ place). Run `make dev-clean` and restart the stack.
    only for tool-node (policy gate) resolutions. Approval-node resolutions use
    the signal as the authorization for that one invocation; no grant row is
    written.
+
+### Remembered-approval edge semantics
+
+- **Definition rollback:** definition IDs are content hashes. Restoring byte-equivalent content intentionally restores that immutable definition identity; reuse still requires the same node, action, plugin version, credential identity, resolved parameters, and current policy revision.
+- **Team membership:** membership is checked on every read, approval, and revocation request. A former team member cannot view, create, or revoke the team's remembered approvals. The approval belongs to the workflow principal, not permanently to the individual approver.
+- **Plugin drift:** the plugin version is fingerprinted. An upgraded or downgraded action cannot reuse approval created under another plugin version.
+- **Foreach:** iteration number is not authority. Calls in the same foreach tool node with identical fully resolved parameters share the same narrow fingerprint; different resolved parameters supersede the node's previous remembered row and require approval.
+- **Lifecycle:** remembered approvals expire after 90 days. A new fingerprint for the same principal/workflow/node supersedes the old row, and expired rows are removed during writes. Active approvals are visible and revocable from the workflow editor.

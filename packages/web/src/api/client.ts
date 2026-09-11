@@ -13,6 +13,8 @@ import type {
   CreateAssistantResponse,
   EnsureAssistantSessionResponse,
   ListAssistantsResponse,
+  ListWorkflowToolApprovalsResponse,
+  RevokeWorkflowToolApprovalResponse,
   PatchAssistantRequest,
   PatchAssistantResponse,
   AllowWorkflowPermissionsRequest,
@@ -957,6 +959,16 @@ export const api = {
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
   },
+  listWorkflowToolApprovals: (id: string) =>
+    request<ListWorkflowToolApprovalsResponse>(
+      "GET",
+      `/workflows/${encodeURIComponent(id)}/tool-approvals`,
+    ),
+  revokeWorkflowToolApproval: (id: string, approvalId: string) =>
+    request<RevokeWorkflowToolApprovalResponse>(
+      "DELETE",
+      `/workflows/${encodeURIComponent(id)}/tool-approvals/${encodeURIComponent(approvalId)}`,
+    ),
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(
       "GET",
