@@ -113,6 +113,7 @@ describe("EngineHost pinned-action scope", () => {
       workspace: "/tmp",
     });
     const names = toolNames(session.options.tools);
+    expect(names).not.toContain(COPY_TOOL);
     expect(names).not.toContain(PATCH_TOOL);
     expect(names).toContain("call_tool");
   });
@@ -126,6 +127,7 @@ describe("EngineHost pinned-action scope", () => {
       orgId: ORG,
       workspace: "/tmp",
     });
+    expect(toolNames(parent.options.tools)).not.toContain(COPY_TOOL);
     expect(toolNames(parent.options.tools)).not.toContain(PATCH_TOOL);
 
     const child = await engineHost.childSessionFor("pins-child", {
@@ -137,6 +139,7 @@ describe("EngineHost pinned-action scope", () => {
       workspace: "/tmp",
     });
     const names = toolNames(child.options.tools);
+    expect(names).not.toContain(COPY_TOOL);
     expect(names).not.toContain(PATCH_TOOL);
     expect(names).toContain("call_tool");
   });

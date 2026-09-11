@@ -175,7 +175,17 @@ all three values before invocation. The action remains available through
 `list_tools` and `call_tool`.
 
 Team assistants, workflow sessions, regular sessions and child sessions do not
-receive the pin. This keeps the existing pinned-action security boundary. The
-memory and artifact schemas now give the same explicit source, destination and
-collision guidance. No UI control is added because conversation is the requested
-surface and the existing agent actions complete the flow.
+receive the pin. This keeps the existing pinned-action security boundary.
+
+Personal-assistant pins are never filtered by the assistant behavior integration
+allowlist or its action exclusions. This rule already applies to the pinned
+workflow read and edit actions. It now also applies to the cross-boundary copy
+action. A pin changes discoverability, not authority. The existing action path
+still checks the acting user, personal source ownership, destination team
+membership, organization scope, policy rules and destination name collisions.
+
+The memory schema already described its explicit source, destination and
+collision rule. This change adds equivalent field guidance to the artifact and
+workflow schemas, plus forwarding and visibility tests. No UI control is added
+because conversation is the requested surface and the existing agent actions
+complete the flow.

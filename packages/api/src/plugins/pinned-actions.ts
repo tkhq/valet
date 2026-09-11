@@ -40,8 +40,10 @@
  * Session tools are fixed when a session is built, so within a user-owned
  * assistant each pin applies to that person's whole default assistant. That
  * scope is acceptable: each tool reaches nothing `call_tool` could not reach
- * for the same user, and a wrong workflow id fails with "workflow not found".
- * Revisit the scope if this list grows beyond the workflow tools below.
+ * for the same user. Workflow reads and edits reject an inaccessible source.
+ * Team copies also reject an inaccessible source, unauthorized destination or
+ * name collision through the same action path. Revisit the scope if this list
+ * grows beyond the workflow tools below.
  *
  * DEPLOY NOTE. A cached live session keeps the tool array it was built
  * with. A change here reaches an existing session at its next build.
