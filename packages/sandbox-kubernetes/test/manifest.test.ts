@@ -156,6 +156,12 @@ describe("buildSandboxManifest", () => {
     ]);
   });
 
+  it("fingerprints the exact requested image string", () => {
+    expect(imageFingerprint("repo:identity-a-commit")).not.toBe(
+      imageFingerprint("repo:identity-b-commit"),
+    );
+  });
+
   it("maps opts.resources cpu (number) and memory (string) to requests/limits", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
     const container = manifest.spec.podTemplate.spec.containers[0];
