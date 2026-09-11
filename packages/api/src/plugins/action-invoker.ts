@@ -896,6 +896,8 @@ function buildActionContext(
     threadId: "invoke",
     actionId,
     service: req.service,
+    owner: ctx.owner,
+    sessionPurpose: "workflow",
     // `WorkflowInvokeActionRequest` carries no summary field (the `tool`
     // node executor's `engine.invokeAction` call never sets one) — left
     // undefined rather than guessing at a value the type doesn't offer.

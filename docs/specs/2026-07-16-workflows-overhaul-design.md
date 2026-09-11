@@ -162,3 +162,42 @@ workspace switcher and could contradict it. The workflows list badges
 team-owned rows with the team name. `TeamSummary` gains `callerRole` so
 the teams settings panel can hide mutation controls the API's
 `canAdministerTeam` gate would 404 anyway.
+
+## 2026-09-11 addendum: agent workflow ownership follows the assistant
+
+The workflow action context carries the assistant session owner. Workflow
+actions now use that principal for authorization and creation.
+
+- A team assistant creates team-owned workflow definitions. It can read and
+  change only that team's workflows through these actions.
+- A personal assistant still creates personal workflow definitions.
+- A team assistant's orchestrator-prompt schedule belongs to the team.
+  Workflow-target schedules and event triggers continue to follow the target
+  workflow.
+- An `orchestrator` node still resolves the run owner's default assistant.
+  A run of a team-owned definition therefore targets the team's default
+  assistant, not the acting member's personal default assistant.
+
+The tool schemas do not accept an owner id. The server-derived session or run
+owner is the explicit scope, so a caller cannot name an unrelated team. For a
+live team-assistant action, workflow and orchestrator-schedule creation also
+re-check the acting user's current membership, team existence, and organization
+under the same ownership lock used by team deletion. A workflow tool node uses
+the run's server-derived owner instead; it does not borrow a member's personal
+scope.
+
+Shared team-assistant sessions do not yet have reliable per-turn actor
+attribution: the materialized session can retain the actor that first created
+it. This change therefore makes no claim that `actorUserId` identifies the
+current member on every shared-session turn. The concrete follow-up is to carry
+the authenticated channel/HTTP actor on each dispatched event, use that value
+when constructing `PluginActionContext.userId` and run attribution, and add a
+two-member shared-session regression. Repository issues are disabled, so this
+follow-up remains recorded here rather than in an issue.
+
+This change does not move existing rows. An automatic update cannot distinguish
+a wrongly filed workflow from an intentionally personal workflow. To move an
+affected graph safely, use `workflows.copy_to_team` from a personal assistant.
+Check the copied graph in the team workspace. Recreate its schedules, event
+triggers, and webhook in the team scope because the copy does not move them.
+Delete the personal workflow only after the team workflow runs successfully.

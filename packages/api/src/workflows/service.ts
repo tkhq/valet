@@ -43,6 +43,7 @@ import {
   listTeamsForUser,
   lockTeamForOwnership,
   TeamHasActiveRunsError,
+  withAuthorizedTeamOwnership,
 } from "../services/teams.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { isOrgAdmin, isOrgMember } from "../services/org.js";
@@ -86,10 +87,13 @@ export interface WorkflowServiceDeps {
 export interface WorkflowOwner {
   userId: string;
   orgId: string;
-  /** Set on every HTTP request. A team `vlt_` key pins reach to that team
-   * and skips the creating admin's membership — the key survives them
-   * leaving. Agent-facing callers omit it and keep the user-only rule. */
+  /** The authenticated request, assistant-session, or workflow-run owner.
+   * A team principal restricts access to that team. */
   principal?: RequestPrincipal;
+  /** Re-check `userId` membership before a team assistant acts. Workflow
+   * runs and team API keys omit this because their server-derived team
+   * principal is the authority. */
+  requireTeamMembership?: boolean;
 }
 
 /** The owner types `workflow_definitions.owner_type` holds. Read off the
@@ -248,7 +252,8 @@ export async function isAuthorizedForOwner(
   target: { ownerType: string; ownerId: string },
 ): Promise<boolean> {
   if (owner.principal?.type === "team") {
-    return target.ownerType === "team" && target.ownerId === owner.principal.id;
+    if (target.ownerType !== "team" || target.ownerId !== owner.principal.id) return false;
+    return !owner.requireTeamMembership || isTeamMember(db, owner.principal.id, owner.userId);
   }
   if (target.ownerType === "user") return target.ownerId === owner.userId;
   if (target.ownerType === "team") return isTeamMember(db, target.ownerId, owner.userId);
@@ -277,7 +282,9 @@ export function isAuthorizedForOwnerWith(
   target: { ownerType: string; ownerId: string },
 ): boolean {
   if (owner.principal?.type === "team") {
-    return target.ownerType === "team" && target.ownerId === owner.principal.id;
+    return target.ownerType === "team" &&
+      target.ownerId === owner.principal.id &&
+      teamIds.has(owner.principal.id);
   }
   if (target.ownerType === "user") return target.ownerId === owner.userId;
   if (target.ownerType === "team") return teamIds.has(target.ownerId);
@@ -287,7 +294,12 @@ export function isAuthorizedForOwnerWith(
 /** Ids of every team the caller is a live member of — the one membership
  * read behind `ownedDefinitionFilter` and `triggerAccessSets`. */
 async function callerTeamIds(db: AppDb, owner: WorkflowOwner): Promise<Set<string>> {
-  if (owner.principal?.type === "team") return new Set([owner.principal.id]);
+  if (owner.principal?.type === "team") {
+    if (!owner.requireTeamMembership || await isTeamMember(db, owner.principal.id, owner.userId)) {
+      return new Set([owner.principal.id]);
+    }
+    return new Set();
+  }
   const myTeams = await listTeamsForUser(db, owner.userId);
   return new Set(myTeams.map((t) => t.id));
 }
@@ -363,6 +375,7 @@ function ownedDefinitionFilterWith(
     return and(
       eq(workflowDefinitions.ownerType, "team"),
       eq(workflowDefinitions.ownerId, owner.principal.id),
+      inArray(workflowDefinitions.ownerId, [...teamIds]),
     );
   }
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
@@ -537,7 +550,7 @@ export async function getWorkflowDefinition(
 export async function createWorkflowDefinition(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
-  input: { name: string; definition: unknown; teamId?: string; skipMembershipCheck?: boolean },
+  input: { name: string; definition: unknown; teamId?: string },
 ): Promise<WorkflowDefinitionSummary> {
   const now = Date.now();
   const id = newWorkflowId("wf");
@@ -561,23 +574,23 @@ export async function createWorkflowDefinition(
     // are deleted in the gap between this check and the insert, stranding
     // it permanently (see that lock's own doc comment for why
     // `db.transaction` alone isn't enough here).
-    await deps.db.transaction(async (tx) => {
-      await lockTeamForOwnership(tx, teamId);
-      // Non-member and unknown-team look identical here (both a plain
-      // `false`) — same "cross-owner access 404s, never 403s" convention
-      // as the rest of this file, so a team's existence is never leaked
-      // to a non-member's probe. A team principal skips membership but
-      // still needs the team row, or a delete that commits under this
-      // lock would insert a workflow for a gone team.
-      if (input.skipMembershipCheck) {
-        if (!(await getTeamInOrg(tx, owner.orgId, teamId))) {
-          throw new NotFoundError("team", teamId);
-        }
-      } else if (!(await isTeamMember(tx, teamId, owner.userId))) {
-        throw new NotFoundError("team", teamId);
-      }
-      await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
-    });
+    const inserted = await withAuthorizedTeamOwnership(
+      deps.db,
+      {
+        teamId,
+        orgId: owner.orgId,
+        userId: owner.userId,
+        principalTeamId: owner.principal?.type === "team" ? owner.principal.id : null,
+        requireMembership: owner.requireTeamMembership === true,
+      },
+      async (tx) => {
+        await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
+        return true;
+      },
+    );
+    // Non-member and unknown-team look identical — same "cross-owner access
+    // 404s, never 403s" convention as the rest of this file.
+    if (!inserted) throw new NotFoundError("team", teamId);
     ownerType = "team";
     ownerId = teamId;
   } else {
