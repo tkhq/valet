@@ -971,7 +971,7 @@ async function resolveSlackOrigin(
 }
 
 const replyToOrigin = action(Type.Object({
-    text: Type.String({ description: 'The reply text (Slack markdown).' }),
+    text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
   }))({
   id: 'slack.reply_to_origin',
   name: 'Reply to Origin',
