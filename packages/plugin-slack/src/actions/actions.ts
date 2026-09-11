@@ -302,7 +302,7 @@ async function openAndSendDM(
   const openData = (await openRes.json()) as { ok: boolean; error?: string; channel?: { id?: string } };
   if (!openData.ok || !openData.channel?.id) return slackError(openRes, openData);
 
-  const formattedText = markdownToSlackMrkdwn(text);
+  const formattedText = markdownToSlackMrkdwn(text, { preserveSlackNativeSpans: true });
   const body: Record<string, unknown> = { channel: openData.channel.id, text: formattedText, mrkdwn: true };
 
   // For long messages, use blocks so Slack doesn't split into separate threads.
@@ -889,7 +889,7 @@ const sendMessage = action(Type.Object({
     const denied = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
     if (denied) return denied;
 
-    const formattedText = markdownToSlackMrkdwn(p.text);
+    const formattedText = markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true });
     const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
     if (p.thread_ts) body.thread_ts = p.thread_ts;
 
@@ -984,7 +984,7 @@ const replyToOrigin = action(Type.Object({
     const { res, data } = await postActionMessage(o.token, {
       channel: o.channelId,
       thread_ts: o.threadTs,
-      text: markdownToSlackMrkdwn(args.text),
+      text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
     }, ctx);
     if (!res.ok) return slackError(res);
@@ -1027,6 +1027,7 @@ const replyFileToOrigin = action(Type.Object({
       channelId: o.channelId,
       threadTs: o.threadTs,
       initialComment: args.caption,
+      preserveSlackNativeSpans: true,
     });
     return { success: true, data: { channel: o.channelId, fileId } };
   },
@@ -1081,7 +1082,7 @@ const updateMessage = action(Type.Object({
     // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
     // previously block-formatted (long) message down to short text must not leave
     // the stale blocks rendering.
-    const formattedText = markdownToSlackMrkdwn(args.text);
+    const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
     const body: Record<string, unknown> = {
       channel: args.channel,
       ts: args.ts,

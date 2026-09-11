@@ -20,15 +20,30 @@
 const SLACK_CONTROL_SEQUENCE =
   /<(![a-z]+(?:\^[^>|\s]+)?|[@#][A-Z0-9]+)((?:\|[^>]*)?)>/g;
 
-/** Existing Slack control sequences and links. These forms are unambiguous
- * Slack mrkdwn, so converter callers can safely preserve them verbatim. */
+/** Existing Slack control sequences and links that callers can preserve.
+ * Broadcast tokens are deliberately excluded. */
 const SLACK_NATIVE_SPAN =
-  /<(?:@[UW][A-Z0-9]+(?:\|[^>]*)?|#[CG][A-Z0-9]+(?:\|[^>]*)?|![a-z]+(?:\^[^>|\s]+)?(?:\|[^>]*)?|https?:\/\/[^>\s]+(?:\|[^>]*)?)>/g;
+  /<(?:@[UW][A-Z0-9]+(?:\|[^>]*)?|#[CG][A-Z0-9]+(?:\|[^>]*)?|!subteam\^[^>|\s]+(?:\|[^>]*)?|https?:\/\/[^>\s]+(?:\|[^>]*)?)>/g;
+
+export interface MarkdownToSlackMrkdwnOptions {
+  /** Preserve raw Slack spans. Use only for deliberate action input. */
+  preserveSlackNativeSpans?: boolean;
+}
 
 /**
  * Make Slack mention and broadcast sequences inert for the `markdown_text`
  * path, leaving all other text — including every other angle bracket —
  * untouched.
+ *
+ * Slack's docs do not state whether `markdown_text` interprets mrkdwn control
+ * sequences. Until that is confirmed against a live workspace, assume it
+ * does: an agent that echoes `<!channel>` back from a document it read would
+ * otherwise notify the entire workspace. A mangled `&lt;!channel>` in rare
+ * output is a far cheaper failure than a mass ping.
+ *
+ * Sequences inside fenced code are neutralized too. Fence state is not
+ * knowable on a streamed delta, which arrives mid-block, so this deliberately
+ * does not try to track it.
  */
 export function neutralizeSlackMentions(text: string): string {
   return text.replace(SLACK_CONTROL_SEQUENCE, (_match, token: string, label: string) => {
@@ -51,10 +66,15 @@ export function escapeMrkdwn(text: string): string {
  *
  * Apply this function exactly once. A second application treats Slack's
  * `*bold*` output as CommonMark italic text and changes it to `_bold_`.
+ * Transport text uses the default strict policy. Actions can preserve
+ * deliberately supplied Slack spans with `preserveSlackNativeSpans`.
  */
-export function markdownToSlackMrkdwn(text: string): string {
+export function markdownToSlackMrkdwn(
+  text: string,
+  options: MarkdownToSlackMrkdwnOptions = {},
+): string {
   const codeBlocks: string[] = [];
-  let result = text.replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_, code: string) => {
+  let result = text.replace(/\x00/g, "").replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_, code: string) => {
     codeBlocks.push(code.trimEnd());
     return `\x00CB${codeBlocks.length - 1}\x00`;
   });
@@ -66,10 +86,12 @@ export function markdownToSlackMrkdwn(text: string): string {
   });
 
   const nativeSpans: string[] = [];
-  result = result.replace(SLACK_NATIVE_SPAN, (span: string) => {
-    nativeSpans.push(span);
-    return `\x00SN${nativeSpans.length - 1}\x00`;
-  });
+  if (options.preserveSlackNativeSpans) {
+    result = result.replace(SLACK_NATIVE_SPAN, (span: string) => {
+      nativeSpans.push(span);
+      return `\x00SN${nativeSpans.length - 1}\x00`;
+    });
+  }
 
   result = escapeMrkdwn(result);
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<$2|$1>");
@@ -89,12 +111,12 @@ export function markdownToSlackMrkdwn(text: string): string {
   result = result.replace(/(?<!\w)\*\*(?=\S)(.+?)(?<!\s)\*\*(?!\w)/g, (_, content: string) => holdBold(content));
   result = result.replace(/(?<![\w_])__(?=\S)(.+?)(?<!\s)__(?![\w_])/g, (_, content: string) => holdBold(content));
 
-  result = result.replace(/(?<!\*)\*(?![\s*])(.+?\S)\*(?!\*)/g, "_$1_");
-  result = result.replace(/^#{1,6}\s+\x00BD(\d+)\x00$/gm, "\x00BD$1\x00");
+  result = result.replace(/(?<!\*)\*(?![\s*])(\S(?:.*?\S)?)\*(?!\*)/g, "_$1_");
+  result = result.replace(/^#{1,6}\s+(?=.*\x00BD\d+\x00)(.+)$/gm, "$1");
   result = result.replace(/^#{1,6}\s+(.+)$/gm, "*$1*");
 
   const italicize = (content: string): string =>
-    content.replace(/(?<!\*)\*(?![\s*])(.+?\S)\*(?!\*)/g, "_$1_");
+    content.replace(/(?<!\*)\*(?![\s*])(\S(?:.*?\S)?)\*(?!\*)/g, "_$1_");
   result = result.replace(/\x00BD(\d+)\x00/g, (_, index: string) => {
     return `*${italicize(boldSpans[Number(index)])}*`;
   });

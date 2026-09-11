@@ -118,6 +118,12 @@ describe("conversation key codec", () => {
 });
 
 describe("send threads on the conversation key's thread root", () => {
+  it("escapes broadcasts in non-streaming transport replies", async () => {
+    const transport = makeTransport();
+    await transport.send(KEY, { markdown: "the doc said <!channel>" });
+    expect(lastCall("chat.postMessage").text).toBe("the doc said &lt;!channel>");
+  });
+
   it("threads on the key's threadTs when no inbound turn was recorded (event-triggered reply)", async () => {
     const transport = makeTransport();
     // No parseUpdate/primeTurn: the reply's key was rebuilt from a thread key
@@ -853,6 +859,22 @@ describe("assistant thread controls", () => {
 });
 
 describe("gate prompts", () => {
+  it("escapes broadcasts in gate titles and bodies", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, {
+      gateId: "gate-broadcast",
+      title: "Notify <!channel>",
+      body: "Ask <!here> to review.",
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    const body = lastCall("chat.postMessage");
+    expect(body.text).toBe("*Notify &lt;!channel>*\n\nAsk &lt;!here> to review.");
+    expect(body.blocks).toContainEqual({
+      type: "section",
+      text: { type: "mrkdwn", text: "Ask &lt;!here> to review." },
+    });
+  });
+
   it("posts the gate under the turn that raised it, with the gate id in the button", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000700");

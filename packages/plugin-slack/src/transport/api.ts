@@ -226,13 +226,18 @@ export class SlackApi {
     channelId: string;
     threadTs?: string;
     initialComment?: string;
+    preserveSlackNativeSpans?: boolean;
   }): Promise<void> {
     const body: Record<string, unknown> = {
       files: [{ id: opts.fileId }],
       channel_id: opts.channelId,
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
-    if (opts.initialComment !== undefined) body.initial_comment = markdownToSlackMrkdwn(opts.initialComment);
+    if (opts.initialComment !== undefined) {
+      body.initial_comment = markdownToSlackMrkdwn(opts.initialComment, {
+        preserveSlackNativeSpans: opts.preserveSlackNativeSpans,
+      });
+    }
     await this.call("files.completeUploadExternal", body);
   }
 
