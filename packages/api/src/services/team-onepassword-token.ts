@@ -5,6 +5,7 @@ import { deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { credentials, orgMembers, teamMembers, teams } from "../schema/index.js";
 import { lockTeamForOwnership } from "./teams.js";
 import { ONEPASSWORD_SERVICE } from "./onepassword.js";
+import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 
 type Mutation = { kind: "token"; token: string | null };
 
@@ -47,6 +48,7 @@ export async function mutateTeamOnePassword(
     } else {
       await tx.delete(credentials).where(where);
     }
+    await invalidateWorkflowSources(tx, { teamId: team.id });
     return true;
   });
 }

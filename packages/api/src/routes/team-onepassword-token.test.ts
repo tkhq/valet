@@ -1,9 +1,9 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { mutateTeamOnePassword } from "../services/team-onepassword-token.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { orgs, orgMembers, teamMembers, users } from "../schema/index.js";
+import { contentSources, orgs, orgMembers, teamMembers, users } from "../schema/index.js";
 import { addMember, createTeam, deleteTeam } from "../services/teams.js";
 
 let api: TestApi;
@@ -101,6 +101,43 @@ describe("team token management", () => {
 
 
 describe("team token authority serialization", () => {
+  it.each(["connect", "rotate", "disconnect"])("commits %s with durable readiness invalidation and rolls both back on failure", async (operation) => {
+    const id = await setup();
+    await api.providers.contentSync.stop();
+    const db = api.providers.db;
+    const owner = { type: "team", id } as const;
+    if (operation !== "connect") {
+      await api.providers.engineCredentials.save(owner, "onepassword", { type: "service_account", apiKey: "original" });
+    }
+    const now = Date.now();
+    await db.insert(contentSources).values({
+      id: "token-readiness", orgId: "local-org", ownerType: "team", ownerId: id,
+      repoFullName: "test/readiness", kinds: ["workflows"], status: "ok",
+      lastSha: "unchanged", discoveryScan: "scan", lastManifestHash: "manifest",
+      nextAttemptAt: now + 60_000, createdAt: now, updatedAt: now,
+    });
+    const mutate = () => mutateTeamOnePassword(db, api.providers.encryptionKey,
+      { orgId: "local-org", userId: "local-user", teamId: id },
+      { kind: "token", token: operation === "disconnect" ? null : "replacement" });
+    await db.execute(sql`ALTER TABLE skill_sources ADD CONSTRAINT reject_token_refresh CHECK (sync_revision = 0)`);
+    try {
+      await expect(mutate()).rejects.toThrow();
+      const credential = await api.providers.engineCredentials.get(owner, "onepassword");
+      if (operation === "connect") expect(credential).toBeNull();
+      else expect(credential).toMatchObject({ apiKey: "original" });
+    } finally {
+      await db.execute(sql`ALTER TABLE skill_sources DROP CONSTRAINT reject_token_refresh`);
+    }
+    expect(await mutate()).toBe(true);
+    // Inspect the committed state before any route-level sweep nudge.
+    const [source] = await db.select().from(contentSources).where(eq(contentSources.id, "token-readiness"));
+    expect(source).toMatchObject({ syncRevision: 1, discoveryScan: null, lastManifestHash: null });
+    expect(source.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+    const credential = await api.providers.engineCredentials.get(owner, "onepassword");
+    if (operation === "disconnect") expect(credential).toBeNull();
+    else expect(credential).toMatchObject({ apiKey: "replacement" });
+  });
+
   it("rechecks team and org authority inside the write transaction after revocation", async () => {
     const id = await setup();
     const db = api.providers.db;
