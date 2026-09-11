@@ -205,3 +205,53 @@ Credential helper scripts, the `gh` shim, declared command wrappers, and managed
 The applied marker stays at `/etc/valet/applied.json` in the container filesystem. Resume reads the marker again; it does not reuse cached completed steps from the previous container. Missing or changed steps without a callback use their normal `apply` function. Before callbacks run, the engine removes their completed hashes from the marker. Successful steps restore their hashes. This prevents a failed callback from appearing complete after API restart.
 
 Clone preparation preserves an existing `.git` directory or file. It does not fetch, check out a ref, or reset an existing repository. This also protects local commits and untracked files when API restart or later reconciliation encounters a missing marker. Binding refs initialize new clones; changing a ref does not replace an existing checkout. Users can change an existing checkout through Git commands. Prebuilt initialization still runs for missing repositories.
+
+### Registry capacity and cache health (2026-09-11)
+
+`GET /api/org/sources/health` requires an org administrator. The response contains:
+
+- `checkedAt`: Unix time in milliseconds.
+- `cache.bytesUsed`, `cache.cacheBudgetGb`, and `cache.budgetBytes`: logical pushed-bake accounting for the administrator's org.
+- `cache.unknownSizeCount`: pushed bakes without a measured size. Their bytes are absent from the sum.
+- `cache.overBudget` and `cache.over_budget_all_protected`: current budget pressure. The second flag requires every remaining bake to be protected.
+- `registry.status`: `healthy`, `full`, `unknown`, or `unconfigured`.
+- `registry.capacityBytes`, `registry.usedBytes`, `registry.availableBytes`, and `registry.reserveBytes`: deployment-wide physical capacity and admission reserve.
+- `canAcceptBakes`: false for full or unknown configured capacity; null for an unconfigured probe; true for healthy capacity.
+- `recentPushFailures.count` and `recentPushFailures.windowMs`: org-scoped push failures in the last hour, read from persisted bake rows.
+
+Logical image sizes can count shared layers more than once. Historical rows can also reference deleted images. These bytes are not physical disk usage.
+Unknown capacity fields are null. An unconfigured probe does not prove that the registry can accept a push.
+Push-failure classification matches push-error text in persisted error and log-tail fields. Other build failures do not increase this count.
+Logs that omit the push error cannot be classified. Counts survive API restarts because the API reads bake rows.
+
+The bundled registry has a read-only filesystem probe on an internal ClusterIP service. It measures capacity on each request.
+`VALET_REGISTRY_HEALTH_URL` configures this probe. External registries can provide the same JSON protocol.
+The API limits probe requests to three seconds and rejects redirects. Malformed or unavailable configured probes produce `unknown` status.
+New bakes and sandbox-backed children fail before creation when configured capacity is full or unknown.
+The bake endpoint returns HTTP 503 with `registry_full` or `registry_capacity_unknown`. The child tool receives the corrective error text.
+Local and virtual children do not need this admission check. Children that reuse existing images still receive the sandbox admission check.
+Deployments without a probe retain admission behavior and report unconfigured capacity. Kubernetes deployments log this missing signal as storage pressure.
+
+The reserve is the greater of `VALET_REGISTRY_MIN_FREE_GB` (default 5 GB) and `VALET_REGISTRY_MIN_FREE_PERCENT` (default 10%).
+At or below this reserve, the API stops new admissions. The percentage must be greater than zero and less than 100.
+The absolute reserve can be zero. Small registry volumes can use a lower absolute reserve while retaining percentage protection.
+This check does not reserve bytes for concurrent uploads. It does not stop builds already admitted or external registry writers.
+Operators must size the reserve for concurrent builds and monitor free bytes. This mechanism is not a filesystem quota.
+
+Both per-source retention and the cache ceiling protect current bakes and bakes used by active or hibernated sessions.
+A failed image deletion leaves its row counted. It does not imply that all remaining bakes are protected.
+Protected bakes are never automatically deleted to resolve pressure.
+If registry space is low, free space or remove unused registry images. Run registry garbage collection after image removal.
+Manifest deletion alone does not free registry blob storage.
+
+The API samples health at startup and every minute, even when no bake finishes. Each unhealthy sample emits `bake_storage_pressure` with corrective actions.
+The OpenTelemetry meter `@valet/api` exports these gauges:
+
+- `valet.bake.cache.bytes`, `valet.bake.cache.budget.bytes`, and `valet.bake.cache.over_budget_all_protected`, labeled by org.
+- `valet.bake.push_failures.recent`, labeled by org, with a one-hour window.
+- `valet.registry.capacity.bytes`, `valet.registry.available.bytes`, `valet.registry.reserve.bytes`, `valet.registry.full`, and `valet.registry.capacity_unknown`.
+
+Configure an operator alert when `valet.bake.cache.over_budget_all_protected` or `valet.registry.full` equals 1 for one minute.
+Alert on `valet.registry.capacity_unknown` for configured production registries. Alert when `valet.bake.push_failures.recent` is greater than zero.
+OTel export requires the deployment's telemetry provider. Structured error logs remain available without it.
+Physical byte gauges retain their last sample during unknown capacity. Use the capacity-unknown gauge to exclude stale samples.

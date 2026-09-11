@@ -64,6 +64,8 @@ export interface ChildrenDeps {
    * never uses it.
    */
   prebuildService: SourceService;
+  /** Whether children use an isolated sandbox provider. */
+  sandboxBacked?: boolean;
   /**
    * Directory under which per-child workspaces are created
    * (`{workspaceRoot}/{childSessionId}`, mkdir'd at spawn). Defaults to
@@ -260,6 +262,10 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
 
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
+    if (deps.sandboxBacked ?? deps.prebuildService.builderBackend === "kubernetes") {
+      await deps.prebuildService.assertRegistryCapacity();
+    }
+
 
     // A pre-assigned id (the security dispatch's cell-claim seam) wins so
     // the caller's durable claim row names the session this spawn builds.

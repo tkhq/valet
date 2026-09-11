@@ -16,6 +16,8 @@ spec:
       app.kubernetes.io/component: registry
   template:
     metadata:
+      annotations:
+        checksum/registry-health: {{ include (print $.Template.BasePath "/registry-health-configmap.yaml") . | sha256sum }}
       labels:
         {{- include "valet.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: registry
@@ -50,6 +52,40 @@ spec:
               port: registry
             initialDelaySeconds: 15
             periodSeconds: 10
+        - name: registry-health
+          image: "{{ .Values.registry.health.image.repository }}:{{ .Values.registry.health.image.tag }}"
+          command: ["python3", "-B", "/opt/registry-health/registry-health.py"]
+          ports:
+            - containerPort: 5001
+              name: registry-health
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+              readOnly: true
+            - name: registry-health
+              mountPath: /opt/registry-health
+              readOnly: true
+      volumes:
+        - name: registry-health
+          configMap:
+            name: {{ include "valet.fullname" . }}-registry-health
   volumeClaimTemplates:
     - metadata:
         name: data

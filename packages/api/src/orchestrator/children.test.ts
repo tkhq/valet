@@ -6,7 +6,8 @@
  * so the admitted `child.settled` signal stays observable in the queue.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { RegistryCapacityError } from "../bakes/registry-health.js";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, and, sql } from "drizzle-orm";
@@ -2597,5 +2598,28 @@ describe("child sandbox retention", () => {
     const tokens = await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "child-cold"));
     expect(tokens[0]?.revokedAt).not.toBeNull();
     expect((await watchRow(api, "child-cold"))?.sandboxReclaimedAt).not.toBeNull();
+  });
+});
+
+
+describe("registry capacity child admission", () => {
+  it("rejects before child session, watch, repo, or working directory creation", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { sandboxBacked: true });
+    const parent = await api.providers.engineHost.sessionFor("parent-capacity", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    const guard = vi.spyOn(deps.prebuildService, "assertRegistryCapacity").mockRejectedValue(new RegistryCapacityError("full"));
+    const create = vi.spyOn(deps.engineHost, "childSessionFor");
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    await expect(spawner({ prompt: "work" }, {
+      parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user", owner: { type: "user", id: "local-user" },
+    })).rejects.toThrow("registry full");
+    expect(guard).toHaveBeenCalledOnce();
+    expect(create).not.toHaveBeenCalled();
+    expect(await deps.db.select().from(childWatches)).toHaveLength(0);
+    expect(await deps.db.select().from(sessionRepos)).toHaveLength(0);
+    expect(readdirSync(deps.workspaceRoot!)).toHaveLength(0);
   });
 });

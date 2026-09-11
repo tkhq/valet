@@ -490,6 +490,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   });
 
   const childrenDeps = {
+    sandboxBacked: sandboxProvider.capabilities().isolated === true,
     db,
     engineHost,
     engineStore,
