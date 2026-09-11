@@ -7,7 +7,7 @@ import type {
   Sandbox,
   WorkspaceGrowth,
 } from "../types.js";
-import { SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
+import { SandboxEvictedError, SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
 import { attrTruncate, withSpan } from "../tracing.js";
 import { recordSandboxExec, recordSandboxWorkspaceGrow } from "../metrics.js";
 import type { SandboxAttachment } from "./attachment.js";
@@ -376,8 +376,9 @@ export class PolicySandbox implements Sandbox {
     try {
       result = await op(sandbox);
     } catch (err) {
-      if (isTransportError(err)) {
+      if (err instanceof SandboxEvictedError || isTransportError(err)) {
         this.attachment.reportFailure(epoch, err);
+        if (err instanceof SandboxEvictedError) throw err;
         throw new SandboxUnavailableError(err);
       }
       throw err;

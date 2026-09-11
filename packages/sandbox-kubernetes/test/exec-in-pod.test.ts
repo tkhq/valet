@@ -298,3 +298,24 @@ describe("execInPod", () => {
     expect(result.stdout).toBe("early");
   }, 2000);
 });
+
+describe("exec failure diagnostics", () => {
+  it("preserves a Kubernetes failure without an exit code", async () => {
+    const api = new FakePodExecApi((_o, _e, cb) => cb?.({ status: "Failure", reason: "BadRequest", message: "cannot exec into a completed pod" }));
+    await expect(execInPod(deps(api), "pod-1", "true")).rejects.toThrow("BadRequest: cannot exec into a completed pod");
+  });
+});
+
+it("rejects a failed polling exec even with a valid marker", async () => {
+    const { pollJobInPod } = await import("../src/jobs.js");
+    const api = new FakePodExecApi((_o, stderr, cb) => {
+      stderr?.write("0");
+      cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: "1" }] } });
+    });
+    await expect(pollJobInPod(deps(api), "pod-1", "job-1", 0)).rejects.toThrow("pollJob failed (exit 1)");
+});
+
+it.each(["", " ", "0", "-1", "1.5", "256"])("rejects invalid process exit status %j", async (code) => {
+  const api = new FakePodExecApi((_o, _e, cb) => cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: code }] } }));
+  await expect(execInPod(deps(api), "pod", "true")).rejects.toThrow("Kubernetes exec failed");
+});

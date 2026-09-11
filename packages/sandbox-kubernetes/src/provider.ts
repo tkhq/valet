@@ -63,10 +63,11 @@
  * "signal-shaped exit code → confirm via a liveness probe" disambiguation
  * applies.
  */
+import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -432,6 +433,7 @@ export interface KubernetesSandboxDeps {
   podsApi: SandboxPodsApi;
   execApi: PodExecApi;
   livenessApi: PodLivenessApi;
+  evictionApi?: SandboxEvictionApi;
   /** Optional: enables `growWorkspace()` (on-demand workspace PVC growth).
    * When absent, growWorkspace reports `grown: false`. Production wiring
    * (`packages/api/src/providers/sandbox-backend.ts`) always supplies it. */
@@ -456,6 +458,8 @@ export class KubernetesSandbox implements Sandbox {
   resourceOverrides?: Sandbox["resourceOverrides"];
   private readonly deps: KubernetesSandboxDeps;
   private nextJobId = 1;
+  private lastPodContext?: { podName: string; uid: string | null };
+  private readonly jobPods = new Map<string, { podName: string; uid: string | null }>();
 
   constructor(deps: KubernetesSandboxDeps, id: string) {
     this.deps = deps;
@@ -485,10 +489,20 @@ export class KubernetesSandbox implements Sandbox {
   private async resolvePodContext(): Promise<{ podName: string; uid: string | null }> {
     const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.deps.cfg, this.id);
     if (podName === null) {
+      await this.checkEviction(this.lastPodContext?.podName ?? this.id, this.lastPodContext?.uid ?? null);
       throw podUnavailableError(this.id, "no backing pod");
     }
     const uid = await this.deps.livenessApi.getPodUid(this.deps.cfg.namespace, podName);
+    await this.checkEviction(podName, uid ?? this.lastPodContext?.uid ?? null);
+    this.lastPodContext = { podName, uid };
     return { podName, uid };
+  }
+
+  private async checkEviction(podName: string, uid: string | null): Promise<void> {
+    if (!this.deps.evictionApi) return;
+    // Diagnostic API failures must not replace the original command error.
+    const detail = await findPodEviction(this.deps.evictionApi, this.deps.cfg.namespace, podName, uid).catch(() => null);
+    if (detail) throw new SandboxEvictedError("Evicted", detail);
   }
 
   /** True when the pod identified by `podName` is no longer the SAME pod
@@ -517,6 +531,8 @@ export class KubernetesSandbox implements Sandbox {
    */
   private async translateDeath(podName: string, dispatchUid: string | null, err: unknown): Promise<never> {
     const error = err instanceof Error ? err : new Error(String(err));
+    if (error instanceof SandboxEvictedError) throw error;
+    await this.checkEviction(podName, dispatchUid);
     if (CONTAINER_DEATH_PATTERN.test(error.message)) throw error;
 
     // PodFileOpError carries its exit code as a typed field; jobs.ts's
@@ -558,7 +574,9 @@ export class KubernetesSandbox implements Sandbox {
    * outcome. No-op (returns) when the exit code isn't signal-shaped or the
    * pod is unchanged. */
   private async checkExitForDeath(podName: string, dispatchUid: string | null, exitCode: number | undefined): Promise<void> {
-    if (exitCode === undefined || !looksSignalKilled(exitCode)) return;
+    if (exitCode === undefined || exitCode === 0) return;
+    await this.checkEviction(podName, dispatchUid);
+    if (!looksSignalKilled(exitCode)) return;
     const died = await this.podDiedSince(podName, dispatchUid);
     if (!died) return;
     throw podUnavailableError(this.id, `exec exited ${exitCode} — backing pod was recreated or removed`);
@@ -628,24 +646,50 @@ export class KubernetesSandbox implements Sandbox {
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     const execId = this.nextExecId();
-    return this.withPod(async (pod) => {
-      const handle = await execJobInPod(this.execDeps(), pod, execId, command, opts);
+    return this.withPodContext(async (ctx) => {
+      const handle = await execJobInPod(this.execDeps(), ctx.podName, execId, command, opts);
+      this.jobPods.set(execId, ctx);
       return handle;
     });
   }
 
+  /** Jobs belong to the pod that started them. Never poll or cancel a replacement's process. */
+  private async withJobPod<T>(
+    execId: string,
+    op: (ctx: { podName: string; uid: string | null }) => Promise<T>,
+  ): Promise<T> {
+    const original = this.jobPods.get(execId);
+    try {
+      // Read the original identity before resolvePodContext can observe a healthy replacement.
+      if (original) await this.checkEviction(original.podName, original.uid);
+      return await this.withPodContext(async (current) => {
+        if (original && (original.podName !== current.podName || (original.uid !== null && original.uid !== current.uid))) {
+          await this.checkEviction(original.podName, original.uid);
+          throw podUnavailableError(this.id, "the job's backing pod was recreated or removed");
+        }
+        return op(current);
+      });
+    } catch (error) {
+      // PolicySandbox settles a job on a rejected poll. Keep identity only for active jobs.
+      this.jobPods.delete(execId);
+      throw error;
+    }
+  }
+
   async pollJob(execId: string, offset: number): Promise<JobPoll> {
     assertSafeExecId(execId);
-    return this.withPodContext(async ({ podName, uid }) => {
+    return this.withJobPod(execId, async ({ podName, uid }) => {
       const poll = await pollJobInPod(this.execDeps(), podName, execId, offset);
       if (poll.status === "done") await this.checkExitForDeath(podName, uid, poll.exitCode);
+      if (poll.status !== "running") this.jobPods.delete(execId);
       return poll;
     });
   }
 
   async cancelJob(execId: string): Promise<void> {
     assertSafeExecId(execId);
-    return this.withPod((pod) => cancelJobInPod(this.execDeps(), pod, execId));
+    await this.withJobPod(execId, ({ podName }) => cancelJobInPod(this.execDeps(), podName, execId));
+    this.jobPods.delete(execId);
   }
 
   /**
@@ -697,6 +741,7 @@ export interface KubernetesSandboxProviderDeps {
   podsApi: SandboxPodsApi;
   execApi: PodExecApi;
   livenessApi: PodLivenessApi;
+  evictionApi?: SandboxEvictionApi;
   /** Optional: enables `status()`/`waitReady`'s pod-failure classification
    * (see `lifecycle.ts`'s `sandboxStatus`/`classifyPodFailure`). Omitting it
    * falls back to the CR-Ready-only mapping (pre-fix behavior) — kept
@@ -1181,6 +1226,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         podsApi: this.deps.podsApi,
         execApi: this.deps.execApi,
         livenessApi: this.deps.livenessApi,
+        evictionApi: this.deps.evictionApi,
         pvcApi: this.deps.pvcApi,
         cfg: this.cfg,
         docker,

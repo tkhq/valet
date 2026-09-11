@@ -205,12 +205,12 @@ describe("storage quantity env validation (TKAI-403)", () => {
         {
           VALET_SANDBOX_BACKEND: "kubernetes",
           VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
-          VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "10Gi",
+          VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "40Gi",
         },
         { kubeConfig: fakeKubeConfig() },
       ),
     ).toThrow(
-      /VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST \(effective "10Gi"\) exceeds VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT \(effective "8Gi"\).*Lower the request or raise the limit/,
+      /VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST \(effective "40Gi"\) exceeds VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT \(effective "30Gi"\).*Lower the request or raise the limit/,
     );
   });
 
@@ -332,9 +332,9 @@ describe("resolveHibernatedRetentionMs", () => {
 });
 
 describe("resolveSandboxEphemeralStorageRequest / Limit (TKAI-349)", () => {
-  it("defaults to 2Gi request / 8Gi limit when unset", () => {
+  it("defaults to 2Gi request / 30Gi limit when unset", () => {
     expect(resolveSandboxEphemeralStorageRequest({})).toBe("2Gi");
-    expect(resolveSandboxEphemeralStorageLimit({})).toBe("8Gi");
+    expect(resolveSandboxEphemeralStorageLimit({})).toBe("30Gi");
   });
 
   it("passes explicit quantity strings through verbatim", () => {
@@ -360,7 +360,7 @@ describe("resolveSandboxEphemeralStorageRequest / Limit (TKAI-349)", () => {
       resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "" }),
     ).toBe("2Gi");
     expect(resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "" })).toBe(
-      "8Gi",
+      "30Gi",
     );
   });
 });
@@ -412,7 +412,7 @@ describe("sandbox deployment resource defaults", () => {
       cpu: 1.25,
       memory: "3Gi",
       ephemeralStorage: "2Gi",
-      ephemeralStorageLimit: "8Gi",
+      ephemeralStorageLimit: "30Gi",
     });
   });
 
@@ -422,7 +422,7 @@ describe("sandbox deployment resource defaults", () => {
         VALET_SANDBOX_MEMORY: "2Gi",
         VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "0",
       }),
-    ).toEqual({ memory: "2Gi", ephemeralStorageLimit: "8Gi" });
+    ).toEqual({ memory: "2Gi", ephemeralStorageLimit: "30Gi" });
   });
 });
 

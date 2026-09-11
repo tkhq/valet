@@ -162,8 +162,10 @@ sandbox:
   # one runaway sandbox instead of the node going NotReady (TKAI-349). The
   # limit also bounds the DinD docker-state emptyDir. Set a value to "0" to
   # disable it. Keep the limit at or above the request.
+  # A 15x burst allowance supports source builds and retained Docker layers.
+  # Node capacity alerts remain necessary when multiple sandboxes burst.
   ephemeralStorageRequest: "2Gi"
-  ephemeralStorageLimit: "8Gi"
+  ephemeralStorageLimit: "30Gi"
 
   # Size of the PERSISTENT /workspace claim each sandbox provisions. This
   # is the volume that survives pod recreation and hibernation, and it

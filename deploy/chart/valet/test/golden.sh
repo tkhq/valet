@@ -59,6 +59,20 @@ helm template valet "$CHART_DIR" --kube-version 1.30.0 \
   --set sandbox.resources.cpu=0 \
   > "$TMP_DIR/sandbox-zero-cpu.yaml"
 
+# Storage reserves scheduling capacity independently from the eviction ceiling.
+grep -q 'VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "2Gi"' "$TMP_DIR/bundled.yaml" \
+  || fail "default sandbox storage request must stay 2Gi"
+grep -q 'VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "30Gi"' "$TMP_DIR/bundled.yaml" \
+  || fail "default sandbox storage limit must be 30Gi"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set-string sandbox.ephemeralStorageRequest=4Gi \
+  --set-string sandbox.ephemeralStorageLimit=50Gi > "$TMP_DIR/storage-overrides.yaml"
+grep -q 'VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "4Gi"' "$TMP_DIR/storage-overrides.yaml" \
+  || fail "sandbox storage request override was lost"
+grep -q 'VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "50Gi"' "$TMP_DIR/storage-overrides.yaml" \
+  || fail "sandbox storage limit override was lost"
+pass "independent sandbox storage request and limit"
+
 # --- RBAC: namespaced only, nothing cluster-scoped ---------------------
 grep -q '^kind: Role$' "$TMP_DIR/bundled.yaml" || fail "no namespaced Role rendered"
 grep -q '^kind: RoleBinding$' "$TMP_DIR/bundled.yaml" || fail "no RoleBinding rendered"

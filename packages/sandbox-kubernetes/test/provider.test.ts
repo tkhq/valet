@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { SandboxAttachment, SandboxStartupError } from "@valet/engine";
-import { assertSafeExecId, looksSignalKilled, KubernetesSandboxProvider } from "../src/provider.js";
+import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
@@ -1806,4 +1806,105 @@ it("waits for the home layout when an old pod survives a rapid suspend/resume", 
   await provider.resume("resume-home");
   expect(deletePod).toHaveBeenCalledTimes(1);
   expect(upgraded).toBe(true);
+});
+
+describe("confirmed eviction reporting", () => {
+  function setup(evictedInitially: boolean, disappear = false) {
+    let evicted = evictedInitially;
+    const execApi: PodExecApi = { exec: vi.fn(async (_ns, _pod, _container, _cmd, _stdout, _stderr, _stdin, _tty, cb) => {
+      evicted = true;
+      cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: "1" }] } });
+      return { close() {} };
+    }) };
+    const sandbox = new KubernetesSandbox({
+      objectsApi: new FakeObjectsApi(),
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      execApi, livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
+      evictionApi: {
+        getPod: async () => disappear && evicted ? null : { uid: "uid", reason: evicted ? "Evicted" : undefined, message: "docker-state exceeded 8Gi" },
+        listEvents: async () => [{ podName: "pod", uid: "uid", reason: "Evicted", message: "docker-state exceeded 8Gi", timestamp: Date.now() }],
+      },
+    }, "sandbox");
+    return { sandbox, execApi };
+  }
+  it.each([false, true])("rejects eviction before dispatch when deleted=%s", async (deleted) => {
+    const { sandbox, execApi } = setup(true, deleted);
+    await expect(sandbox.execJob("touch /side-effect")).rejects.toThrow("Sandbox evicted (Evicted): docker-state exceeded 8Gi");
+    expect(execApi.exec).not.toHaveBeenCalled();
+  });
+  it.each([false, true])("reports kickoff eviction when deleted=%s", async (deleted) => {
+    const { sandbox, execApi } = setup(false, deleted);
+    await expect(sandbox.execJob("touch /side-effect")).rejects.toThrow("Sandbox evicted (Evicted): docker-state exceeded 8Gi");
+    expect(execApi.exec).toHaveBeenCalledTimes(1);
+  });
+  it("reports eviction during polling instead of success", async () => {
+    const { sandbox } = setup(false);
+    await expect(sandbox.pollJob("job-1", 0)).rejects.toThrow("Sandbox evicted");
+  });
+  it("keeps an ordinary exit 1 as a command failure", async () => {
+    const { sandbox } = setup(false);
+    // A fresh instance without eviction evidence models an ordinary command failure.
+    const ordinary = new KubernetesSandbox({
+      objectsApi: new FakeObjectsApi(),
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      execApi: { exec: async (_ns, _pod, _c, _cmd, _o, _e, _i, _t, cb) => {
+        cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: "1" }] } });
+        return { close() {} };
+      } },
+      livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
+      evictionApi: { getPod: async () => ({ uid: "uid" }), listEvents: async () => [] },
+    }, sandbox.id);
+    await expect(ordinary.exec("exit 1")).resolves.toMatchObject({ exitCode: 1 });
+    await expect(ordinary.execJob("exit 1")).rejects.toThrow("execJob kickoff failed (exit 1)");
+  });
+});
+
+describe("job pod identity", () => {
+  function setup(hasEvictionEvent = true) {
+    let uid = "original";
+    let marker = "running";
+    const exec = vi.fn<PodExecApi["exec"]>(async (_ns, _pod, _container, _command, stdout, stderr, _stdin, _tty, cb) => {
+      if (exec.mock.calls.length === 1) stdout?.write("started\n");
+      else stderr?.write(marker);
+      cb?.({ status: "Success" });
+      return { close() {} };
+    });
+    const sandbox = new KubernetesSandbox({
+      objectsApi: new FakeObjectsApi(),
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      execApi: { exec }, livenessApi: { getPodUid: async () => uid }, cfg: providerCfg,
+      evictionApi: {
+        getPod: async () => ({ uid }),
+        listEvents: async () => hasEvictionEvent ? [{ podName: "pod", uid: "original", reason: "Evicted", message: "docker-state exceeded 8Gi", timestamp: Date.now() }] : [],
+      },
+    }, "sandbox");
+    return { sandbox, exec, replace: () => { uid = "replacement"; marker = "unknown"; }, finish: () => { marker = "0"; } };
+  }
+
+  it.each(["poll", "cancel"])("checks the kickoff UID before %s on a replacement pod", async (operation) => {
+    const { sandbox, exec, replace } = setup();
+    const { execId } = await sandbox.execJob("side-effect");
+    replace();
+    const result = operation === "poll" ? sandbox.pollJob(execId, 0) : sandbox.cancelJob(execId);
+    await expect(result).rejects.toThrow("Sandbox evicted (Evicted): docker-state exceeded 8Gi");
+    expect(exec).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains identity across running polls and rejects replacement without claiming eviction", async () => {
+    const { sandbox, exec, replace } = setup(false);
+    const { execId } = await sandbox.execJob("side-effect");
+    await expect(sandbox.pollJob(execId, 0)).resolves.toMatchObject({ status: "running" });
+    replace();
+    await expect(sandbox.pollJob(execId, 0)).rejects.toThrow("the job's backing pod was recreated or removed");
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the kickoff identity after a terminal poll", async () => {
+    const { sandbox, replace, finish } = setup();
+    const { execId } = await sandbox.execJob("side-effect");
+    finish();
+    await expect(sandbox.pollJob(execId, 0)).resolves.toMatchObject({ status: "done", exitCode: 0 });
+    replace();
+    await expect(sandbox.pollJob(execId, 0)).resolves.toMatchObject({ status: "failed" });
+  });
 });

@@ -18,7 +18,7 @@ agents-dev, 2026-09-03):
   as a sustained-full PVC.
 
 Nothing auto-grew the workspace before this change. The #530
-ephemeral-storage limit (8Gi) is a node-local eviction cap; it never grows
+ephemeral-storage limit (30Gi) is a node-local eviction cap; it never grows
 and it is not where the clone lands. A flat global size bump was declined:
 a larger default is billed on every PVC in the fleet (~360 on agents-dev)
 for space almost none of them use.
@@ -134,7 +134,7 @@ value from making every later Sandbox CR fail admission.
 
 An unset or blank value uses its code default. The workspace default is 1Gi,
 the workspace cap is 20Gi, the ephemeral-storage request is 2Gi, and the
-ephemeral-storage limit is 8Gi. Any zero quantity, such as `"0"` or `"0Gi"`,
+ephemeral-storage limit is 30Gi. Any zero quantity, such as `"0"` or `"0Gi"`,
 disables that environment variable. A disabled workspace default or cap uses
 the manifest builder's effective default of 1Gi or 20Gi. At boot, the api
 compares these effective workspace values. If the effective default exceeds

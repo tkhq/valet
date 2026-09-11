@@ -32,6 +32,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # Read eviction evidence after a sandbox pod has been deleted.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
   # On-demand workspace growth (Sandbox.growWorkspace): after an ENOSPC in
   # workspace prep the api reads the workspace PVC and merge-patches its
   # storage request one increment up (gp3 expands online). get/patch ONLY —

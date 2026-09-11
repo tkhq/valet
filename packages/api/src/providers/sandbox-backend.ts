@@ -31,6 +31,7 @@ import {
   podExecApiAdapter,
   podLivenessApiAdapter,
   podStatusApiAdapter,
+  sandboxEvictionApiAdapter,
   podsApiAdapter,
   sandboxPvcApiAdapter,
   sandboxSecretsApiAdapter,
@@ -301,13 +302,13 @@ export function resolveSandboxEphemeralStorageRequest(env: NodeJS.ProcessEnv): s
 
 /**
  * Per-sandbox ephemeral-storage LIMIT
- * (`VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT`, default "8Gi"). Past it the
+ * (`VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT`, default "30Gi"). Past it the
  * kubelet evicts the one runaway sandbox instead of the node failing. Also
  * bounds the DinD docker-state emptyDir (the manifest reuses it as the
  * volume's sizeLimit). `"0"` disables it. Keep it at or above the request.
  */
 export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): string | undefined {
-  return quantityEnv("VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT", env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
+  return quantityEnv("VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT", env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "30Gi");
 }
 
 /** Optional deployment-wide CPU default. Repository resource declarations
@@ -439,6 +440,7 @@ export function buildSandboxProvider(
       const execApi = podExecApiAdapter(new k8s.Exec(kc));
       const livenessApi = podLivenessApiAdapter(coreApi);
       const podStatusApi = podStatusApiAdapter(coreApi);
+      const evictionApi = sandboxEvictionApiAdapter(coreApi);
       const podDeleteApi = podDeleteApiAdapter(coreApi);
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
       const defaultResources = resolveSandboxResources(env);
@@ -502,7 +504,7 @@ export function buildSandboxProvider(
       const secretsApi = sandboxSecretsApiAdapter(coreApi);
       const pvcApi = sandboxPvcApiAdapter(coreApi);
       return new KubernetesSandboxProvider(
-        { objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi, pvcApi },
+        { objectsApi, podsApi, execApi, livenessApi, podStatusApi, evictionApi, podDeleteApi, secretsApi, pvcApi },
         cfg,
       );
     }
