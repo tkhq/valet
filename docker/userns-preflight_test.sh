@@ -5,37 +5,58 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 source "$ROOT/userns-preflight.sh"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
-
-# The RootlessKit map is inner 0 -> outer 1500 and inner 1..65535 ->
-# outer 65536..131070. No low outer identity other than dockerd is used.
-outer_id() {
-  [ "$1" -eq 0 ] && { echo 1500; return; }
-  echo $((65536 + $1 - 1))
+write_map() { printf '%s\n' "$2" > "$TMP/$1"; }
+rejects() {
+  if validate_outer_maps "$TMP/$1" "$TMP/$2" 2> "$TMP/$1-$2.err"; then
+    fail "$1/$2 was accepted"
+  fi
 }
-for id in 0 999 1000 63536 65532 65534 65535; do
-  case "$id" in
-    0) expected=1500 ;; 999) expected=66534 ;; 1000) expected=66535 ;;
-    63536) expected=129071 ;; 65532) expected=131067 ;;
-    65534) expected=131069 ;; 65535) expected=131070 ;;
-  esac
-  actual=$(outer_id "$id")
-  [ "$actual" -eq "$expected" ] || fail "nested ID $id maps to $actual, want $expected"
-  [ "$id" -eq 0 ] || [ "$actual" -ge 65536 ] \
-    || fail "nested ID $id maps to forbidden outer ID $actual"
-done
 
-printf '0 0 65536\n' > "$TMP/old"
-printf '0 0 131072\n' > "$TMP/new"
-if validate_outer_maps "$TMP/old" "$TMP/old" 2> "$TMP/old.err"; then
-  fail '65536-ID outer map was accepted'
-fi
-grep -Fq 'Kubernetes 1.35' "$TMP/old.err" \
-  && grep -Fq 'userNamespaces.idsPerPod: 131072' "$TMP/old.err" \
+# Require one zero-based outer container-ID segment with all 131072 IDs.
+# This includes RootlessKit's required parent IDs 65536 through 131070.
+write_map old '0 0 65536'
+write_map boundary '0 100000 131071'
+write_map valid '0 100000 131072'
+write_map wider '0 42 262144'
+write_map split $'0 100000 65536\n65536 165536 65536'
+write_map gap $'0 100000 65536\n65537 165537 65536'
+write_map shifted '60000 160000 131072'
+write_map malformed 'zero 100000 131072'
+for map in old boundary split gap shifted malformed; do rejects "$map" "$map"; done
+validate_outer_maps "$TMP/valid" "$TMP/valid"
+validate_outer_maps "$TMP/wider" "$TMP/wider"
+rejects valid old
+grep -Fq 'gid map' "$TMP/valid-old.err" || fail 'gid failure was not named'
+grep -Fq 'Kubernetes 1.35' "$TMP/old-old.err" \
+  && grep -Fq 'userNamespaces.idsPerPod: 131072' "$TMP/old-old.err" \
   || fail 'rollout action missing from failure'
-validate_outer_maps "$TMP/new" "$TMP/new"
-if validate_outer_maps "$TMP/new" "$TMP/old" 2> "$TMP/gid.err"; then
-  fail 'short gid map was accepted'
+
+# Run the start script itself with a production parser wrapper. A short map
+# must stop before the first cgroup or daemon setup side effect.
+cat > "$TMP/preflight" <<EOF
+#!/usr/bin/env bash
+source "$ROOT/userns-preflight.sh"
+validate_outer_maps "$TMP/old" "$TMP/old"
+EOF
+chmod +x "$TMP/preflight"
+printf '#!/usr/bin/env bash\ntouch %q\n' "$TMP/cgroup-hit" > "$TMP/cgroup"
+printf '#!/usr/bin/env bash\ntouch %q\n' "$TMP/dockerd-hit" > "$TMP/dockerd"
+chmod +x "$TMP/cgroup" "$TMP/dockerd"
+sed -e "s|/userns-preflight.sh|$TMP/preflight|" \
+  -e "s|/cgroup-delegation.sh|$TMP/cgroup|" \
+  -e "s|RUNTIME_DIR=/tmp/valet-docker|RUNTIME_DIR=$TMP/runtime|" \
+  "$ROOT/start-docker.sh" > "$TMP/start-docker.sh"
+chmod +x "$TMP/start-docker.sh"
+if PATH="$TMP:$PATH" VALET_SANDBOX_DOCKER=1 VALET_DOCKER_USERNS=1 bash "$TMP/start-docker.sh" \
+  > "$TMP/start.out" 2> "$TMP/start.err"; then
+  fail 'start-docker accepted a short outer map'
 fi
-grep -Fq 'gid map' "$TMP/gid.err" || fail 'gid failure was not named'
+grep -Fq 'Kubernetes 1.35' "$TMP/start.err" || fail 'start-docker lost the preflight error'
+[ ! -e "$TMP/runtime" ] && [ ! -e "$TMP/cgroup-hit" ] && [ ! -e "$TMP/dockerd-hit" ] \
+  || fail 'start-docker reached cgroup or daemon setup'
+
+grep -Fxq '    && echo "dockerd:65536:65535" >> /etc/subuid \' "$ROOT/Dockerfile.sandbox-k8s" \
+  && grep -Fxq '    && echo "dockerd:65536:65535" >> /etc/subgid' "$ROOT/Dockerfile.sandbox-k8s" \
+  || fail 'Dockerfile does not declare the exact subordinate ID range'
 VALET_DOCKER_USERNS=0 bash "$ROOT/userns-preflight.sh"
 echo 'userns preflight tests passed'

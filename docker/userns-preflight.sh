@@ -7,11 +7,13 @@ set -euo pipefail
 SUBID_START=65536
 SUBID_COUNT=65535
 SUBID_END=$((SUBID_START + SUBID_COUNT - 1))
+OUTER_IDS=131072
 
 map_covers_subids() {
   local map=$1
-  awk -v start="$SUBID_START" -v end="$SUBID_END" '
-    $1 <= start && $1 + $3 - 1 >= end { found = 1 }
+  awk -v count="$OUTER_IDS" '
+    NF == 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ \
+      && $1 == 0 && $3 >= count { found = 1 }
     END { exit !found }
   ' "$map"
 }

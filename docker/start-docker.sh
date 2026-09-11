@@ -16,7 +16,7 @@ set -u
 if [ "${VALET_SANDBOX_DOCKER:-0}" != "1" ]; then exit 0; fi
 # On Kubernetes userns pods, reject insufficient outer maps before dockerd
 # starts. Local Docker has no outer pod user namespace and skips this guard.
-/userns-preflight.sh
+/userns-preflight.sh || exit $?
 # XDG_RUNTIME_DIR must be outside /run: rootlesskit's --copy-up=/run makes
 # bind-mount paths under /run invisible across the user-namespace boundary,
 # which breaks the port-driver API socket.
