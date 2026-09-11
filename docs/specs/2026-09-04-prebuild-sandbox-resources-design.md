@@ -341,7 +341,8 @@ memory when Valet runs them inside its own sandbox.
 
 Repository rows start collapsed. Each row shows its name, latest build status,
 enabled switch, build action, and Details button. Details opens the resource
-form and sandbox history together. Resource edits remain when Details closes.
+form and sandbox history together. Resource edits remain when Details closes
+or search hides the repository. Hidden rows do not fetch history.
 
 Search matches repository names without case sensitivity. The list shows a
 result count and a clear action when no repositories match. Sorting supports

@@ -35,14 +35,17 @@ export function SourcesSection() {
   const baseSource = sources.find((s) => s.kind === "base");
   const repoSources = sources.filter((s) => s.kind === "repo");
   const query = search.trim().toLowerCase();
-  const visibleRepos = repoSources
-    .filter((source) => (source.repoFullName ?? source.name).toLowerCase().includes(query))
-    .sort((a, b) => {
-      const byName = (a.repoFullName ?? a.name).localeCompare(b.repoFullName ?? b.name);
-      if (sort === "recent") return (b.lastBoundAt ?? 0) - (a.lastBoundAt ?? 0) || byName;
-      if (sort === "status") return repoStatus(a).order - repoStatus(b).order || byName;
-      return sort === "name-desc" ? -byName : byName;
-    });
+  const sortedRepos = repoSources.sort((a, b) => {
+    const byName = (a.repoFullName ?? a.name).localeCompare(b.repoFullName ?? b.name);
+    if (sort === "recent") return (b.lastBoundAt ?? 0) - (a.lastBoundAt ?? 0) || byName;
+    if (sort === "status") return repoStatus(a).order - repoStatus(b).order || byName;
+    return sort === "name-desc" ? -byName : byName;
+  });
+  const visibleRepoIds = new Set(
+    sortedRepos
+      .filter((source) => (source.repoFullName ?? source.name).toLowerCase().includes(query))
+      .map((source) => source.id),
+  );
   const externalSources = sources.filter((s) => s.kind === "external");
 
   return (
@@ -115,17 +118,17 @@ export function SourcesSection() {
             ) : (
               <>
                 <p className="text-xs text-muted" aria-live="polite">
-                  {visibleRepos.length} of {repoSources.length} repositories
+                  {visibleRepoIds.size} of {repoSources.length} repositories
                 </p>
                 <div className="divide-y divide-line rounded-lg border border-line">
-                  {visibleRepos.length === 0 && (
+                  {visibleRepoIds.size === 0 && (
                     <div className="space-y-2 p-6 text-center">
                       <p className="text-sm text-muted">No repositories match your search.</p>
                       <Button variant="ghost" size="sm" onClick={() => setSearch("")}>Clear search</Button>
                     </div>
                   )}
-                  {visibleRepos.map((source) => (
-                    <RepoSourceRow key={source.id} source={source} builderAvailable={builderAvailable} />
+                  {sortedRepos.map((source) => (
+                    <RepoSourceRow key={source.id} source={source} builderAvailable={builderAvailable} visible={visibleRepoIds.has(source.id)} />
                   ))}
                 </div>
               </>
@@ -315,9 +318,11 @@ const DECAY_MS = 30 * 24 * 60 * 60 * 1000;
 function RepoSourceRow({
   source,
   builderAvailable,
+  visible,
 }: {
   source: SourceSummary;
   builderAvailable: boolean;
+  visible: boolean;
 }) {
   const patchSource = usePatchSource();
   const bakeSource = useBakeSource();
@@ -328,7 +333,7 @@ function RepoSourceRow({
   const detailsId = `repo-details-${source.id}`;
   const [bakeError, setBakeError] = useState<string | null>(null);
 
-  const bakesQ = useSourceBakes(source.id, { enabled: expanded });
+  const bakesQ = useSourceBakes(source.id, { enabled: expanded && visible });
 
   const isDecayed =
     !source.enabled &&
@@ -346,7 +351,7 @@ function RepoSourceRow({
   }
 
   return (
-    <div className="space-y-3 p-4">
+    <div hidden={!visible} className="space-y-3 p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">

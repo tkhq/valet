@@ -302,13 +302,26 @@ describe("SourcesSection", () => {
     expect((screen.getByLabelText("CPU cores for acme/widgets") as HTMLInputElement).value).toBe("4");
   });
 
+  it("preserves resource drafts and expanded details when search hides a repository", () => {
+    sourcesData = { sources: [makeSource()], builderAvailable: true };
+    render(<SourcesSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Details for acme/widgets" }));
+    fireEvent.change(screen.getByLabelText("CPU cores for acme/widgets"), { target: { value: "4" } });
+    const search = screen.getByRole("searchbox", { name: "Search repositories" });
+    fireEvent.change(search, { target: { value: "missing" } });
+    expect(screen.queryByRole("button", { name: "Save resources" })).toBeNull();
+    fireEvent.change(search, { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Details for acme/widgets" }).getAttribute("aria-expanded")).toBe("true");
+    expect((screen.getByLabelText("CPU cores for acme/widgets") as HTMLInputElement).value).toBe("4");
+  });
+
   it("searches repository names without case or surrounding whitespace and clears no matches", () => {
     sourcesData = { sources: [makeSource(), makeSource({ id: "other", repoFullName: "acme/api" })], builderAvailable: true };
     render(<SourcesSection />);
     const search = screen.getByRole("searchbox", { name: "Search repositories" });
     fireEvent.change(search, { target: { value: " WIDGET " } });
     expect(screen.getByText("acme/widgets")).toBeTruthy();
-    expect(screen.queryByText("acme/api")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Details for acme/api" })).toBeNull();
     fireEvent.change(search, { target: { value: "missing" } });
     expect(screen.getByText("No repositories match your search.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
