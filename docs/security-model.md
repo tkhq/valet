@@ -131,13 +131,17 @@ bonus on top of the container boundary.
 
 On Kubernetes, the `valet-docker` RuntimeClass mounts the sandbox cgroup
 read-write inside its private cgroup namespace. Valet delegates only the
-`/init` directory and its three core delegation files from mapped root to
-`dockerd` UID 1500. The visible root and all outer CPU, memory, and PID limit
-files stay owned by mapped root. Kernel cgroup containment prevents `dockerd` from moving a
-process into or out of the sandbox subtree. A nested runtime can only add
-stricter controls below the limits that Kubernetes applies to the sandbox.
-After evacuation into a UID-1500-owned descendant, the agent can freeze, kill,
-or throttle its own sandbox services but cannot cross the sandbox boundary.
+`/init` manager and its three core delegation files to `dockerd` UID 1500.
+The empty manager distributes controllers to a mapped-root-owned `services`
+leaf. PID 1, dockerd, gateway services, and later exec processes stay in that
+leaf. UID 1500 cannot use cgroup files to throttle or kill these services.
+
+The workload user can create a sibling below `/init` and move its own process
+there. The kernel requires destination and common-ancestor write access for
+this move. The kernel also applies process permission checks. Thus, UID 1500
+cannot move mapped-root service processes. The visible root and all outer CPU,
+memory, and PID limit files stay owned by mapped root. A nested runtime can
+only add stricter controls below the limits that Kubernetes applies.
 
 The daemon and every container it runs live inside the sandbox's user
 namespace. An escape from an inner container lands in the rootless daemon's

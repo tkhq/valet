@@ -195,27 +195,36 @@ root. Consequences:
     but cannot fix ownership, and a fresh cgroup2 mount over the
     mountpoint is refused (fs already mounted).
   - Bootstrap: before dockerd starts, `start-docker.sh` bind-remounts
-    the cgroupfs rw. It moves every process into an `/init` leaf and
-    enables the root controllers. The v2 no-internal-process rule
-    requires the root to be empty before it can distribute controllers.
-    The script then delegates only `/init`, `cgroup.procs`,
-    `cgroup.threads`, and `cgroup.subtree_control` to the resolved
-    `dockerd` UID and GID. It does not delegate the visible root or any
-    CPU, memory, or PID limit file. Missing controllers, files, or
-    ownership stop Docker startup with a corrective error.
-  - Containment: the private cgroup namespace makes the sandbox
-    container cgroup appear as `/sys/fs/cgroup`. The kernel delegation
-    rules prevent `dockerd` from moving processes across that boundary.
-    Ancestor CPU, memory, and PID limits remain effective for every
-    nested cgroup.
-  - Rootless k3s: k3s v1.31.5+k3s1 embeds RootlessKit v1.0.1. It does
-    not use a separately installed RootlessKit binary for server startup.
-    RootlessKit creates `k3s_evac` below `/init`, moves all direct
-    `/init` processes into that leaf, and enables controllers below
-    `/init`. A cgroup move does not change a process namespace or send a
-    signal. PID 1, the gateway, dockerd, and other direct members remain
-    in the sandbox, but share the evacuation leaf. Deployment acceptance
-    must test their health across repeated k3s start and stop cycles.
+    the cgroupfs rw. It moves root processes into `/init` and enables the
+    root controllers. It then creates `/init/services` as a root-owned
+    leaf. A bounded loop moves each direct `/init` process into that leaf.
+    The loop uses `cgroup.procs`, which moves all threads in each process.
+    The script enables every available controller below empty `/init`.
+    CPU and PID controllers are required. A missing controller, a racing
+    process, or an `EBUSY` result stops startup with a corrective error.
+  - Ownership: Valet delegates only `/init`, `cgroup.procs`,
+    `cgroup.threads`, and `cgroup.subtree_control` to UID 1500. The
+    `services` leaf stays owned by mapped root. UID 1500 cannot change
+    service limits or kill root-owned services through cgroup files.
+    It can create a sibling below `/init` and move its own process there.
+    Cgroup v2 requires write access to the destination and the common
+    ancestor, not the source `services` leaf. The kernel cgroup v2
+    documentation specifies this containment rule in "Delegation".
+    Process permission checks prevent UID 1500 from moving mapped-root
+    processes.
+  - Service placement: PID 1, the startup chain, dockerd, containerd, and
+    gateway services inherit `/init/services`. Kubernetes exec commands
+    are expected to join PID 1's cgroup, as observed in the target cluster.
+    Acceptance must verify this behavior after controller or runtime
+    upgrades. Valet keeps `services` for the sandbox container lifetime.
+  - Nested runtime: mono can create `/init/tkhq-k3s`. RootlessKit can then
+    create `k3s_evac` below that sibling without evacuating sandbox
+    services or enabling controllers at a populated manager. Mono owns
+    creation and cleanup of `tkhq-k3s`; Valet does not create it.
+  - Containment: the private cgroup namespace makes the sandbox container
+    cgroup appear as `/sys/fs/cgroup`. The visible root and all CPU,
+    memory, and PID limit files stay owned by mapped root. Ancestor limits
+    remain effective for every nested cgroup.
 
 ### Exec identity
 
@@ -294,10 +303,15 @@ trade already accepted for rootless BuildKit build pods.
 2. E2e (gated `needs: ["docker"]`): create a `docker: true` sandbox,
    then inside it run `docker build` on a small context, `docker run`
    with a bind volume and a published port, and assert output.
-3. Acceptance (manual at first): clone valet inside a `docker: true`
-   sandbox and run the docker-gated suites
+3. Acceptance (manual at first): deploy the image and create a fresh
+   `docker: true` child. Verify that `/init` is empty and distributes CPU
+   and PID controllers. Verify that PID 1, dockerd, containerd, gateway,
+   and a new exec run in `/init/services`. Verify that UID 1500 cannot
+   change outer limits, but can move itself to `/init/tkhq-k3s`. Start
+   RootlessKit and confirm that services stay in place without `EBUSY`.
+   Run three ready and cleanup cycles. Then run the docker-gated suites
    (`make e2e E2E_ARGS="--only sandbox-docker,store-postgres,prebuilds-docker"`).
-   Record results in the PR.
+   Record results in the PR. Repeat placement checks after runtime upgrades.
 
 ## Kubernetes reality (2026-08-17 addendum)
 
