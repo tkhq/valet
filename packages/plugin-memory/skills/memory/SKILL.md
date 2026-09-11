@@ -23,10 +23,11 @@ Knowledge here means a memory file, including notes under `artifacts/`.
 
 1. Use `mem_read` with an empty path to discover accessible team IDs.
 2. Read `team:{teamId}/` to find team files. Use `mem_search` to find relevant personal or team files.
-3. Select the exact source file, team ID, and destination path from the user's request.
+3. Select the exact source file and team ID from the user's request. Keep the source path as the destination unless the user chooses another path.
 4. To pull, call `mem_copy_from_team` with `{ teamId, from, to }`. Use a team-relative `from` without the virtual prefix.
 5. To push, call `mem_copy_to_team` with `{ teamId, from, to }`. Use a personal `from` and team-relative `to`.
-6. If the destination exists, ask the user to choose another path or skip the copy.
+6. If the destination exists, ask whether to replace it, choose another path, or cancel. Do not invent a suffix or silently pick another name.
+7. Only after a separate, explicit replacement confirmation, retry with `replacement: { expectedVersion: destinationVersion, userConfirmed: true }`, using the revision from the conflict response. The original copy request is not replacement approval. If the destination changes, ask again.
 
 Run either tool from the personal assistant. Pull requires current team membership. Push also requires team-admin or target-organization-admin authority.
 Each copy preserves the original and copies its current content and metadata exactly. Do not reconstruct the file with `mem_write`.

@@ -84,6 +84,12 @@ async function parseJsonBody(res: Response): Promise<unknown> {
 async function memoryErrorResult(res: Response): Promise<ToolResult> {
   const body = await parseJsonBody(res);
   const message = isRecord(body) && typeof body.error === "string" ? body.error : `HTTP ${res.status}`;
+  if (res.status === 409 && isRecord(body) &&
+      (body.code === "MEMORY_DESTINATION_EXISTS" || body.code === "MEMORY_DESTINATION_CHANGED")) {
+    // Keep the opaque revision reachable in tool text so a later, user-approved
+    // retry can send it. Never treat the original copy ask as replacement approval.
+    return { text: `[memory_error] ${JSON.stringify(body)}` };
+  }
   return { text: `[memory_error] ${message}` };
 }
 
@@ -363,40 +369,55 @@ export const artifactCopyToTeamTool = defineTool({
   },
 });
 
+const memoryCopyReplacementSchema = Type.Optional(Type.Object({
+  expectedVersion: Type.String({ pattern: "^[a-f0-9]{64}$", description: "Opaque destinationVersion from the latest copy conflict." }),
+  userConfirmed: Type.Literal(true, { description: "Set only after the user explicitly approves replacing this destination revision. The original copy request is not approval." }),
+}, { description: "Omit on the initial copy. Requires a separate user decision to replace after a collision." }));
+
 export const memCopyToTeamTool = defineTool({
   name: "mem_copy_to_team",
-  description: "Push an existing personal memory or knowledge file into a team by copying its exact content and metadata. Requires team membership plus team-admin or target-organization-admin authority. Use mem_copy_from_team to pull team knowledge into personal memory. Never deletes the source or overwrites a destination. Links remain unchanged; copy only the explicit file requested by the user.",
+  description: "Push an existing personal memory or knowledge file into a team by copying its exact content and metadata. Requires team membership plus team-admin or target-organization-admin authority. Use mem_copy_from_team to pull team knowledge into personal memory. Preserves the source and links. Default to the same source path unless the user chooses a different destination. On collision, ASK the user to replace, rename, or cancel; never invent a suffix or alternate name. The original copy request does not authorize replacement. Send replacement only after the user explicitly confirms replacing the reported destination revision. A stale revision requires a new user decision.",
   parameters: Type.Object({
     from: Type.String({ description: "Existing personal memory path to copy." }),
-    to: Type.String({ description: "New destination path in team memory. Must not exist." }),
+    to: Type.String({ description: "Destination path in team memory; use from unless the user chooses another path." }),
     teamId: Type.String({ description: "Explicit destination team ID." }),
+    replacement: memoryCopyReplacementSchema,
   }),
   execute: async (args, ctx) => {
+    if (args.replacement && args.replacement.userConfirmed !== true) {
+      return { text: "[memory_error] Ask the user to replace, rename, or cancel. Replacement requires explicit user confirmation." };
+    }
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     return memoryRequest(new URL("/api/memory/copy-to-team", cfg.apiBaseUrl), {
       method: "POST",
       headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
-      body: JSON.stringify(args),
+      body: JSON.stringify({ ...args, replacement: args.replacement
+        ? { expectedVersion: args.replacement.expectedVersion } : undefined }),
     }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
   },
 });
 
 export const memCopyFromTeamTool = defineTool({
   name: "mem_copy_from_team",
-  description: "Pull an explicitly selected team memory or knowledge file into personal memory with exact content and metadata. Requires current team membership. Use mem_copy_to_team to push personal memory to a team. Never deletes the source or overwrites a destination. Links remain unchanged; copy only the explicit file requested by the user.",
+  description: "Pull an explicitly selected team memory or knowledge file into personal memory with exact content and metadata. Requires current team membership. Use mem_copy_to_team to push personal memory to a team. Preserves the source and links. Default to the same source path unless the user chooses a different destination. On collision, ASK the user to replace, rename, or cancel; never invent a suffix or alternate name. The original copy request does not authorize replacement. Send replacement only after the user explicitly confirms replacing the reported destination revision. A stale revision requires a new user decision.",
   parameters: Type.Object({
     from: Type.String({ description: "Existing path within the source team, without the team:{id}/ prefix." }),
-    to: Type.String({ description: "New destination path in personal memory. Must not exist." }),
+    to: Type.String({ description: "Destination path in personal memory; use from unless the user chooses another path." }),
     teamId: Type.String({ description: "Explicit source team ID." }),
+    replacement: memoryCopyReplacementSchema,
   }),
   execute: async (args, ctx) => {
+    if (args.replacement && args.replacement.userConfirmed !== true) {
+      return { text: "[memory_error] Ask the user to replace, rename, or cancel. Replacement requires explicit user confirmation." };
+    }
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     return memoryRequest(new URL("/api/memory/copy-from-team", cfg.apiBaseUrl), {
       method: "POST",
       headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
-      body: JSON.stringify(args),
+      body: JSON.stringify({ ...args, replacement: args.replacement
+        ? { expectedVersion: args.replacement.expectedVersion } : undefined }),
     }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
   },
 });

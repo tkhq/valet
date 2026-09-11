@@ -120,7 +120,7 @@ describe("team memory pull into personal memory", () => {
     await writeFile(db, teamScope, { path: input.from, content: "Team source" });
     await writeFile(db, scope, { path: input.to, content: "Keep personal content" });
     const before = await readOwnFile(db, scope, input.to);
-    await expect(copyFileFromTeam(db, scope, input)).rejects.toThrow(/Choose another path/);
+    await expect(copyFileFromTeam(db, scope, input)).rejects.toThrow(/Ask the user whether to replace, rename, or cancel/);
     expect(await readOwnFile(db, scope, input.to)).toEqual(before);
     const fresh = { ...input, to: "notes/fresh.md" };
     const results = await Promise.allSettled([copyFileFromTeam(db, scope, fresh), copyFileFromTeam(db, scope, fresh)]);
