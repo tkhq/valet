@@ -21,8 +21,8 @@ vi.mock("~/api/policies", async () => {
   return {
     ...actual,
     useMyPolicyOverrides: () => ({ data: overridesData, isLoading: false, error: null }),
-    usePutMyPolicyOverride: () => ({ mutate: putMutate, isPending: false }),
-    useDeleteMyPolicyOverride: () => ({ mutate: deleteMutate, isPending: false }),
+    usePutMyPolicyOverride: () => ({ mutateAsync: putMutate, isPending: false }),
+    useDeleteMyPolicyOverride: () => ({ mutateAsync: deleteMutate, isPending: false }),
   };
 });
 
@@ -36,6 +36,8 @@ import { PolicyOverridesSection } from "./policy-overrides-section";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  deleteMutate.mockResolvedValue({ ok: true });
+  putMutate.mockResolvedValue({});
   overridesData = { overrides: [] };
 });
 
@@ -49,7 +51,7 @@ describe("PolicyOverridesSection — create", () => {
     await user.click(screen.getByRole("radio", { name: "Risk level" }));
     await user.selectOptions(screen.getByLabelText("Mode"), "require_approval");
     await user.click(screen.getByRole("button", { name: "Save override" }));
-    expect(putMutate).toHaveBeenCalledWith({ riskLevel: "low", mode: "require_approval" }, expect.anything());
+    expect(putMutate).toHaveBeenCalledWith({ riskLevel: "low", mode: "require_approval" });
   });
 
   it("defaults to Service target and PUTs with only service set", async () => {
@@ -83,8 +85,8 @@ describe("PolicyOverridesSection — create", () => {
 
   it("surfaces the API's loosen-past-org-policy error verbatim", async () => {
     const user = userEvent.setup();
-    putMutate.mockImplementation((_body, opts) => {
-      opts.onError(
+    putMutate.mockImplementation(() => {
+      return Promise.reject(
         new ApiError(400, "PUT /api/me/policy-overrides → 400", {
           error: "override would loosen an org deny policy for this action",
         }),
@@ -125,9 +127,10 @@ describe("PolicyOverridesSection — list + delete", () => {
     expect(screen.getByText("service: gmail")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Delete override service: gmail" }));
 
+    expect(deleteMutate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Delete override" }));
     expect(deleteMutate).toHaveBeenCalledWith(
       { service: "gmail", actionId: undefined, riskLevel: undefined },
-      expect.anything(),
     );
   });
 });

@@ -172,3 +172,17 @@ export function useDeleteMyGrant() {
     },
   });
 }
+
+export function usePutTeamPolicyOverride(teamId: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (body: PutPolicyOverrideRequest) => api.putTeamPolicyOverride(teamId, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: qkPolicies.teamPolicies(teamId) }); } });
+}
+export function useTeamGrants(teamId: string) {
+  return useQuery({ queryKey: ["policies", "team", teamId, "grants"], queryFn: () => api.listTeamGrants(teamId) });
+}
+export function useDeleteTeamGrant(teamId: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (id: string) => api.deleteTeamGrant(teamId, id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["policies", "team", teamId, "grants"] }); } });
+}

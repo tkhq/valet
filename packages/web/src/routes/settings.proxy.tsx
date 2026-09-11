@@ -26,10 +26,13 @@ function PersonalProxySettings() {
   const orgQ = useOrg();
   const settingsQ = useProxySettings();
 
+  if (orgQ.error || settingsQ.error) return <p role="alert">Could not load proxy settings. Reload this page to try again.</p>;
+  if (!orgQ.data || !settingsQ.data) return <p role="status">Loading proxy settings…</p>;
+
   const singleUser = orgQ.data?.features.organizations === false;
 
   return (
-    <div className="space-y-10">
+    <div className="min-w-0 max-w-full space-y-10">
       <Section
         title="Proxy"
         description="Route your Claude Code / Codex traffic through Valet for spend tracking and recording."

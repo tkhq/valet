@@ -87,11 +87,12 @@ const MODE_BADGE: Record<ApprovalModeWire, "success" | "accent" | "danger"> = {
  * Target is exactly-one-of service/actionId/riskLevel, matching the API's
  * 400-on-violation contract.
  */
-export function PoliciesSection({ teamId, canEdit = true }: { teamId?: string; canEdit?: boolean }) {
+export function PoliciesSection({ teamId, canEdit = true, variant = "full" }: { teamId?: string; canEdit?: boolean; variant?: "full" | "advanced" }) {
   const title = teamId === undefined ? "Policies" : "Action rules";
   const policiesQ = usePolicies(teamId);
   const pluginsQ = usePlugins();
-  const policies = policiesQ.data?.policies ?? [];
+  const rows = policiesQ.data?.policies ?? [];
+  const policies = variant === "advanced" ? rows.filter(p => p.appliesIn !== "any" || p.paramMatchers.length > 0 || p.expiresAt !== null) : rows;
   const plugins = pluginsQ.data?.plugins ?? [];
 
   // A failed team refetch must remove stale rows and any open editor.
@@ -105,7 +106,7 @@ export function PoliciesSection({ teamId, canEdit = true }: { teamId?: string; c
 
   return (
     <div className="space-y-10">
-      <KillSwitches plugins={plugins} policies={policies} teamId={teamId} canEdit={canEdit} />
+      {variant === "full" && <KillSwitches plugins={plugins} policies={policies} teamId={teamId} canEdit={canEdit} />}
       <Section title={title} description={teamId === undefined
         ? "Rules the resolver applies before an action runs."
         : "Rules for actions run by this team. Organization policies still apply."}>
@@ -115,7 +116,7 @@ export function PoliciesSection({ teamId, canEdit = true }: { teamId?: string; c
           <p className="py-4 text-sm text-muted">No policies yet.</p>
         )}
         {policies.map((p) => (
-          <PolicyRow key={p.id} policy={p} teamId={teamId} canEdit={canEdit} />
+          <PolicyRow key={p.id} policy={p} teamId={teamId} canEdit={canEdit} showConditions={variant === "advanced"} />
         ))}
       </Section>
       {teamId !== undefined && !canEdit && <p className="text-sm text-muted">Only team admins can change policies.</p>}
@@ -137,11 +138,13 @@ function targetLabel(p: {
 }
 
 function PolicyRow({
-  policy, teamId, canEdit,
+  policy, teamId, canEdit, showConditions = false,
 }: {
   teamId?: string;
   canEdit: boolean;
+  showConditions?: boolean;
   policy: {
+    paramMatchers?: ParamMatcherWire[];
     id: string;
     service: string | null;
     actionId: string | null;
@@ -171,6 +174,7 @@ function PolicyRow({
           <Badge variant={MODE_BADGE[policy.mode]}>{MODE_LABELS[policy.mode]}</Badge>
           <Badge variant="neutral">{RUN_LABELS[policy.appliesIn]}</Badge>
         </div>
+        {showConditions && (policy.paramMatchers?.length ?? 0) > 0 && <pre className="mt-2 whitespace-pre-wrap break-all text-xs text-muted">{JSON.stringify(policy.paramMatchers, null, 2)}</pre>}
         {policy.expiresAt !== null && (
           <p className="mt-0.5 text-xs text-muted">
             Expires {new Date(policy.expiresAt).toLocaleString()}

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { MODE_LABELS, RISK_LABELS, POLICY_SELECT_CLASS } from "./policy-presentation";
 import { Trash2 } from "lucide-react";
-import type { ApprovalModeWire, RiskLevelWire } from "@valet/api/wire";
-import { Badge, Button, Label } from "~/components/primitives";
+import type { ActionPolicyOverrideWire, PutPolicyOverrideRequest, ApprovalModeWire, RiskLevelWire } from "@valet/api/wire";
+import { Badge, Button, ConfirmDialog, Label } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import {
   apiErrorMessage,
@@ -39,10 +39,29 @@ function targetLabel(o: { service: string | null; actionId: string | null; riskL
  */
 export function PolicyOverridesSection() {
   const overridesQ = useMyPolicyOverrides();
-  const overrides = overridesQ.data?.overrides ?? [];
   const del = useDeleteMyPolicyOverride();
   const put = usePutMyPolicyOverride();
+  if (overridesQ.error) return <p role="alert">{apiErrorMessage(overridesQ.error)}</p>;
+  if (!overridesQ.data) return <p role="status">Loading…</p>;
+  return <PolicyOverridesEditor overrides={overridesQ.data.overrides} title="My policy overrides"
+    description="Your own overrides on top of org policy." canEdit saving={put.isPending} deleting={del.isPending}
+    save={body => put.mutateAsync(body)} remove={row => del.mutateAsync({ service: row.service ?? undefined, actionId: row.actionId ?? undefined, riskLevel: row.riskLevel ?? undefined })} />;
+}
 
+export interface PolicyOverridesEditorProps {
+  overrides: ActionPolicyOverrideWire[];
+  title: string;
+  description: string;
+  canEdit: boolean;
+  saving: boolean;
+  deleting: boolean;
+  save: (body: PutPolicyOverrideRequest) => Promise<unknown>;
+  remove: (row: ActionPolicyOverrideWire) => Promise<unknown>;
+}
+
+/** Shared personal/team interaction; the adapter supplies only scoped data and mutations. */
+export function PolicyOverridesEditor({ overrides, title, description, canEdit, saving, deleting, save, remove }: PolicyOverridesEditorProps) {
+  const [selected, setSelected] = useState<ActionPolicyOverrideWire | null>(null);
   const [targetKind, setTargetKind] = useState<TargetKind>("service");
   const [service, setService] = useState("");
   const [actionId, setActionId] = useState("");
@@ -60,29 +79,18 @@ export function PolicyOverridesSection() {
     setError(null);
     const target =
       targetKind === "service" ? { service } : targetKind === "actionId" ? { actionId } : { riskLevel };
-    put.mutate(
-      { ...target, mode },
-      {
-        onSuccess: () => {
-          setService("");
-          setActionId("");
-        },
-        onError: (err) => setError(apiErrorMessage(err)),
-      },
-    );
+    if (!canEdit) return;
+    void save({ ...target, mode }).then(() => { setService(""); setActionId(""); }, err => setError(apiErrorMessage(err)));
   }
 
   return (
     <div className="space-y-10">
-      <Section title="My policy overrides" description="Your own overrides on top of org policy.">
-        {overridesQ.isLoading && <p className="py-4 text-sm text-muted">Loading…</p>}
-        {!overridesQ.isLoading && overrides.length === 0 && (
-          <p className="py-4 text-sm text-muted">No overrides yet.</p>
-        )}
+      <Section title={title} description={description}>
+        {overrides.length === 0 && <p className="py-4 text-sm text-muted">No overrides yet.</p>}
         {overrides.map((o) => (
           <div key={o.id} className="flex items-center gap-3 py-3">
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 break-words">
                 <span className="text-sm font-medium text-[--fg]">{targetLabel(o)}</span>
                 <Badge variant={MODE_BADGE[o.mode]}>{MODE_LABELS[o.mode]}</Badge>
               </div>
@@ -92,13 +100,10 @@ export function PolicyOverridesSection() {
               variant="ghost"
               size="sm"
               aria-label={`Delete override ${targetLabel(o)}`}
-              disabled={del.isPending}
+              disabled={!canEdit || deleting}
               onClick={() => {
                 setRowError(null);
-                del.mutate(
-                  { service: o.service ?? undefined, actionId: o.actionId ?? undefined, riskLevel: o.riskLevel ?? undefined },
-                  { onError: (err) => setRowError(apiErrorMessage(err)) },
-                );
+                if (canEdit) setSelected(o);
               }}
             >
               <Trash2 className="h-4 w-4" />
@@ -108,7 +113,13 @@ export function PolicyOverridesSection() {
         {rowError && <p className="pb-2 text-xs text-danger-500">{rowError}</p>}
       </Section>
 
-      <Section title="New override" description="Choose exactly one target: service, action, or risk level.">
+      {!canEdit && <p className="text-sm text-muted">Only team admins can change overrides and revoke grants.</p>}
+      <ConfirmDialog open={selected !== null && canEdit} onOpenChange={open => { if (!open) setSelected(null); }}
+        title="Delete override?" description="Remove this override and use the remaining policy rules." confirmLabel="Delete override"
+        pending={deleting} error={rowError} onConfirm={() => {
+          if (selected && canEdit) void remove(selected).then(() => setSelected(null), err => setRowError(apiErrorMessage(err)));
+        }} />
+      {canEdit && <Section title="New override" description="Choose exactly one target: service, action, or risk level.">
         <div className="space-y-4 py-4">
           <fieldset className="flex flex-wrap gap-4" aria-label="Target">
             {(["service", "actionId", "riskLevel"] as const).map((kind) => (
@@ -189,11 +200,11 @@ export function PolicyOverridesSection() {
 
           {error && <p className="text-sm text-danger-500">{error}</p>}
 
-          <Button type="button" disabled={!canSubmit || put.isPending} onClick={submit}>
-            {put.isPending ? "Saving…" : "Save override"}
+          <Button type="button" disabled={!canSubmit || saving} onClick={submit}>
+            {saving ? "Saving…" : "Save override"}
           </Button>
         </div>
-      </Section>
+      </Section>}
     </div>
   );
 }

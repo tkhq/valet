@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { PolicyOverridesSection } from "~/components/settings/policy-overrides-section";
 import { GrantsSection } from "~/components/settings/grants-section";
-import { PoliciesSection } from "~/components/settings/policies-section";
+import { TeamPolicyOverrides } from "~/components/settings/team-policy-overrides";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useMe, useTeams } from "~/api/settings";
 
@@ -34,8 +34,7 @@ function TeamPoliciesPage({ teamId }: { teamId: string }) {
   if (!team || (team.callerRole === null && !orgAdmin)) return <p role="alert">Team unavailable. Choose another workspace.</p>;
   const canEdit = orgAdmin || team.callerRole === "admin";
   return <div className="space-y-6">
-    <h1 className="break-words font-display text-2xl text-ink">Policies · {team.name}</h1>
-    <PoliciesSection key={`${teamId}:${canEdit}`} teamId={teamId} canEdit={canEdit} />
+    <TeamPolicyOverrides key={`${teamId}:${canEdit}`} teamId={teamId} canEdit={canEdit} />
   </div>;
 }
 

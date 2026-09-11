@@ -338,9 +338,9 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 
 ## Team proxy settings (2026-09-11)
 
-In a team workspace, `/settings/proxy` shows that team's shared API keys and setup instructions. It does not mount personal key creation. Existing team key controls keep creation and revocation limited to team or organization admins. Members can read key summaries and use a key supplied by their team admin. Secrets are shown only at creation.
+In a team workspace, `/settings/proxy` uses the personal page's `ProxyGovernance` and numbered `OnboardingPanel` flow. Governance is read-only. A team adapter creates keys through the team endpoint without mounting the personal key hook. Team and organization admins can create keys. Members see a disabled create action and instructions to request a shared key from an admin.
 
-The page reads organization gateway enablement and credential mode. It offers no governance mutations, including for organization admins. Loading, failed, and unavailable team states block setup. Changing workspace remounts the panel so drafts, key reveals, and late creation callbacks cannot cross teams. Key controls also remount after role changes. Failed access checks hide cached keys and unmount controls, clearing drafts and secrets.
+The page reads organization gateway enablement and credential mode. It offers no governance mutations, including for organization admins. Loading, failed, and unavailable team states block setup. Changing workspace remounts the panel so key reveals and late creation callbacks cannot cross teams. The flow also remounts after admin access changes. Failed team, organization, key-access, or proxy-setting queries unmount the flow even when cached data remains. Restored access starts at key creation.
 
 The gateway accepts a verified team key only when its metadata matches the stored key pin and the team still exists. The team supplies the organization identity. The creating admin is not the acting user; removing that admin's membership does not disable a shared key. Revoked keys and deleted teams are refused.
 
@@ -352,4 +352,6 @@ The in-place schema repair adds `team_id`, permits a null `user_id`, and updates
 
 Regression coverage includes real team key forwarding in both credential modes, disabled governance, creator departure, invalid key pins, deleted teams, revocation, recording attribution, schema repair, permissions, and workspace transitions.
 
-The team Proxy page groups gateway status in one panel. Key access and lifetime details use a disclosure beneath concise sharing guidance. Setup snippets scroll inside the settings column. Key creation errors show the server message, including the corrective action when real authentication is disabled.
+Both scopes start with the Proxy section and Step 2, Create your key. Success shows the new secret once, setup snippets containing that key, Run it commands, and Create another key. Create another clears the secret and returns to creation. Team snippets retain the organization credential mode. The shared API keys link opens scoped key management; no separate key list or placeholder setup appears on the Proxy page. Snippets and revealed keys scroll inside the settings column. Key creation errors show the server corrective message, including when real authentication is disabled.
+
+Frontend regression tests cover successful creation in both scopes, actual-key snippets, Run it, Create another, member and admin permissions, scope changes, access errors, and delayed responses.
