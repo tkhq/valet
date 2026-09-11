@@ -21,7 +21,7 @@ import {
   oauthAccessToken,
   oauthConsent,
 } from "../schema/index.js";
-import type { AuthConfig } from "./config.js";
+import { AUTH_SESSION_LIFETIME_SECONDS, type AuthConfig } from "./config.js";
 import type { buildAuthHooks } from "./provisioning.js";
 
 export interface BuildAuthOpts {
@@ -192,6 +192,9 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
         oauthConsent,
       },
     }),
+    // Keep eligibility freshness tied to this explicit session lifetime.
+    // This value is Better Auth's documented default, not a new duration.
+    session: { expiresIn: AUTH_SESSION_LIFETIME_SECONDS },
     emailAndPassword: { enabled: true },
     socialProviders: {
       ...(cfg.social.google

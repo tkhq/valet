@@ -522,8 +522,6 @@ async function runBootChain(): Promise<void> {
 
   if (closed) return;
 
-  if (closed) return;
-
   // Ready flips here, after the steps that protect traffic (session restore,
   // child-watch re-arm, config reconcile) and BEFORE the best-effort service
   // starts below. Those tolerate failure (logged-and-continue), so gating

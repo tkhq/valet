@@ -124,9 +124,11 @@ Login never creates a team. Login never adds, removes, or changes a membership. 
 
 The `team_join_eligibilities` table stores only `team_id`, `user_id`, and `observed_at`. It does not duplicate claim values or group paths. An absent, unreadable, or empty claim replaces the user's snapshot with no rows. This fail-closed replacement prevents an old claim from authorizing a later join.
 
-`GET /api/teams/suggestions` returns only eligible teams in the caller's organization that the caller has not joined. Each item contains the team id, display name, and member count. The response does not contain a group path or unrelated team.
+Eligibility expires after seven days. This bound is the documented Better Auth default session lifetime, which Valet now configures explicitly. Valet does not extend eligibility when Better Auth refreshes a session. The user must complete another single-sign-on login to refresh the identity-provider claim and eligibility.
 
-`POST /api/teams/:id/join` checks the server-held eligibility again inside a transaction. A missing, stale, non-eligible, or foreign-organization id returns the same existence-hiding 404. A successful join inserts role `member`. An admin subgroup never escalates this role. An existing membership makes the action idempotent and keeps its current role.
+`GET /api/teams/suggestions` returns only fresh eligible teams in the caller's organization that the caller has not joined. Each item contains the team id, display name, and member count. The response does not contain a group path or unrelated team.
+
+`POST /api/teams/:id/join` checks fresh server-held eligibility, team provenance, organization scope, and current `org_members` membership inside one transaction. A missing, stale, non-eligible, or foreign-organization id returns the same existence-hiding 404. A successful join inserts role `member`. An admin subgroup never escalates this role. An existing membership makes the action idempotent and keeps its current role.
 
 The Organization → Teams page shows these candidates under **Suggested teams** with an explicit **Join** button. It has no Team sync switch, group-path field, per-group switch, or Add group control.
 

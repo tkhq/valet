@@ -12,6 +12,7 @@ import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
 import {
   agentSessions,
   assistants,
+  orgMembers,
   teamJoinEligibilities,
   teamMembers,
   teams,
@@ -19,6 +20,7 @@ import {
   workflowDefinitions,
   workflowRuns,
 } from "../src/schema/index.js";
+import { AUTH_SESSION_LIFETIME_SECONDS } from "../src/auth/config.js";
 import type {
   CreateTeamResponse,
   ListSuggestedTeamsResponse,
@@ -342,6 +344,7 @@ describe("teams routes", () => {
       teamId = "team_idp_platform",
       orgId = "local-org",
       userId = "test-member",
+      observedAt = Date.now(),
     ) {
       const { db } = api.providers;
       await db.insert(teams).values({
@@ -352,7 +355,7 @@ describe("teams routes", () => {
         externalId: `/${teamId}`,
         createdAt: Date.now(),
       });
-      await db.insert(teamJoinEligibilities).values({ teamId, userId, observedAt: Date.now() });
+      await db.insert(teamJoinEligibilities).values({ teamId, userId, observedAt });
       return teamId;
     }
 
@@ -412,6 +415,55 @@ describe("teams routes", () => {
         expect(res.status).toBe(404);
         expect(await res.json()).toEqual({ error: "team not found" });
       }
+    });
+
+    it("refuses eligibility older than the configured auth session lifetime", async () => {
+      api = await bootTestApi();
+      const observedAt = Date.now() - AUTH_SESSION_LIFETIME_SECONDS * 1000 - 1;
+      const teamId = await seedSuggestion(
+        "team_idp_expired",
+        "local-org",
+        "test-member",
+        observedAt,
+      );
+
+      const suggestions = await fetch(`${api.baseUrl}/api/teams/suggestions`, {
+        headers: MEMBER_HEADERS,
+      });
+      expect(await suggestions.json()).toEqual({ teams: [] });
+
+      const join = await fetch(`${api.baseUrl}/api/teams/${teamId}/join`, {
+        method: "POST",
+        headers: MEMBER_HEADERS,
+      });
+      expect(join.status).toBe(404);
+      expect(await join.json()).toEqual({ error: "team not found" });
+    });
+
+    it("refuses join after the caller loses organization membership", async () => {
+      api = await bootTestApi();
+      const teamId = await seedSuggestion();
+      await api.providers.db
+        .delete(orgMembers)
+        .where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
+
+      const suggestions = await fetch(`${api.baseUrl}/api/teams/suggestions`, {
+        headers: MEMBER_HEADERS,
+      });
+      expect(await suggestions.json()).toEqual({ teams: [] });
+
+      const join = await fetch(`${api.baseUrl}/api/teams/${teamId}/join`, {
+        method: "POST",
+        headers: MEMBER_HEADERS,
+      });
+      expect(join.status).toBe(404);
+      expect(await join.json()).toEqual({ error: "team not found" });
+      expect(
+        await api.providers.db
+          .select()
+          .from(teamMembers)
+          .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, "test-member"))),
+      ).toEqual([]);
     });
 
     it("is idempotent for an existing membership and preserves its role", async () => {

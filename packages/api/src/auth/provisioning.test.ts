@@ -638,6 +638,21 @@ describe("buildAuthHooks", () => {
       expect(await db.select().from(teamMembers).where(eq(teamMembers.userId, ssoUser.id))).toEqual([]);
     });
 
+    it("rejects non-admin and deeper subgroup paths", async () => {
+      await seedIdpTeam("team_platform", "/platform");
+      const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });
+
+      await provisionUser({
+        user: ssoUser,
+        userInfo: {
+          groups: ["/platform/notadmins", "/platform/admins/deeper"],
+          groups_asserted: "true",
+        },
+      });
+
+      expect(await eligibleIds()).toEqual([]);
+    });
+
     it("clears stale eligibility when the claim is absent", async () => {
       await seedIdpTeam("team_platform", "/platform");
       const { provisionUser } = buildAuthHooks({ db, cfg: ssoConfig(), credentialStore });

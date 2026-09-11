@@ -1,6 +1,7 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { AUTH_SESSION_LIFETIME_SECONDS } from "../auth/config.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { teamJoinEligibilities, teamMembers, teams } from "../schema/index.js";
+import { orgMembers, teamJoinEligibilities, teamMembers, teams } from "../schema/index.js";
 import type { TeamClaim } from "./team-sync.js";
 
 export interface SuggestedTeam {
@@ -38,20 +39,21 @@ export async function refreshTeamJoinEligibility(
   opts: { orgId: string; userId: string; claim: TeamClaim; adminGroupName: string },
 ): Promise<number> {
   const paths = eligibleTeamPaths(opts.claim, opts.adminGroupName);
-  const candidates = paths.length === 0
-    ? []
-    : await db
-        .select({ teamId: teams.id })
-        .from(teams)
-        .where(
-          and(
-            eq(teams.orgId, opts.orgId),
-            eq(teams.origin, "idp"),
-            inArray(teams.externalId, paths),
-          ),
-        );
+  return db.transaction(async (tx) => {
+    const candidates = paths.length === 0
+      ? []
+      : await tx
+          .select({ teamId: teams.id })
+          .from(teams)
+          .where(
+            and(
+              eq(teams.orgId, opts.orgId),
+              eq(teams.origin, "idp"),
+              inArray(teams.externalId, paths),
+            ),
+          )
+          .for("share");
 
-  await db.transaction(async (tx) => {
     await tx.delete(teamJoinEligibilities).where(eq(teamJoinEligibilities.userId, opts.userId));
     if (candidates.length > 0) {
       const observedAt = Date.now();
@@ -59,8 +61,8 @@ export async function refreshTeamJoinEligibility(
         candidates.map(({ teamId }) => ({ teamId, userId: opts.userId, observedAt })),
       );
     }
+    return candidates.length;
   });
-  return candidates.length;
 }
 
 /** Lists only eligible teams in this org that the current user has not joined. */
@@ -69,6 +71,7 @@ export async function listSuggestedTeams(
   orgId: string,
   userId: string,
 ): Promise<SuggestedTeam[]> {
+  const freshAfter = Date.now() - AUTH_SESSION_LIFETIME_SECONDS * 1000;
   return db
     .select({
       id: teams.id,
@@ -84,10 +87,15 @@ export async function listSuggestedTeams(
         eq(teams.origin, "idp"),
       ),
     )
+    .innerJoin(
+      orgMembers,
+      and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)),
+    )
     .leftJoin(teamMembers, eq(teamMembers.teamId, teams.id))
     .where(
       and(
         eq(teamJoinEligibilities.userId, userId),
+        gt(teamJoinEligibilities.observedAt, freshAfter),
         sql`not exists (
           select 1 from ${teamMembers} membership
           where membership.team_id = ${teams.id} and membership.user_id = ${userId}
@@ -106,6 +114,7 @@ export async function joinEligibleTeam(
   db: AppDb,
   opts: { orgId: string; userId: string; teamId: string },
 ): Promise<boolean> {
+  const freshAfter = Date.now() - AUTH_SESSION_LIFETIME_SECONDS * 1000;
   return db.transaction(async (tx) => {
     const eligible = await tx
       .select({ teamId: teams.id })
@@ -118,13 +127,22 @@ export async function joinEligibleTeam(
           eq(teams.origin, "idp"),
         ),
       )
+      .innerJoin(
+        orgMembers,
+        and(
+          eq(orgMembers.orgId, opts.orgId),
+          eq(orgMembers.userId, opts.userId),
+        ),
+      )
       .where(
         and(
           eq(teamJoinEligibilities.userId, opts.userId),
           eq(teamJoinEligibilities.teamId, opts.teamId),
+          gt(teamJoinEligibilities.observedAt, freshAfter),
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!eligible[0]) return false;
 
     await tx

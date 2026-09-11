@@ -4,6 +4,9 @@
  * Pure function — no process.env reads inside the module.
  */
 
+/** Better Auth's documented default session lifetime, made explicit for eligibility expiry. */
+export const AUTH_SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 7;
+
 export interface AuthConfig {
   secret: string;
   baseUrl: string;
