@@ -682,7 +682,11 @@ describe('slack actions', () => {
     );
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toMatchObject({ username: 'Alice' });
+    const body = JSON.parse(init.body as string);
+    expect(body).toMatchObject({ username: 'Alice' });
+    // No configured picture keeps Slack's bot icon while preserving the
+    // assistant name. Slack has no safe generated icon URL fallback.
+    expect(body.icon_url).toBeUndefined();
     expect(result).toEqual({ success: true, data: { ts: '126.789', channel: 'C1' } });
   });
 

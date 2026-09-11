@@ -44,6 +44,7 @@ import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@v
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { qualifiedActionId } from "./action-id.js";
+import { assistantSenderIdentity, findDefaultAssistant } from "../assistants/service.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { actionInvocations } from "../schema/index.js";
@@ -394,7 +395,7 @@ async function computeResult(
     return { ok: false, error: prepared.error };
   }
 
-  const actionCtx = buildActionContext(req, ctx, credentials, action.id);
+  const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);
 
   const startedAt = (opts.clock ?? Date.now)();
   let result: PluginActionResult;
@@ -887,6 +888,7 @@ function buildActionContext(
   ctx: ActionInvocationContext,
   credentials: CredentialProvider,
   actionId: string,
+  db: AppDb,
 ): PluginActionContext {
   const sessionId = `wf:invoke:${req.invocationId}`;
   return {
@@ -901,6 +903,14 @@ function buildActionContext(
     // undefined rather than guessing at a value the type doesn't offer.
     summary: undefined,
     credentials,
+    // Workflow tool nodes have no live agent session. Resolve the run
+    // owner's configured default assistant at post time so Slack actions use
+    // the same identity as session-backed agent actions. No assistant, name,
+    // or avatar leaves Slack's bot identity unchanged.
+    resolveOutboundSender: async () => {
+      const assistant = await findDefaultAssistant(db, ctx.orgId, ctx.owner);
+      return assistant ? assistantSenderIdentity(assistant) : undefined;
+    },
     sandbox: throwingSandbox(sessionId),
     signal: AbortSignal.timeout(ACTION_TIMEOUT_MS),
     requestDecision: () =>

@@ -103,6 +103,7 @@ import {
 import {
   ArchivedAssistantError,
   assistantSenderIdentity,
+  findDefaultAssistant,
   loadAssistant,
   loadAssistantBySessionId,
 } from "../assistants/service.js";
@@ -2358,6 +2359,28 @@ export class EngineHost {
     return promise;
   }
 
+  /**
+   * Resolve the sender when an action posts outbound. The lookup stays at
+   * action time so profile edits apply to cached sessions.
+   */
+  private outboundSenderResolver(orgId: string, owner: Principal, assistantId?: string) {
+    const db = this.opts.db;
+    if (!db) return undefined;
+
+    return async () => {
+      try {
+        const assistant = assistantId
+          ? await loadAssistant(db, assistantId)
+          : await findDefaultAssistant(db, orgId, owner);
+        return assistant ? assistantSenderIdentity(assistant) : undefined;
+      } catch (err) {
+        const target = assistantId ?? owner.type + ":" + owner.id;
+        console.error("[engine-host] assistant identity lookup failed (assistant=" + target + ")", err);
+        return undefined;
+      }
+    };
+  }
+
   private async buildAssistantSession(
     sessionId: string,
     assistantId: string,
@@ -2488,6 +2511,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, [], behavior);
+    const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistantId);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -2497,15 +2521,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
-      resolveOutboundSender: async () => {
-        try {
-          const current = await loadAssistant(db, assistantId);
-          return current ? assistantSenderIdentity(current) : undefined;
-        } catch (err) {
-          console.error(`[engine-host] assistant identity lookup failed (assistant=${assistantId})`, err);
-          return undefined;
-        }
-      },
+      ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
       queueMode,
       sandbox: {
@@ -3467,6 +3483,10 @@ export class EngineHost {
     );
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const parentAssistant = this.opts.db
+      ? await loadAssistantBySessionId(this.opts.db, opts.parentSessionId)
+      : undefined;
+    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, parentAssistant?.id);
     // A child spawned with a repo binding (the spawner inserts the
     // `session_repos` row before calling in here) gets the same declarative
     // clone prep a REST-created session gets. Only this first build decides —
@@ -3542,6 +3562,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+      ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
@@ -3688,6 +3709,7 @@ export class EngineHost {
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -3697,6 +3719,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+      ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are
       // sandbox-less by default, like orchestrators. A session-node turn
