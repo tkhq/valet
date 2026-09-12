@@ -473,15 +473,17 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
     );
     return true;
   }
+  const pinned = isCommitSha(ref);
+  const command = pinned
+    ? `git checkout ${shQuote(ref)}`
+    : `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`;
   const checkout = await safeExecGrowRetry(
-    sandbox,
-    `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`,
-    { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
-    `git checkout -B ${ref} for ${binding.fullName}`,
+    sandbox, command, { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+    `git checkout ${ref} for ${binding.fullName}`,
   );
   if (checkout.exitCode !== 0) {
     console.error(
-      `workspace prep: git checkout -B ${ref} origin/${ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
+      `workspace prep: ${command} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
     );
   }
   return true;
@@ -551,12 +553,13 @@ async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): 
 }
 
 export async function prepBinding(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
+  const checkout = binding.resolvedRef ? { ...binding, ref: binding.resolvedRef } : binding;
   const hasGit = await dirHasGit(sandbox, dir);
   if (hasGit) {
-    await refreshExistingClone(sandbox, dir, binding);
+    await refreshExistingClone(sandbox, dir, checkout);
     return;
   }
-  await cloneFresh(sandbox, dir, binding);
+  await cloneFresh(sandbox, dir, checkout);
 }
 
 /**
@@ -644,9 +647,10 @@ export async function prepPrebuiltBinding(
   binding: RepoBinding,
   prebuild: { bakedSha: string; recipe: RecipeStep[] },
 ): Promise<void> {
+  const checkout = binding.resolvedRef ? { ...binding, ref: binding.resolvedRef } : binding;
   const hasGit = await dirHasGit(sandbox, dir);
   if (hasGit) {
-    await refreshExistingClone(sandbox, dir, binding);
+    await refreshExistingClone(sandbox, dir, checkout);
     return;
   }
   await stagePrebuiltRepo(sandbox, dir);
@@ -660,7 +664,7 @@ export async function prepPrebuiltBinding(
       `workspace prep: git remote set-url origin failed for ${binding.fullName} (${dir}) — continuing: ${setUrl.stderr || setUrl.stdout}`,
     );
   }
-  const fetched = await refreshStagedPrebuild(sandbox, dir, binding);
+  const fetched = await refreshStagedPrebuild(sandbox, dir, checkout);
   if (fetched) await conditionalReinstall(sandbox, dir, prebuild);
 }
 

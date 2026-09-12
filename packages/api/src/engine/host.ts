@@ -61,7 +61,11 @@ import {
   primaryRepoBinding,
   resolveSessionGitHubToken,
 } from "../services/session-github-token.js";
-import { repoCredentialCommands, repoPrebuildFlags, type RepoPrebuildFlags } from "../bakes/source-service.js";
+import {
+  repoCredentialCommands,
+  resolvedRepoPrebuildFlags,
+  type RepoPrebuildFlags,
+} from "../bakes/source-service.js";
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
@@ -504,7 +508,7 @@ export function primaryGitHubRepoTarget(repos: SessionMeta["repos"]): PrimaryGit
   if (host !== "github" && host !== "github.com") return { ok: false, reason: "non-github-host", host };
   const [owner, repo] = primary.fullName.split("/");
   if (!owner || !repo) return { ok: false, reason: "bad-full-name" };
-  return { ok: true, owner, repo, ref: primary.ref ?? "HEAD" };
+  return { ok: true, owner, repo, ref: primary.resolvedRef ?? primary.ref ?? "HEAD" };
 }
 
 /** A session build's model pair: the wire-ready pi-ai model object plus the
@@ -1966,7 +1970,18 @@ export class EngineHost {
             `EngineHost: resolveRepoPrebuildFlags: no GitHub token for session ${sessionId} (${err.message}) — attempting a tokenless read`,
           );
         }
-        const flags = await repoPrebuildFlags(fullDeps, token, owner, repoName, ref, controller.signal);
+        const { sha, flags } = await resolvedRepoPrebuildFlags(
+          fullDeps, token, owner, repoName, ref, controller.signal,
+        );
+        const primary = meta.repos?.[0];
+        if (primary && primary.resolvedRef !== sha) {
+          const rows = await db.update(sessionRepos)
+            .set({ resolvedRef: sha })
+            .where(and(eq(sessionRepos.sessionId, sessionId), eq(sessionRepos.position, 0)))
+            .returning({ resolvedRef: sessionRepos.resolvedRef });
+          if (rows[0]?.resolvedRef !== sha) throw new Error("primary repo snapshot was not persisted");
+          primary.resolvedRef = sha;
+        }
         // A tokenless 404 on a PRIVATE repo reads as "absent" — but under a
         // degrade that is not a trustworthy repo answer (the authenticated
         // read may have found the file). Relabel it so the log/metric show a
@@ -3398,6 +3413,8 @@ export class EngineHost {
       docker?: boolean;
       /** CPU and memory overrides for this child only. */
       resources?: PrebuildResources;
+      /** Non-fatal startup warnings returned by the task tool. */
+      startupWarnings?: string[];
       /**
        * The mode the spawner writes on the child's row. A child of a legacy
        * team orchestrator inherits `actor` and must resolve that way from
@@ -3434,6 +3451,8 @@ export class EngineHost {
       docker?: boolean;
       /** CPU and memory overrides for this child only. */
       resources?: PrebuildResources;
+      /** Non-fatal startup warnings returned by the task tool. */
+      startupWarnings?: string[];
       /**
        * The mode the spawner writes on the child's row. A child of a legacy
        * team orchestrator inherits `actor` and must resolve that way from
@@ -3568,6 +3587,11 @@ export class EngineHost {
     // claim while REST sessions honored the declaration. Best-effort: any
     // failure resolves the defaults.
     const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
+    if (repoFlags.outcome === "error") {
+      opts.startupWarnings?.push(
+        "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
+      );
+    }
     const dockerFlag = opts.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;

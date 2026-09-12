@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { generateKeyPairSync } from "node:crypto";
+import { buildSandboxManifest, SANDBOX_CR_API_VERSION } from "@valet/sandbox-kubernetes";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { RecordingSandboxProvider } from "../test-helpers/recording-sandbox.js";
@@ -24,6 +25,7 @@ import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { primaryGitHubRepoTarget } from "./host.js";
+import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import type { RepoBinding } from "../wire/types.js";
 import type { SandboxCapabilities } from "@valet/engine";
 
@@ -257,6 +259,89 @@ describe("childSessionFor repo prebuild flags", () => {
     const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
     expect(contentsCall?.authHeader).toBe("Bearer inst-111");
     expect(fixture.calls.filter((c) => c.path.includes("/contents/.valet/prebuild.yaml"))).toHaveLength(1);
+  });
+
+  it("pins mutable private-repo flags and checkout to one authenticated commit", async () => {
+    const oldSha = "9ae8720066b8af545eec68ad64789dd75b014687";
+    const newSha = "afbbbca285b504f6f43781f77c68817522c4bd4d";
+    const branch = "valet-arm64-solana-test-validator";
+    const movedYaml = "kubernetes: true\nresources:\n  memory: 8Gi\n";
+    let branchHead = oldSha;
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      getCommit: (_owner, _repo, ref) => ({ body: { sha: ref === branch ? branchHead : ref } }),
+      getContents: (_owner, _repo, path, ref) => {
+        if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+        return contentsBody(ref === newSha ? movedYaml : "kubernetes: false\n", `blob-${ref}`);
+      },
+    });
+    const recorder = new NestedRecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+    });
+    const { engineHost, db, engineCredentials } = api.providers;
+    await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+    const now = Date.now();
+    await db.insert(githubInstallations).values({
+      id: "ghi_mutable_flags", orgId: "local-org", installationId: 333, accountLogin: "tkhq",
+      accountType: "Organization", repositorySelection: "all", suspended: false,
+      cachedToken: null, cachedTokenExpiresAt: null, createdAt: now, updatedAt: now,
+    });
+    const parent = await engineHost.sessionFor("parent-mutable-flags", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp/parent-mutable-flags",
+    });
+    const deps = {
+      db, engineHost, engineStore: api.providers.engineStore,
+      prebuildService: api.providers.prebuildService, workspaceRoot: "/tmp",
+    };
+    const spawn = buildChildSpawner(deps, new ChildWatcher(deps));
+    const childIds: string[] = [];
+    for (const docker of [false, true]) {
+      const result = await spawn({
+        prompt: "test", repo: "tkhq/mono", branch, docker,
+        ...(docker ? { resources: { cpu: 2 } } : {}),
+      }, {
+        parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user", owner: { type: "user", id: "local-user" },
+      });
+      childIds.push(result.childSessionId);
+      await engineHost.liveSession(result.childSessionId)?.attachment.ensureReady({ timeoutMs: 5_000 });
+      branchHead = newSha;
+    }
+    const [firstId, secondId] = childIds;
+    const secondCall = recorder.createCalls.find((call) => call.sessionId === secondId);
+    expect(secondCall?.nestedKubernetes).toBe(true);
+    expect(secondCall?.resources).toEqual({ cpu: 2, memory: "8Gi" });
+    expect((await db.select({
+      kubernetes: agentSessions.kubernetes,
+      resources: agentSessions.sandboxResourceOverrides,
+    }).from(agentSessions).where(eq(agentSessions.id, secondId!)))[0]).toEqual({
+      kubernetes: true,
+      resources: { cpu: 2 },
+    });
+    const refs = await db.select({
+      sessionId: sessionRepos.sessionId, ref: sessionRepos.ref, resolvedRef: sessionRepos.resolvedRef,
+    }).from(sessionRepos);
+    expect(refs).toEqual(expect.arrayContaining([
+      { sessionId: firstId, ref: branch, resolvedRef: oldSha },
+      { sessionId: secondId, ref: branch, resolvedRef: newSha },
+    ]));
+    const contentsCalls = fixture.calls.filter((call) => call.path.includes("/contents/.valet/prebuild.yaml"));
+    expect(contentsCalls.map((call) => call.query.ref)).toEqual([oldSha, newSha]);
+    expect(contentsCalls.every((call) => call.authHeader === "Bearer inst-333")).toBe(true);
+    expect(fixture.calls.filter((call) => call.path.includes("/access_tokens"))).toHaveLength(1);
+
+    const manifest = buildSandboxManifest({
+      namespace: "test", defaultImage: "sandbox:test", apiVersion: SANDBOX_CR_API_VERSION,
+      dockerRuntimeClassName: "valet-docker",
+    }, secondId!, secondCall!);
+    expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual(expect.arrayContaining([
+      { name: "VALET_SANDBOX_KUBERNETES", value: "1" },
+      { name: "KUBECONFIG", value: "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml" },
+    ]));
   });
 
   it.each([null, { cpu: 2, memory: "4Gi" }])("an authenticated missing file applies saved defaults %j authoritatively", async (sandboxResources) => {
@@ -747,9 +832,13 @@ describe("childSessionFor repo prebuild flags", () => {
 
   it("a timed-out read is evicted so the next child retries", async () => {
     let contentReads = 0;
-    const fetchImpl: typeof fetch = (_input, init) => {
-      contentReads++;
+    const fetchImpl: typeof fetch = (input, init) => {
       expect(init?.signal).toBeInstanceOf(AbortSignal);
+      const url = new URL(String(input));
+      if (url.pathname.includes("/commits/")) {
+        return Promise.resolve(Response.json({ sha: "3".repeat(40) }));
+      }
+      contentReads++;
       if (contentReads === 1) return new Promise<Response>(() => {});
       return Promise.resolve(
         new Response(
@@ -797,9 +886,11 @@ describe("childSessionFor repo prebuild flags", () => {
       owner: { type: "user" as const, id: "local-user" },
     };
 
+    const firstWarnings: string[] = [];
     const first = await engineHost.childSessionFor("child-timeout-one", {
       ...childOpts,
       workspace: "/tmp/child-timeout-one",
+      startupWarnings: firstWarnings,
     });
     await first.attachment.ensureReady({ timeoutMs: 5_000 });
     const second = await engineHost.childSessionFor("child-timeout-two", {
@@ -809,6 +900,9 @@ describe("childSessionFor repo prebuild flags", () => {
     await second.attachment.ensureReady({ timeoutMs: 5_000 });
 
     expect(contentReads).toBe(2);
+    expect(firstWarnings).toEqual([
+      "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
+    ]);
     expect(recorder.createCalls.find((call) => call.sessionId === "child-timeout-one")?.workspaceStorage).toBeUndefined();
     expect(recorder.createCalls.find((call) => call.sessionId === "child-timeout-two")?.workspaceStorage).toBe("8Gi");
     errorSpy.mockRestore();

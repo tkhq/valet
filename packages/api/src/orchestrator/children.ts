@@ -14,7 +14,7 @@
  * bookkeeping here — see `arm`'s doc).
  */
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
@@ -285,32 +285,6 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // the caller's durable claim row names the session this spawn builds.
     const childSessionId = req.sessionId ?? newChildSessionId();
     const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
-    await mkdir(workspace, { recursive: true });
-
-    if (binding) {
-      // The binding row must land BEFORE the engine session is built —
-      // `buildChildSession` loads meta from `session_repos` to wire clone
-      // prep, and only the first build per cache lifetime decides that (see
-      // `loadSessionMeta`'s module doc). A `childSessionFor` failure below
-      // leaves this row orphaned for a session id that never runs; harmless.
-      await deps.db.insert(sessionRepos).values({
-        sessionId: childSessionId,
-        host: binding.host ?? "github",
-        fullName: binding.fullName,
-        cloneUrl: binding.cloneUrl,
-        ref: binding.ref ?? null,
-        auth: binding.auth ?? "auto",
-        position: 0,
-        targetDir: computeTargetDirs([binding])[0] ?? null,
-      });
-      // Zero-config generation (spec decision 13), same fire-and-forget as
-      // the REST create route — `ensureRepoSource` never throws.
-      void deps.prebuildService.ensureRepoSource(orgId, {
-        host: binding.host ?? "github",
-        fullName: binding.fullName,
-        cloneUrl: binding.cloneUrl,
-      });
-    }
 
     // A child resolves credentials the way its parent does. A team
     // orchestrator from before owner-mode resolution keeps acting as the
@@ -324,6 +298,58 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       .limit(1);
     const credentialOwnerMode = parentRows[0]?.credentialOwnerMode === "actor" ? "actor" : "owner";
 
+    // Commit the authoritative shape and repo binding together before the
+    // build. Capability persistence and SpecProvider both read these rows.
+    const now = Date.now();
+    await mkdir(workspace, { recursive: true });
+    try {
+      await deps.db.transaction(async (tx) => {
+        await tx.insert(agentSessions).values({
+          id: childSessionId,
+          userId: ctx.actorUserId,
+          orgId,
+          workspace,
+          title: req.title ?? null,
+          profile: req.profile ?? "headless",
+          docker: req.docker === true,
+          kubernetes: false,
+          sandboxResourceOverrides: req.resources ?? null,
+          status: "active",
+          ownerType: ctx.owner.type,
+          ownerId: ctx.owner.id,
+          credentialOwnerMode,
+          createdAt: now,
+          updatedAt: now,
+          lastActivityAt: now,
+        });
+        if (binding) {
+          await tx.insert(sessionRepos).values({
+            sessionId: childSessionId,
+            host: binding.host ?? "github",
+            fullName: binding.fullName,
+            cloneUrl: binding.cloneUrl,
+            ref: binding.ref ?? null,
+            auth: binding.auth ?? "auto",
+            position: 0,
+            targetDir: computeTargetDirs([binding])[0] ?? null,
+          });
+        }
+      });
+    } catch (error) {
+      await rm(workspace, { recursive: true, force: true });
+      throw error;
+    }
+
+    if (binding) {
+      // Zero-config generation (spec decision 13), same fire-and-forget as
+      // the REST create route — `ensureRepoSource` never throws.
+      void deps.prebuildService.ensureRepoSource(orgId, {
+        host: binding.host ?? "github",
+        fullName: binding.fullName,
+        cloneUrl: binding.cloneUrl,
+      });
+    }
+
     const childSession = await deps.engineHost.childSessionFor(childSessionId, {
       credentialOwnerMode,
       parentSessionId: ctx.parentSessionId,
@@ -336,31 +362,18 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       profile: req.profile,
       docker: req.docker,
       resources: req.resources,
-    });
-
-
-    const now = Date.now();
-    await deps.db
-      .insert(agentSessions)
-      .values({
-        id: childSessionId,
-        userId: ctx.actorUserId,
-        orgId,
-        workspace,
-        title: req.title ?? null,
-        // Persisted so a post-restart rebuild through the generic
-        // `sessionFor` (which reads the row) keeps the same sandbox shape.
-        profile: req.profile ?? "headless",
-        docker: req.docker === true,
-        sandboxResourceOverrides: req.resources ?? null,
-        status: "active",
-        ownerType: ctx.owner.type,
-        ownerId: ctx.owner.id,
-        credentialOwnerMode,
-        createdAt: now,
-        updatedAt: now,
-        lastActivityAt: now,
+      startupWarnings: warnings,
+    }).catch(async (error: unknown) => {
+      await deps.engineHost.destroy(childSessionId).catch((cleanupError: unknown) => {
+        console.error(`buildChildSpawner: failed to destroy partial child ${childSessionId}:`, cleanupError);
       });
+      await deps.db.transaction(async (tx) => {
+        await tx.delete(sessionRepos).where(eq(sessionRepos.sessionId, childSessionId));
+        await tx.delete(agentSessions).where(eq(agentSessions.id, childSessionId));
+      });
+      await rm(workspace, { recursive: true, force: true });
+      throw error;
+    });
 
     // No `author`: the parent AGENT composed this prompt, and `author`
     // means "the person who wrote this" — it renders as a `[from: …]` line

@@ -26,6 +26,7 @@ import {
   imageRefFor,
   slugify,
   repoPrebuildFlags,
+  resolvedRepoPrebuildFlags,
   clearRepoPrebuildFlagsCache,
   resolveChangedFiles,
   fetchRepoFile,
@@ -1914,6 +1915,32 @@ describe("repoPrebuildFlags", () => {
     // Second call — should be served from cache, no new HTTP call.
     await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
     expect(callCount).toBe(1);
+  });
+
+  it("snapshots concurrent mutable-ref reads at their resolved commits", async () => {
+    await fixture.close();
+    const oldSha = "1".repeat(40);
+    const newSha = "2".repeat(40);
+    let resolves = 0;
+    let contentsReads = 0;
+    fixture = startGithubFixture({
+      getCommit: () => ({ body: { sha: resolves++ === 0 ? oldSha : newSha } }),
+      getContents: (_owner, _repo, path, ref) => {
+        if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+        contentsReads++;
+        return { body: { content: b64(ref === newSha ? "kubernetes: true" : "kubernetes: false"), encoding: "base64" } };
+      },
+    });
+
+    const [oldRead, newRead] = await Promise.all([
+      resolvedRepoPrebuildFlags(deps(), "tok", "o", "r", "main"),
+      resolvedRepoPrebuildFlags(deps(), "tok", "o", "r", "main"),
+    ]);
+    expect(oldRead.sha).toBe(oldSha);
+    expect(oldRead.flags.kubernetes).toBeUndefined();
+    expect(newRead).toMatchObject({ sha: newSha, flags: { kubernetes: true } });
+    expect((await resolvedRepoPrebuildFlags(deps(), "tok", "o", "r", "main")).sha).toBe(newSha);
+    expect(contentsReads).toBe(2);
   });
 
   it("returns false when docker: false in the file", async () => {

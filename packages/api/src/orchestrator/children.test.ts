@@ -363,6 +363,33 @@ describe("buildChildSpawner", () => {
     expect(inheritedRow?.resources).toBeNull();
   });
 
+  it("removes the authoritative row, repo binding, and directory when the first build fails", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await api.providers.engineHost.sessionFor("parent-build-failure", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    vi.spyOn(deps.engineHost, "childSessionFor").mockRejectedValue(new Error("build failed"));
+
+    await expect(buildChildSpawner(deps, new ChildWatcher(deps))({
+      sessionId: "child-build-failure",
+      prompt: "work",
+      repo: "acme/widgets",
+      resources: { cpu: 2 },
+    }, {
+      parentSessionId: parent.id,
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      owner: { type: "user", id: "local-user" },
+    })).rejects.toThrow("build failed");
+
+    expect(await deps.db.select().from(agentSessions)
+      .where(eq(agentSessions.id, "child-build-failure"))).toHaveLength(0);
+    expect(await deps.db.select().from(sessionRepos)
+      .where(eq(sessionRepos.sessionId, "child-build-failure"))).toHaveLength(0);
+    expect(readdirSync(deps.workspaceRoot!)).toHaveLength(0);
+  });
+
   it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {
     // Isolated + customImage provider so buildSpecProvider wires image
     // resolution (resolveBaseImage consults the org's per-profile base bakes).

@@ -686,6 +686,7 @@ describe("pg app schema + migrations", () => {
         fullName: "acme/widgets",
         cloneUrl: "https://github.com/acme/widgets.git",
         ref: "main",
+        resolvedRef: null,
         auth: "auto",
         position: 0,
         targetDir: null,
@@ -895,6 +896,7 @@ describe("pg app schema + migrations", () => {
   // that database by dropping the columns, then re-run the migrations.
   describe("column repair for in-place 0000 edits", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
+      { table: "session_repos", column: "resolved_ref" },
       { table: "image_sources", column: "sandbox_resources" },
       { table: "skill_sources", column: "created_by" },
       { table: "skill_sources", column: "kinds" },

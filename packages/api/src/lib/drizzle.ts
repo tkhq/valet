@@ -220,6 +220,11 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "session_repos.resolved_ref column",
+    probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
+    sql: 'ALTER TABLE "session_repos" ADD COLUMN IF NOT EXISTS "resolved_ref" text',
+  },
+  {
     describe: "agent_sessions.kubernetes column",
     probe: { kind: "column", table: "agent_sessions", column: "kubernetes" },
     sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "kubernetes" boolean DEFAULT false NOT NULL',

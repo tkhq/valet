@@ -101,6 +101,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
       fullName: r.fullName,
       cloneUrl: r.cloneUrl,
       ref: r.ref ?? undefined,
+      resolvedRef: r.resolvedRef ?? undefined,
       auth: r.auth,
     }));
     // Check whether any row is missing a target_dir (legacy session).
