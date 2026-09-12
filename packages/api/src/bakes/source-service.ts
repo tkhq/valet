@@ -558,7 +558,7 @@ export async function repoPrebuildFlags(
       );
       // Not a repo answer — return defaults WITHOUT caching, so the next
       // session retries instead of inheriting a transient failure.
-      return { docker: false, kubernetes: false, outcome: "error" };
+      return { docker: false, outcome: "error" };
     }
     // Crude size cap: clear the whole map rather than LRU-evict. The map holds
     // at most ~1000 entries (owner/repo@ref strings + small objects), which is
@@ -1330,7 +1330,10 @@ export class SourceService {
     }
     const baseImage = await this.resolveBaseImage(source, resolved.image);
 
-    const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image, kubernetes: resolved.kubernetes };
+    const snapshot: RecipeSnapshot = {
+      recipe: resolved.recipe, setup: resolved.setup, image: resolved.image,
+      ...(resolved.kubernetes ? { kubernetes: true } : {}),
+    };
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
@@ -1372,7 +1375,7 @@ export class SourceService {
       baseImage,
       recipe: resolved.recipe,
       setup: resolved.setup.length > 0 ? resolved.setup : undefined,
-      kubernetes: resolved.kubernetes,
+      ...(resolved.kubernetes ? { kubernetes: true } : {}),
       imageRef,
       gitToken: gitToken.token ?? undefined,
     };

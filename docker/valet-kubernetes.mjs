@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, fstatSync,
+  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statfsSync, statSync, fstatSync,
   unlinkSync, writeFileSync, chmodSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -149,7 +149,7 @@ function identityValid(record) {
   } catch { return false; }
 }
 function ownerValid(owner) {
-  try { const now = procIdentity(owner.pid); return now.startTime === owner.startTime && now.bootId === owner.bootId && now.uid === owner.uid && owner.epoch === EPOCH; }
+  try { const now = procIdentity(owner.pid); return now.startTime === owner.startTime && now.bootId === owner.bootId && now.uid === 1500 && owner.uid === 1500 && owner.epoch === EPOCH; }
   catch { return false; }
 }
 function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
@@ -166,7 +166,7 @@ function withLock(shared, fn) {
     if (fstatSync(fd).uid !== 1500) throw Object.assign(new Error("The Kubernetes lock has unsafe ownership. Recreate the sandbox before retrying."), { exitCode: 21 });
     chmodSync(LOCK, 0o600); assertOwnedFile(LOCK, 0o600);
     const stdio = Array(fd + 1).fill("ignore"); stdio[fd] = fd;
-    const holder = spawn("/usr/bin/flock", ["--no-fork", shared ? "-s" : "-x", "-w", "30", String(fd), "/bin/sh", "-c", "kill -STOP $; exec sleep 2147483647"], { stdio });
+    const holder = spawn("/usr/bin/flock", ["--no-fork", shared ? "-s" : "-x", "-w", "30", String(fd), "/bin/sh", "-c", "kill -STOP $$; exec sleep 2147483647"], { stdio });
     const deadline = Date.now() + 31_000;
     while (Date.now() < deadline) {
       let state = "";
@@ -206,7 +206,7 @@ function checks() {
   check("kmsg", () => { const s = statSync("/dev/kmsg"); return s.isCharacterDevice() && s.rdev === 259; }, "Bind null 1:3 to /dev/kmsg in the RuntimeClass.");
   check("sysReadOnly", () => !commandOk(["/bin/sh", "-c", "touch /sys/.valet-write-test"]), "Mount the broad /sys path read-only.");
   check("cgroup", () => ["cpu", "cpuset", "memory", "pids"].every((v) => readFileSync("/sys/fs/cgroup/init/cgroup.controllers", "utf8").split(/\s+/).includes(v)), "Delegate cpu, cpuset, memory, and pids below /init.");
-  check("slirp4netns", () => realpathSync("/usr/bin/slirp4netns") === "/usr/bin/slirp4netns" && commandOk(["/usr/bin/dpkg-query", "-W", "-f=${Version}", "slirp4netns"]), "Install Debian Bookworm slirp4netns=1.2.0-1.");
+  check("slirp4netns", () => { const found = spawnSync("/usr/bin/dpkg-query", ["-W", "-f=${Version}", "slirp4netns"], { encoding: "utf8" }); return realpathSync("/usr/bin/slirp4netns") === "/usr/bin/slirp4netns" && found.status === 0 && found.stdout === "1.2.0-1"; }, "Install Debian Bookworm slirp4netns=1.2.0-1.");
   for (const tool of ["/usr/local/bin/k3s", "/usr/local/bin/kubectl", "/usr/bin/tini", "/usr/bin/flock"]) check(tool.split("/").pop(), () => statSync(tool).isFile(), "Rebuild the sandbox image from the normative lock.");
   return results;
 }
@@ -239,6 +239,13 @@ function prepareRoot() {
   if (storage.bavail * storage.bsize < MINIMUM_FREE_BYTES) throw Object.assign(new Error("The workspace has less than 2 GiB free. Free space, then retry."), { exitCode: 20 });
 }
 function operation(type) { return { type, id: randomUUID(), cancelRequested: false, deadline: Date.now() + 600_000, epoch: EPOCH, owner: procIdentity(process.pid) }; }
+function cleanupStaged(operationId) {
+  if (!/^[0-9a-f-]{36}$/i.test(operationId) || !existsSync(ROOT)) return;
+  const prefix = `.import-${operationId}-`;
+  for (const name of readdirSync(ROOT)) if (name.startsWith(prefix) && (name.endsWith(".tar") || name.endsWith(".tar.result"))) {
+    try { unlinkSync(join(ROOT, name)); } catch {}
+  }
+}
 function normalizeKubeconfig() {
   chmodSync(KUBECONFIG, 0o600);
   const env = { ...process.env, KUBECONFIG };
@@ -251,12 +258,13 @@ function normalizeKubeconfig() {
 function start() {
   const bad = Object.values(checks()).find((value) => !value.ok);
   if (bad) return fail(`${bad.action} Run valet-kubernetes diagnose for details.`, 20);
-  let op = null; let join = false; let alreadyRunning = false;
+  let op = null; let join = false; let alreadyRunning = false; let staleImportId = null;
   withLock(false, () => {
     prepareRoot();
     const current = readJson(OP_PATH, null);
     const pid = readJson(PID_PATH, null);
     const stored = readJson(STATUS_PATH, { state: "stopped" });
+    if (current?.type === "import" && !ownerValid(current.owner)) staleImportId = current.id;
     if (pid && recordLive(pid) && !identityValid(pid)) throw Object.assign(new Error("The server identity is not owned. Recreate the sandbox before cleanup."), { exitCode: 21 });
     if (current && ownerValid(current.owner)) {
       if (current.type === "start") { op = current; join = true; return; }
@@ -273,6 +281,7 @@ function start() {
     atomicJson(OP_PATH, op);
     atomicJson(STATUS_PATH, { state: "starting", error: null, epoch: EPOCH });
   });
+  if (staleImportId) cleanupStaged(staleImportId);
   if (alreadyRunning) {
     if (!readiness()) return fail("Kubernetes failed its readiness recheck. Run valet-kubernetes diagnose.", 4);
     if (!normalizeKubeconfig()) return fail("The kubeconfig context is invalid. Stop the cluster, then retry.", 22);
@@ -289,7 +298,7 @@ function start() {
     }
     return fail("The joined start did not become ready. Run valet-kubernetes diagnose.", 22);
   }
-  if (existsSync(SCOPE)) cleanupOwned();
+  if (existsSync(SCOPE) && !cleanupOwned()) throw Object.assign(new Error("The prior Kubernetes cgroup is unsafe or populated. Recreate the sandbox before retrying."), { exitCode: 21 });
   if (!join) {
     mkdirSync(SCOPE, { mode: 0o700 });
     const log = openSync(LOG_PATH, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY, 0o600); chmodSync(LOG_PATH, 0o600);
@@ -320,14 +329,17 @@ function start() {
     }
     sleep(1000);
   }
-  cleanupOwned();
+  const cleaned = cleanupOwned();
   let committed = false;
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
     if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
-    atomicJson(STATUS_PATH, { state: "error", error: "startup_timeout", epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
+    atomicJson(STATUS_PATH, { state: "error", error: cleaned ? "startup_timeout" : "startup_failed", epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
   });
-  return committed ? fail("Kubernetes startup timed out. Inspect server.log and run valet-kubernetes diagnose.", 22) : 4;
+  if (!committed) return 4;
+  return cleaned
+    ? fail("Kubernetes startup timed out. Inspect server.log and run valet-kubernetes diagnose.", 22)
+    : fail("Kubernetes startup cleanup did not drain its cgroup. Recreate the sandbox before retrying.", 21);
 }
 function processGone(pid) {
   try { return readFileSync(`/proc/${pid}/status`, "utf8").match(/^State:\s+(.)/m)?.[1] === "Z"; } catch { return true; }
@@ -340,11 +352,33 @@ function terminate(pid) {
   until = Date.now() + 2_000;
   while (Date.now() < until) { if (processGone(pid)) return; sleep(100); }
 }
+function ownedCgroups(path, result = []) {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== 1500) return null;
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const nested = ownedCgroups(join(path, entry.name), result);
+    if (!nested) return null;
+  }
+  result.push(path);
+  return result;
+}
 function cleanupOwned() {
+  if (!existsSync(SCOPE)) return true;
+  if (!ownedCgroups(SCOPE)) return false;
   const pid = readJson(PID_PATH, null); if (pid && identityValid(pid)) terminate(pid.pid);
-  try { writeFileSync(join(SCOPE, "cgroup.kill"), "1\n"); } catch {}
-  const until = Date.now() + 10_000; while (Date.now() < until) { try { if (/populated 0/.test(readFileSync(join(SCOPE, "cgroup.events"), "utf8"))) break; } catch { break; } }
-  spawnSync("/bin/rmdir", [SCOPE], { stdio: "ignore" });
+  try { writeFileSync(join(SCOPE, "cgroup.kill"), "1\n"); } catch { return false; }
+  const until = Date.now() + 10_000;
+  while (Date.now() < until) {
+    try { if (/^populated 0$/m.test(readFileSync(join(SCOPE, "cgroup.events"), "utf8"))) break; } catch { return false; }
+    sleep(100);
+  }
+  try {
+    if (!/^populated 0$/m.test(readFileSync(join(SCOPE, "cgroup.events"), "utf8"))) return false;
+    const paths = ownedCgroups(SCOPE); if (!paths) return false;
+    for (const path of paths) rmSync(path);
+    return true;
+  } catch { return false; }
 }
 function stop() {
   let stopped = false; let unsafe = false; let active = null;
@@ -354,19 +388,29 @@ function stop() {
     if (status.state === "stopped" && !pid && !existsSync(ROOT)) { stopped = true; return; }
     if (pid && recordLive(pid) && !identityValid(pid)) { unsafe = true; return; }
     active = readJson(OP_PATH, null);
-    if (active && ownerValid(active.owner)) { active.cancelRequested = true; atomicJson(OP_PATH, active); }
+    if (active && ownerValid(active.owner)) { active.cancelRequested = true; atomicJson(OP_PATH, active); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH }); }
   });
   if (stopped) return emit(statusKernel({ persisted: "stopped", identity: "dead", readiness: "unknown" }));
   if (unsafe) return fail("The server identity is not owned. Recreate the sandbox before cleanup.", 21);
-  if (active?.worker && recordLive(active.worker)) terminate(active.worker.pid);
+  if (active?.worker && ownerValid(active.worker)) terminate(active.worker.pid);
   if (active && ownerValid(active.owner)) {
     const deadline = Date.now() + 12_000;
     while (Date.now() < deadline && ownerValid(active.owner)) sleep(100);
     if (ownerValid(active.owner)) return fail("The active Kubernetes operation did not stop. Retry the command.", 24);
   }
-  const op = operation("stop");
-  withLock(false, () => { atomicJson(OP_PATH, op); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH }); });
-  cleanupOwned();
+  let op;
+  withLock(false, () => {
+    const current = readJson(OP_PATH, null);
+    if (current && ownerValid(current.owner)) throw Object.assign(new Error("Another Kubernetes operation became active. Retry stop."), { exitCode: 24 });
+    op = operation("stop"); atomicJson(OP_PATH, op); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH });
+  });
+  if (!cleanupOwned()) {
+    withLock(false, () => {
+      const claim = readJson(OP_PATH, null);
+      if (claim?.id === op.id && !claim.cancelRequested && ownerValid(claim.owner)) { atomicJson(STATUS_PATH, { state: "error", error: "stop_failed", epoch: EPOCH }); unlinkSync(OP_PATH); }
+    });
+    return fail("Kubernetes cleanup did not drain its owned cgroup. Retry stop.", 22);
+  }
   let committed = false;
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
@@ -391,7 +435,27 @@ function archiveKind(path) {
   if (names.includes("oci-layout") && names.includes("index.json")) return "oci";
   return null;
 }
+function recoverStaleImport() {
+  let stale = null; let recovery = null; let leaderReady = false;
+  withLock(false, () => {
+    const claim = readJson(OP_PATH, null);
+    if (!claim || claim.type !== "import" || ownerValid(claim.owner)) return;
+    const pid = readJson(PID_PATH, null);
+    leaderReady = Boolean(pid && identityValid(pid) && readJson(STATUS_PATH, {}).state === "ready");
+    stale = claim; recovery = operation("import"); atomicJson(OP_PATH, recovery);
+  });
+  if (!stale) return;
+  if (stale.worker && ownerValid(stale.worker)) terminate(stale.worker.pid);
+  cleanupStaged(stale.id);
+  withLock(false, () => {
+    const claim = readJson(OP_PATH, null);
+    if (claim?.id !== recovery.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
+    atomicJson(STATUS_PATH, { state: leaderReady ? "ready" : "error", error: leaderReady ? null : "import_owner_lost", epoch: EPOCH });
+    unlinkSync(OP_PATH);
+  });
+}
 function importArchives(paths) {
+  recoverStaleImport();
   const snapshot = withLock(true, () => stateSnapshot());
   if (stateReport(snapshot.stored.state === "ready" && readiness() ? "ready" : "failed", snapshot).exit !== 0) {
     return fail("Kubernetes is not ready. Run valet-kubernetes start, then retry.", 4);
@@ -400,6 +464,9 @@ function importArchives(paths) {
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
     if (claim && ownerValid(claim.owner)) throw Object.assign(new Error("Another Kubernetes operation is active. Retry after it finishes."), { exitCode: 24 });
+    const status = readJson(STATUS_PATH, { state: "stopped" });
+    const pid = readJson(PID_PATH, null);
+    if (status.state !== "ready" || !pid || !identityValid(pid)) throw Object.assign(new Error("Kubernetes is not ready. Run valet-kubernetes start, then retry."), { exitCode: 4 });
     if (claim) unlinkSync(OP_PATH);
     op = operation("import"); atomicJson(OP_PATH, op);
   });
