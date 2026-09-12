@@ -6,6 +6,7 @@
  * pullable before booting a sandbox from it). Only `fetch` I/O, no db.
  */
 import { pushRefFor } from "./k8s-builder.js";
+import { recordRegistryOperation, recordRegistryReconciliation } from "../observability/prebuild-lifecycle.js";
 
 /** The `Accept` header sent on the manifest HEAD. BuildKit pushes OCI
  * manifests (`application/vnd.oci.image.*`) by DEFAULT, so an Accept limited
@@ -52,13 +53,19 @@ export async function headRegistryManifest(
   if (!parsed) return null;
   const { host, name, tag } = parsed;
   const scheme = insecure ? "http" : "https";
+  const startedAt = Date.now();
   try {
-    return await fetchImpl(`${scheme}://${host}/v2/${name}/manifests/${tag}`, {
+    const response = await fetchImpl(`${scheme}://${host}/v2/${name}/manifests/${tag}`, {
       method: "HEAD",
       headers: { Accept: MANIFEST_ACCEPT },
       ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
-  } catch {
+    const outcome = response.ok ? "success" : response.status === 404 ? "missing" : response.status === 401 || response.status === 403 ? "auth" : "error";
+    recordRegistryOperation("lookup", outcome, Date.now() - startedAt);
+    return response;
+  } catch (error) {
+    const outcome = error instanceof Error && error.name === "TimeoutError" ? "timeout" : "error";
+    recordRegistryOperation("lookup", outcome, Date.now() - startedAt);
     return null;
   }
 }
@@ -104,7 +111,13 @@ export async function prebuildImagePullable(imageRef: string, opts: PrebuildPref
     opts.registryInsecure,
     opts.timeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS,
   );
-  if (res === null) return false;
+  if (res === null) {
+    recordRegistryReconciliation("unavailable");
+    return false;
+  }
+  if (res.status === 404) recordRegistryReconciliation("missing");
+  else if (res.status === 401 || res.status === 403) recordRegistryReconciliation("auth_unknown");
+  else recordRegistryReconciliation(res.ok ? "present" : "unavailable");
   // 401/403 means "this credential-less preflight can't tell", NOT "absent":
   // against a credentialed external registry the kubelet holds the
   // pullSecret and may well pull fine — treat auth rejections as pullable

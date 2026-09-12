@@ -1,0 +1,96 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: valet-prebuilds
+    folder: Valet
+    interval: 1m
+    rules:
+      - uid: valet-prebuild-stuck-queue
+        title: Valet prebuild queue is stuck
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(valet_prebuild_queue_depth) > 0 and (sum(increase(valet_prebuild_builds_total{outcome="started"}[15m])) or vector(0)) == 0'
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model: &threshold
+              expression: A
+              type: threshold
+              refId: C
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }
+                  type: query
+        noDataState: OK
+        execErrState: Alerting
+        for: 10m
+        annotations:
+          summary: The prebuild queue has work but no bake has started for 15 minutes.
+        labels: { severity: warning }
+      - uid: valet-prebuild-failures
+        title: Valet prebuild failures are sustained
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(rate(valet_prebuild_builds_total{outcome="failed"}[15m])) / clamp_min(sum(rate(valet_prebuild_builds_total{outcome=~"succeeded|failed"}[15m])), 0.001) > 0.2'
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model: *threshold
+        noDataState: OK
+        execErrState: Alerting
+        for: 15m
+        annotations:
+          summary: More than 20 percent of terminal prebuilds failed for 15 minutes.
+        labels: { severity: warning }
+      - uid: valet-prebuild-queue-age
+        title: Valet prebuild queue age is excessive
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max(valet_prebuild_queue_oldest_age_seconds) > 900'
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model: *threshold
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: A prebuild has remained queued for more than 15 minutes.
+        labels: { severity: warning }
+      - uid: valet-prebuild-registry-divergence
+        title: Valet bake state differs from registry state
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(valet_prebuild_registry_reconciliations_total{outcome="missing"}[10m])) > 0'
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model: *threshold
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: A session preflight found that a bake image is missing from the registry.
+        labels: { severity: critical }

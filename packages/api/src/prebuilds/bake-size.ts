@@ -8,6 +8,7 @@
 import type { SpawnFn } from "./docker-builder.js";
 import { parseRegistryImageRef, MANIFEST_ACCEPT } from "./registry.js";
 import { pushRefFor } from "./k8s-builder.js";
+import { recordRegistryOperation } from "../observability/prebuild-lifecycle.js";
 
 export interface BakeSizeDeps {
   spawnFn: SpawnFn;
@@ -70,22 +71,33 @@ async function measureK8sSize(imageRef: string, deps: BakeSizeDeps): Promise<num
   const { host, name, tag } = parsed;
   const scheme = deps.registryInsecure ? "http" : "https";
   let res: Response;
+  const startedAt = Date.now();
   try {
     res = await deps.fetchImpl(`${scheme}://${host}/v2/${name}/manifests/${tag}`, {
       headers: { Accept: MANIFEST_ACCEPT },
     });
   } catch {
+    recordRegistryOperation("size", "error", Date.now() - startedAt);
     return null;
   }
-  if (!res.ok) return null;
+  if (!res.ok) {
+    const outcome = res.status === 404 ? "missing" : res.status === 401 || res.status === 403 ? "auth" : "error";
+    recordRegistryOperation("size", outcome, Date.now() - startedAt);
+    return null;
+  }
   let body: unknown;
   try {
     body = await res.json();
   } catch {
     return null;
   }
-  if (!isManifestSize(body)) return null;
-  return body.config.size + body.layers.reduce((sum, l) => sum + l.size, 0);
+  if (!isManifestSize(body)) {
+    recordRegistryOperation("size", "error", Date.now() - startedAt);
+    return null;
+  }
+  const size = body.config.size + body.layers.reduce((sum, l) => sum + l.size, 0);
+  recordRegistryOperation("size", "success", Date.now() - startedAt, size);
+  return size;
 }
 
 /**
