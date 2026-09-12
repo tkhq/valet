@@ -1,7 +1,8 @@
 import { Fragment, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
-import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch } from "~/components/primitives";
+import { BakeQueuePanel } from "~/components/settings/bake-queue-panel";
 import { Section } from "~/components/settings/section";
 import { RepoSandboxResourcesForm } from "~/components/settings/repo-sandbox-resources-form";
 import { ApiError } from "~/api/client";
@@ -26,26 +27,31 @@ import {
  * `OrgRouteGuard` — no per-section admin re-check needed.
  */
 export function SourcesSection() {
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<RepoSort>("name");
   const sourcesQ = useSources();
   const sources = sourcesQ.data?.sources ?? [];
   const builderAvailable = sourcesQ.data?.builderAvailable ?? false;
 
   const baseSource = sources.find((s) => s.kind === "base");
   const repoSources = sources.filter((s) => s.kind === "repo");
+  const query = search.trim().toLowerCase();
+  const sortedRepos = repoSources.sort((a, b) => {
+    const byName = (a.repoFullName ?? a.name).localeCompare(b.repoFullName ?? b.name);
+    if (sort === "recent") return (b.lastBoundAt ?? 0) - (a.lastBoundAt ?? 0) || byName;
+    if (sort === "status") return repoStatus(a).order - repoStatus(b).order || byName;
+    return sort === "name-desc" ? -byName : byName;
+  });
+  const visibleRepoIds = new Set(
+    sortedRepos
+      .filter((source) => (source.repoFullName ?? source.name).toLowerCase().includes(query))
+      .map((source) => source.id),
+  );
   const externalSources = sources.filter((s) => s.kind === "external");
 
   return (
     <div className="space-y-10">
-      {/* Builder-unavailable banner */}
-      {sourcesQ.data && !builderAvailable && (
-        <div
-          role="status"
-          className="rounded border border-line bg-ink-wash px-3 py-2 text-sm text-muted"
-        >
-          Image builds are unavailable on this deployment. Contact your administrator to wire an image builder.
-        </div>
-      )}
-
+      <BakeQueuePanel />
       {/* ── Base image ─────────────────────────────────────────────────── */}
       <Section
         title="Base image"
@@ -70,15 +76,54 @@ export function SourcesSection() {
         description="Per-repo images pre-built from a repo's dependencies. Sessions boot without a cold install."
       >
         {sourcesQ.data && (
-          <div className="divide-y divide-line">
+          <div className="space-y-3">
+            {repoSources.length > 0 && (
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted" aria-hidden />
+                  <Input
+                    type="search"
+                    aria-label="Search repositories"
+                    placeholder="Search repositories…"
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    className="pl-9"
+                  />
+                </div>
+                <SelectMenu
+                  value={sort}
+                  options={REPO_SORT_OPTIONS}
+                  onChange={setSort}
+                  triggerLabel={
+                    <>
+                      <ArrowDownUp className="h-3.5 w-3.5" aria-hidden />
+                      Sort: {REPO_SORT_OPTIONS.find((option) => option.value === sort)?.label}
+                    </>
+                  }
+                />
+              </div>
+            )}
             {repoSources.length === 0 ? (
               <p className="py-4 text-sm text-muted">
                 Repository images appear automatically when a session binds a repo.
               </p>
             ) : (
-              repoSources.map((source) => (
-                <RepoSourceRow key={source.id} source={source} builderAvailable={builderAvailable} />
-              ))
+              <>
+                <p className="text-xs text-muted" aria-live="polite">
+                  {visibleRepoIds.size} of {repoSources.length} repositories
+                </p>
+                <div className="divide-y divide-line rounded-lg border border-line">
+                  {visibleRepoIds.size === 0 && (
+                    <div className="space-y-2 p-6 text-center">
+                      <p className="text-sm text-muted">No repositories match your search.</p>
+                      <Button variant="ghost" size="sm" onClick={() => setSearch("")}>Clear search</Button>
+                    </div>
+                  )}
+                  {sortedRepos.map((source) => (
+                    <RepoSourceRow key={source.id} source={source} builderAvailable={builderAvailable} visible={visibleRepoIds.has(source.id)} />
+                  ))}
+                </div>
+              </>
             )}
           </div>
         )}
@@ -237,6 +282,26 @@ function BaseImageCard({
 
 // ── Repository source row ─────────────────────────────────────────────────────
 
+type RepoSort = "name" | "name-desc" | "recent" | "status";
+const REPO_SORT_OPTIONS: { value: RepoSort; label: string }[] = [
+  { value: "name", label: "Name A–Z" },
+  { value: "name-desc", label: "Name Z–A" },
+  { value: "recent", label: "Recently used" },
+  { value: "status", label: "Build status" },
+];
+
+const REPO_STATUS: Record<BakeSummary["status"], { label: string; variant: "accent" | "neutral" | "success" | "danger"; order: number }> = {
+  building: { label: "Building", variant: "accent", order: 0 },
+  queued: { label: "Build queued", variant: "neutral", order: 1 },
+  failed: { label: "Build failed", variant: "danger", order: 2 },
+  pushed: { label: "Built", variant: "success", order: 3 },
+};
+
+function repoStatus(source: SourceSummary) {
+  if (source.latestBake) return REPO_STATUS[source.latestBake.status];
+  return { label: source.latestBake === null ? "Not built" : "Status unavailable", variant: "neutral" as const, order: 4 };
+}
+
 // A repo source is "decayed" when it is disabled and has not been used in
 // 30 days (30 * 24 * 60 * 60 * 1000 ms). Show a quiet indicator rather than
 // hiding the row — admins may want to re-enable without re-triggering a bind.
@@ -245,16 +310,22 @@ const DECAY_MS = 30 * 24 * 60 * 60 * 1000;
 function RepoSourceRow({
   source,
   builderAvailable,
+  visible,
 }: {
   source: SourceSummary;
   builderAvailable: boolean;
+  visible: boolean;
 }) {
   const patchSource = usePatchSource();
   const bakeSource = useBakeSource();
-  const [showBakes, setShowBakes] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [hasExpanded, setHasExpanded] = useState(false);
+  const status = repoStatus(source);
+  const repoName = source.repoFullName ?? source.name;
+  const detailsId = `repo-details-${source.id}`;
   const [bakeError, setBakeError] = useState<string | null>(null);
 
-  const bakesQ = useSourceBakes(source.id, { enabled: showBakes });
+  const bakesQ = useSourceBakes(source.id, { enabled: expanded && visible });
 
   const isDecayed =
     !source.enabled &&
@@ -272,14 +343,17 @@ function RepoSourceRow({
   }
 
   return (
-    <div className="space-y-2 py-3">
-      <div className="flex items-center justify-between gap-3">
+    <div hidden={!visible} className="space-y-3 p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium text-ink">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-all text-sm font-medium text-ink">
               {source.repoFullName ?? source.name}
             </span>
-            <Badge variant="neutral">auto</Badge>
+            <Badge variant={status.variant} className="shrink-0 gap-1.5 rounded-full px-2" role="status">
+              <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+              {status.label}
+            </Badge>
           </div>
           {isDecayed && (
             <p className="mt-0.5 text-xs text-muted">paused — repo unused</p>
@@ -308,27 +382,41 @@ function RepoSourceRow({
             {bakeSource.isPending ? "Starting…" : "Bake now"}
           </Button>
 
-          <button
+          <Button
             type="button"
-            onClick={() => setShowBakes((v) => !v)}
-            aria-expanded={showBakes}
-            className="text-xs font-medium text-muted underline-offset-2 hover:text-ink hover:underline"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setExpanded((value) => !value);
+              setHasExpanded(true);
+            }}
+            aria-label={`Details for ${repoName}`}
+            aria-expanded={expanded}
+            aria-controls={detailsId}
           >
-            {showBakes ? "Hide history" : "History"}
-          </button>
+            Details
+            {expanded ? <ChevronDown className="h-4 w-4" aria-hidden /> : <ChevronRight className="h-4 w-4" aria-hidden />}
+          </Button>
         </div>
       </div>
 
       {bakeError && <p className="text-xs text-danger-500">{bakeError}</p>}
 
-      <RepoSandboxResourcesForm source={source} />
-
-      {showBakes && (
-        <BakeHistoryTable
-          bakes={bakesQ.data?.bakes ?? []}
-          loading={bakesQ.isLoading}
-        />
-      )}
+      <div id={detailsId} hidden={!expanded}>
+        {hasExpanded && (
+          <div className="space-y-5 border-t border-line pt-4">
+            <RepoSandboxResourcesForm source={source} />
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium text-ink">Sandbox history</h3>
+              {bakesQ.error ? (
+                <p className="text-xs text-danger-500">History could not load. Close and reopen Details to retry.</p>
+              ) : (
+                <BakeHistoryTable bakes={bakesQ.data?.bakes ?? []} loading={bakesQ.isLoading} />
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

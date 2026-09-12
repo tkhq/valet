@@ -21,6 +21,8 @@ let sourcesLoading = false;
 let sourcesError = false;
 
 vi.mock("~/api/sources", () => ({
+  useBakeQueue: () => ({ data: { builderAvailable: sourcesData?.builderAvailable ?? true, reorderAvailable: true, running: [], queued: [], recent: [], blocked: [] }, error: null, isLoading: false }),
+  useReorderBakeQueue: () => ({ mutate: vi.fn(), isPending: false }),
   useSources: () => ({
     data: sourcesData,
     isLoading: sourcesLoading,
@@ -88,6 +90,11 @@ describe("SourcesSection", () => {
     sourcesError = false;
   });
 
+  it("puts the bake queue before the base image settings", () => {
+    render(<SourcesSection />);
+    expect(screen.getAllByRole("heading")[0].textContent).toContain("Bake queue");
+  });
+
   // ── Loading / error ──────────────────────────────────────────────────────
 
   it("shows a loading spinner while sources load", () => {
@@ -110,7 +117,7 @@ describe("SourcesSection", () => {
     sourcesData = { sources: [], builderAvailable: false };
     render(<SourcesSection />);
     expect(
-      screen.getByText(/Image builds are unavailable on this deployment/),
+      screen.getByText(/Image builds are unavailable/),
     ).toBeTruthy();
   });
 
@@ -118,7 +125,7 @@ describe("SourcesSection", () => {
     sourcesData = { sources: [], builderAvailable: true };
     render(<SourcesSection />);
     expect(
-      screen.queryByText(/Image builds are unavailable on this deployment/),
+      screen.queryByText(/Image builds are unavailable/),
     ).toBeNull();
   });
 
@@ -211,13 +218,13 @@ describe("SourcesSection", () => {
     ).toBeTruthy();
   });
 
-  it("repo row: shows repo name, auto badge, and enabled switch", () => {
+  it("repo row: shows repo name, status pill, and enabled switch", () => {
     const repo = makeSource({ id: "src_repo_1", kind: "repo", repoFullName: "acme/widgets" });
     sourcesData = { sources: [repo], builderAvailable: true };
     render(<SourcesSection />);
 
     expect(screen.getByText("acme/widgets")).toBeTruthy();
-    expect(screen.getByText("auto")).toBeTruthy();
+    expect(screen.getByText("Status unavailable")).toBeTruthy();
     expect(screen.getByLabelText("Enable bakes for acme/widgets")).toBeTruthy();
   });
 
@@ -226,11 +233,12 @@ describe("SourcesSection", () => {
     sourcesData = { sources: [repo], builderAvailable: false };
     render(<SourcesSection />);
 
+    fireEvent.click(screen.getByRole("button", { name: "Details for acme/widgets" }));
     expect((screen.getByLabelText("CPU cores for acme/widgets") as HTMLInputElement).disabled).toBe(false);
     expect((screen.getByLabelText("Memory for acme/widgets") as HTMLInputElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Save resources" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Bake now" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "History" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Details for acme/widgets" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("repo row: toggling the enabled switch PATCHes the source", () => {
@@ -280,10 +288,84 @@ describe("SourcesSection", () => {
     };
     render(<SourcesSection />);
 
-    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    fireEvent.click(screen.getByRole("button", { name: "Details for acme/widgets" }));
 
     await waitFor(() => expect(screen.getAllByText("pushed").length).toBeGreaterThan(0));
     expect(screen.getByText("abcdef1")).toBeTruthy();
+  });
+
+  it("keeps resources and history collapsed together and preserves resource edits", () => {
+    sourcesData = { sources: [makeSource()], builderAvailable: true };
+    render(<SourcesSection />);
+    expect(screen.queryByLabelText("CPU cores for acme/widgets")).toBeNull();
+    expect(screen.queryByText("No bakes yet.")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Details for acme/widgets" });
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByLabelText("CPU cores for acme/widgets"), { target: { value: "4" } });
+    expect(screen.getByText("Sandbox history")).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("button", { name: "Save resources" })).toBeNull();
+    fireEvent.click(toggle);
+    expect((screen.getByLabelText("CPU cores for acme/widgets") as HTMLInputElement).value).toBe("4");
+  });
+
+  it("preserves resource drafts and expanded details when search hides a repository", () => {
+    sourcesData = { sources: [makeSource()], builderAvailable: true };
+    render(<SourcesSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Details for acme/widgets" }));
+    fireEvent.change(screen.getByLabelText("CPU cores for acme/widgets"), { target: { value: "4" } });
+    const search = screen.getByRole("searchbox", { name: "Search repositories" });
+    fireEvent.change(search, { target: { value: "missing" } });
+    expect(screen.queryByRole("button", { name: "Save resources" })).toBeNull();
+    fireEvent.change(search, { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Details for acme/widgets" }).getAttribute("aria-expanded")).toBe("true");
+    expect((screen.getByLabelText("CPU cores for acme/widgets") as HTMLInputElement).value).toBe("4");
+  });
+
+  it("searches repository names without case or surrounding whitespace and clears no matches", () => {
+    sourcesData = { sources: [makeSource(), makeSource({ id: "other", repoFullName: "acme/api" })], builderAvailable: true };
+    render(<SourcesSection />);
+    const search = screen.getByRole("searchbox", { name: "Search repositories" });
+    fireEvent.change(search, { target: { value: " WIDGET " } });
+    expect(screen.getByText("acme/widgets")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Details for acme/api" })).toBeNull();
+    fireEvent.change(search, { target: { value: "missing" } });
+    expect(screen.getByText("No repositories match your search.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(screen.getByText("acme/api")).toBeTruthy();
+  });
+
+  it("sorts repository rows by name and recent use", async () => {
+    sourcesData = { sources: [makeSource({ lastBoundAt: 2000 }), makeSource({ id: "other", repoFullName: "acme/api", lastBoundAt: 1000 })], builderAvailable: true };
+    render(<SourcesSection />);
+    const names = () => screen.getAllByRole("button", { name: /^Details for / }).map((button) => button.getAttribute("aria-label"));
+    expect(names()).toEqual(["Details for acme/api", "Details for acme/widgets"]);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Sort: Name/ }));
+    await user.click(screen.getByRole("menuitem", { name: "Recently used" }));
+    expect(names()).toEqual(["Details for acme/widgets", "Details for acme/api"]);
+  });
+
+  it("updates collapsed status after a refresh and sorts active builds first", async () => {
+    sourcesData = { sources: [makeSource({ latestBake: { status: "pushed", createdAt: 1 } }), makeSource({ id: "other", repoFullName: "acme/zebra", latestBake: { status: "building", createdAt: 2 } })], builderAvailable: true };
+    const { rerender } = render(<SourcesSection />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Sort: Name/ }));
+    await user.click(screen.getByRole("menuitem", { name: "Build status" }));
+    expect(screen.getAllByRole("button", { name: /^Details for / })[0].getAttribute("aria-label")).toBe("Details for acme/zebra");
+    sourcesData = { sources: [makeSource({ latestBake: null })], builderAvailable: true };
+    rerender(<SourcesSection />);
+    expect(screen.getByText("Not built")).toBeTruthy();
+    expect(screen.queryByText("Built")).toBeNull();
+  });
+
+  it.each([
+    ["pushed", "Built"], ["building", "Building"], ["queued", "Build queued"], ["failed", "Build failed"],
+  ] as const)("shows %s status while collapsed", (status, label) => {
+    sourcesData = { sources: [makeSource({ latestBake: { status, createdAt: 1000 } })], builderAvailable: true };
+    render(<SourcesSection />);
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(screen.queryByText("Sandbox history")).toBeNull();
   });
 
   // ── External images ───────────────────────────────────────────────────────

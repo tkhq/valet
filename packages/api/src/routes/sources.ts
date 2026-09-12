@@ -96,7 +96,41 @@ sourcesRouter.get("/", async (c) => {
     .select()
     .from(imageSources)
     .where(eq(imageSources.orgId, c.var.user.orgId));
-  return c.json({ sources: rows, builderAvailable: prebuildService.builderBackend !== null });
+  // One summary per source keeps collapsed rows current without loading build logs.
+  const latestBakes = await db
+    .selectDistinctOn([bakes.sourceId], {
+      sourceId: bakes.sourceId,
+      status: bakes.status,
+      createdAt: bakes.createdAt,
+    })
+    .from(bakes)
+    .innerJoin(imageSources, eq(bakes.sourceId, imageSources.id))
+    .where(eq(imageSources.orgId, c.var.user.orgId))
+    .orderBy(bakes.sourceId, desc(bakes.createdAt), desc(bakes.id));
+  const latestBySource = new Map(latestBakes.map(({ sourceId, ...bake }) => [sourceId, bake]));
+  return c.json({
+    sources: rows.map((source) => ({ ...source, latestBake: latestBySource.get(source.id) ?? null })),
+    builderAvailable: prebuildService.builderBackend !== null,
+  });
+});
+
+sourcesRouter.get("/queue", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  return c.json(await c.var.providers.prebuildService.listBakeQueue(c.var.user.orgId));
+});
+
+sourcesRouter.patch("/queue", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!isRecord(body) || !Array.isArray(body.bakeIds) || !body.bakeIds.every((id): id is string => typeof id === "string")) {
+    return c.json({ error: "Send bakeIds as an array of bake IDs. Refresh the queue before you retry." }, 400);
+  }
+  if (!await c.var.providers.prebuildService.reorderBakeQueue(c.var.user.orgId, body.bakeIds)) {
+    return c.json({ error: "The queue changed or cannot be reordered. Refresh the queue, then retry with all waiting bake IDs." }, 409);
+  }
+  return c.json({ ok: true });
 });
 
 // POST / — create kind='external' or kind='base'; reject kind='repo'
