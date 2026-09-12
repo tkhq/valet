@@ -6,7 +6,7 @@
 
 ## Summary
 
-Valet will use one canonical policy engine for every authorization decision. Rego is the canonical policy authoring language. A Valet-owned Rust engine parses, compiles, and evaluates Rego v1 under a versioned capability profile. Open Policy Agent (OPA) is not a runtime, compiler, sidecar, or dependency of Valet or TVC.
+Valet will use one canonical policy engine for every authorization decision. Rego is the canonical policy authoring language. The built-in Valet-owned Rust engine is the only supported production evaluator. Open Policy Agent (OPA) is historical reference context, not a runtime, compiler, sidecar, or dependency of Valet or TVC.
 
 A typed `AuthorizationService` contract covers plugin actions, workflow actions, built-in tools, entitlements, routes, resources, delegation, sandbox capabilities, credentials, and egress. The Rust engine returns `PolicyDecisionV1` through a stable language-neutral boundary.
 
@@ -83,7 +83,7 @@ Rego is the only canonical policy authoring language. Structured database rows a
 
 The Valet-owned Rust engine is the authoritative semantic implementation. It targets full Rego v1 language compatibility and full pure built-in coverage where feasible. It compiles deterministic engine artifacts, evaluates explicit input, and returns `PolicyDecisionV1`.
 
-OPA is outside the architecture. Valet and TVC do not invoke an OPA runtime, compiler, sidecar, command, library, or WebAssembly artifact. OPA runtime compatibility is not the operational contract. Published OPA language fixtures can inform Valet's independent compatibility corpus.
+OPA appears only as historical and language-reference context. Valet and TVC do not invoke an OPA runtime, compiler, sidecar, command, library, or WebAssembly artifact. OPA is not a migration path, shadow path, fallback, or second production evaluator. Published OPA language fixtures can inform Valet's independent compatibility corpus.
 
 Valet uses one named package and entry point, such as `data.valet.authz.decision`. Bundle validation rejects a missing entry point, invalid output, unsupported version, or policy that cannot produce a closed decision.
 
@@ -143,11 +143,11 @@ This choice preserves current Valet behavior for rules such as an exact action e
 
 Valet owns one Rust engine and its public contract. The engine has a native target and can have a Rust-to-WebAssembly target where tests prove compatibility. Both targets compile from the same source and implement the same Rego semantics, capability profile, intermediate representation, limits, and decision contract.
 
-The local deployment selects one validated target. A native library or process is preferred when packaging and isolation permit it. A WebAssembly target can support Node embedding or another browser-independent host. The design does not promise `wasm-bindgen`, WASI, the Component Model, or browser execution before compatibility is proven.
+The local deployment embeds the engine through a native Rust library or validated in-process WebAssembly module. It does not use a local service or network hop. The design does not promise `wasm-bindgen`, WASI, the Component Model, or browser execution before compatibility is proven.
 
 The TVC deployment prefers a native Rust image. Its thin Rust host validates the language-neutral request, loads a pinned bundle, calls the same engine crate, and returns the decision for attestation. It is not an OPA host.
 
-`AuthorizationService` does not depend on the deployment target. The local adapter and TVC client use a stable request and response boundary based on canonical bytes and versioned schemas. One deployment has one active evaluator. A TVC rollout replaces the local deployment selection and does not compare production decisions at runtime.
+`AuthorizationService` does not depend on the deployment target. The generic evaluator boundary supports the built-in local engine and a future TVC host of that same engine. It does not make other production evaluators interchangeable or supported. Both adapters use canonical bytes and versioned schemas. One deployment has one active evaluator.
 
 TKMS and TVC have different roles:
 
@@ -208,7 +208,7 @@ Valet can adopt Regorus, vendor or fork it, or replace it with a Valet implement
 
 A third-party substrate adds supply-chain and semantic-drift risk. A fork adds merge and maintenance work. A replacement adds parser, compiler, optimizer, and security work. The implementation decision must compare these costs and publish the accepted gaps.
 
-Owning the engine increases initial scope and long-term maintenance. The benefit is one audited Rust implementation that can run in Valet and TVC. Ownership does not automatically guarantee Rego compatibility, determinism, safety, or equal native and WebAssembly behavior. Tests and review must establish those properties.
+Owning the engine increases initial scope and long-term maintenance. Valet owns Rego compatibility, built-in coverage, conformance evidence, security review, and upgrades. The benefit is one audited Rust implementation for local and measured TVC evaluation. This removes a local network hop, reduces runtime parts, and prevents drift between different evaluator implementations. Ownership does not itself prove compatibility, determinism, or safety.
 
 ## Architecture
 

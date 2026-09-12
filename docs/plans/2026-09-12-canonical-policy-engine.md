@@ -8,7 +8,7 @@
 
 Prepare the pull requests as a stack. Merge them in dependency order. Documentation is the first pull request. Preparatory pull requests can add inert contracts, libraries, policy bundles, and adapters. They must not evaluate live requests twice.
 
-The action-policy behavior changes in one final local Valet engine cutover pull request. That pull request removes the old TypeScript evaluator. No pull request adds shadow mode. No production path falls back to the old evaluator.
+The built-in Valet Rust engine is the only supported production evaluator. The action-policy behavior changes in one final cutover pull request. That pull request removes the old TypeScript evaluator. No pull request adds a second evaluator, shadow mode, or runtime fallback.
 
 ## Stack and dependency graph
 
@@ -55,7 +55,9 @@ PR 3 defines the engine before PR 4 integrates a local target. PR 5 can proceed 
 ## Reviewability rules
 
 - Keep each preparatory pull request behavior-neutral in production.
-- Put policy rules in Rego and evaluator semantics in the Rust engine. Do not duplicate either in TypeScript.
+- Put policy rules in Rego and evaluator semantics in one Rust engine. Use that implementation locally and in TVC.
+- Keep the local engine in-process. Do not add a local network hop or evaluator service.
+- Keep the generic evaluator boundary for the built-in engine and future TVC host only.
 - Use fixture policy rows and static request fixtures before cutover. Do not mirror live traffic.
 - Keep generated bundle fixtures small and review their source rows beside the expected Rego or data.
 - Route a surface only when its request adapter, decision handling, audit, and failure behavior land together.
@@ -69,7 +71,7 @@ PR 3 defines the engine before PR 4 integrates a local target. PR 5 can proceed 
 
 - Add this plan and the canonical policy engine design.
 - Record Rego as the canonical authoring language and the Valet Rust engine as the authoritative evaluator.
-- Record that OPA is not a Valet or TVC dependency.
+- Record OPA only as historical and language-reference context. It is not a dependency, migration path, shadow path, fallback, or production evaluator.
 - Record TVC attested evaluation and optional TKMS roles as future work.
 - Record specificity semantics, no shadow mode, and no legacy fallback.
 
@@ -121,9 +123,10 @@ pnpm typecheck
 
 **Scope**
 
-- Add the Valet-owned Rust policy engine crate without production wiring.
+- Add the Valet-owned Rust policy engine crate without production wiring. It is the only supported source of production evaluation semantics.
 - Target full Rego v1 syntax and language semantics and publish a versioned compatibility profile.
 - Target full pure built-in coverage and inventory every remaining gap.
+- Make Valet own Rego compatibility, built-in coverage, conformance, security review, and engine upgrades.
 - Classify capability-builtins as fact-backed, explicitly injected, or rejected.
 - Add parser and AST support toward the full Rego v1 target.
 - Add deterministic compilation to a versioned IR or bytecode with canonical encoding.
@@ -166,10 +169,10 @@ cargo fmt --all -- --check
 - Add deterministic bundle manifests and RFC 8785 input serialization.
 - Add SHA-256 source, compiled bundle, engine, input, decision, and subject digest helpers.
 - Add bundle compatibility checks for Rego, capability-profile, compiler, IR, contract, and engine versions.
-- Add `LocalValetEvaluator` over one validated native or WebAssembly target.
+- Add `LocalValetEvaluator` over one validated in-process native or WebAssembly target.
 - Add bounded requests, typed failures, and atomic loaded-bundle replacement.
 - Add no production wiring and no decision cache.
-- Add no OPA host or compatibility layer.
+- Add no OPA host, local evaluator service, network hop, or compatibility layer.
 
 **Acceptance checks**
 
@@ -464,7 +467,7 @@ make e2e
 
 **Scope**
 
-- Add a native Rust TVC host around the same pinned `valet-policy-engine` crate and bundle contract.
+- Add a native Rust TVC host around the same pinned `valet-policy-engine` crate and bundle contract. Do not implement new policy semantics.
 - Implement `TvcAttestedEvaluator` behind the existing language-neutral evaluator contract.
 - Use bounded HTTP/1.1 requests and responses with explicit byte limits and timeouts.
 - Deploy stateless TVC replicas with no database, lock, approval, or durable idempotency state.
@@ -474,7 +477,7 @@ make e2e
 - Bind engine, source bundle, compiled bundle, request nonce, subject, input, decision, and obligation digests.
 - Keep authentication, proof verification, durable audit, approvals, request reservation, and idempotency in Valet.
 - Add signed policy pins and trusted fact issuers where required.
-- Replace the local evaluator deployment only after proof and failure-path review. Do not run both evaluators in production.
+- Replace the local deployment location only after proof and failure-path review. Do not run both locations in production.
 
 **Acceptance checks**
 
@@ -560,7 +563,9 @@ For TVC rollout, rollback deploys the last known-good local Valet engine release
 
 The stack is complete when:
 
-- Rego is the canonical authoring language, and the Valet Rust engine is the only semantic implementation.
+- Rego is the canonical authoring language, and the built-in Valet Rust engine is the only supported production evaluator.
+- Local and TVC deployments use the same semantic implementation and compatibility profile.
+- OPA remains historical and language-reference context only.
 - Interactive and workflow actions use one service and equal semantics.
 - Built-ins, entitlements, routes, resources, delegation, sandbox capabilities, credentials, and egress use the contract where applicable.
 - `PolicyResolver` contains no policy logic.
