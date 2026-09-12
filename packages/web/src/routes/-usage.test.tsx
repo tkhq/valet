@@ -33,6 +33,7 @@ const DAY_A_MS = Math.floor(1_750_000_000_000 / 86_400_000) * 86_400_000;
 const DAY_B_MS = DAY_A_MS + 86_400_000;
 
 const mockBreakdown: UsageBreakdownResponse = {
+  activeAgents: 9,
   windowMs: 7 * 86_400_000,
   scope: "me",
   totalCostUsd: 0.1234,
@@ -445,6 +446,18 @@ beforeEach(() => {
 });
 
 describe("UsagePage — spend summary", () => {
+  it("renders the active-agent headline independently of member averages and shows zero", () => {
+    const view = render(<UsagePage />);
+    const card = screen.getByText("Active agents").parentElement;
+    if (!card) throw new Error("Active agents card missing");
+    expect(within(card).getByText("9")).toBeTruthy();
+    expect(within(card).getByText("Unique agents with token usage in this period.")).toBeTruthy();
+    expect(card.parentElement?.children).toHaveLength(5);
+    breakdownResult.data = { ...mockBreakdown, activeAgents: 0 };
+    view.rerender(<UsagePage />);
+    expect(within(card).getByText("0")).toBeTruthy();
+  });
+
   it("renders the total cost from the breakdown", () => {
     render(<UsagePage />);
     expect(screen.getByText("$0.1234")).toBeTruthy();

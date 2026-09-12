@@ -3546,6 +3546,8 @@ export interface SkillUsageBreakdown {
  * scope, and for a team scope when the caller ADMINISTERS the team — a plain
  * member reads the team's aggregate without colleagues' individual spend. */
 export interface UsageBreakdownResponse {
+  /** Distinct engine sessions with positive tokens in the rolling window, through now. Excludes proxy calls. */
+  activeAgents: number;
   windowMs: number;
   scope: UsageScopeName;
   totalCostUsd: number;

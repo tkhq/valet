@@ -7,6 +7,7 @@
  * Every card degrades independently: its own loading row, its own error row
  * with Retry. A failed card never blanks the page.
  */
+import { TeamSlackSetupCard } from "~/components/events/team-slack-setup";
 import { Link } from "@tanstack/react-router";
 import type {
   GlobalWorkflowRunSummary,
@@ -167,6 +168,8 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
             </Link>
           </div>
         </header>
+
+        <TeamSlackSetupCard key={teamId} teamId={teamId} />
 
         {/* Activity feed */}
         <section aria-label="Team activity" className="space-y-3">
