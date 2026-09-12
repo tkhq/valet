@@ -610,6 +610,7 @@ export class KubernetesImageBuilder implements ImageBuilder {
               commitSha: rec.spec.commitSha,
               recipe: rec.spec.recipe,
               setup: rec.spec.setup,
+              kubernetes: rec.spec.kubernetes,
             });
 
       // When the registry is insecure, include a buildkitd.toml in the ConfigMap

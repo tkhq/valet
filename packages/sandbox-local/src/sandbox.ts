@@ -368,6 +368,7 @@ export class LocalSandboxProvider implements SandboxProvider {
       warmPool: false,
       hibernation: false,
       customImage: false,
+      nestedKubernetes: false,
       coldStartEstimateMs: 0,
     };
   }

@@ -20,6 +20,7 @@ import {
   WorkspaceProvisioningError,
 } from "../errors.js";
 import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
+import { nestedKubernetesDecision, NESTED_KUBERNETES_UNSUPPORTED } from "./nested-kubernetes.js";
 
 /**
  * Max age of a cached observation before `reconcile` re-reads the applied-state
@@ -345,6 +346,9 @@ export class SandboxAttachment {
    * it does not change attachment state (a timeout is not degradation).
    */
   ensureReady(opts: { timeoutMs: number; signal?: AbortSignal }): Promise<{ sandbox: Sandbox; epoch: number }> {
+    if (this.createOpts.nestedKubernetes && this.provider && nestedKubernetesDecision(true, this.provider.capabilities().nestedKubernetes) !== "allow") {
+      return Promise.reject(new SandboxStartupError(this.createOpts.sessionId ?? "sandbox", NESTED_KUBERNETES_UNSUPPORTED));
+    }
     if (this.destroyed) {
       return Promise.reject(new SandboxUnavailableError(new Error("sandbox attachment destroyed")));
     }
@@ -820,6 +824,9 @@ export class SandboxAttachment {
     let superseded = false;
     try {
       if (!provider) throw new Error("no provider");
+      if (nestedKubernetesDecision(this.createOpts.nestedKubernetes === true, provider.capabilities().nestedKubernetes) !== "allow" && this.createOpts.nestedKubernetes) {
+        throw new SandboxStartupError(this.createOpts.sessionId ?? "sandbox", NESTED_KUBERNETES_UNSUPPORTED);
+      }
       if (!provider.resume) throw new Error("provider does not support hibernation");
       if (!sandbox) throw new Error("suspended attachment has no sandbox handle");
       if (this.pendingResumeEpoch !== startEpoch) {
@@ -958,6 +965,9 @@ export class SandboxAttachment {
     const provider = this.provider;
     try {
       if (!provider) throw new Error("no provider");
+      if (this.createOpts.nestedKubernetes && nestedKubernetesDecision(true, provider.capabilities().nestedKubernetes) !== "allow") {
+        throw new SandboxStartupError(this.createOpts.sessionId ?? "sandbox", NESTED_KUBERNETES_UNSUPPORTED);
+      }
       // Post-provision prep (specProvider seam). Runs once per (sandbox, epoch)
       // AFTER the sandbox reports ready and BEFORE we mark `ready`/flush
       // waiters — no waiter may ever observe an unprepped sandbox (`_sandbox`

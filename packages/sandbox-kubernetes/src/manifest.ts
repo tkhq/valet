@@ -7,7 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { homeInitContainer, persistentHomeMounts, withHomeLinks, WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION } from "./home-persistence.js";
-import type { SandboxCreateOpts } from "@valet/engine";
+import { NESTED_KUBERNETES_IDENTITY, type SandboxCreateOpts } from "@valet/engine";
 import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, parseStorageQuantity } from "./quantity.js";
 import type {
   K8sProviderConfig,
@@ -45,6 +45,9 @@ export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
 export const IMAGE_FINGERPRINT_ENV = "VALET_SANDBOX_IMAGE_FINGERPRINT";
+export const NESTED_KUBERNETES_ANNOTATION_KEY = "valet.dev/capability.nested-kubernetes";
+export { NESTED_KUBERNETES_IDENTITY };
+export const NESTED_KUBERNETES_LABEL_KEY = "valet.dev/nested-kubernetes";
 
 /** Immutable generation marker for the requested image before admission mutation. */
 export function imageFingerprint(image: string): string {
@@ -314,21 +317,32 @@ export function buildSandboxManifest(
     { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(image) },
   ];
 
-  if (opts.docker) {
+  if (opts.docker || opts.nestedKubernetes) {
     container.securityContext = {
+      ...(opts.nestedKubernetes ? { privileged: false } : {}),
       seccompProfile: { type: "Unconfined" },
       capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
       procMount: "Unmasked",
     };
     container.env = [
       ...(container.env ?? []),
-      { name: "VALET_SANDBOX_DOCKER", value: "1" },
-      { name: "VALET_DOCKER_USERNS", value: "1" },
+      ...(opts.docker ? [
+        { name: "VALET_SANDBOX_DOCKER", value: "1" },
+        { name: "VALET_DOCKER_USERNS", value: "1" },
+      ] : []),
+      ...(opts.nestedKubernetes ? [
+        { name: "VALET_SANDBOX_KUBERNETES", value: "1" },
+        { name: "KUBECONFIG", value: "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml" },
+        { name: "VALET_SANDBOX_EPOCH", valueFrom: { fieldRef: { fieldPath: "metadata.uid" as const } } },
+        { name: "VALET_NESTED_KUBERNETES_IDENTITY", value: NESTED_KUBERNETES_IDENTITY },
+      ] : []),
     ];
-    container.volumeMounts = [
-      ...(container.volumeMounts ?? []),
-      { name: DOCKER_STATE_VOLUME_NAME, mountPath: DOCKER_STATE_MOUNT_PATH },
-    ];
+    if (opts.docker) {
+      container.volumeMounts = [
+        ...(container.volumeMounts ?? []),
+        { name: DOCKER_STATE_VOLUME_NAME, mountPath: DOCKER_STATE_MOUNT_PATH },
+      ];
+    }
     if (!isFullProfile) {
       container.command = [
         "sh",
@@ -361,7 +375,7 @@ export function buildSandboxManifest(
       },
     ],
   };
-  if (opts.docker) {
+  if (opts.docker || opts.nestedKubernetes) {
     // Pod-level fsGroup: the workspace PVC mounts group-owned by the
     // dockerd user's gid, so non-privileged (dockerd) execs can write
     // /workspace — the k8s analog of start-docker.sh's `chown /workspace`.
@@ -420,7 +434,7 @@ export function buildSandboxManifest(
         // Stamp the spread selector's label on the pod explicitly.
         // The controller need not copy labels from the CR metadata.
         labels: { [SESSION_LABEL_KEY]: name, [SANDBOX_POD_LABEL_KEY]: "true" },
-        ...(opts.docker
+        ...((opts.docker || opts.nestedKubernetes)
           ? {
               annotations: {
                 [`container.apparmor.security.beta.kubernetes.io/${SANDBOX_CONTAINER_NAME}`]: "unconfined",
@@ -447,6 +461,7 @@ export function buildSandboxManifest(
   }
 
   const labels: Record<string, string> = { [SESSION_LABEL_KEY]: name };
+  if (opts.nestedKubernetes) labels[NESTED_KUBERNETES_LABEL_KEY] = "true";
   if (opts.docker) labels[DOCKER_LABEL_KEY] = "true";
 
   return {
@@ -455,7 +470,10 @@ export function buildSandboxManifest(
     metadata: {
       name,
       labels,
-      ...(opts.sessionId ? { annotations: { [SESSION_ANNOTATION_KEY]: opts.sessionId } } : {}),
+      ...((opts.sessionId || opts.nestedKubernetes) ? { annotations: {
+        ...(opts.sessionId ? { [SESSION_ANNOTATION_KEY]: opts.sessionId } : {}),
+        ...(opts.nestedKubernetes ? { [NESTED_KUBERNETES_ANNOTATION_KEY]: NESTED_KUBERNETES_IDENTITY } : {}),
+      } } : {}),
     },
     spec,
   };

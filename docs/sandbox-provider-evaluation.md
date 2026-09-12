@@ -166,3 +166,13 @@ Rationale:
 3. Restrict the managed platform to non-production customer data (our own sessions and internal testing)
 4. Document the migration path to self-hosted so we can execute it within a sprint when needed
 5. Evaluate network egress controls available on the managed platform -- if they're insufficient, this may accelerate the self-hosted timeline
+
+## Nested Kubernetes v1
+
+Only the Kubernetes provider reports `nestedKubernetes: "v1"`.
+Set `kubernetes: true` in `.valet/prebuild.yaml` to request the capability.
+Valet rejects all other providers before sandbox creation.
+
+The enabled sandbox exports `KUBECONFIG` and `VALET_SANDBOX_KUBERNETES=1`.
+Use `valet-kubernetes start`, `status`, `import`, `diagnose`, and `stop` inside the sandbox.
+The import command accepts only explicit absolute OCI-layout or Docker-save archive paths.

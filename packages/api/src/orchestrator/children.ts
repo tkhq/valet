@@ -562,6 +562,7 @@ export class ChildWatcher {
       .select({
         profile: agentSessions.profile,
         docker: agentSessions.docker,
+        kubernetes: agentSessions.kubernetes,
         sandboxResourceOverrides: agentSessions.sandboxResourceOverrides,
         credentialOwnerMode: agentSessions.credentialOwnerMode,
       })
@@ -584,6 +585,7 @@ export class ChildWatcher {
           ? {
               profile: shapeRow.profile,
               docker: shapeRow.docker,
+              kubernetes: shapeRow.kubernetes,
               sandboxResourceOverrides: shapeRow.sandboxResourceOverrides,
               credentialOwnerMode: shapeRow.credentialOwnerMode,
             }
@@ -1090,6 +1092,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         workspace: agentSessions.workspace,
         profile: agentSessions.profile,
         docker: agentSessions.docker,
+        kubernetes: agentSessions.kubernetes,
         sandboxResourceOverrides: agentSessions.sandboxResourceOverrides,
         status: agentSessions.status,
         // Owner columns feed SessionMeta.ownerTeamId so a rebuild of a

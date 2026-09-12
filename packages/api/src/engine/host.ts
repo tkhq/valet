@@ -407,6 +407,8 @@ export interface SessionMeta {
   /** Request a rootless docker daemon inside this session's sandbox
    * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
   docker?: boolean;
+  /** Persisted nested Kubernetes request from repository config. */
+  kubernetes?: boolean;
   /** Per-child CPU and memory overrides persisted on the app session row. */
   sandboxResourceOverrides?: PrebuildResources;
   /**
@@ -993,6 +995,7 @@ export class EngineHost {
     // resolved.
     const repoFlags = await this.resolveRepoPrebuildFlags(sessionId, meta);
     const dockerFlag = meta.docker === true || repoFlags.docker;
+    const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
@@ -1065,6 +1068,7 @@ export class EngineHost {
       env: sandboxEnv,
       profile,
       ...(dockerFlag ? { docker: true } : {}),
+      ...(kubernetesFlag ? { nestedKubernetes: true } : {}),
       ...(initialResources ? { resources: initialResources } : {}),
       // Sizes a fresh claim; an adopted (existing) claim converges UP to this
       // through the provider's rate-limited grow at create time (TKAI-402).
@@ -1866,7 +1870,15 @@ export class EngineHost {
   private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<ResolvedRepoPrebuildFlags> {
     const primary = meta.repos?.[0];
     const resolved = await resolveRepoResources(this.opts.db, meta.orgId, primary, () => this.resolveRepoYamlFlags(sessionId, meta));
-    const result = applySandboxResourceOverrides(resolved, meta.sandboxResourceOverrides);
+    if (resolved.outcome !== "error" && this.opts.db) {
+      await this.opts.db.update(agentSessions)
+        .set({ kubernetes: resolved.kubernetes === true })
+        .where(eq(agentSessions.id, sessionId));
+    }
+    const effective = resolved.outcome === "error"
+      ? { ...resolved, kubernetes: meta.kubernetes === true }
+      : resolved;
+    const result = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
       if (result.resourcesWithheld) {
@@ -1885,7 +1897,7 @@ export class EngineHost {
   }
 
   private async resolveRepoYamlFlags(sessionId: string, meta: SessionMeta): Promise<RepoPrebuildFlags> {
-    const defaults: RepoPrebuildFlags = { docker: false, outcome: "error" };
+    const defaults: RepoPrebuildFlags = { docker: false, kubernetes: meta.kubernetes === true, outcome: "error" };
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     if (!tokenDeps || !db) return defaults;
@@ -1897,7 +1909,7 @@ export class EngineHost {
             `EngineHost: resolveRepoPrebuildFlags: session ${sessionId} primary repo host "${target.host}" is not GitHub — using default flags`,
           );
         }
-        return { docker: false, outcome: "absent" };
+        return { docker: false, kubernetes: false, outcome: "absent" };
       }
       const { owner, repo: repoName, ref } = target;
       const fullDeps = {
@@ -1962,6 +1974,7 @@ export class EngineHost {
         if (degradedTokenless && flags.outcome === "absent") {
           return {
             docker: flags.docker,
+            kubernetes: flags.kubernetes,
             ...(flags.workspaceStorage ? { workspaceStorage: flags.workspaceStorage } : {}),
             outcome: "error",
           };
@@ -3556,6 +3569,7 @@ export class EngineHost {
     // failure resolves the defaults.
     const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
     const dockerFlag = opts.docker === true || repoFlags.docker;
+    const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
     const specProvider = await this.buildSpecProvider(childSessionId, meta, undefined, personaCell != null);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
@@ -3600,6 +3614,7 @@ export class EngineHost {
             : sandboxMint?.env,
         profile,
         ...(dockerFlag ? { docker: true } : {}),
+        ...(kubernetesFlag ? { nestedKubernetes: true } : {}),
         ...(initialResources ? { resources: initialResources } : {}),
         // Sizes a fresh claim; an adopted (existing) claim converges UP to
         // this through the provider's rate-limited grow at create time

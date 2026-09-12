@@ -11,6 +11,7 @@
  * drift apart again.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { generateKeyPairSync } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
@@ -24,6 +25,13 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { primaryGitHubRepoTarget } from "./host.js";
 import type { RepoBinding } from "../wire/types.js";
+import type { SandboxCapabilities } from "@valet/engine";
+
+class NestedRecordingSandboxProvider extends RecordingSandboxProvider {
+  override capabilities(): SandboxCapabilities {
+    return { ...super.capabilities(), nestedKubernetes: "v1" };
+  }
+}
 
 function binding(overrides: Partial<RepoBinding> = {}): RepoBinding & { targetDir: string } {
   return {
@@ -169,10 +177,10 @@ describe("childSessionFor repo prebuild flags", () => {
       }),
       getContents: (_owner, _repo, path) =>
         path === ".valet/prebuild.yaml"
-          ? contentsBody('workspaceStorage: "8Gi"\ndocker: true\nresources:\n  cpu: 4\n  memory: 8Gi\n', "blob1")
+          ? contentsBody('workspaceStorage: "8Gi"\ndocker: true\nkubernetes: true\nresources:\n  cpu: 4\n  memory: 8Gi\n', "blob1")
           : { status: 404, body: { message: "Not Found" } },
     });
-    const recorder = new RecordingSandboxProvider();
+    const recorder = new NestedRecordingSandboxProvider();
     api = await bootTestApi({
       sandboxProvider: recorder,
       githubTokenDeps: {
@@ -199,6 +207,11 @@ describe("childSessionFor repo prebuild flags", () => {
     });
 
     const childId = "child-prebuild-flags";
+    await db.insert(agentSessions).values({
+      id: childId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${childId}`,
+      status: "active", ownerType: "user", ownerId: "local-user", profile: "headless",
+      createdAt: now, updatedAt: now,
+    });
     // The binding row lands BEFORE the build, same order as the spawner
     // (`orchestrator/children.ts`).
     await db.insert(sessionRepos).values({
@@ -233,6 +246,8 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(call).toBeDefined();
     expect(call?.workspaceStorage).toBe("8Gi");
     expect(call?.docker).toBe(true);
+    expect(call?.nestedKubernetes).toBe(true);
+    expect((await db.select({ kubernetes: agentSessions.kubernetes }).from(agentSessions).where(eq(agentSessions.id, childId)).limit(1))[0]?.kubernetes).toBe(true);
     expect(call?.resources).toEqual({ cpu: 2, memory: "8Gi" });
     expect((await child.options.specProvider?.())?.resources).toEqual({ cpu: 2, memory: "8Gi" });
 
@@ -371,6 +386,25 @@ describe("childSessionFor repo prebuild flags", () => {
       cpu: 4,
       memory: "8Gi",
     });
+  });
+
+  it("preserves persisted Kubernetes when the repository read fails", async () => {
+    fixture = startGithubFixture({ getContents: () => ({ status: 500, body: { message: "failed" } }) });
+    const recorder = new NestedRecordingSandboxProvider();
+    api = await bootTestApi({ sandboxProvider: recorder, githubTokenDeps: {
+      key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url,
+    } });
+    const { engineHost, db } = api.providers;
+    const id = "persisted-kubernetes"; const now = Date.now();
+    await db.insert(agentSessions).values({ id, userId: "local-user", orgId: "local-org", workspace: `/tmp/${id}`,
+      status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", kubernetes: true,
+      createdAt: now, updatedAt: now });
+    await db.insert(sessionRepos).values({ sessionId: id, host: "github", fullName: "acme/failing",
+      cloneUrl: "https://github.com/acme/failing.git", ref: null, auth: "auto", position: 0, targetDir: "failing" });
+    const session = await engineHost.sessionFor(id, await loadSessionMeta(db, (await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1))[0]!));
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    expect(recorder.createCalls.find((call) => call.sessionId === id)?.nestedKubernetes).toBe(true);
+    expect((await db.select({ kubernetes: agentSessions.kubernetes }).from(agentSessions).where(eq(agentSessions.id, id)).limit(1))[0]?.kubernetes).toBe(true);
   });
 
   it.each([null, { cpu: 2, memory: "4Gi" }])("a tokenless missing file preserves adoption and uses saved defaults %j for fresh compute", async (sandboxResources) => {

@@ -1,3 +1,4 @@
+import { NESTED_KUBERNETES_IDENTITY } from "@valet/engine";
 import type { BakeQueueItem, ListBakeQueueResponse } from "../wire/types.js";
 /**
  * `SourceService` — the generation-path core (sandbox-reconcile plan, Task
@@ -465,6 +466,8 @@ export async function resolveRecipeFromGitHub(
 export interface RepoPrebuildFlags {
   /** `docker: true` — run a rootless docker daemon in the sandbox. */
   docker: boolean;
+  /** `kubernetes: true` — request nested Kubernetes v1. */
+  kubernetes?: boolean;
   /** Authoritative repository CPU and memory overrides. An empty object
    * means the file is absent or does not declare resource overrides. */
   resources?: PrebuildResources;
@@ -544,6 +547,7 @@ export async function repoPrebuildFlags(
       if (controller.signal.aborted) return { docker: false, outcome: "error" };
       value = {
         docker: override?.docker === true,
+        ...(override?.kubernetes === true ? { kubernetes: true } : {}),
         resources: override?.resources ?? {},
         ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
         outcome: override === null ? "absent" : "declared",
@@ -676,10 +680,11 @@ const DECAY_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Canonical recipe JSON — mirrors `recipe.ts`'s private helper so the
  * identity hash covers full step content (id + lockfile + command) plus the
  * setup list, deterministic regardless of key order. */
-function canonicalRecipeJson(recipe: RecipeStep[], setup: string[]): string {
+function canonicalRecipeJson(recipe: RecipeStep[], setup: string[], kubernetes = false): string {
   return JSON.stringify({
     steps: recipe.map((s) => ({ id: s.id, lockfile: s.lockfile, command: s.command })),
     setup,
+    ...(kubernetes ? { capability: NESTED_KUBERNETES_IDENTITY } : {}),
   });
 }
 
@@ -693,6 +698,7 @@ export interface RecipeSnapshot {
   recipe: RecipeStep[];
   setup: string[];
   image?: string;
+  kubernetes?: boolean;
 }
 
 function readSetupCommands(source: ImageSourceRow): string[] {
@@ -1074,7 +1080,7 @@ export class SourceService {
     if (source.kind === "base") return this.baseIdentity(source, parentIdentity);
     // repo
     const parent = parentIdentity ?? stock;
-    const recipeHash = sha256Hex(canonicalRecipeJson(recipe?.recipe ?? [], recipe?.setup ?? []));
+    const recipeHash = sha256Hex(canonicalRecipeJson(recipe?.recipe ?? [], recipe?.setup ?? [], recipe?.kubernetes === true));
     return sha256Hex(`${parent}|${source.repoFullName ?? ""}|${recipeHash}`);
   }
 
@@ -1325,7 +1331,10 @@ export class SourceService {
     }
     const baseImage = await this.resolveBaseImage(source, resolved.image);
 
-    const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
+    const snapshot: RecipeSnapshot = {
+      recipe: resolved.recipe, setup: resolved.setup, image: resolved.image,
+      ...(resolved.kubernetes ? { kubernetes: true } : {}),
+    };
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
@@ -1367,6 +1376,7 @@ export class SourceService {
       baseImage,
       recipe: resolved.recipe,
       setup: resolved.setup.length > 0 ? resolved.setup : undefined,
+      ...(resolved.kubernetes ? { kubernetes: true } : {}),
       imageRef,
       gitToken: gitToken.token ?? undefined,
     };

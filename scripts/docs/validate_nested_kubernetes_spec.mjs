@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { capabilityKernel, lifecycleKernel, mapKernel, statusKernel } from "../../docker/valet-kubernetes.mjs";
 
 const root = new URL("../../", import.meta.url);
 const specText = readFileSync(new URL("docs/specs/2026-09-12-nested-kubernetes-design.md", root), "utf8");
@@ -20,75 +21,8 @@ function expandCover(cover) {
   return Array.from({ length: Number(range[2]) - Number(range[1]) + 1 }, (_, i) => `K${String(Number(range[1]) + i).padStart(2, "0")}`);
 }
 
-function capability({ requested, provider }) {
-  if (typeof requested !== "boolean" || (provider !== false && provider !== "v1")) fail("invalid capability input type");
-  return !requested ? "ignore" : provider === "v1" ? "allow" : "reject:unsupported_provider";
-}
-
-function mapCovers(rows) {
-  if (!Array.isArray(rows)) return false;
-  const inner = [], outer = [];
-  for (const row of rows) {
-    if (!Array.isArray(row) || row.length !== 3 || row.some((n) => !Number.isSafeInteger(n))) return false;
-    const [inside, outside, count] = row;
-    if (inside < 0 || outside < 0 || count <= 0) return false;
-    const innerEnd = inside + count - 1, outerEnd = outside + count - 1;
-    if (innerEnd >= 0xffffffff || outerEnd >= 0xffffffff) return false;
-    outer.push([outside, outerEnd]);
-    if (inside <= 65535 && innerEnd >= 0) inner.push([inside, Math.min(innerEnd, 65535)]);
-  }
-  outer.sort((a, b) => a[0] - b[0]);
-  for (let i = 1; i < outer.length; i++) if (outer[i][0] <= outer[i - 1][1]) return false;
-  inner.sort((a, b) => a[0] - b[0]);
-  let next = 0;
-  for (const [start, end] of inner) {
-    if (start !== next) return false;
-    next = end + 1;
-  }
-  return next === 65536;
-}
-
-function lifecycle({ state, command, identity, active, owner, operationId, actualOperationId, cancelRequested }) {
-  if (command === "commit-start") return operationId === actualOperationId && owner === "valid" && !cancelRequested && identity === "valid"
-    ? { action: "commit-ready", exit: 0, next: "ready" }
-    : { action: "abandon-result", exit: 4, next: state };
-  if (command === "recover") {
-    if (owner === "valid") return { action: "wait-owner", exit: 24, next: state };
-    if (active === "start") return { action: identity === "valid" ? "adopt-start" : "clean-restart", exit: 0, next: "starting" };
-    if (active === "stop") return { action: "resume-stop", exit: 0, next: "stopping" };
-    if (active === "import") return { action: identity === "valid" ? "release-import" : "release-import-error", exit: 0, next: identity === "valid" ? "ready" : "error" };
-  }
-  if (identity === "foreign") return { action: "refuse-foreign", exit: 21, next: "error" };
-  if (command === "start") {
-    if (state === "stopping") return { action: "report-stopping", exit: 4, next: state };
-    if (state === "ready" && identity === "valid" && active === null) return { action: "recheck", exit: 0, next: state };
-    if (state === "starting" && active === "start") return { action: identity === "valid" ? "join-start" : "recover-start", exit: 0, next: state };
-    return { action: "claim-start", exit: 0, next: "starting" };
-  }
-  if (command === "stop") {
-    if (state === "stopped") return { action: "none", exit: 0, next: state };
-    if (active === "start") return { action: "cancel-start", exit: 0, next: "stopping" };
-    if (active === "import") return { action: "cancel-import", exit: 0, next: "stopping" };
-    return { action: "claim-stop", exit: 0, next: "stopping" };
-  }
-  if (command === "import") return state === "ready" && identity === "valid" && active === null
-    ? { action: "claim-import", exit: 0, next: state }
-    : { action: "report-nonready", exit: 4, next: state };
-  fail(`invalid lifecycle command ${command}`);
-}
-
-function status({ persisted, identity, readiness, errorReason }) {
-  const path = "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml";
-  let state = persisted, error = persisted === "error" ? errorReason : null, exit = 4;
-  if (persisted === "stopped") exit = 3;
-  else if (persisted === "ready" && identity !== "valid") { state = "error"; error = "identity_invalid"; }
-  else if (persisted === "ready" && readiness === "ready") exit = 0;
-  else if (persisted === "ready") { state = "error"; error = "readiness_failed"; }
-  return { exit, persistedAfter: persisted, stdout: `${canonical({ error, kubeconfig: path, schema: 1, state })}\n` };
-}
-
 function validate(spec, data) {
-  if (data.schema !== 2 || data.status !== "proposed-unimplemented") fail("invalid vector header");
+  if (data.schema !== 2 || data.status !== "implemented-l2-l3-pending") fail("invalid vector header");
   const normative = spec.split("\n").filter((line) => /\b(?:MUST|MAY|SHOULD)(?: NOT)?\b/.test(line));
   for (const line of normative) {
     if ((line.match(/\b(?:MUST|MAY|SHOULD)(?: NOT)?\b/g) ?? []).length !== 1) fail(`normative line needs one clause: ${line}`);
@@ -136,13 +70,21 @@ function validate(spec, data) {
       if (vector.mode !== "acceptance" || !/^A(?:[1-9]|1[0-5])$/.test(vector.step) || typeof vector.check !== "string" || vector.check.length < 8 || typeof vector.expected !== "string" || vector.expected.length < 8) fail(`vacuous acceptance vector ${vector.id}`);
     } else if (vector.mode !== "kernel" || vector.input === undefined || vector.expected === undefined) fail(`vacuous kernel vector ${vector.id}`);
   }
+  for (const id of ["life-live-owner-no-theft", "life-start-commit-after-stop"]) {
+    const vector = data.lifecycleVectors.find((candidate) => candidate.id === id);
+    if (vector?.mode !== "kernel") fail(`missing required lifecycle kernel ${id}`);
+  }
   for (const tag of tags) if (!covered.has(tag)) fail(`uncovered requirement ${tag}`);
   for (const tag of covered) if (!tags.includes(tag)) fail(`unknown covered requirement ${tag}`);
 
-  for (const vector of data.capabilityVectors) if (!equal(capability(vector.input), vector.expected)) fail(`capability vector ${vector.id}`);
-  for (const vector of data.mapVectors) if (!equal(mapCovers(vector.input), vector.expected)) fail(`map vector ${vector.id}`);
-  for (const vector of data.lifecycleVectors) if (!equal(lifecycle(vector.input), vector.expected)) fail(`lifecycle vector ${vector.id}`);
-  for (const vector of data.statusVectors) if (!equal(status(vector.input), vector.expected)) fail(`status vector ${vector.id}`);
+  for (const vector of data.capabilityVectors) {
+    const { requested, provider } = vector.input;
+    if (typeof requested !== "boolean" || (provider !== false && provider !== "v1")) fail(`invalid capability vector ${vector.id}`);
+    if (!equal(capabilityKernel(requested, provider), vector.expected)) fail(`capability vector ${vector.id}`);
+  }
+  for (const vector of data.mapVectors) if (!equal(mapKernel(vector.input), vector.expected)) fail(`map vector ${vector.id}`);
+  for (const vector of data.lifecycleVectors) if (!equal(lifecycleKernel(vector.input), vector.expected)) fail(`lifecycle vector ${vector.id}`);
+  for (const vector of data.statusVectors) if (!equal(statusKernel(vector.input), vector.expected)) fail(`status vector ${vector.id}`);
   return { requirements: tags.length, vectors: vectors.length };
 }
 
@@ -155,6 +97,8 @@ const mutations = [
   ["duplicate vector id", specText, (() => { const d = clone(source); d.mapVectors[0].id = d.capabilityVectors[0].id; return d; })()],
   ["vacuous acceptance", specText, (() => { const d = clone(source); d.acceptanceVectors[0].check = ""; return d; })()],
   ["string false", specText, (() => { const d = clone(source); d.capabilityVectors[0].input.provider = "false"; return d; })()],
+  ["missing K136 kernel", specText, (() => { const d = clone(source); d.lifecycleVectors = d.lifecycleVectors.filter(({ id }) => id !== "life-live-owner-no-theft"); return d; })()],
+  ["missing K138/K139 kernel", specText, (() => { const d = clone(source); d.lifecycleVectors = d.lifecycleVectors.filter(({ id }) => id !== "life-start-commit-after-stop"); return d; })()],
 ];
 for (const [name, spec, data] of mutations) {
   let rejected = false;

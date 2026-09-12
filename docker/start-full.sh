@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+[ "${VALET_SANDBOX_KUBERNETES:-}" != 1 ] || /kubernetes-preflight.sh
 WORK_DIR=/workspace
 mkdir -p "$WORK_DIR"
 if [ -x /start-docker.sh ]; then /start-docker.sh; fi

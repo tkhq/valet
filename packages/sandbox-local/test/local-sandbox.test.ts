@@ -195,6 +195,7 @@ describe("LocalSandboxProvider", () => {
       warmPool: false,
       hibernation: false,
       customImage: false,
+      nestedKubernetes: false,
       coldStartEstimateMs: 0,
     });
   });

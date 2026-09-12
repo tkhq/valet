@@ -378,6 +378,8 @@ export const agentSessions = pgTable(
     // Request a rootless docker daemon inside this session's sandbox
     // (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md.
     docker: boolean("docker").notNull().default(false),
+    // Persisted repository capability. Failed YAML reads preserve this value.
+    kubernetes: boolean("kubernetes").notNull().default(false),
     // Per-child CPU and memory overrides from the task tool. Null means the
     // session uses repository or deployment defaults.
     sandboxResourceOverrides: jsonb("sandbox_resource_overrides").$type<PrebuildResources>(),

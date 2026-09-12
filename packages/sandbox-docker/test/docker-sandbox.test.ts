@@ -380,6 +380,7 @@ describeDocker("DockerSandbox", () => {
       coldStartEstimateMs: 8000,
       credsMount: true,
       dockerSupport: true,
+      nestedKubernetes: false,
     });
   });
 

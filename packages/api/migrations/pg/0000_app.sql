@@ -233,6 +233,7 @@ CREATE TABLE "agent_sessions" (
 	"credential_owner_mode" text,
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
+	"kubernetes" boolean DEFAULT false NOT NULL,
 	"sandbox_resource_overrides" jsonb,
 	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,

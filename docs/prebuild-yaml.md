@@ -21,8 +21,25 @@ Two layer-size rules worth knowing when writing `setup` commands:
 
 ## Fields
 
-The proposed `kubernetes` field is unimplemented. Its authoritative design is
-[First-class nested Kubernetes v1](specs/2026-09-12-nested-kubernetes-design.md).
+### `kubernetes`
+
+Type: `boolean` (default `false`)
+
+Set `true` to enable one managed nested Kubernetes v1 cluster. This setting requires the Kubernetes sandbox provider.
+Valet rejects Docker, local, and virtual providers before the sandbox becomes ready.
+
+Run the cluster as the `dockerd` user:
+
+```sh
+valet-kubernetes start
+valet-kubernetes status
+valet-kubernetes import /absolute/path/image.tar
+valet-kubernetes stop
+```
+
+Valet sets `KUBECONFIG` only in enabled sandboxes. Run `valet-kubernetes diagnose` to check provider prerequisites.
+The working directory volume stores cluster state. A sandbox replacement removes only managed Kubernetes state.
+See [First-class nested Kubernetes v1](specs/2026-09-12-nested-kubernetes-design.md).
 
 ### `setup`
 
