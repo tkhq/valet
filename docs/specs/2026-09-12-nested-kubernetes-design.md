@@ -4,227 +4,282 @@ Date: 2026-09-12. Status: **Proposed and unimplemented**. Target: Valet v2.
 
 ## Acceptance scenario
 
-A conforming deployment MUST pass A1 through A12 in one run on a fresh ARM64 Kubernetes sandbox. [K01]
+A conforming deployment MUST pass A1 through A13 in one run on each supported architecture. [K01]
 
-| Step | Action | Expected observation |
+| Step | Action | Required observation |
 |---|---|---|
-| A1 | Set `kubernetes: true` in `.valet/prebuild.yaml`. Create a session. | Valet selects a capability-labeled bake and a supporting provider. |
-| A2 | Inspect the pod before readiness. | It matches the security profile in K08 through K12. |
-| A3 | Run `valet-kubernetes start`. | It exits 0 and emits the `ready` JSON from K25. |
-| A4 | Read `$KUBECONFIG`. | It names the fixed file in K15 and context `valet-kubernetes`. |
-| A5 | Create a pod with DNS, ClusterIP, `emptyDir`, CPU, memory, and UID 65535. | The pod becomes Ready. DNS and service traffic work. Limits stay below outer limits. |
-| A6 | Run the sandbox Docker daemon and an unrelated long exec. | Both remain in `/init/services` and continue during cluster use. |
-| A7 | Import two caller-selected OCI archives. Import the first again. | All imports succeed. The repeated import has the same image records. |
-| A8 | Run `valet-kubernetes start` twice and three stop/start cycles. | Starts are idempotent. Cgroup depth and owned paths do not grow. |
-| A9 | Send SIGTERM to the server leader. Run `status`. | Status is `error`; `start` removes owned residue and returns `ready`. |
-| A10 | Run `valet-kubernetes stop` twice. | Both calls exit 0. State and `/init/valet-kubernetes` are absent. |
-| A11 | Repeat A1 through A10 on AMD64. | Results match, except artifact checksums and process identifiers. |
-| A12 | Request the capability on each unsupported provider and an unready Kubernetes node. | Session creation fails before readiness and gives the corrective action. |
+| A1 | Set `kubernetes: true` in `.valet/prebuild.yaml`. Create a session. | Valet selects a capability-labeled bake and the Kubernetes provider. |
+| A2 | Inspect the admitted pod before readiness. | The pod matches K23 through K32 exactly. |
+| A3 | Run `valet-kubernetes start` twice. | Both calls exit 0 with the ready status vector. |
+| A4 | Inspect the process and kubeconfig. | Environment, argv, paths, mode, and context match K39 through K48 and K131 through K132. |
+| A5 | Create a limited multi-UID pod with DNS, ClusterIP, and `emptyDir`. | UID 65535, DNS, service traffic, and outer resource containment work. |
+| A6 | Run Docker and an unrelated long exec during cluster use. | Both stay in `/init/services` and continue. Scope is its sibling. |
+| A7 | Import two selected archives, then import the first again. | Tracing proves the K64 socket and argv. Image records stay stable. |
+| A8 | Run concurrent start, import, status, and stop race fixtures. | Results match the lifecycle and status vectors. No command hangs. |
+| A9 | Send SIGTERM to the server leader. Run `status`. | It reports `error:identity_invalid`, exits 4, and does not edit state. |
+| A10 | Run three stop and start cycles, then stop twice. | No cgroup depth grows. Both stops exit 0. Owned state is absent. |
+| A11 | Request it on Docker, local, virtual, unknown, and an unready Kubernetes node. | Each fails before readiness with a corrective error. |
+| A12 | Kill the helper at each crash point in K56. | The next start or stop follows the matching recovery vector. |
+| A13 | Replace the sandbox pod while the Cluster is ready. | Valet wipes old Cluster state, keeps other PVC data, then creates a new Cluster. |
 
-Pass requires all steps, Mono PR [#8098](https://github.com/tkhq/mono/pull/8098) application e2e, and no outer isolation regression.
-The oracle revision is `9ae8720066b8af545eec68ad64789dd75b014687`.
+The L4 gate also runs Mono PR [#8098](https://github.com/tkhq/mono/pull/8098) at `9ae8720066b8af545eec68ad64789dd75b014687`.
+That oracle has the wrong containerd socket. Mono must correct it before parity can pass.
 
 ## 00. Preliminaries
 
-This document uses MUST, MUST NOT, SHOULD, and MAY as defined by RFC 2119.
-Text without these words is informative. Each keyword sentence ends with a requirement ID.
-The vector validator rejects an ID that has no vector or acceptance step.
+This document uses RFC 2119 requirement words. Informative text has no requirement word.
+Each normative sentence has one unique requirement tag. The validator enforces this rule.
 
 **Capability**: the one `kubernetes: true` sandbox request.
-**Helper**: the image-baked `/usr/local/bin/valet-kubernetes` program.
+**Helper**: `/usr/local/bin/valet-kubernetes` in the sandbox image.
 **Cluster**: one rootless, single-node k3s instance in one sandbox.
+**Root**: `/home/dockerd/.local/state/valet/kubernetes` on the workspace PVC.
 **Manager**: the delegated cgroup `/init`.
-**Services**: the persistent `/init/services` cgroup.
-**Scope**: the helper-owned `/init/valet-kubernetes` cgroup.
+**Services**: the persistent child cgroup `/init/services`.
+**Scope**: the Helper-owned child cgroup `/init/valet-kubernetes`, which is a sibling of Services.
+**Operation**: one persisted start, stop, or import claim with an immutable random ID.
 
-| Level | Name | Required parts |
+| Level | Name | Required proof |
 |---|---|---|
-| L0 | Decision kernels | Capability, interval-map, and lifecycle vectors |
-| L1 | Image | L0 plus artifact lock, helper, paths, and command contract |
-| L2 | Provider | L1 plus Kubernetes admission and startup checks |
-| L3 | Runtime | L2 plus lifecycle, import, and status behavior |
-| L4 | Deployed | L3 plus A1 through A12 and the Mono e2e adapter |
+| L0 | Kernels | Capability, map, lifecycle, and status vectors |
+| L1 | Image | L0, artifact lock, Helper contract, and image goldens |
+| L2 | Provider | L1, schema propagation, admission goldens, and provider failure tests |
+| L3 | Runtime | L2, generic lifecycle, crash, import, and persistence tests |
+| L4 | Deployed | L3, A1 through A13, and corrected Mono acceptance |
 
-**INV-1, outward authority**: The helper MUST control only its sandbox process tree and Scope. [K02]
-**INV-2, inward control**: Valet MUST own capability resolution, helper artifacts, state, readiness, and generic tests. [K03]
-**INV-3, fail closed**: A missing prerequisite MUST stop readiness without an unsafe fallback. [K04]
-**INV-4, deterministic decisions**: The L0 kernels MUST use only their stated inputs. [K05]
-**INV-5, bounded identity**: Inner UID and GID maps MUST cover every integer from 0 through 65535. [K06]
-**INV-6, one cluster**: One sandbox MUST have at most one managed Cluster. [K07]
+**INV-1, bounded authority**: The Helper MUST control only Root, its process tree, and Scope. [K02]
+**INV-2, Valet ownership**: Valet MUST own capability resolution, artifacts, lifecycle, readiness, and generic tests. [K03]
+**INV-3, fail closed**: A failed prerequisite MUST stop readiness without an unsafe fallback. [K04]
+**INV-4, pure decisions**: Each L0 kernel MUST use only its stated input. [K05]
+**INV-5, complete maps**: UID and GID maps MUST cover every inner ID from 0 through 65535. [K06]
+**INV-6, one cluster**: One sandbox MUST have at most one Operation and one managed Cluster. [K07]
 
-## 01. Capability and support
+## 01. Capability and identity
 
 *Depends on: Part 00. Conformance: L0 to L2.*
 
-`.valet/prebuild.yaml` gains the optional Boolean key `kubernetes`; omission means `false`.
-The recipe loader MUST reject non-Boolean values with the exact field name and `use kubernetes: true or false`. [K30]
-A successful repository read MUST persist the resolved value in `agent_sessions.kubernetes`, default `false`. [K31]
-A failed read MUST preserve a stored `true`; it MUST NOT silently remove authority required by a running Cluster. [K32]
-REST and child creation MUST use the same repository resolution and persistence path. [K33]
+`.valet/prebuild.yaml` uses optional Boolean `kubernetes`; omission means `false`.
+The loader MUST reject other types with `use kubernetes: true or false`. [K08]
+A successful repository read MUST persist the value in `agent_sessions.kubernetes`, whose default is false. [K09]
+A failed read MUST preserve a stored true value. [K10]
+REST and child creation MUST use the same resolution and persistence path. [K11]
+Propagation MUST follow `PrebuildOverride` to `RepoPrebuildFlags` to `SessionMeta` to `SandboxCreateOpts`. [K12]
+`SandboxCapabilities.nestedKubernetes` MUST be the Boolean false or the string `v1`. [K13]
+A true repository bake identity MUST include `nested-kubernetes:v1:<lockDigest>`. [K14]
+That bake MUST carry OCI label `dev.valet.capability.nested-kubernetes` with the same value. [K15]
+The CR annotation and immutable pod environment fingerprint MUST include that value. [K16]
+Reconcile MUST replace compute on identity change and preserve the working directory PVC. [K17]
 
-Propagation is `PrebuildOverride.kubernetes` to `RepoPrebuildFlags.kubernetes` to `SessionMeta.kubernetes` to `SandboxCreateOpts.kubernetes`.
-`SandboxCapabilities.nestedKubernetes` MUST report `v1` or `false`. [K34]
-The repository bake identity MUST include `nested-kubernetes:v1:<lock digest>` when the value is true. [K35]
-The bake MUST carry OCI label `dev.valet.capability.nested-kubernetes` with that same value. [K36]
-The provider identity MUST include the value in the CR annotation and immutable pod environment fingerprint. [K37]
-Reconcile MUST replace compute when this identity changes and preserve `/workspace`. [K38]
+The capability kernel is `(requestedBoolean, providerReport) -> decision`.
+It MUST return `ignore` for false, `allow` for true plus `v1`, and `reject:unsupported_provider` otherwise. [K18]
+A rejection MUST say `Nested Kubernetes requires the Kubernetes sandbox provider. Change the provider or remove kubernetes: true.` [K19]
+The API MUST reject Docker, local, and virtual providers before sandbox create or restore. [K20]
+The Kubernetes provider MUST finish admission and startup checks before it reports Ready. [K21]
+A false request MUST leave bake identity, manifest, environment, startup, and kubeconfig unchanged. [K22]
 
-| Provider | L2 support | Reason |
-|---|---:|---|
-| Kubernetes | Required | It can prove user namespaces, OCI devices, RuntimeClass, maps, and cgroup delegation. |
-| Docker | Unsupported | It cannot prove the Kubernetes pod and node invariants. |
-| Local and virtual | Unsupported | They have no isolated provider boundary. |
-
-The capability decision kernel is `(requested, providerReport) -> allow | ignore | reject`.
-It MUST return `ignore` when requested is false, `allow` only for `v1`, and `reject:unsupported_provider` otherwise. [K39]
-The API MUST apply this kernel before it creates or restores a sandbox. [K40]
-A reject MUST say `Nested Kubernetes requires the Kubernetes sandbox provider. Change the provider or remove kubernetes: true.` [K41]
-The provider MUST finish all K08 through K12 checks before it reports the sandbox Ready. [K42]
-
-## 02. Provider and image contract
+## 02. Bounded provider profile
 
 *Depends on: Parts 00 and 01. Conformance: L1 to L2.*
 
-The Kubernetes manifest MUST set `hostUsers: false`, `privileged: false`, and add no workload capability. [K08]
-It MUST NOT add a hostPath, host socket, host PID, host IPC, host network, or host namespace mount. [K09]
-The RuntimeClass MUST expose TUN character `10:200` with `rw` and mode `0666`. [K10]
-It MUST bind host `/dev/null` character `1:3` to `/dev/kmsg` and MUST NOT expose kmsg `1:11`. [K11]
-It MUST keep the inherited broad `/sys` mount read-only and grant no wildcard device rule. [K12]
-Kubernetes 1.35 nodes MUST set `userNamespaces.idsPerPod: 131072`. [K43]
-The image MUST declare UID and GID subordinate ranges `65536:65535` for UID 1500. [K44]
+A true request uses the existing Kubernetes `docker:true` profile.
+The manifest MUST set `hostUsers:false` and `privileged:false`. [K23]
+Its maximum added capabilities MUST be exactly `SYS_ADMIN` and `NET_ADMIN`. [K24]
+Its seccomp profile MUST be `Unconfined`, and its AppArmor profile MUST be `unconfined`. [K25]
+Its `procMount` MUST be `Unmasked`. [K26]
+Nested Kubernetes MUST add no grant beyond K24 through K26. [K27]
+The manifest MUST add no hostPath, host socket, host namespace, host PID, host IPC, or host network. [K28]
+The inherited broad `/sys` mount MUST remain read-only. [K29]
 
-Image startup MUST create Services, move the PID 1 chain there, empty Manager, and enable `cpu cpuset memory pids`. [K45]
-It MUST delegate Manager ownership and required control files to UID 1500 without changing outer limits. [K46]
-It MUST set `VALET_SANDBOX_KUBERNETES=1` and `KUBECONFIG` to the path in K15. [K47]
-It MUST verify the Helper, lock digest label, `k3s`, `kubectl`, RootlessKit, `slirp4netns`, `newuidmap`, and `newgidmap`. [K48]
+The existing profile uses `SYS_ADMIN` for user-namespace mounts and delegated cgroups.
+It uses `NET_ADMIN` for nested Docker bridge, veth, and iptables work.
+Unmasked proc and unconfined seccomp permit the existing nested proc mount and namespace sysctl operations.
 
-The provider enforces K08 through K12, RuntimeClass selection, and the immutable capability fingerprint.
-Image startup enforces K43 through K48 before the provider readiness probe succeeds.
-The Helper rechecks maps, devices, cgroups, commands, file ownership, and versions before each cold start.
+The RuntimeClass MUST expose TUN character `10:200` with `rw` and mode `0666`. [K30]
+It MUST bind host `/dev/null` character `1:3` to `/dev/kmsg`. [K31]
+It MUST exclude kmsg `1:11`, wildcard device rules, and cgroup device permission `m`. [K32]
+Kubernetes 1.35 sandbox nodes MUST set `userNamespaces.idsPerPod:131072`. [K33]
+The image MUST declare UID and GID subordinate ranges `65536:65535` for UID 1500. [K34]
 
-The normative lock is in `nested-kubernetes-v1-vectors.json` under `artifacts`.
-Artifacts MUST come from the listed upstream HTTPS release URL and match SHA-256 before installation. [K49]
-The initial pins MUST be k3s `v1.31.5+k3s1`, kubectl `v1.31.5`, and RootlessKit `v3.0.2`. [K50]
-Callers MUST NOT select a version. [K51]
-A pin change MUST update both architectures, the lock digest, bake identity, vectors, and acceptance evidence. [K52]
+Only capability-enabled image startup MUST perform K35 through K37. [K35]
+Enabled startup MUST create Services, empty Manager, and enable `cpu cpuset memory pids`. [K36]
+Enabled startup MUST delegate Manager control files to UID 1500 without changing outer limits. [K37]
+Ordinary sandbox startup MUST NOT install, validate, export, or modify nested Kubernetes state. [K38]
 
-## 03. Helper interface and state
+## 03. Artifact and process contract
 
 *Depends on: Parts 00 through 02. Conformance: L1 to L3.*
 
-The grammar is `valet-kubernetes {start|status|stop|diagnose}` and `valet-kubernetes import ARCHIVE...`.
-The Helper MUST reject options, missing archives, relative archives, and unknown commands with exit 2 and usage on stderr. [K13]
-It MUST run as UID 1500 and MUST refuse UID 0. [K14]
-The fixed root is `/home/dockerd/.local/state/valet/kubernetes`; kubeconfig is `<root>/kubeconfig.yaml`. [K15]
-The root contains `data/`, `run/`, `config/`, `server.log`, `server.pid.json`, and `state.json`; its adjacent lock is `<root>.lock`. [K16]
-Files MUST be UID 1500, non-symlinked, and mode 0700 for directories or 0600 for files. [K17]
-Each mutating command MUST hold one exclusive `flock` from validation through its final atomic state write. [K18]
-Lock wait MUST stop after 30 seconds with exit 24 and a retry action. [K19]
-`status` and `diagnose` MUST take a shared lock and MUST have no side effect. [K20]
+The normative artifact lock is the `artifacts` array in the vector file.
+Installation MUST use each listed HTTPS URL and verify its SHA-256. [K39]
+Initial versions MUST be k3s `v1.31.5+k3s1` and kubectl `v1.31.5`. [K40]
+Callers MUST NOT select versions. [K41]
+A pin change MUST update both architectures, lockDigest, identities, vectors, and acceptance evidence. [K42]
 
-Exit 0 means success; 2 means usage; 3 means stopped status; 4 means non-ready status.
-Exit 20 means failed prerequisite; 21 means foreign state; 22 means startup or readiness failure; 23 means import failure; 24 means timeout.
-A failure MUST emit one corrective error on stderr and MUST emit no success JSON. [K21]
-`diagnose` MUST emit deterministic JSON checks and exit 0 only when all prerequisites pass. [K22]
-Logs MAY contain timestamps; status JSON and vector comparisons MUST NOT contain timestamps or durations. [K23]
+k3s rootless mode uses its embedded RootlessKit Go library.
+The k3s pin MUST also pin that source dependency at RootlessKit `v1.0.1`. [K43]
+The image MUST NOT install a standalone RootlessKit binary. [K44]
 
-The lifecycle states are `stopped`, `starting`, `ready`, `stopping`, and `error`.
-Missing `state.json` means `stopped`; every other invalid state means `error:invalid_state`.
-The lifecycle kernel is `(state, operation, identity) -> next, action, exit` and MUST match every lifecycle vector. [K24]
-The vectors cover every valid operation class and take precedence over prose examples.
-Successful `start`, `stop`, `import`, and `status` MUST emit one compact JSON line with sorted keys. [K25]
-The stable status fields MUST be `error`, `kubeconfig`, `schema`, and `state`, with schema value 1. [K26]
-Ready means the leader identity is valid, the API answers, all nodes are Ready, and CoreDNS rollout is complete. [K27]
-Startup MUST stop after 10 minutes, roll back its owned process tree and Scope, retain logs, write `error`, and exit 22. [K28]
-A repeated ready `start` MUST recheck K27 and return success without replacing the Cluster. [K29]
+`XDG_RUNTIME_DIR` MUST equal `<Root>/run`, and `XDG_CONFIG_HOME` MUST equal `<Root>/config`. [K45]
+`K3S_DATA_DIR` MUST equal `<Root>/data`, and `KUBECONFIG` MUST equal `<Root>/kubeconfig.yaml`. [K46]
+The exact argv MUST match the `k3sArgv` vector. [K47]
+The Helper MUST rename kubeconfig context `default` to `valet-kubernetes` once and reject any other initial context. [K48]
 
-`server.pid.json` records PID, `/proc/<pid>/stat` start time, boot ID, UID, cgroup, and argv digest.
-A live identity MUST match all fields, UID 1500, Scope, and the pinned k3s server argv. [K53]
-A live mismatch MUST exit 21 without signaling the process or deleting state. [K54]
-A dead or reboot-stale identity MUST permit cleanup only inside the fixed root and Scope. [K55]
+## 04. Files, persistence, and process identity
 
-`stop` MUST send SIGTERM to the saved process group, wait 10 seconds, then send SIGKILL and wait 2 seconds. [K56]
-It MUST use the validated Scope `cgroup.kill` for survivors and wait 10 seconds for `populated 0`. [K57]
-It MUST remove owned descendants bottom-up and MUST leave state on unsafe, foreign, or populated paths. [K58]
-A successful stop MUST remove the fixed root and Scope; a stopped stop MUST succeed. [K59]
-The Helper MUST create only Scope as a Manager sibling and move only its detached launcher into Scope before `exec`. [K60]
+*Depends on: Parts 00 through 03. Conformance: L1 to L3.*
 
-## 04. Map and import kernels
+Root contains `data`, `run`, `config`, `server.log`, `server.pid.json`, `operation.json`, and `state.json`.
+Root directories MUST use mode 0700, and Root files MUST use mode 0600 with UID 1500. [K49]
+The adjacent `<Root>.lock` MUST be a non-symlinked UID 1500 file with mode 0600. [K50]
+All state replacement MUST use write, fsync, rename, and parent-directory fsync. [K51]
 
-*Depends on: Parts 00 through 03. Conformance: L0 and L3.*
+The provider injects immutable `VALET_SANDBOX_EPOCH` for each fresh compute instance.
+Each state file MUST record the current epoch. [K52]
+A matching epoch start MAY reuse valid k3s data after an owned process failure. [K53]
+An epoch mismatch MUST remove all Root contents before any launch. [K54]
+Epoch cleanup MUST preserve `<Root>.lock` and every PVC path outside Root. [K55]
+Tests MUST cover crashes before launch, after launch, after readiness, during stop, and during each archive import. [K56]
+A13 MUST prove that pod replacement removes old Cluster data and keeps unrelated PVC data. [K57]
+A successful stop MUST remove Root contents, Root, and Scope after it closes the lock. [K58]
 
-The map kernel accepts ordered triples `(inner, outer, count)` for UID and GID.
-It MUST reject malformed, zero, overflowing, overlapping, or gapped coverage of inner interval `[0,65535]`. [K61]
-It MUST accept split, unordered input when the union covers that exact interval. [K62]
-Subordinate files MUST give UID 1500 a total usable range of at least 65535 at outer start 65536. [K63]
+`server.pid.json` records PID, proc start time, boot ID, UID, cgroup, argv digest, epoch, and Operation ID.
+A valid identity MUST match every field, UID 1500, the current epoch, Scope, and K47. [K59]
+A live mismatch MUST never receive a signal or authorize state deletion. [K60]
+A dead or reboot-stale identity MUST authorize cleanup only inside Root and Scope. [K61]
+The Helper MUST create Scope as a Manager child and Services sibling. [K62]
+It MUST move only its detached launcher into Scope before exec. [K63]
 
-`import` accepts one or more absolute regular files in OCI or Docker `docker save` tar format.
-It MUST pass each archive unchanged to pinned `k3s ctr --address <root>/data/agent/containerd/containerd.sock --namespace k8s.io images import --digests`. [K64]
-It MUST hold the lifecycle lock, require `ready`, preserve argument order, and never discover or infer images. [K65]
-A duplicate import MUST succeed with containerd's content-addressed result. [K66]
-Imports have no multi-archive transaction; a failure MUST stop later imports and retain completed earlier imports. [K67]
-A failed archive MAY leave content-addressed blobs or image records; retrying the same archive MUST be safe. [K66]
-The Helper MUST reject links, devices, directories, changing inode or size, and archives over available state storage. [K68]
-It MUST copy each validated archive to a 0600 temporary file in the fixed root, import it, then remove it. [K69]
+## 05. Import and readiness
 
-## 05. Threats and checks
+*Depends on: Parts 00 through 04. Conformance: L3.*
 
-*Depends on: Parts 00 through 04. Conformance: L2 to L4.*
+Pinned source maps `/run/k3s/containerd` to `$XDG_RUNTIME_DIR/k3s/containerd` in rootless mode.
+Import MUST call `k3s ctr --address <Root>/run/k3s/containerd/containerd.sock --namespace k8s.io images import --digests ARCHIVE`. [K64]
+A7 MUST trace this exact address and prove the socket accepts an import. [K65]
+The Helper MUST accept absolute regular OCI-layout or Docker-save tar archives only. [K66]
+It MUST preserve argument order and MUST NOT discover images. [K67]
+A duplicate import MUST succeed with the same content-addressed image records. [K68]
+A failed archive MAY leave blobs or records; retrying it MUST be safe. [K69]
+Failure MUST stop later archives while retaining earlier completed imports. [K70]
+The Helper MUST reject links, devices, directories, changing files, and files larger than free Root storage. [K71]
+It MUST stage each archive as a 0600 Root temporary file and remove that file after the attempt. [K72]
 
-| Threat | Invariant | Mechanical check |
+Ready requires valid identity, a responding API, all nodes Ready, and completed CoreDNS rollout.
+Start readiness MUST use one Operation deadline of 10 minutes. [K73]
+A readiness timeout MUST retain logs, clean owned processes and Scope, persist error, and exit 22. [K74]
+A repeated ready start MUST recheck readiness without replacing the Cluster. [K75]
+
+## 06. Commands, locks, and state kernels
+
+*Depends on: Parts 00 through 05. Conformance: L0 and L3.*
+
+Grammar is `valet-kubernetes {start|status|stop|diagnose}` or `valet-kubernetes import ARCHIVE...`.
+Invalid grammar MUST print usage on stderr, emit no JSON, and exit 2. [K76]
+The Helper MUST run as UID 1500 and refuse UID 0 with exit 20. [K77]
+
+A mutating command MUST hold the exclusive lock only while it validates, claims, or commits an Operation. [K78]
+It MUST release the lock during launch, readiness polling, signaling waits, archive copying, and import. [K79]
+Lock acquisition MUST time out after 30 seconds with exit 24 and a retry action. [K80]
+Status MUST take a shared lock for one state snapshot, then release it before probes. [K81]
+Diagnose MUST use the same read-only pattern. [K82]
+
+A concurrent start MUST join the current start Operation and share its deadline. [K83]
+Import during start or stop MUST report non-ready and exit 4. [K84]
+Stop during start MUST set `cancelRequested`, persist `stopping`, and perform bounded owned cleanup. [K85]
+Start during stop MUST report stopping and exit 4. [K86]
+Stop during import MUST request cancellation, wait for the current archive process, then clean the Cluster. [K87]
+A recovering command MUST adopt only an Operation whose epoch and process identity match. [K88]
+
+The lifecycle kernel is `(persistedState, operation, identity, activeOperation) -> decision`.
+It MUST match every lifecycle vector. [K89]
+The status kernel is `(persistedState, identity, readiness) -> derivedReport`.
+It MUST match every status vector without changing persisted state. [K90]
+A persisted ready state with dead, missing, or mismatched identity MUST report `error:identity_invalid` and exit 4. [K91]
+
+Successful mutating commands MUST emit the derived compact status JSON and exit 0. [K92]
+Status MUST always emit compact JSON, including error reports. [K93]
+Status exits MUST be 0 for ready, 3 for stopped, and 4 for every other report. [K94]
+Mutating command failure MUST emit one corrective stderr error and no success JSON. [K95]
+Diagnose MUST emit deterministic check JSON and exit 20 when any prerequisite fails. [K96]
+Import from a non-ready state MUST emit one corrective stderr error, no JSON, and exit 4. [K97]
+Logs MAY contain time data; vector-compared JSON MUST NOT contain time data. [K98]
+
+Stop MUST send SIGTERM to the owned group, wait 10 seconds, then send SIGKILL and wait 2 seconds. [K99]
+It MUST use validated Scope `cgroup.kill` for survivors and wait 10 seconds for `populated 0`. [K100]
+It MUST remove owned descendants bottom-up and retain state for unsafe, foreign, or populated paths. [K101]
+A stopped stop MUST succeed without side effects. [K102]
+
+## 07. Map kernel and threats
+
+*Depends on: Parts 00 through 06. Conformance: L0 to L4.*
+
+The map kernel input is a list of integer `(inner, outer, count)` triples.
+It MUST reject malformed rows, zero counts, arithmetic overflow, and any interval containing ID 4294967295. [K103]
+It MUST reject overlapping outer intervals because `newuidmap` and `newgidmap` reject them. [K104]
+It MUST ignore valid inner intervals wholly above 65535 when it computes target coverage. [K105]
+It MUST reject overlap or a gap within inner target interval 0 through 65535. [K106]
+It MUST accept coverage that starts at 0 and extends beyond 65535. [K107]
+It MUST accept unordered split coverage when its clipped union covers 0 through 65535. [K108]
+Subordinate files MUST grant UID 1500 outer interval `65536:65535` for both UID and GID. [K109]
+
+| Threat | Bound invariant | Mechanical proof |
 |---|---|---|
-| Host escape through pod grants | INV-1 | Manifest golden for K08 through K12; live A2 |
-| Short or gapped user map | INV-3, INV-5 | Map vectors; startup preflight; A5 |
-| PID reuse or forged pidfile | INV-1 | Full identity vector; foreign live process test |
-| Cgroup escape or service kill | INV-1 | Fake cgroup ownership tests; A6, A8, A10 |
-| Concurrent lifecycle corruption | INV-6 | Lock race vector and concurrent command test |
-| Supply-chain substitution | INV-3 | SHA-256 lock validator and image-label probe |
-| Ambient image import | INV-2 | Import argv test and syscall fixture |
-| False readiness | INV-3 | absent node, unready node, and absent CoreDNS tests |
+| Provider grant expansion | INV-1, INV-3 | Manifest golden for K23 to K32 plus live A2 |
+| Map truncation or alias | INV-3, INV-5 | Executed K103 to K109 vectors plus A5 |
+| PID reuse | INV-1 | K59 to K61 identity vectors plus A9 |
+| Cgroup service damage | INV-1 | K62, K63, K99 to K101 tests plus A6 and A10 |
+| Lifecycle race | INV-3, INV-6 | K78 to K90 race vectors plus A8 and A12 |
+| Supply substitution | INV-2, INV-3 | K39 to K44 digest and image tests |
+| Ambient import | INV-2 | K64 to K72 argv vector plus A7 tracing |
+| False readiness | INV-3 | K73 to K75 and K90 to K91 failure fixtures |
+| Persistent stale cluster | INV-3, INV-6 | K52 to K58 epoch vectors plus A13 |
 
-## 06. Migration, rollout, and rollback
+## 08. Migration and rollout
 
-*Depends on: Parts 00 through 05. Conformance: L4.*
+*Depends on: Parts 00 through 07. Conformance: L4.*
 
-Mono PR #8098 MUST remain unchanged as the oracle until L4 passes in a deployed Valet environment. [K70]
-Implementation order MUST be lock artifacts, image startup, provider manifest, schema propagation, Helper, generic tests, then Mono adapter. [K71]
-PR #659 supplies Tini PID 1 and PR #661 supplies the full subordinate ranges; implementation MUST preserve both. [K72]
+Mono PR #8098 MUST remain the behavioral oracle until corrected Mono and Valet pass L4. [K110]
+Mono MUST correct its `<root>/data/agent/containerd/containerd.sock` address to K64 before parity. [K111]
+Implementation order MUST be artifacts, image startup, provider, schema, Helper, generic tests, then Mono adapter. [K112]
+Implementation MUST preserve PR #659 Tini behavior and PR #661 subordinate ranges. [K113]
 
 Infra PR [test-agents-infra#11](https://github.com/tkhq/test-agents-infra/pull/11) is stage 1.
-Stage 1 MUST remain Kubernetes 1.34 and MUST NOT enable `idsPerPod`; it cannot pass K43. [K73]
-Stage 2 MUST upgrade control plane, then `platform`, `default`, and `large` node groups to 1.35 with health gates. [K74]
-Stage 2 MUST set `idsPerPod: 131072`, preserve the TUN and null-kmsg OCI rules, and complete A2 before image rollout. [K75]
-Stage 3 MUST deploy the capability-disabled Valet image and run non-capability regression tests. [K76]
-Stage 4 MUST enable one canary repository, complete A1 through A12, then widen access. [K77]
+Stage 1 MUST remain Kubernetes 1.34 without `idsPerPod`. [K114]
+Stage 2 MUST upgrade control plane and all node groups to 1.35 with health gates. [K115]
+Stage 2 MUST set `idsPerPod:131072`, preserve OCI device rules, and pass A2 before image rollout. [K116]
+Stage 3 MUST deploy the capability-disabled image and run ordinary sandbox regressions. [K117]
+Stage 4 MUST enable one canary repository, pass A1 through A13, then widen access. [K118]
 
-Rollback MUST first disable capability admission while existing Clusters remain stoppable. [K78]
-An image rollback MUST retain the Helper until all managed Clusters stop. [K79]
-Node rollback MUST use replacement capacity because EKS control planes and managed node groups do not downgrade in place. [K80]
+Rollback MUST disable new capability admission while existing Clusters remain stoppable. [K119]
+An image rollback MUST retain the Helper until all managed Clusters stop. [K120]
+Node rollback MUST use replacement capacity because EKS components do not downgrade in place. [K121]
 
-After L4, Mono MUST replace `rootless-k3s.sh` with calls to `valet-kubernetes start`, `import "$archive"...`, and `stop`. [K81]
-The adapter MUST keep `VALET_SANDBOX_DOCKER=1`, `TK_ENV`, Make targets, `KUBECONFIG`, and context `k3d-tkhq` compatibility. [K82]
-The adapter MUST copy only the canonical kubeconfig to its existing `K3S_STATE_DIR`, then rename that copy's context to `k3d-tkhq`. [K83]
-It MUST NOT read or modify an ambient kubeconfig or the canonical kubeconfig. [K83]
-Mono MUST retain archive selection, builds, Kustomize, application readiness, SOPS, e2e, and k3d outside Valet. [K84]
+After L4, Mono MUST replace its lifecycle script with Helper start, import, and stop calls. [K122]
+The adapter MUST keep `VALET_SANDBOX_DOCKER=1`, `TK_ENV`, Make targets, and `K3S_STATE_DIR` compatibility. [K123]
+It MUST copy only the canonical kubeconfig, then rename that copy's context to `k3d-tkhq`. [K124]
+It MUST NOT read or modify an ambient or canonical kubeconfig. [K125]
+Mono MUST retain archive selection, builds, Kustomize, application readiness, SOPS, e2e, and external k3d. [K126]
 
-## 07. Non-goals and re-entry seams
+## 09. Non-goals and normative artifacts
 
-*Depends on: Parts 00 through 06. Conformance: all levels.*
+*Depends on: Parts 00 through 08. Conformance: all levels.*
 
-A v1 implementation MUST NOT ship an excluded item under the v1 capability label. [K85]
+A v1 implementation MUST NOT ship an excluded item under the v1 label. [K127]
 
 | Excluded item | Reason | Re-entry seam |
 |---|---|---|
-| Remote CLI tree, plugin, or action | Consumers use the in-sandbox binary and kubeconfig. | New API version and authorization review |
-| Arbitrary distro or version | One lock bounds supply chain and behavior. | New capability version and artifact matrix |
-| Multiple clusters, nodes, or host management | They exceed sandbox authority. | New topology spec and provider contract |
-| Privileged workloads | They break the outer security invariant. | Separate security model and admission class |
-| Automatic image discovery | The caller owns intent. | New explicit archive-selection API |
-| Manifests and application readiness | Mono owns application behavior. | Repository adapter interface |
-| Secrets | Existing Valet secret paths own credentials. | Secret-broker integration with redaction tests |
+| Remote CLI, plugin, or action | Consumers have the Helper and kubeconfig. | New API and authorization review |
+| Arbitrary distro or version | One lock bounds behavior. | New capability version |
+| Multiple clusters, nodes, or host management | They exceed sandbox authority. | New topology contract |
+| Privileged workloads | They break the provider bound. | Separate admission class |
+| Automatic image discovery | The caller owns import intent. | Explicit selection API |
+| Manifests, application readiness, or secrets | Mono and existing brokers own them. | Adapter or broker contract |
 
-## Normative artifacts
-
-`docs/specs/nested-kubernetes-v1-vectors.json` is normative.
-`scripts/docs/validate_nested_kubernetes_spec.mjs` validates requirement coverage, artifact pins, and L0 kernels.
-Implementation tests MUST consume the same vectors instead of copying their values. [K86]
+The JSON vectors are normative.
+Implementation tests MUST consume these vectors without copied values. [K128]
+The validator MUST execute kernels and reject duplicate, missing, unknown, or vacuous vector coverage. [K129]
+Acceptance-only vectors MUST name an A-step and a concrete falsifying check. [K130]
+The managed environment MUST match `k3sEnv` and set `VALET_SANDBOX_KUBERNETES=1`. [K131]
+The Helper MUST clear every unlisted `K3S_*`, `CONTAINERD_*`, and `ROOTLESSKIT_*` variable before launch. [K132]
+Stop MUST terminate a canceled archive process with the K99 bounded TERM and KILL sequence. [K133]
+A cold start MUST require the `minimumFreeBytes` vector within the existing PVC quota. [K134]
