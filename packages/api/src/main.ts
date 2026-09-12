@@ -44,6 +44,7 @@ import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from ".
 import { ensureEnvProviders } from "./proxy/upstream.js";
 import { resolveOrgId } from "./lib/org.js";
 import { webDistPath } from "./assets/base.js";
+import { startSigningKeySweep, type SigningKeySweepHandle } from "./engine/signing-key-sweep.js";
 import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
 import {
   startInstallationSweep,
@@ -369,6 +370,7 @@ getAttachmentRefStore().startSweep();
 let closed = false;
 let bootReady = false;
 let rotateSweep: RotateSweepHandle | undefined;
+let signingKeySweep: SigningKeySweepHandle | undefined;
 let installationSweep: InstallationSweepHandle | undefined;
 
 // `startServer` from createApp is renamed at the destructure so it can't
@@ -617,6 +619,13 @@ async function runBootChain(): Promise<void> {
     db: providers.db,
   });
 
+  // Commit signing keys past their window: remove the GitHub key and close
+  // the row (agent commit signing design). Expiry is expected in normal
+  // operation, which is why this repair exists. The interval is `.unref()`'d.
+  signingKeySweep = startSigningKeySweep({
+    tokens: { db: providers.db, credentials: providers.engineCredentials, key: deriveSecretKey(encryptionKey) },
+  });
+
   // GitHub App installations: pick up a new installation without anybody
   // pressing "Refresh installations". The tick wakes every minute and checks at
   // most one org that is past its own due time, so most ticks do nothing. An
@@ -695,6 +704,11 @@ async function close(): Promise<void> {
     rotateSweep?.stop();
   } catch (err) {
     console.error("rotateSweep.stop failed:", err);
+  }
+  try {
+    signingKeySweep?.stop();
+  } catch (err) {
+    console.error("signingKeySweep.stop failed:", err);
   }
   try {
     // Awaited, unlike the sweeps above it: a pass in flight holds a database

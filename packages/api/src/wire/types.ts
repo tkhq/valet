@@ -5167,3 +5167,46 @@ export interface ListBakeQueueResponse {
   recent: BakeQueueItem[];
   blocked: BakeQueueBlockedSource[];
 }
+
+// ── Commit signing (agent commit signing design) ────────────────────────
+
+/** `GET /api/me/commit-signing` */
+export interface GetCommitSigningResponse {
+  /** The deployment has VALET_TURNKEY_* set. */
+  configured: boolean;
+  /** The user has a Turnkey sub-organization for signing. */
+  enrolled: boolean;
+  subOrgId?: string;
+  enrolledAt?: number;
+  /** Values the browser needs to create the passkey. */
+  passkey?: { apiBaseUrl: string; organizationId: string; rpId?: string };
+  keys: CommitSigningKeySummary[];
+}
+
+export interface CommitSigningKeySummary {
+  fingerprint: string;
+  repo: string;
+  branch: string;
+  prNumber?: number;
+  sessionId: string;
+  notBefore: number;
+  notAfter: number;
+  status: "active" | "revoked" | "closed";
+}
+
+/** `POST /api/me/commit-signing/enroll` — the passkey attestation from `@turnkey/sdk-browser`. */
+export interface PostCommitSigningEnrollRequest {
+  authenticatorName?: string;
+  challenge: string;
+  attestation: {
+    credentialId: string;
+    clientDataJson: string;
+    attestationObject: string;
+    transports: string[];
+  };
+}
+
+export interface PostCommitSigningEnrollResponse {
+  subOrgId: string;
+  enrolledAt: number;
+}
