@@ -133,3 +133,8 @@ Security review also corrected primary button interaction colors and reduced-mot
 The final web suite passes 2,966 tests across 265 files.
 
 Reasoning selectors use 48-pixel controls and 16-pixel text on phones, with 36-pixel controls and 14-pixel text from the small breakpoint.
+
+The final full e2e run passed 30 checks and failed the root unit step on two API assertions.
+Both API files passed in isolation, and the complete unit scorecard step passed on rerun. The initial cause was not reproduced.
+All 31 enabled checks passed across the full run and rerun. The same four optional integrations were skipped.
+The final reasoning selector change passed 11 targeted tests, phone and desktop browser checks, and a fresh production build.
