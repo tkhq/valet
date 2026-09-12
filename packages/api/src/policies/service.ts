@@ -22,7 +22,7 @@
  * non-interactive `appliesIn: "workflow"` enforcement path.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type {
   ActionPlugin,
   ApprovalMode,
@@ -34,8 +34,8 @@ import type {
   RiskLevel,
   ValetPlugin,
 } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
+import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import {
   grantPolicyKey,
@@ -85,6 +85,7 @@ export function alwaysAllowPolicyId(orgId: string, actionId: string): string {
 
 export interface PolicyRowScope {
   orgId: string;
+  teamId?: string;
   userId?: string;
   sessionId?: string;
   workflowExecutionId?: string;
@@ -97,11 +98,21 @@ export interface PolicyRowScope {
  * session/execution, and the user's overrides. Filtering/precedence is the
  * pure core's job; this only narrows the query.
  */
-export async function loadPolicyRows(db: AppDb, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
+export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
+  // Session ownership comes from the durable row, never the acting member.
+  let teamId = scope.teamId;
+  if (scope.sessionId) {
+    const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+      .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
+    if (session) teamId = session.ownerType === "team" ? session.ownerId ?? undefined : undefined;
+  }
+  const principalFilter = teamId
+    ? or(and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId)), and(eq(actionPolicies.principalType, "team"), eq(actionPolicies.principalId, teamId)))
+    : and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId));
   const policyRows = await db
     .select()
     .from(actionPolicies)
-    .where(and(eq(actionPolicies.orgId, scope.orgId), isNull(actionPolicies.revokedAt)));
+    .where(and(eq(actionPolicies.orgId, scope.orgId), principalFilter, isNull(actionPolicies.revokedAt)));
 
   const policies: ActionPolicyRow[] = policyRows.map((r) => ({
     id: r.id,
@@ -145,7 +156,7 @@ export async function loadPolicyRows(db: AppDb, scope: PolicyRowScope): Promise<
   }
 
   let overrides: ActionPolicyOverrideRow[] = [];
-  if (scope.userId) {
+  if (scope.userId && !teamId) {
     const rows = await db
       .select()
       .from(actionPolicyOverrides)
@@ -182,6 +193,7 @@ function toGrantRow(r: {
 
 export interface ResolveActionPolicyInput {
   orgId: string;
+  teamId?: string;
   userId?: string;
   service: string;
   actionId: string;
@@ -202,6 +214,7 @@ export interface ResolveActionPolicyInput {
 export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyInput): Promise<PolicyDecision> {
   const rows = await loadPolicyRows(db, {
     orgId: input.orgId,
+    teamId: input.teamId,
     userId: input.userId,
     sessionId: input.sessionId,
     workflowExecutionId: input.workflowExecutionId,
@@ -581,6 +594,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
 
       const decision = await resolveActionPolicy(deps.db, {
         orgId: input.orgId,
+        teamId: input.teamId,
         userId: input.userId,
         service: input.service,
         actionId: input.actionId,

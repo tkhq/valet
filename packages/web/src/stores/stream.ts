@@ -669,10 +669,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
-    case "ping": {
-      // Ping carries no state change. Preserve identity unless the
-      // frame advanced lastOffset (defensive — pings don't carry
-      // offsets today, but the contract allows it).
+    case "ping":
+    case "title.updated": {
+      // These frames carry no stream state. Title updates trigger query-cache
+      // invalidation in the socket hook after the persisted write completes.
       return ev.offset && ev.offset > slice.lastOffset ? next : slice;
     }
 

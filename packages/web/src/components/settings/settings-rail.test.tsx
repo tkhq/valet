@@ -35,7 +35,8 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
 }));
 
-import { SettingsRail } from "./settings-rail";
+import { SettingsRail, isTeamSettingsPath } from "./settings-rail";
+beforeEach(() => { teamId = undefined; });
 
 describe("SettingsRail", () => {
   it("opens the current section menu with only permitted organization links", async () => {
@@ -73,6 +74,17 @@ describe("SettingsRail", () => {
     expect(screen.getByRole("button", { name: "Settings section: Organization / General" })).toBeTruthy();
   });
 
+  it("keeps Proxy and Policies reachable in the team rail and route allowlist", () => {
+    teamId = "team";
+    orgData = { callerRole: "member", features: { organizations: false } };
+    render(<SettingsRail />);
+    expect(screen.getByText("Team")).toBeTruthy();
+    for (const label of ["Proxy", "Policies"]) {
+      expect(screen.getByRole("link", { name: label }).getAttribute("href")).toBe(`/settings/${label.toLowerCase()}`);
+      expect(isTeamSettingsPath(`/settings/${label.toLowerCase()}`)).toBe(true);
+    }
+    expect(screen.queryByRole("link", { name: "Profile" })).toBeNull();
+  });
   it("always shows the You · Policies entry", () => {
     orgData = { callerRole: "member", features: { organizations: false } };
     render(<SettingsRail />);

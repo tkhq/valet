@@ -18,7 +18,7 @@ vi.mock("~/api/policies", async () => {
   return {
     ...actual,
     useMyGrants: () => ({ data: grantsData, isLoading: false, error: null }),
-    useDeleteMyGrant: () => ({ mutate: deleteMutate, isPending: false }),
+    useDeleteMyGrant: () => ({ mutateAsync: deleteMutate, isPending: false }),
   };
 });
 
@@ -26,6 +26,7 @@ import { GrantsSection } from "./grants-section";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  deleteMutate.mockResolvedValue({ ok: true });
   grantsData = { grants: [] };
 });
 
@@ -54,6 +55,8 @@ describe("GrantsSection", () => {
     expect(screen.getByText("session sess_1")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Revoke grant gmail.gmail.send_email" }));
 
+    expect(deleteMutate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Revoke grant" }));
     expect(deleteMutate).toHaveBeenCalledWith(
       {
         sessionId: "sess_1",
@@ -61,7 +64,6 @@ describe("GrantsSection", () => {
         service: "gmail",
         actionId: "gmail.send_email",
       },
-      expect.anything(),
     );
   });
 

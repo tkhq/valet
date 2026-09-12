@@ -1,5 +1,5 @@
 /**
- * Paginated request log. Displays time, user, model, harness, tokens, cost,
+ * Paginated request log. Displays time, owner, model, harness, tokens, cost,
  * and status. Row onClick selects an id for the SampleView drill-down.
  */
 import type { ProxyRequestListItem } from "@valet/api/wire";
@@ -31,7 +31,7 @@ export function RequestLog({ items, selectedId, onSelect, nextCursor, onLoadMore
           <thead>
             <tr className="border-b border-line bg-paper-muted">
               <th className="px-3 py-2 text-left font-medium text-muted whitespace-nowrap">Time</th>
-              <th className="px-3 py-2 text-left font-medium text-muted">User</th>
+              <th className="px-3 py-2 text-left font-medium text-muted">Owner</th>
               <th className="px-3 py-2 text-left font-medium text-muted">Model</th>
               <th className="px-3 py-2 text-left font-medium text-muted">Harness</th>
               <th className="px-3 py-2 text-right font-medium text-muted">Tokens</th>
@@ -55,8 +55,8 @@ export function RequestLog({ items, selectedId, onSelect, nextCursor, onLoadMore
                   <td className="px-3 py-2 text-muted whitespace-nowrap">
                     {new Date(item.createdAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                   </td>
-                  <td className="px-3 py-2 text-muted truncate max-w-[8rem]" title={item.userId}>
-                    {item.userId.slice(0, 8)}
+                  <td className="px-3 py-2 text-muted truncate max-w-[8rem]" title={item.teamId ? `Team ${item.teamId}` : item.userId ?? undefined}>
+                    {item.teamId ? `Team ${item.teamId.slice(0, 8)}` : item.userId?.slice(0, 8)}
                   </td>
                   <td className="px-3 py-2 text-muted truncate max-w-[12rem]" title={item.model ?? undefined}>
                     {item.model ?? <span className="italic">—</span>}

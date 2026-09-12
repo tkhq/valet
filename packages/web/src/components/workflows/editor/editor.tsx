@@ -401,7 +401,7 @@ function EditorDraft({
             ))}
         </div>
         {!readOnly && (
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {saveError && (
               <span role="alert" className="text-xs text-danger-600 dark:text-danger-500">
                 {saveError}
@@ -469,7 +469,7 @@ function EditorDraft({
           compactView === "canvas" && !inspector ? "flex" : "hidden",
         )}>
         {jsonMode && !readOnly ? (
-          <div className="min-w-0 flex-1 overflow-y-auto p-3">
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
             <JsonDefinitionEditor definition={definition} onApply={handleApplyJson} />
           </div>
         ) : (

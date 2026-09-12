@@ -234,7 +234,7 @@ describe("GET /api/usage — scope=team", () => {
     expect(await foreign.json()).toEqual(await unknown.json());
   });
 
-  it("drill-down lists the team's sessions only, and the proxy drill is empty", async () => {
+  it("drill-down includes team proxy spend without personal, other-team, or foreign-org rows", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await seedTeamSpend(api, now);
@@ -245,11 +245,25 @@ describe("GET /api/usage — scope=team", () => {
       stream: false, statusCode: 200, requestBody: "{}", inputTokens: 50, outputTokens: 10, totalTokens: 60, costUsd: 0.001,
     });
 
+    const proxyBase = {
+      createdAt: now, userId: null, apiKeyId: "shared", providerKind: "openai" as const,
+      model: "gpt-4o-mini", endpoint: "/v1/responses", stream: false, statusCode: 200,
+      requestBody: "{}", inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsd: 0.5,
+    };
+    await api.providers.db.insert(llmProxyRequests).values([
+      { ...proxyBase, id: "team-proxy", orgId: "local-org", teamId: "team-x", harness: "codex" },
+      { ...proxyBase, id: "other-team-proxy", orgId: "local-org", teamId: "team-y", harness: "other-team" },
+      { ...proxyBase, id: "foreign-proxy", orgId: "other-org", teamId: "team-x", harness: "foreign-org" },
+    ]);
     const sess = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=session&scope=team&teamId=team-x`)).json()) as UsageDrillResponse;
     expect(sess.items.map((i) => i.sessionId)).toEqual(["s-team"]);
 
     const px = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=proxy&scope=team&teamId=team-x`)).json()) as UsageDrillResponse;
-    expect(px.items).toEqual([]);
+    expect(px.items).toEqual([expect.objectContaining({ id: "codex", turns: 1, totalTokens: 120, costUsd: 0.5 })]);
+    const rejected = await fetch(`${api.baseUrl}/api/usage/items?useCase=proxy&scope=team&teamId=team-x`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(rejected.status).toBe(404);
   });
 
   it("CSV export carries the team's rows only, names the team in the filename, and withholds user_id from a plain member", async () => {
@@ -521,6 +535,35 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     expect(empty.byUser?.every((r) => r.avgDailyActiveAgents === 0)).toBe(true);
   });
 
+  it("counts rolling-window unique agents across days and actors with strict scope and time bounds", async () => {
+    api = await bootTestApi();
+    await seedActivity(api);
+    const db = api.providers.db;
+    const since = now - 7 * DAY;
+    for (const id of ["orchestrator:activity", "at-start", "at-end", "too-old", "future-only", "no-entries"]) {
+      await db.insert(agentSessions).values({ id, orgId: "local-org", userId: "local-user", ownerType: "team", ownerId: "activity-team", workspace: "/w", createdAt: since, updatedAt: now });
+    }
+    for (const [id, at] of [["orchestrator:activity", today], ["at-start", since], ["at-end", now], ["too-old", since - 1], ["future-only", now + 1]] as const) {
+      await seedEngineEntry(api, `headline-${id}`, id, at);
+    }
+    await db.insert(llmProxyRequests).values({ id: "headline-proxy", createdAt: now, orgId: "local-org", teamId: "activity-team", userId: "local-user", apiKeyId: "k", providerKind: "anthropic", model: "claude", endpoint: "/v1/messages", stream: false, statusCode: 200, requestBody: "{}", totalTokens: 100 });
+    const scope = { scope: "team", orgId: "local-org", teamId: "activity-team", byMember: true } as const;
+    const admin = await getUsageBreakdown(db, { scope, windowMs: 7 * DAY, now });
+    // Five existing unique agents (including two workflow nodes), an
+    // orchestrator, and the two inclusive boundary sessions. Not agent-days.
+    expect(admin.activeAgents).toBe(8);
+    const member = await getUsageBreakdown(db, { scope: { ...scope, byMember: false }, windowMs: 7 * DAY, now });
+    expect(member.activeAgents).toBe(8);
+    expect(member.byUser).toBeUndefined();
+    expect(member.dailyAgentWindow).toBeUndefined();
+    const org = await getUsageBreakdown(db, { scope: { scope: "org", orgId: "local-org" }, windowMs: 7 * DAY, now });
+    expect(org.activeAgents).toBe(10); // plus the other team and personal session, never the foreign org
+    const personal = await getUsageBreakdown(db, { scope: { scope: "me", orgId: "local-org", userId: "test-member" }, windowMs: 7 * DAY, now });
+    expect(personal.activeAgents).toBe(2); // existing personal usage attribution, not prompt-author counts
+    const empty = await getUsageBreakdown(db, { scope, windowMs: DAY, now: since - 20 * DAY });
+    expect(empty.activeAgents).toBe(0);
+  });
+
   it("returns the metric only to team administrators and enforces team/org isolation", async () => {
     api = await bootTestApi();
     await seedActivity(api);
@@ -534,6 +577,8 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     const member = await fetch(url, { headers: { "x-valet-test-user-id": "test-member" } });
     expect(member.status).toBe(200);
     const memberBody = await member.json() as UsageBreakdownResponse;
+    expect(memberBody.activeAgents).toBe(body.activeAgents);
+    expect(memberBody.activeAgents).toBeGreaterThan(0);
     expect(memberBody.byUser).toBeUndefined();
     expect(memberBody.dailyAgentWindow).toBeUndefined();
     expect((await fetch(url.replace("activity-team", "activity-other-team"))).status).toBe(404);

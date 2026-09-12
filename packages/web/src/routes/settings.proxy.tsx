@@ -3,6 +3,8 @@ import { useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
 import { Section } from "~/components/settings/section";
 import { ProxyGovernance } from "~/components/proxy/proxy-governance";
+import { TeamProxySettings } from "~/components/proxy/team-proxy-settings";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { OnboardingPanel } from "~/components/usage/OnboardingPanel";
 
 /**
@@ -16,13 +18,21 @@ export const Route = createFileRoute("/settings/proxy")({
 });
 
 export function SettingsProxyPage() {
+  const { teamId } = useWorkspaceScope();
+  return teamId ? <TeamProxySettings key={teamId} teamId={teamId} /> : <PersonalProxySettings />;
+}
+
+function PersonalProxySettings() {
   const orgQ = useOrg();
   const settingsQ = useProxySettings();
 
-  const singleUser = orgQ.data?.features.organizations !== true;
+  if (orgQ.error || settingsQ.error) return <p role="alert">Could not load proxy settings. Reload this page to try again.</p>;
+  if (!orgQ.data || !settingsQ.data) return <p role="status">Loading proxy settings…</p>;
+
+  const singleUser = orgQ.data?.features.organizations === false;
 
   return (
-    <div className="space-y-10">
+    <div className="min-w-0 max-w-full space-y-10">
       <Section
         title="Proxy"
         description="Route your Claude Code / Codex traffic through Valet for spend tracking and recording."

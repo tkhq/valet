@@ -68,6 +68,7 @@ import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { profilePicturesPublicRouter, profilePicturesRouter } from "./routes/profile-pictures.js";
+import { teamPoliciesRouter } from "./routes/team-policies.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
 import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
@@ -171,7 +172,7 @@ export function createApp(
           const r = await auth.api.verifyApiKey({ body: opts });
           // Bridge ValetApiKeyRecord (referenceId, metadata) → PrincipalDeps
           // (userId, teamId). The team id rides along so the gateway can
-          // refuse a team key instead of billing the creating admin.
+          // resolve the team instead of billing the creating admin.
           return {
             valid: r.valid,
             key: r.key
@@ -358,6 +359,7 @@ export function createApp(
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
   app.route("/api/org/policies", policiesRouter);
+  app.route("/api/teams", teamPoliciesRouter);
   app.route("/api/org/action-log", actionLogRouter);
   // Same defensive-ordering note as identityLinksRouter/githubConnectRouter
   // above: meRouter has no wildcard route today, so there's no real

@@ -150,7 +150,7 @@ for profile in headless full; do
   sed -e "s|/start-docker.sh|$fail_docker|g" -e "s|WORK_DIR=/workspace|WORK_DIR=$TMP/workspace|" \
     "$ROOT/start-$profile.sh" > "$TMP/start-$profile.sh"
   set +e; bash "$TMP/start-$profile.sh"; status=$?; set -e
-  expected=1; [ "$profile" = full ] && expected=42
+  expected=42
   [ "$status" -eq "$expected" ] || fail "$profile returned $status instead of $expected"
 done
 for error in "$TMP"/*.err; do contains "$error" 'valet-docker RuntimeClass'; done

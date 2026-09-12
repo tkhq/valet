@@ -147,3 +147,7 @@ Calm-companion, extended: page title and section headings in Newsreader; rail wi
 ## Provisioning rule (for the auth phase, stated now)
 
 Creating an org makes the creator its `org_members.role = "admin"`. First login (when real auth ships) implicitly creates the user's org and therefore makes them admin. Local dev already seeds `local-user` as admin of `local-org` — the enable card is visible on first boot.
+
+### Narrow settings navigation (2026-09-11)
+
+Below the small-screen breakpoint, each settings group uses a horizontal list so the selected page stays near the top. Navigation keeps the active link in view. Desktop retains the left rail and the same route and permission gates.

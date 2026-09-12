@@ -25,7 +25,7 @@ This is LiteLLM's pass-through mode, not its unified mode. LiteLLM's unified `/c
 
 | Noun | Definition |
 |---|---|
-| **Proxy key** | A per-user `vlt_` API key (existing `apiKey` plugin). The identity anchor for every proxied request. The harness sends it; valet resolves it to `{userId, orgId, keyId}`. Never leaves valet — the real upstream key is swapped in on the outbound hop. |
+| **Proxy key** | A personal or team `vlt_` API key (existing `apiKey` plugin). The identity anchor for every proxied request. The harness sends it; Valet resolves its user or team, organization, and key ID. Never leaves valet — the real upstream key is swapped in on the outbound hop. |
 | **Ingress route** | A public, wire-compatible mount: `/proxy/anthropic/*` and `/proxy/openai/*`. Path suffixes (`/v1/messages`, `/v1/responses`) are fixed by the clients; the prefix is valet's. |
 | **Upstream** | `{ baseUrl, apiKey }` for a provider `kind`, resolved from the org's default `llm_providers` row of that kind + its `CredentialStore` secret. |
 | **Recorder** | The tee branch that accumulates the streamed response and, on completion, parses SSE events for the usage object, computes cost, and writes one row. |
@@ -35,7 +35,7 @@ This is LiteLLM's pass-through mode, not its unified mode. LiteLLM's unified `/c
 
 | Verb | Definition |
 |---|---|
-| **resolve** | `resolveProxyPrincipal(headers)` reads the key from `x-api-key` or `Authorization: Bearer`, runs `auth.api.verifyApiKey`, and returns `{userId, orgId, keyId}`, or a wire-correct 401. |
+| **resolve** | `resolveProxyPrincipal(headers)` reads the key from `x-api-key` or `Authorization: Bearer`, runs `auth.api.verifyApiKey`, and returns a user or team principal with organization and key IDs, or a wire-correct 401. |
 | **forward** | Fetch the upstream `{baseUrl}{subpath}{search}` with the request body streamed through, valet's key replaced by the real key, and hop-by-hop headers stripped. |
 | **tee** | `ReadableStream.tee()` the upstream response body: one branch streams to the client unbuffered; the other feeds the recorder. |
 | **record** | On response completion, parse usage, price it, and insert one `llm_proxy_requests` row. Failure to parse usage leaves `cost_usd` NULL (unpriced, not free). |
@@ -80,12 +80,17 @@ resolveProxyPrincipal(c):
   if !key: return wireError(kind, 401, "missing API key. Create a proxy key in valet Settings.")
   result = await auth.api.verifyApiKey({ body: { key } })
   if !result.valid || !result.key: return wireError(kind, 401, "invalid API key.")
-  userId = result.key.userId               // verifyApiKey returns the key record, NOT an org
-  orgId  = await resolveOrgId(db, userId)   // org comes from the user row (lib/org.ts), as the auth ladder does
+  if result.key.teamId:
+    orgId = await teamOrg(result.key.teamId, result.key.id) // live team and stored key pin
+    if !orgId: return wireError(kind, 401, "Ask a team admin to create a new key.")
+    return { userId: null, teamId: result.key.teamId, orgId, keyId: result.key.id }
+  userId = result.key.userId
+  orgId  = await userOrg(userId) // live organization membership; no fallback
+  if !orgId: return wireError(kind, 401, "Contact your organization administrator.")
   return { userId, orgId, keyId: result.key.id }
 ```
 
-`verifyApiKey` returns `{ valid, error, key }` (`ValetVerifyApiKeyResult`); the key record carries `userId`, not an org. The org is resolved from the user, reusing `resolveOrgId` (`packages/api/src/lib/org.ts`) — the same lookup auth-ladder rung 3/4 uses.
+`verifyApiKey` returns a key record, not an organization. Personal keys require live organization membership. Team keys resolve the organization from the team and stored key pin.
 
 `wireError(kind, status, msg)` returns the provider's own error shape so the harness surfaces a clean message:
 - Anthropic: `{ "type": "error", "error": { "type": "authentication_error", "message": "..." } }`
@@ -186,7 +191,8 @@ CREATE TABLE "llm_proxy_requests" (
   "id"                text PRIMARY KEY,
   "created_at"        bigint NOT NULL,          -- epoch ms, toNum convention
   "org_id"            text NOT NULL,
-  "user_id"           text NOT NULL,
+  "user_id"           text,
+  "team_id"           text,
   "api_key_id"        text NOT NULL,
   "provider_kind"     text NOT NULL,            -- 'anthropic' | 'openai'
   "model"             text,                     -- null until parsed
@@ -220,7 +226,9 @@ CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id
 UNION ALL
 SELECT
   p."id" AS entry_id, NULL AS session_id, p."created_at", p."model",
-  p."org_id", p."user_id", 'user' AS owner_type, p."user_id" AS owner_id,
+  p."org_id", p."user_id",
+  CASE WHEN p."team_id" IS NOT NULL THEN 'team' ELSE 'user' END AS owner_type,
+  COALESCE(p."team_id", p."user_id") AS owner_id,
   NULL AS workflow_id, NULL AS workflow_run_id,
   p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
   p."cost_usd" AS cost_total, (p."cost_usd" IS NOT NULL) AS priced
@@ -327,3 +335,23 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 - A pricing backfill job for rows recorded while unpriced.
 - The training-data pipeline itself — consent, redaction/PII handling, opt-out, and any export surface. This spec produces the normalized `parsed` samples in-place under org-scoped access; turning them into a training corpus is a separate spec with its own governance (decision 9 governance note).
 - A conversation-stitcher that reconstructs full transcripts from `previous_response_id` chains (the ids are stored; the join is later).
+
+## Team proxy settings (2026-09-11)
+
+In a team workspace, `/settings/proxy` uses the personal page's `ProxyGovernance` and numbered `OnboardingPanel` flow. Governance is read-only. A team adapter creates keys through the team endpoint without mounting the personal key hook. Team and organization admins can create keys. Members see a disabled create action and instructions to request a shared key from an admin.
+
+The page reads organization gateway enablement and credential mode. It offers no governance mutations, including for organization admins. Loading, failed, and unavailable team states block setup. Changing workspace remounts the panel so key reveals and late creation callbacks cannot cross teams. The flow also remounts after admin access changes. Failed team, organization, key-access, or proxy-setting queries unmount the flow even when cached data remains. Restored access starts at key creation.
+
+The gateway accepts a verified team key only when its metadata matches the stored key pin and the team still exists. The team supplies the organization identity. The creating admin is not the acting user; removing that admin's membership does not disable a shared key. Revoked keys and deleted teams are refused.
+
+Organization governance applies to team traffic. A disabled gateway forwards nothing. Centralized mode uses the organization's provider credential. Pass-through mode requires an approved provider credential alongside the shared team key. The team page never reads personal provider credentials.
+
+Proxy records store `team_id` and a null `user_id` for team traffic. Personal records retain `user_id` and a null `team_id`. Metrics label the team instead of the creating admin. The `cost_entries` view projects team ownership, including after key revocation. Team usage drill-down groups proxy rows by harness and filters by both organization and team. Existing detailed proxy log access remains limited to organization admins for team records. Personal members cannot read those records through their user identity.
+
+The in-place schema repair adds `team_id`, permits a null `user_id`, and updates the cost view. One SQL block updates attribution and creates the team index atomically. The index is the repair completion marker. Fresh migrations contain the same schema and view.
+
+Regression coverage includes real team key forwarding in both credential modes, disabled governance, creator departure, invalid key pins, deleted teams, revocation, recording attribution, schema repair, permissions, and workspace transitions.
+
+Both scopes start with the Proxy section and Step 2, Create your key. Success shows the new secret once, setup snippets containing that key, Run it commands, and Create another key. Create another clears the secret and returns to creation. Team snippets retain the organization credential mode. The shared API keys link opens scoped key management; no separate key list or placeholder setup appears on the Proxy page. Snippets and revealed keys scroll inside the settings column. Key creation errors show the server corrective message, including when real authentication is disabled.
+
+Frontend regression tests cover successful creation in both scopes, actual-key snippets, Run it, Create another, member and admin permissions, scope changes, access errors, and delayed responses.

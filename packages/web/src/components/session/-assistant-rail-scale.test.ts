@@ -169,6 +169,6 @@ describe("assistantLabel", () => {
   });
 
   it("names an unnamed default for what it is", () => {
-    expect(assistantLabel(own("a", { isDefault: true }))).toBe("Default assistant");
+    expect(assistantLabel(own("a", { isDefault: true }))).toBe("Default Orchestrator");
   });
 });

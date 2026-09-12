@@ -30,11 +30,12 @@
  * `onOpenChange` + `Dialog`/`DialogContent`/`DialogFooter` composition, same
  * "stays open with the mutation's error on failure" pattern.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "~/components/primitives";
 import { RadioCard } from "~/components/settings/radio-card";
 import { useCreateWorkflow } from "~/api/workflows";
+import { useAssistants } from "~/api/assistants";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import {
   autoLayout,
@@ -43,6 +44,7 @@ import {
   type WorkflowNode,
 } from "~/components/workflows/editor-model";
 import { errorText } from "~/lib/error-text";
+import { assistantLabel } from "~/lib/assistant-name";
 
 const DEFAULT_NAME = "Untitled workflow";
 
@@ -326,8 +328,23 @@ export function NewWorkflowDialog({
   open: boolean;
   onOpenChange: (next: boolean) => void;
 }) {
+  const scope = useWorkspaceScope();
+  return <WorkflowCreationForm key={scope.teamId === undefined ? "personal" : `team:${scope.teamId}`}
+    open={open} onOpenChange={onOpenChange} teamId={scope.teamId} />;
+}
+
+function WorkflowCreationForm({ open, onOpenChange, teamId }: {
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  teamId: string | undefined;
+}) {
   const navigate = useNavigate();
   const create = useCreateWorkflow();
+  const generation = useRef(0);
+  useEffect(() => {
+    generation.current += 1;
+    return () => { generation.current += 1; };
+  }, [open]);
   const [presetId, setPresetId] = useState(WORKFLOW_PRESETS[0]!.id);
   const [name, setName] = useState(DEFAULT_NAME);
   // Choosing a preset renames an UNTOUCHED field, and never a typed one —
@@ -335,7 +352,17 @@ export function NewWorkflowDialog({
   const [nameTouched, setNameTouched] = useState(false);
   // The active workspace owns it. An Owner select here duplicated the nav's
   // workspace switcher and could contradict it.
-  const scope = useWorkspaceScope();
+  const assistantsQ = useAssistants({ enabled: open });
+  const [selectedAssistantId, setSelectedAssistantId] = useState("");
+  const availableAssistants = (assistantsQ.data?.assistants ?? []).filter((assistant) =>
+    teamId === undefined
+      ? assistant.owner.type === "user"
+      : assistant.owner.type === "team" && assistant.owner.id === teamId,
+  );
+  const missingSelection = selectedAssistantId !== "" && !availableAssistants.some((assistant) => assistant.id === selectedAssistantId);
+  const assistantId = selectedAssistantId !== ""
+    ? availableAssistants.find((assistant) => assistant.id === selectedAssistantId)?.id
+    : availableAssistants.find((assistant) => assistant.isDefault)?.id ?? availableAssistants[0]?.id;
 
   const preset = WORKFLOW_PRESETS.find((p) => p.id === presetId) ?? WORKFLOW_PRESETS[0]!;
 
@@ -348,17 +375,22 @@ export function NewWorkflowDialog({
     setPresetId(WORKFLOW_PRESETS[0]!.id);
     setName(DEFAULT_NAME);
     setNameTouched(false);
+    setSelectedAssistantId("");
   }
 
   async function submit() {
     const trimmed = name.trim();
-    if (!trimmed) return;
+    if (!open || create.isPending || !trimmed || !assistantId || assistantsQ.isLoading || assistantsQ.error) return;
+    const requestGeneration = generation.current;
     try {
       const created = await create.mutateAsync({
         name: trimmed,
-        definition: preset.build(),
-        ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }),
+        definition: { ...preset.build(), assistantId },
+        ...(teamId === undefined ? {} : { teamId }),
       });
+      // A workspace change unmounts this form. Its late response must not
+      // close the new form or navigate away from the new workspace.
+      if (generation.current !== requestGeneration) return;
       onOpenChange(false);
       reset();
       void navigate({ to: "/workflows/$workflowId", params: { workflowId: created.id } });
@@ -374,6 +406,21 @@ export function NewWorkflowDialog({
         title="New workflow"
         description="Choose a starting shape. Every one of them runs as it is, and you can rebuild it in the editor."
       >
+        <div className="grid gap-1">
+          <Label htmlFor="workflow-orchestrator">Orchestrator</Label>
+          <select id="workflow-orchestrator" value={assistantId ?? ""}
+            className="rounded border border-line bg-paper px-3 py-2 text-sm"
+            disabled={assistantsQ.isLoading || !!assistantsQ.error || create.isPending}
+            onChange={(event) => setSelectedAssistantId(event.target.value)}>
+            {!assistantId && <option value="">{assistantsQ.isLoading ? "Loading orchestrators…" : missingSelection ? "Choose an orchestrator again" : "No orchestrators available"}</option>}
+            {availableAssistants.map((assistant) => <option key={assistant.id} value={assistant.id}>
+              {assistantLabel(assistant)}{assistant.isDefault ? " (default)" : ""}
+            </option>)}
+          </select>
+          {assistantsQ.error ? <p className="text-xs text-danger-600">Could not load orchestrators. <button type="button" onClick={() => void assistantsQ.refetch()}>Retry</button></p>
+            : !assistantsQ.isLoading && missingSelection ? <p role="alert" className="text-xs text-danger-600">The selected orchestrator is no longer available. Choose another orchestrator.</p>
+            : !assistantsQ.isLoading && !assistantId && <p className="text-xs text-muted">Create an orchestrator in this workspace first.</p>}
+        </div>
         <div className="grid gap-1">
           <Label htmlFor="workflow-name">Name</Label>
           <Input
@@ -416,7 +463,7 @@ export function NewWorkflowDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={create.isPending}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={create.isPending || !name.trim()}>
+          <Button onClick={() => void submit()} disabled={create.isPending || !name.trim() || !assistantId || assistantsQ.isLoading || !!assistantsQ.error}>
             {create.isPending ? "Creating…" : "Create"}
           </Button>
         </DialogFooter>

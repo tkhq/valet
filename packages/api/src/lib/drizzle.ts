@@ -155,6 +155,55 @@ interface SchemaRepair {
   backfill?: string;
 }
 
+const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
+      SELECT
+        e."id"                                                     AS "entry_id",
+        e."session_id"                                             AS "session_id",
+        e."created_at"                                             AS "created_at",
+        e."model"                                                  AS "model",
+        COALESCE(s."org_id", d."org_id")                           AS "org_id",
+        CASE
+          WHEN s."id" IS NOT NULL THEN s."user_id"
+          WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '')
+        END                                                        AS "user_id",
+        COALESCE(s."owner_type", r."owner_type")                   AS "owner_type",
+        NULLIF(COALESCE(s."owner_id", r."owner_id"), '')           AS "owner_id",
+        r."workflow_id"                                            AS "workflow_id",
+        r."id"                                                     AS "workflow_run_id",
+        COALESCE((e."usage"::jsonb->>'input')::bigint, 0)          AS "input_tokens",
+        COALESCE((e."usage"::jsonb->>'output')::bigint, 0)         AS "output_tokens",
+        COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0)      AS "cache_read_tokens",
+        COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
+        COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
+        (e."cost"::jsonb->>'total')::float8                        AS "cost_total",
+        ((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced",
+        CASE
+          WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+          WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
+          ELSE 'session'
+        END                                                        AS "use_case"
+      FROM "engine_entries" e
+      LEFT JOIN "agent_sessions" s
+        ON s."id" = e."session_id"
+      LEFT JOIN "workflow_runs" r
+        ON e."session_id" LIKE 'wf:%'
+        AND r."id" = split_part(e."session_id", ':', 2)
+      LEFT JOIN "workflow_definitions" d
+        ON d."id" = r."workflow_id"
+      WHERE e."usage" IS NOT NULL
+        AND COALESCE(s."org_id", d."org_id") IS NOT NULL
+      UNION ALL
+      SELECT
+        p."id" AS "entry_id", NULL AS "session_id", p."created_at" AS "created_at", p."model" AS "model",
+        p."org_id" AS "org_id", p."user_id" AS "user_id",
+        CASE WHEN p."team_id" IS NOT NULL THEN 'team' ELSE 'user' END AS "owner_type",
+        COALESCE(p."team_id", p."user_id") AS "owner_id",
+        NULL AS "workflow_id", NULL AS "workflow_run_id",
+        p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
+        p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
+      FROM "llm_proxy_requests" p
+      WHERE p."total_tokens" > 0`;
+
 /**
  * The pre-1.0 in-place-edit repair list. Add an entry when an edit to
  * `0000_app.sql` adds a NULLABLE (or DEFAULT-backfilled) column, a table,
@@ -168,6 +217,7 @@ interface SchemaRepair {
  * dropping is not, because the older release repairs the OLD name and its
  * statement then stops its boot. Do not rename or drop here.
  */
+
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "team deletion requests", probe: { kind: "table", table: "team_deletion_requests" }, sql: `CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "team_id" text NOT NULL,
@@ -712,7 +762,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "id" text PRIMARY KEY NOT NULL,
       "created_at" bigint NOT NULL,
       "org_id" text NOT NULL,
-      "user_id" text NOT NULL,
+      "user_id" text,
+      "team_id" text,
       "api_key_id" text NOT NULL,
       "provider_kind" text NOT NULL,
       "model" text,
@@ -736,6 +787,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "parse_version" integer,
       "parse_error" text
     )`,
+  },
+  {
+    describe: "llm_proxy_requests.team_id column",
+    probe: { kind: "column", table: "llm_proxy_requests", column: "team_id" },
+    sql: 'ALTER TABLE "llm_proxy_requests" ADD COLUMN IF NOT EXISTS "team_id" text',
   },
   {
     describe: "llm_proxy_requests_org_created index",
@@ -795,52 +851,18 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     // with the cost_entries view in 0000_app.sql.
     describe: "cost_entries.use_case (view rewrite)",
     probe: { kind: "column", table: "cost_entries", column: "use_case" },
-    sql: `CREATE OR REPLACE VIEW "cost_entries" AS
-      SELECT
-        e."id"                                                     AS "entry_id",
-        e."session_id"                                             AS "session_id",
-        e."created_at"                                             AS "created_at",
-        e."model"                                                  AS "model",
-        COALESCE(s."org_id", d."org_id")                           AS "org_id",
-        CASE
-          WHEN s."id" IS NOT NULL THEN s."user_id"
-          WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '')
-        END                                                        AS "user_id",
-        COALESCE(s."owner_type", r."owner_type")                   AS "owner_type",
-        NULLIF(COALESCE(s."owner_id", r."owner_id"), '')           AS "owner_id",
-        r."workflow_id"                                            AS "workflow_id",
-        r."id"                                                     AS "workflow_run_id",
-        COALESCE((e."usage"::jsonb->>'input')::bigint, 0)          AS "input_tokens",
-        COALESCE((e."usage"::jsonb->>'output')::bigint, 0)         AS "output_tokens",
-        COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0)      AS "cache_read_tokens",
-        COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
-        COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
-        (e."cost"::jsonb->>'total')::float8                        AS "cost_total",
-        ((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced",
-        CASE
-          WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
-          WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
-          ELSE 'session'
-        END                                                        AS "use_case"
-      FROM "engine_entries" e
-      LEFT JOIN "agent_sessions" s
-        ON s."id" = e."session_id"
-      LEFT JOIN "workflow_runs" r
-        ON e."session_id" LIKE 'wf:%'
-        AND r."id" = split_part(e."session_id", ':', 2)
-      LEFT JOIN "workflow_definitions" d
-        ON d."id" = r."workflow_id"
-      WHERE e."usage" IS NOT NULL
-        AND COALESCE(s."org_id", d."org_id") IS NOT NULL
-      UNION ALL
-      SELECT
-        p."id" AS "entry_id", NULL AS "session_id", p."created_at" AS "created_at", p."model" AS "model",
-        p."org_id" AS "org_id", p."user_id" AS "user_id", 'user' AS "owner_type", p."user_id" AS "owner_id",
-        NULL AS "workflow_id", NULL AS "workflow_run_id",
-        p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
-        p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
-      FROM "llm_proxy_requests" p
-      WHERE p."total_tokens" > 0`,
+    sql: COST_ENTRIES_VIEW_SQL,
+  },
+  {
+    // The index marks completion of this atomic nullable-user and view repair.
+    // Keep the block one statement: pg binds tx.query as a prepared statement.
+    describe: "llm_proxy_requests team attribution",
+    probe: { kind: "index", index: "llm_proxy_requests_team_created" },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE "llm_proxy_requests" ALTER COLUMN "user_id" DROP NOT NULL;
+      ${COST_ENTRIES_VIEW_SQL};
+      CREATE INDEX IF NOT EXISTS "llm_proxy_requests_team_created" ON "llm_proxy_requests" ("team_id", "created_at");
+      END $repair$`,
   },
   {
     // Which authoring surface a session drives (Valet Security spec; shared

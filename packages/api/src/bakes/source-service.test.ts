@@ -14,6 +14,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, imageSources, bakes, agentSessions, sessionRepos } from "../schema/index.js";
 import { GitHubAuthError, type GitHubTokenDeps } from "../services/github-tokens.js";
+import { reorderWaitingBuilds } from "../prebuilds/builder.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import {
   DEFAULT_PREBUILD_REGISTRY_HOST,
@@ -63,6 +64,26 @@ class FakeImageBuilder implements ImageBuilder {
 
   setState(buildId: string, status: BuildStatus): void {
     this.states.set(buildId, status);
+  }
+}
+
+class QueueImageBuilder extends FakeImageBuilder {
+  running: string[] = [];
+  queued: string[] = [];
+  onSnapshot?: () => void;
+  override async build(spec: PrebuildSpec): Promise<{ buildId: string }> {
+    const result = await super.build(spec);
+    if (this.running.length === 0) this.running.push(result.buildId);
+    else this.queued.push(result.buildId);
+    return result;
+  }
+  queueSnapshot() {
+    const snapshot = { running: [...this.running], queued: [...this.queued] };
+    this.onSnapshot?.();
+    return snapshot;
+  }
+  reorderQueue(expected: string[], order: string[]) {
+    return reorderWaitingBuilds(this.queued, expected, order);
   }
 }
 
@@ -221,6 +242,87 @@ async function seedBakeSession(
 }
 
 describe("SourceService", () => {
+  it("lists recent results with source labels and treats unsupported builders as read-only", async () => {
+    const sourceId = await seedRepoSource(db);
+    await seedBake(db, sourceId, { id: "recent-queue", status: "failed", error: "failure" });
+    const queue = await service.listBakeQueue(orgId);
+    expect(queue.builderAvailable).toBe(true);
+    expect(queue.reorderAvailable).toBe(false);
+    expect(queue.recent[0]).toMatchObject({ id: "recent-queue", sourceName: "acme/widgets", error: "failure" });
+    expect(await service.reorderBakeQueue(orgId, [])).toBe(false);
+    expect((await service.listBakeQueue("other-org")).recent).toEqual([]);
+  });
+
+  it("returns builder order, isolates orgs, rejects stale orders, and shows eligible blocked repos", async () => {
+    const queueBuilder = new QueueImageBuilder();
+    service = makeService({ builder: queueBuilder });
+    await seedOrg(db, credentials, "other-org");
+    const firstSource = await seedBaseSource(db, [], { id: "queue-base", profile: null });
+    const secondSource = await seedBaseSource(db, [], { id: "queue-second", profile: null });
+    const foreignSource = await seedBaseSource(db, [], { id: "queue-foreign", orgId: "other-org", profile: null });
+    const thirdSource = await seedBaseSource(db, [], { id: "queue-third", profile: null });
+    const first = await service.startBuild(firstSource);
+    const second = await service.startBuild(secondSource);
+    const foreign = await service.startBuild(foreignSource);
+    const third = await service.startBuild(thirdSource);
+    const child = await seedRepoSource(db, { parentId: firstSource });
+    await seedRepoSource(db, { parentId: firstSource, repoFullName: "acme/disabled", enabled: false });
+    await seedRepoSource(db, { parentId: firstSource, repoFullName: "acme/off", schedule: "off" });
+    for (let index = 0; index < 10; index++) await seedBake(db, secondSource, { id: `queue-recent-${index}`, finishedAt: NOW + index });
+    let queue = await service.listBakeQueue(orgId);
+    expect(queue.running.map((bake) => bake.id)).toEqual([first.id]);
+    expect(queue.queued.map((bake) => bake.id)).toEqual([second.id, third.id]);
+    expect(queue.blocked.map((source) => source.sourceId)).toEqual([child]);
+    expect(queue.recent).toHaveLength(8);
+    expect(queue.recent[0]?.id).toBe("queue-recent-9");
+    expect(await service.reorderBakeQueue(orgId, [third.id, second.id])).toBe(true);
+    expect(queueBuilder.queued).toEqual([queueBuilder.buildIds[3], queueBuilder.buildIds[2], queueBuilder.buildIds[1]]);
+    for (const order of [[third.id], [third.id, third.id], [third.id, foreign.id], [first.id, second.id]]) {
+      expect(await service.reorderBakeQueue(orgId, order)).toBe(false);
+    }
+    queue = await service.listBakeQueue(orgId);
+    expect(queue.queued.map((bake) => bake.id)).toEqual([third.id, second.id]);
+    queueBuilder.onSnapshot = () => {
+      queueBuilder.onSnapshot = undefined;
+      const next = queueBuilder.queued.shift();
+      if (next) queueBuilder.running.push(next);
+    };
+    expect(await service.reorderBakeQueue(orgId, [second.id, third.id])).toBe(false);
+    expect((await service.listBakeQueue("other-org")).queued.map((bake) => bake.id)).toEqual([foreign.id]);
+  });
+
+  it("keeps finished builder work visible as finalizing until persistence catches up", async () => {
+    const queueBuilder = new QueueImageBuilder();
+    service = makeService({ builder: queueBuilder });
+    const sourceId = await seedBaseSource(db, []);
+    const bake = await service.startBuild(sourceId);
+    queueBuilder.running = [];
+    queueBuilder.setState(queueBuilder.buildIds[0]!, { state: "failed", error: "build failed" });
+    const queue = await service.listBakeQueue(orgId);
+    expect(queue.running).toEqual([expect.objectContaining({ id: bake.id, phase: "finalizing" })]);
+    expect(queue.queued).toEqual([]);
+    expect(queue.recent).toEqual([]);
+    expect(await service.reorderBakeQueue(orgId, [bake.id])).toBe(false);
+    await service.syncActiveBuilds();
+    const completed = await service.listBakeQueue(orgId);
+    expect(completed.running).toEqual([]);
+    expect(completed.recent[0]).toMatchObject({ id: bake.id, status: "failed" });
+  });
+
+  it("does not mark unchanged base rebuilds or indirect descendants as blocked", async () => {
+    const queueBuilder = new QueueImageBuilder();
+    service = makeService({ builder: queueBuilder });
+    const sourceId = await seedBaseSource(db, [], { profile: null });
+    const bake = await service.startBuild(sourceId);
+    const direct = await seedRepoSource(db, { parentId: sourceId });
+    const middle = await seedBaseSource(db, [], { profile: null, parentId: sourceId });
+    await seedRepoSource(db, { repoFullName: "acme/indirect", parentId: middle });
+    await seedBake(db, sourceId, { identityHash: "older-identity" });
+    expect((await service.listBakeQueue(orgId)).blocked.map((source) => source.sourceId)).toEqual([direct]);
+    await seedBake(db, sourceId, { identityHash: bake.identityHash, createdAt: NOW - 1 });
+    expect((await service.listBakeQueue(orgId)).blocked).toEqual([]);
+  });
+
   let db: AppDb;
   let credentials: PgCredentialStore;
   let fixture: GithubFixture;
@@ -1264,6 +1366,16 @@ describe("SourceService", () => {
   // ── ported lifecycle: poll sync + retention + orphan sweep ─────────────
 
   describe("syncActiveBuilds / retention (ported)", () => {
+    it("preserves request-time startedAt when the poll observes builder start", async () => {
+      const srcId = await seedRepoSource(db);
+      const row = await service.startBake(srcId);
+      expect(row.startedAt).toBe(NOW);
+      await service.syncActiveBuilds();
+      const [updated] = await db.select().from(bakes).where(eq(bakes.id, row.id));
+      expect(updated.status).toBe("building");
+      expect(updated.startedAt).toBe(NOW);
+    });
+
     it("transitions a build to pushed and stamps finishedAt", async () => {
       const srcId = await seedRepoSource(db);
       const row = await service.startBake(srcId);
@@ -1319,12 +1431,15 @@ describe("SourceService", () => {
       const srcId = await seedRepoSource(db);
       await seedBake(db, srcId, { id: "stuck", status: "building", finishedAt: null });
       await seedBake(db, srcId, { id: "done", status: "pushed" });
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
       await service.start();
       const rows = await db.select().from(bakes).where(eq(bakes.sourceId, srcId));
       const byId = new Map(rows.map((r) => [r.id, r]));
       expect(byId.get("stuck")?.status).toBe("failed");
       expect(byId.get("stuck")?.error).toBe("interrupted by restart");
       expect(byId.get("done")?.status).toBe("pushed");
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('"event":"bake_failed"'));
+      log.mockRestore();
     });
   });
 

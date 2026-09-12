@@ -11,8 +11,9 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { ActionPlugin, ApprovalMode, RiskLevel, ValetPlugin } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
+  agentSessions, workflowRuns, workflowDefinitions,
   actionInvocations,
   actionPolicies,
   actionPolicyOverrides,
@@ -91,16 +92,22 @@ function overrideTargetEquals(target: PolicyTarget) {
   throw new Error("target must have exactly one of service, actionId, riskLevel set");
 }
 
+export interface PolicyScope { orgId: string; type: "org" | "team"; id: string }
+
+function policyScopeFilter(scope: PolicyScope) {
+  return and(eq(actionPolicies.orgId, scope.orgId), eq(actionPolicies.principalType, scope.type), eq(actionPolicies.principalId, scope.id));
+}
+
 // ── action_policies CRUD ────────────────────────────────────────────
 
 /** Live (non-revoked) org policies, newest first. Revoked rows are DELETE's
  *  effect (soft-delete), so the default list excludes them — matching every
  *  other "list" route in this codebase reading past a soft-delete flag. */
-export async function listOrgPolicies(db: AppDb, orgId: string): Promise<ActionPolicyRow[]> {
+export async function listPolicies(db: AppQueryable, scope: PolicyScope): Promise<ActionPolicyRow[]> {
   return db
     .select()
     .from(actionPolicies)
-    .where(and(eq(actionPolicies.orgId, orgId), isNull(actionPolicies.revokedAt)))
+    .where(and(policyScopeFilter(scope), isNull(actionPolicies.revokedAt)))
     .orderBy(desc(actionPolicies.createdAt));
 }
 
@@ -113,12 +120,12 @@ export interface CreateOrgPolicyInput extends PolicyTarget {
   now: number;
 }
 
-export async function createOrgPolicy(db: AppDb, orgId: string, input: CreateOrgPolicyInput): Promise<ActionPolicyRow> {
+export async function createPolicy(db: AppQueryable, scope: PolicyScope, input: CreateOrgPolicyInput): Promise<ActionPolicyRow> {
   const row = {
     id: randomUUID(),
-    orgId,
-    principalType: "org" as const,
-    principalId: orgId,
+    orgId: scope.orgId,
+    principalType: scope.type,
+    principalId: scope.id,
     service: input.service ?? null,
     actionId: input.actionId ?? null,
     riskLevel: input.riskLevel ?? null,
@@ -151,9 +158,9 @@ export interface UpdateOrgPolicyInput {
  *  a partial patch. Returns `undefined` when the row doesn't exist, is
  *  already revoked, or belongs to another org (cross-org 404, not 403 — this
  *  route never distinguishes "not found" from "not yours"). */
-export async function updateOrgPolicy(
-  db: AppDb,
-  orgId: string,
+export async function updatePolicy(
+  db: AppQueryable,
+  scope: PolicyScope,
   id: string,
   patch: UpdateOrgPolicyInput,
 ): Promise<ActionPolicyRow | undefined> {
@@ -166,7 +173,7 @@ export async function updateOrgPolicy(
   const [updated] = await db
     .update(actionPolicies)
     .set(set)
-    .where(and(eq(actionPolicies.id, id), eq(actionPolicies.orgId, orgId), isNull(actionPolicies.revokedAt)))
+    .where(and(eq(actionPolicies.id, id), policyScopeFilter(scope), isNull(actionPolicies.revokedAt)))
     .returning();
   return updated;
 }
@@ -175,11 +182,11 @@ export async function updateOrgPolicy(
  *  convention as `runtime_grants`). Idempotent: revoking an already-revoked
  *  row is a no-op that still returns the row (not a 404) so a retried DELETE
  *  reads as success, not "gone". */
-export async function revokeOrgPolicy(db: AppDb, orgId: string, id: string, now: number): Promise<ActionPolicyRow | undefined> {
+export async function revokePolicy(db: AppQueryable, scope: PolicyScope, id: string, now: number): Promise<ActionPolicyRow | undefined> {
   const existing = await db
     .select()
     .from(actionPolicies)
-    .where(and(eq(actionPolicies.id, id), eq(actionPolicies.orgId, orgId)))
+    .where(and(eq(actionPolicies.id, id), policyScopeFilter(scope)))
     .limit(1);
   const row = existing[0];
   if (!row) return undefined;
@@ -187,10 +194,15 @@ export async function revokeOrgPolicy(db: AppDb, orgId: string, id: string, now:
   const [updated] = await db
     .update(actionPolicies)
     .set({ revokedAt: now, updatedAt: now })
-    .where(and(eq(actionPolicies.id, id), eq(actionPolicies.orgId, orgId)))
+    .where(and(eq(actionPolicies.id, id), policyScopeFilter(scope)))
     .returning();
   return updated;
 }
+
+export const listOrgPolicies = (db: AppDb, orgId: string) => listPolicies(db, { orgId, type: "org", id: orgId });
+export const createOrgPolicy = (db: AppDb, orgId: string, input: CreateOrgPolicyInput) => createPolicy(db, { orgId, type: "org", id: orgId }, input);
+export const updateOrgPolicy = (db: AppDb, orgId: string, id: string, patch: UpdateOrgPolicyInput) => updatePolicy(db, { orgId, type: "org", id: orgId }, id, patch);
+export const revokeOrgPolicy = (db: AppDb, orgId: string, id: string, now: number) => revokePolicy(db, { orgId, type: "org", id: orgId }, id, now);
 
 // ── Override write-time bounds (spec decision 3) ────────────────────
 
@@ -204,7 +216,7 @@ interface OrgPolicyDimensionRow {
   mode: ApprovalMode;
 }
 
-async function loadLiveOrgPolicyDimensionRows(db: AppDb, orgId: string, now: number): Promise<OrgPolicyDimensionRow[]> {
+async function loadLiveOrgPolicyDimensionRows(db: AppQueryable, orgId: string, now: number): Promise<OrgPolicyDimensionRow[]> {
   return db
     .select({
       id: actionPolicies.id,
@@ -301,7 +313,7 @@ function blockedByOrgPolicy(row: OrgPolicyDimensionRow): TargetValidation {
  * reopened one axis over.
  */
 async function validateActionIdOverrideBounds(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   actionId: string,
   now: number,
@@ -357,7 +369,7 @@ async function validateActionIdOverrideBounds(
  * admin` wording in `blockedByOrgPolicy`.
  */
 async function validateServiceOverrideBounds(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   service: string,
   now: number,
@@ -390,7 +402,7 @@ async function validateServiceOverrideBounds(
  * genuinely disjoint, no catalog lookup needed).
  */
 async function validateRiskLevelOverrideBounds(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   riskLevel: RiskLevel,
   now: number,
@@ -437,7 +449,7 @@ async function validateRiskLevelOverrideBounds(
  * against the org policy it bypassed).
  */
 export async function validateOverrideBounds(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   target: PolicyTarget,
   mode: ApprovalMode,
@@ -696,4 +708,38 @@ export async function listActionLog(db: AppDb, orgId: string, filters: ActionLog
   const nextCursor = hasMore && last ? encodeActionLogCursor({ s: last.createdAt, id: last.invocationId }) : undefined;
 
   return { rows: page, nextCursor };
+}
+
+/** Caller holds the team's ownership/authority locks. Advanced rows never
+ * participate: saving a simple preference must not clear their conditions. */
+export async function upsertSimpleTeamPolicy(db: AppQueryable, scope: PolicyScope, input: CreateOrgPolicyInput) {
+  const rows = await listPolicies(db, scope);
+  const existing = rows.filter(row => row.appliesIn === "any" && row.paramMatchers.length === 0 && row.expiresAt === null
+    && row.service === (input.service ?? null) && row.actionId === (input.actionId ?? null) && row.riskLevel === (input.riskLevel ?? null));
+  if (!existing.length) return createPolicy(db, scope, input);
+  // Historical duplicate simple rows are retired, never deleted. Advanced rows
+  // sharing this target remain independent and retain all their fields.
+  for (const duplicate of existing.slice(1)) await revokePolicy(db, scope, duplicate.id, input.now);
+  return updatePolicy(db, scope, existing[0].id, { mode: input.mode, now: input.now });
+}
+
+function teamGrantOwner(orgId: string, teamId: string) {
+  return and(eq(runtimeGrants.orgId, orgId), isNull(runtimeGrants.revokedAt), or(
+    sql`exists (select 1 from ${agentSessions} where ${agentSessions.id} = ${runtimeGrants.sessionId}
+      and ${agentSessions.orgId} = ${orgId} and ${agentSessions.ownerType} = 'team' and ${agentSessions.ownerId} = ${teamId})`,
+    sql`exists (select 1 from ${workflowRuns} inner join ${workflowDefinitions} on ${workflowDefinitions.id} = ${workflowRuns.workflowId}
+      where ${workflowRuns.id} = ${runtimeGrants.workflowExecutionId} and ${workflowDefinitions.orgId} = ${orgId}
+      and ${workflowRuns.ownerType} = 'team' and ${workflowRuns.ownerId} = ${teamId})`,
+  ));
+}
+
+export async function listTeamGrants(db: AppQueryable, orgId: string, teamId: string) {
+  return db.select().from(runtimeGrants).where(teamGrantOwner(orgId, teamId)).orderBy(desc(runtimeGrants.createdAt));
+}
+
+export async function revokeTeamGrant(db: AppQueryable, orgId: string, teamId: string, id: string, now: number) {
+  // Ownership is included in the mutation itself, not inferred from grantedBy.
+  const rows = await db.update(runtimeGrants).set({ revokedAt: now })
+    .where(and(eq(runtimeGrants.id, id), teamGrantOwner(orgId, teamId))).returning({ id: runtimeGrants.id });
+  return rows.length > 0;
 }

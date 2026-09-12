@@ -1,3 +1,4 @@
+import { reorderWaitingBuilds } from "./builder.js";
 /**
  * Kubernetes-backed `ImageBuilder` (sandbox images v2 plan, Task 5). Each
  * `build()` call creates three namespaced resources in the sandbox
@@ -8,13 +9,10 @@
  * (`buildctl-daemonless.sh build ...`) that clones+builds+pushes the image
  * to the configured registry.
  *
- * Unlike `DockerImageBuilder`, there is no in-process FIFO queue: each
- * build is its own Kubernetes Job, and the cluster scheduler is the
- * concurrency authority. `concurrency` (default 1) is enforced by this
- * class as a soft in-process cap on how many Jobs it will have
- * outstanding at once — extra `build()` calls queue exactly like the
- * docker builder's own FIFO, so a misconfigured caller can't flood the
- * cluster with unbounded simultaneous BuildKit Jobs.
+ * Each dispatched build owns a Kubernetes Job. The process-local queue
+ * limits outstanding Jobs to `concurrency` (default 1). The cluster scheduler
+ * decides when dispatched Jobs start. Waiting builds remain in the local
+ * queue and can be reordered before dispatch.
  *
  * `status()` polls the Job's `.status` (active/succeeded/failed counts +
  * conditions) and best-effort-tails the backing pod's log. The Secret +
@@ -424,6 +422,14 @@ export class KubernetesImageBuilder implements ImageBuilder {
     this.queue.push(buildId);
     void this.pump();
     return { buildId };
+  }
+
+  queueSnapshot(): { running: string[]; queued: string[] } {
+    return { running: [...this.running], queued: [...this.queue] };
+  }
+
+  reorderQueue(expectedBuildIds: string[], buildIds: string[]): boolean {
+    return reorderWaitingBuilds(this.queue, expectedBuildIds, buildIds);
   }
 
   async status(buildId: string): Promise<BuildStatus> {

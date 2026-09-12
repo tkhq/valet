@@ -1425,6 +1425,36 @@ describe("pinned tool: same execution path as call_tool", () => {
     return { viaCallTool: viaCallTool.text, viaPinned: viaPinned.text };
   }
 
+  it("cannot approve around a failed team policy read", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    let approvalCalls = 0;
+    const result = await bothRoutes(plugin, { workflow_id: "wf-1" }, {
+      owner: { type: "team", id: "team-a" },
+      policyResolver: { resolve: async () => { throw new Error("policy store unavailable"); } },
+      requestDecision: async () => { approvalCalls++; return { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() }; },
+    });
+    expect(result.viaCallTool).toContain("Could not check this team's action policies");
+    expect(result.viaPinned).toBe(result.viaCallTool);
+    expect(approvalCalls).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("carries team ownership to both policy checks and names a team denial", async () => {
+    const { plugin, calls } = makePinnablePlugin();
+    const teamIds: Array<string | undefined> = [];
+    const resolver: PolicyResolver = {
+      resolve: async (input): Promise<PolicyDecision> => {
+        teamIds.push(input.teamId);
+        return { mode: "deny", provenance: { baseMode: "deny", source: "team_policy" } };
+      },
+    };
+    const result = await bothRoutes(plugin, { workflow_id: "wf-1" }, { owner: { type: "team", id: "team-a" }, policyResolver: resolver });
+    expect(teamIds).toEqual(["team-a", "team-a"]);
+    expect(result.viaCallTool).toContain("blocked by team policy");
+    expect(result.viaPinned).toBe(result.viaCallTool);
+    expect(calls).toHaveLength(0);
+  });
+
   it("a deny decision blocks the pinned tool with the same text as call_tool", async () => {
     const { plugin, calls } = makePinnablePlugin();
     const resolver: PolicyResolver = {

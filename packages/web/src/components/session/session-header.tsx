@@ -49,6 +49,7 @@ import {
   type ConnectionStatus,
 } from "~/stores/stream";
 import { assistantLabel } from "./assistant-rail";
+import { orchestratorName } from "~/lib/assistant-name";
 import { ModelPicker } from "./model-picker";
 import { RatingButtons } from "./rating-buttons";
 import { MoveSessionDialog } from "./move-session-dialog";
@@ -306,7 +307,7 @@ export function SessionHeader({
   // beside this title already says which team the conversation belongs to.
   const title =
     (assistant ? assistantLabel(assistant) : undefined) ||
-    (isOwnOrchestrator ? orchInfo.data?.name : undefined) ||
+    (isOwnOrchestrator ? orchestratorName(orchInfo.data?.name) : undefined) ||
     session.title ||
     "Untitled session";
 

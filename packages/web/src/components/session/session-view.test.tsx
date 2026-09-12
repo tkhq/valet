@@ -68,8 +68,8 @@ function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void)
     routeTree: rootRoute.addChildren([]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
-  // SessionView's auto-title effect needs a QueryClient in scope; provide
-  // a scratch one per render so the effect can call `invalidateQueries`.
+  // SessionView's query hooks need a QueryClient in scope. Provide a scratch
+  // client per render so the test shares no cache state.
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>

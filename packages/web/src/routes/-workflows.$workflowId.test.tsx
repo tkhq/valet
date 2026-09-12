@@ -74,6 +74,8 @@ const initialDefinition: unknown = {
 
 const workflowData = {
   id: "wf_1",
+  ownerType: "user",
+  ownerId: "u1",
   name: "Deploy pipeline",
   definition: initialDefinition,
   createdAt: 1,
@@ -490,6 +492,18 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
         },
       ],
     };
+  });
+
+  it("directs team workflows to team policies without a personal pre-approval action", () => {
+    workflowData.ownerType = "team";
+    workflowData.ownerId = "team-1";
+    try {
+      render(<WorkflowEditorPage workflowId="wf_1" />);
+      expect(screen.queryByTestId("workflow-gate-badge")).toBeNull();
+      expect(screen.getByText(/Team Policies · 1 action/).getAttribute("to")).toBe("/settings/policies");
+      expect(screen.queryByText("Pre-approve actions")).toBeNull();
+      expect(allowMutateAsync).not.toHaveBeenCalled();
+    } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
   });
 
   it("shows the header badge with the count of unique gating actions", () => {

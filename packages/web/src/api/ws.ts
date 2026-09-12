@@ -6,8 +6,10 @@
  * owns the socket lifecycle.
  */
 import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
+import { qk } from "./queries";
 
 const MAX_RETRY_MS = 8_000;
 const INITIAL_RETRY_MS = 500;
@@ -34,6 +36,8 @@ function summarizeForLog(ev: WireEvent): string {
       return ev.status;
     case "turn_end":
       return ev.reason;
+    case "title.updated":
+      return `${ev.sessionId}/${ev.threadId}`;
     case "error":
       return `${ev.code}: ${ev.message}`;
     case "model_switched":
@@ -51,6 +55,27 @@ function summarizeForLog(ev: WireEvent): string {
   }
 }
 
+function invalidatePersistedTitles(
+  qc: ReturnType<typeof useQueryClient>,
+  sessionId: string,
+  includeSession: boolean,
+  includeThread: boolean,
+): void {
+  if (includeSession) {
+    void qc.invalidateQueries({ queryKey: qk.session(sessionId), exact: true });
+    void qc.invalidateQueries({
+      predicate: ({ queryKey }) =>
+        queryKey[0] === "sessions" &&
+        (queryKey.length === 1 ||
+          (queryKey.length === 3 &&
+            (queryKey[1] === "user" || queryKey[1] === "team" || queryKey[1] === "org"))),
+    });
+  }
+  if (includeThread) {
+    void qc.invalidateQueries({ queryKey: qk.threads(sessionId), exact: true });
+  }
+}
+
 function wsUrl(sessionId: string, fromOffset: string | undefined): string {
   // Vite proxy upgrades /api → server, including WS (`ws: true`).
   // In production, the same /api path is served by the API directly.
@@ -60,6 +85,7 @@ function wsUrl(sessionId: string, fromOffset: string | undefined): string {
 }
 
 export function useSessionWebSocket(sessionId: string) {
+  const qc = useQueryClient();
   const setConnection = useStreamStore((s) => s.setConnection);
   const ingest = useStreamStore((s) => s.ingest);
   const reset = useStreamStore((s) => s.reset);
@@ -104,11 +130,18 @@ export function useSessionWebSocket(sessionId: string) {
             console.debug(`[ws] seq=${wire.seq} ${wire.type} ${summary}`);
           }
           ingest(sessionId, wire);
+          if (wire.type === "title.updated") {
+            invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
+          }
           // Reset backoff only after receiving init — confirms the session
           // is valid and the connection is healthy. Resetting in onopen
           // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
           if (wire.type === "init") {
             retryDelay = INITIAL_RETRY_MS;
+            // title.updated is ephemeral. Refresh both persisted title views
+            // after every initial connection or reconnect to recover a frame
+            // missed while this client was disconnected.
+            invalidatePersistedTitles(qc, sessionId, true, true);
           }
         } catch (err) {
           console.error("ws parse failed:", err);

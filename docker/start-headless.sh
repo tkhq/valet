@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -u
-if ! /start-docker.sh; then exit 1; fi
+/start-docker.sh || exit $?
 exec tail -f /dev/null

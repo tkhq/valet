@@ -6,6 +6,8 @@
  * carries the ids (`workflowId`/`runId`) the web chat renderer fetches by.
  */
 import { ValetError } from "@valet/shared";
+import { and, eq } from "drizzle-orm";
+import { assistants } from "../schema/index.js";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import type {
@@ -141,7 +143,11 @@ export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
   if (typeof userId !== "string" || userId.length === 0) return null;
   if (typeof orgId !== "string" || orgId.length === 0) return null;
-  return { userId, orgId };
+  const owner: WorkflowOwner = { userId: ctx.actor?.id ?? userId, orgId };
+  if (ctx.owner?.type === "team") {
+    owner.principal = { type: "team", id: ctx.owner.id };
+  }
+  return owner;
 }
 
 const NO_OWNER: PluginActionResult = {
@@ -296,9 +302,16 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         };
       }
 
+      let routedDefinition: unknown = definition;
+      if (!validation.definition.assistantId && ctx.sessionId) {
+        const [creatingAssistant] = await getDeps().db.select().from(assistants)
+          .where(and(eq(assistants.sessionId, ctx.sessionId), eq(assistants.orgId, owner.orgId))).limit(1);
+        if (creatingAssistant) routedDefinition = { ...validation.definition, assistantId: creatingAssistant.id };
+      }
       const created = await createWorkflowDefinition(getDeps(), owner, {
         name: name ?? "Untitled workflow",
-        definition,
+        definition: routedDefinition,
+        ...(ctx.owner?.type === "team" ? { teamId: ctx.owner.id, skipMembershipCheck: true } : {}),
       });
       return {
         success: true,

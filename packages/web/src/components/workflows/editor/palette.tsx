@@ -18,7 +18,7 @@ export function Palette({ onAdd, disabled = false }: PaletteProps) {
   return (
     <div
       aria-label="Add node"
-      className="flex w-40 shrink-0 flex-col gap-1 border-r border-line bg-paper p-2"
+      className="flex w-full shrink-0 gap-1 overflow-x-auto border-b border-line bg-paper p-2 lg:w-40 lg:flex-col lg:overflow-y-auto lg:border-b-0 lg:border-r"
     >
       {ADDABLE_NODE_TYPES.map((type) => {
         const meta = NODE_META[type];
@@ -32,7 +32,7 @@ export function Palette({ onAdd, disabled = false }: PaletteProps) {
             disabled={disabled}
             title={meta.description}
             onClick={() => onAdd(type)}
-            className="flex items-center gap-2 rounded border border-line px-2 py-1.5 text-left text-xs font-medium text-ink transition-colors hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
+            className="flex shrink-0 items-center gap-2 whitespace-nowrap rounded border border-line px-2 py-1.5 text-left text-xs font-medium text-ink transition-colors hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
           >
             <Icon className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
             {meta.label}

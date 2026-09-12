@@ -263,3 +263,13 @@ It excludes current assistants and plain child sessions; age is not a deletion c
 The existing session DELETE route accepts `retireLegacyTeam=true` to enforce that selection and refuse unsettled turns.
 No startup sweep deletes these records. Operators stop incoming work during cleanup and use
 `docs/guides/retire-legacy-team-assistants.md` for the dry run and explicit apply procedure.
+
+## Display names and team management links (September 11)
+
+Chat, team dashboards, and assistant selectors use the configured assistant name.
+An unnamed default displays exactly `Default Orchestrator`, including when its name is blank or contains only spaces.
+An unnamed non-default assistant remains `Untitled assistant`. Designation badges and workflow node-type labels keep their existing wording.
+The shared display helper also names the personal orchestrator and workspace-specific assistant hints.
+
+The team dashboard and team settings action `Edit assistant` opens `/assistants`, the full list for the selected workspace.
+Links on individual assistant names and per-assistant edit actions still open `/assistants/$assistantId`.

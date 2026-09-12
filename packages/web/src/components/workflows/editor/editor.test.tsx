@@ -14,7 +14,7 @@
  */
 import { useEffect } from "react";
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WorkflowDefinition } from "@valet/workflow";
 import { ApiError } from "~/api/client";
@@ -60,7 +60,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Editor", () => {
   it("moves phone focus into the inspector and back to the canvas control", () => {
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("max-width"), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
     fireEvent.click(screen.getByText("hello"));
     const back = screen.getByRole("button", { name: "Back to canvas" });
@@ -74,7 +74,7 @@ describe("Editor", () => {
   });
 
   it("does not move desktop focus into the phone inspector navigation", () => {
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
     const control = screen.getByRole("button", { name: "More editor actions" });
     control.focus();
@@ -103,7 +103,7 @@ describe("Editor", () => {
   });
 
   it("adds a node from the compact palette and opens its inspector", async () => {
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("max-width"), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     const user = userEvent.setup();
     render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "Add node" }));
@@ -156,6 +156,26 @@ describe("Editor", () => {
     expect(screen.getByText("hello")).toBeTruthy();
     expect(screen.queryByText("local edit")).toBeNull();
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("closes the compact palette when desktop takes over", async () => {
+    const changes = new EventTarget();
+    const media = {
+      matches: false,
+      addEventListener: changes.addEventListener.bind(changes),
+      removeEventListener: changes.removeEventListener.bind(changes),
+    };
+    vi.stubGlobal("matchMedia", vi.fn(() => media));
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Add node" }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    act(() => {
+      media.matches = true;
+      changes.dispatchEvent(new Event("change"));
+    });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.body.style.pointerEvents).not.toBe("none");
+    expect(screen.queryByTestId("unsaved-indicator")).toBeNull();
   });
 
   it("has no unsaved indicator and a disabled Save button before any edit", () => {

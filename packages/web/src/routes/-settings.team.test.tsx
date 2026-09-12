@@ -52,6 +52,11 @@ beforeEach(() => {
 });
 
 describe("settings workspace routing", () => {
+  it("opens the team assistants list from Edit assistant", () => {
+    teamId = "team_1";
+    render(<TeamSettingsPage />);
+    expect(screen.getByRole("link", { name: "Edit assistant" }).getAttribute("href")).toBe("/assistants");
+  });
   it("keeps personal navigation and forms unchanged", () => {
     render(<SettingsLayout />);
     expect(screen.getByText("You")).toBeTruthy();
@@ -63,7 +68,7 @@ describe("settings workspace routing", () => {
     expect(directoryRead).not.toHaveBeenCalled();
   });
 
-  it.each(["/settings", "/settings/profile", "/settings/appearance", "/settings/assistant", "/settings/policies"])("does not mount personal forms at %s in team scope", (path) => {
+  it.each(["/settings", "/settings/profile", "/settings/appearance", "/settings/assistant"])("does not mount personal forms at %s in team scope", (path) => {
     teamId = "team_1";
     pathname = path;
     render(<SettingsLayout />);
@@ -75,8 +80,8 @@ describe("settings workspace routing", () => {
     expect(screen.queryByRole("button", { name: "Save personal" })).toBeNull();
   });
 
-  it("keeps the workspace-aware API keys route reachable in both scopes", () => {
-    pathname = "/settings/api-keys";
+  it.each(["/settings/api-keys", "/settings/proxy", "/settings/policies"])("keeps %s reachable in both scopes", (path) => {
+    pathname = path;
     teamId = "team_1";
     const view = render(<SettingsLayout />);
     expect(screen.getByRole("link", { name: "API keys" }).getAttribute("href")).toBe("/settings/api-keys");

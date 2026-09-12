@@ -73,6 +73,7 @@ import {
   resolveDefaultAssistant,
 } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import { workflowAssistantId } from "./service.js";
 
 type PiModel = Model<Api>;
 
@@ -166,6 +167,7 @@ interface RunContext {
   orgId: string;
   actorUserId: string;
   owner: Principal;
+  assistantId?: string;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -190,7 +192,8 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { orgId: defRow.orgId, actorUserId: actorUserIdFor(owner), owner };
+  return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
+    assistantId: workflowAssistantId(run.definition) };
 }
 
 /**
@@ -451,15 +454,21 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       }
       const ctx = await resolveRunContext(opts, runId);
 
-      // An `orchestrator` node names an OWNER, so it dispatches to that
-      // owner's DEFAULT assistant. No `agent_sessions` app row is written
+      // Explicit routing comes from the run snapshot. Older workflows use
+      // the owner's default assistant. No `agent_sessions` app row is written
       // here: like the `wf:` sessions above, a workflow-woken session is
       // owned by the run, and the app row is backfilled the first time a
       // human opens the assistant (`POST /api/teams/:id/orchestrator`).
-      const assistant = await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+      const assistant = ctx.assistantId
+        ? await loadAssistant(opts.db, ctx.assistantId)
+        : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+      if (!assistant || assistant.orgId !== ctx.orgId || assistant.ownerType !== principal.type || assistant.ownerId !== principal.id) {
+        throw new Error("Workflow orchestrator is unavailable. Select an orchestrator owned by this workflow's workspace.");
+      }
+      if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
       const session = await opts.host.assistantSessionFor(
         assistant.id,
-        { actorUserId: actorUserIdFor(principal), orgId: ctx.orgId },
+        { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
         { sessionId: assistant.sessionId },
       );
       const thread = session.thread(`signal:workflow:${runId}`);
