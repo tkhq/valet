@@ -12,7 +12,7 @@ A typed `AuthorizationService` contract covers plugin actions, workflow actions,
 
 The first implementation is an atomic replacement. One cutover pull request routes interactive and workflow actions through the local Valet engine and removes the old TypeScript evaluator. It does not run old and new evaluators together. It does not provide a legacy runtime fallback. `PolicyResolver` can adapt the engine during migration, but after cutover it only calls `AuthorizationService`.
 
-A future TVC host runs the same Rust engine and returns an attested decision envelope. The proof binds the Valet engine build, compiled bundle digest, evaluated input, request subject, and decision. Valet verifies TVC proofs before enforcement and retains durable audit and idempotency state.
+A future TVC host runs the same Rust engine and returns an attested decision envelope. The proof binds the Valet engine build, source bundle digest, evaluated input, request subject, and decision. Valet verifies TVC proofs before enforcement and retains durable audit and idempotency state.
 
 This document is a design spec. It does not define conformance levels, executable vectors, or an implementation.
 
@@ -81,7 +81,7 @@ Related work includes:
 
 Rego is the only canonical policy authoring language. Structured database rows and builder documents are source projections that compile to Rego and canonical data. They do not form a second policy language or evaluator.
 
-The Valet-owned Rust engine is the authoritative semantic implementation. It targets full Rego v1 language compatibility and full pure built-in coverage where feasible. It compiles deterministic engine artifacts, evaluates explicit input, and returns `PolicyDecisionV1`.
+The Valet-owned Rust engine is the authoritative semantic implementation. Its initial semantic path is the deterministic Regorus interpreter over Rego v1 source and canonical data. It targets full Rego v1 language compatibility and full pure built-in coverage where feasible. It evaluates explicit input and returns `PolicyDecisionV1`.
 
 OPA appears only as historical and language-reference context. Valet and TVC do not invoke an OPA runtime, compiler, sidecar, command, library, or WebAssembly artifact. OPA is not a migration path, shadow path, fallback, or second production evaluator. Published OPA language fixtures can inform Valet's independent compatibility corpus.
 
@@ -141,7 +141,7 @@ This choice preserves current Valet behavior for rules such as an exact action e
 
 ### One Rust engine runs locally and in TVC
 
-Valet owns one Rust engine and its public contract. The engine has a native target and can have a Rust-to-WebAssembly target where tests prove compatibility. Both targets compile from the same source and implement the same Rego semantics, capability profile, intermediate representation, limits, and decision contract.
+Valet owns one Rust engine and its public contract. The engine has a native target and can have a Rust-to-WebAssembly target where tests prove compatibility. Both targets use the same source, interpreter semantics, capability profile, limits, and decision contract.
 
 The local deployment embeds the engine through a native Rust library or validated in-process WebAssembly module. It does not use a local service or network hop. The design does not promise `wasm-bindgen`, WASI, the Component Model, or browser execution before compatibility is proven.
 
@@ -160,7 +160,7 @@ TKMS and TVC have different roles:
 
 Rego v1 remains the canonical authoring language. Valet targets full Rego v1 syntax, language semantics, and pure built-in coverage. The first engine profile does not claim full compatibility until it passes the required corpus and built-in gates.
 
-Valet publishes a versioned compatibility profile. Version 1 pins Rego v1, Regorus 0.12.0, the Valet engine contract, and these built-in classes:
+Valet publishes a versioned compatibility profile. Version 1 pins Rego v1 and the reviewed `tkhq/regorus` fork at commit `aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e`. Cargo uses the Git repository and exact `rev`, and `Cargo.lock` records the resolved Git source. The profile records the repository, commit, crate version, Valet engine contract, and these built-in classes:
 
 - `pure`: deterministic for explicit arguments and implemented by the pinned substrate;
 - `fact_backed`: replaced by a named, schema-versioned value in canonical policy input;
@@ -179,7 +179,7 @@ Profile version 1 sets these engine limits per compilation or evaluation:
 
 - 256 modules and 1 MiB of Rego source;
 - 8 MiB of canonical policy data and 8 MiB of canonical input;
-- 250,000 parsed nodes and 16 MiB of compiled policy bytes;
+- 250,000 parsed nodes and 16 MiB of source bundle bytes;
 - 1,000,000 evaluation instructions;
 - 128 document-reference, call, and recursion depth;
 - 100,000 generated comprehension values;
@@ -193,31 +193,30 @@ The engine enforces deterministic count and size limits. The local adapter enfor
 The Rust engine owns these design-level modules:
 
 - `compatibility`: Rego versions, conformance status, built-in capability profiles, and compatibility checks;
-- `parser`: accepted Rego source, tokens, parser diagnostics, and source spans;
-- `ast`: the validated abstract syntax tree and static names;
-- `compiler`: deterministic lowering, type and safety checks, dependency analysis, and source-map generation;
-- `ir`: a versioned intermediate representation or bytecode with canonical encoding;
-- `evaluator`: bounded execution over immutable compiled policy, canonical data, and explicit input;
-- `bundle`: manifest validation, digest checks, version pinning, loading, and compatibility checks;
+- `interpreter`: deterministic evaluation through the pinned Regorus fork;
+- `evaluator`: bounded execution over immutable Rego source, canonical data, and explicit input;
+- `bundle`: source manifest validation, digest checks, version pinning, loading, and compatibility checks;
 - `contract`: language-neutral input validation and `PolicyDecisionV1` output validation;
 - `explain`: matched rule IDs, rejected branches, source spans, values, and redacted trace events; and
 - `host`: an allowlisted capability interface that is empty for normal policy evaluation.
 
-The compiler emits the same canonical bytes for the same Rego version, capability profile, compiler version, modules, and data. It sorts all unordered inputs before encoding. The policy digest binds source and compiled artifacts, so source changes remain visible even when compiled behavior is equal.
+Source bundles contain Rego v1 modules, canonical data, a manifest, and source digests. They do not require Regorus Virtual Machine (RVM) bytecode. The policy digest binds the source modules, canonical data, manifest, engine identity, and capability profile.
 
-The evaluator accepts no database handle, lock manager, credential resolver, network client, filesystem handle, clock, random source, or cryptographic verifier. The host resolves facts and verifies proofs outside the engine. The engine receives immutable bytes and returns a decision or a typed failure.
+The evaluator accepts no database handle, lock manager, credential resolver, network client, filesystem handle, clock, random source, or cryptographic verifier. The host resolves facts and verifies proofs outside the engine. The engine receives immutable source and data bytes and returns a decision or a typed failure.
 
-The local native and WebAssembly targets use one semantic implementation. Target-specific adapters can manage memory transfer and process isolation, but they cannot change policy behavior. Cross-target conformance tests must cover accepted source, rejected source, compiled digests, decisions, errors, limits, and explain traces.
+Valet defers the RVM path. RVM cannot become the production semantic path until it has complete `with` semantics, deterministic cache behavior, unwind behavior, value formatting, resource-limit enforcement, and corpus parity with the interpreter. A release selects exactly one semantic path at process start. It never evaluates both paths, shadows one path with another, or falls back between them.
+
+The local native and WebAssembly targets use one selected semantic path. Target-specific adapters can manage memory transfer and process isolation, but they cannot change policy behavior. Cross-target conformance tests must cover accepted source, rejected source, source bundle digests, decisions, errors, limits, and explain traces.
 
 ### Regorus foundation and ownership
 
-Valet adopts Regorus 0.12.0 as its initial Rust Rego substrate. Cargo pins the exact crate version and the repository commits the resolved lockfile. The dependency remains subject to license review, source audit, vulnerability scanning, compatibility tests, and denial-of-service tests.
+Valet adopts the reviewed `tkhq/regorus` fork at commit `aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e` as its initial Rust Rego substrate. Cargo declares `https://github.com/tkhq/regorus` with that exact `rev`. The committed lockfile must resolve the same Git commit. Branch, tag, semver, and floating Git pins are not permitted. The dependency remains subject to license review, source audit, vulnerability scanning, compatibility tests, and denial-of-service tests.
 
 Valet owns the public engine contract, capability profile, compatibility corpus, limits, evaluator boundary, and release decisions. The public crate API does not expose Regorus types. Regorus does not select capabilities, load policy data, resolve facts, or define Valet authorization results.
 
 Valet can vendor or fork Regorus if TVC, security, maintenance, or compatibility requirements need tighter control. It can replace Regorus only behind the same Valet contract and conformance gates. OPA remains excluded from runtime, compilation, sidecars, migration, shadow evaluation, fallback, and production dependencies.
 
-A Regorus, Rust toolchain, profile, contract, or compiler upgrade creates a new engine identity. Before deployment, the upgrade must pass the required corpus, built-in inventory, native and supported WebAssembly parity, dependency audit, resource-limit tests, and security review. Valet then recompiles every active bundle and deploys the engine build with its compatible bundle set. Rollback restores the prior engine build and prior bundle set together. A process rejects mixed engine and bundle versions.
+A Regorus commit, Rust toolchain, profile, contract, interpreter, or future RVM upgrade creates a new engine identity. Before deployment, the upgrade must pass the required corpus, built-in inventory, native and supported WebAssembly parity, dependency audit, resource-limit tests, and security review. Valet then validates every active source bundle and deploys the engine build with its compatible bundle set. Rollback restores the prior engine build and prior bundle set together. A process rejects mixed engine and bundle versions.
 
 ## Architecture
 
@@ -236,7 +235,7 @@ AuthorizationEvaluator
     | TvcAttestedEvaluator later
     v
 Valet Rust policy engine
-    | Rego v1 compatibility profile and compiled bundle
+    | Rego v1 compatibility profile and source bundle
     v
 PolicyDecisionEnvelope
     |
@@ -254,7 +253,7 @@ The implementation should use these boundaries. Exact file placement can follow 
 
 - `packages/engine/src/authorization/types.ts`: portable request, subject, decision, obligation, and adapter types. It must not import Hono or database code.
 - `packages/api/src/authorization/service.ts`: `AuthorizationService`, fact resolution, fail-closed error mapping, and durable request handling.
-- `crates/valet-policy-engine/`: Rust compatibility, parser, AST, compiler, IR, evaluator, bundle, contract, explain, and host modules.
+- `crates/valet-policy-engine/`: Rust compatibility, interpreter, evaluator, source bundle, contract, explain, and host modules.
 - `packages/api/src/authorization/evaluators/local-valet.ts`: language-neutral adapter to one validated native or WebAssembly engine target.
 - `packages/api/src/authorization/evaluators/tvc-attested.ts`: future TVC client and proof verifier.
 - `packages/api/src/authorization/bundles/`: source assembly, canonical data, publication, and active-version storage.
@@ -318,7 +317,7 @@ type PolicyDecisionV1 = {
 type EngineRequestV1 = {
   schemaVersion: 1;
   policyDigest: string;
-  compiledBundleDigest: string;
+  sourceBundleDigest: string;
   engineDigest: string;
   canonicalInput: bytes;
   entryPoint: "data.valet.authz.decision";
@@ -339,7 +338,7 @@ type PolicyDecisionEnvelope = {
   requestSubjectDigest: string;
   inputDigest: string;
   policyDigest: string;
-  compiledBundleDigest: string;
+  sourceBundleDigest: string;
   evaluator: { kind: "local_valet" | "tvc_attested"; engineDigest: string };
   decision: PolicyDecisionV1;
   evaluatedAtMs: number;
@@ -363,8 +362,8 @@ Valet constructs one complete evaluation input. The evaluator must not fetch mut
 4. Valet computes SHA-256 over the UTF-8 canonical bytes.
 5. `inputDigest` covers the full evaluated input, including approval facts and dynamic grants.
 6. `requestSubjectDigest` covers the stable operation binding described above.
-7. `policyDigest` covers the deterministic manifest, Rego source, data, compiled artifact, and source maps.
-8. `compiledBundleDigest` covers the canonical compiled representation and its compiler, IR, contract, Rego, capability-profile, and engine versions.
+7. `policyDigest` covers the deterministic manifest, Rego source, canonical data, provenance maps, and compatibility identity.
+8. `sourceBundleDigest` covers the canonical source bundle bytes and their contract, Rego, capability-profile, interpreter, and engine versions.
 
 The canonical bundle manifest sorts paths by UTF-8 byte order. Each entry contains path, byte length, media type, and SHA-256 digest. Rego source uses UTF-8 and LF line endings. JSON data uses RFC 8785 bytes. Duplicate paths, path traversal, symlinks, non-UTF-8 Rego, and undeclared files are rejected.
 
@@ -374,21 +373,19 @@ Each organization has one active logical bundle version. A bundle contains:
 
 - canonical Rego v1 source modules;
 - immutable canonical data;
-- input, output, Rego, capability-profile, compiler, IR, and engine compatibility versions;
-- a deterministic compiled representation for the pinned engine version;
-- source maps from compiled instructions to Rego and builder provenance;
-- source revision metadata; and
-- a deterministic manifest with source, data, compiled artifact, and source-map digests.
+- input, output, Rego, capability-profile, interpreter, and engine compatibility versions;
+- source revision metadata and builder provenance maps; and
+- a deterministic manifest with source, data, and provenance-map digests.
 
-`policyDigest` binds the complete manifest. The engine rejects a bundle when its Rego, capability-profile, compiler, IR, contract, or engine range does not match the running engine. It also rejects a compiled artifact that does not match the source and data digests declared by the manifest.
+`policyDigest` binds the complete manifest. The engine rejects a bundle when its Rego, capability-profile, interpreter, contract, or engine range does not match the running engine. It also rejects source or data that does not match the manifest digests.
 
-Static policy publication follows `draft`, `validated`, `published`, `active`, and `retired` states. Validation parses and compiles Rego with the pinned Rust engine. It checks the entry point, Rego version, capability profile, data, output contract, limits, source maps, and deterministic digest. A policy authoring write creates or updates and validates a canonical draft. It then publishes and activates that draft in one transaction before it reports success. If activation fails, the write fails and the old active bundle remains. A standalone draft save does not change effective policy.
+Static policy publication follows `draft`, `validated`, `published`, `active`, and `retired` states. Validation parses Rego with the pinned Rust engine. It checks the entry point, Rego version, capability profile, data, output contract, limits, provenance maps, and deterministic digest. A policy authoring write creates or updates and validates a canonical draft. It then publishes and activates that draft in one transaction before it reports success. If activation fails, the write fails and the old active bundle remains. A standalone draft save does not change effective policy.
 
-Organization creation must never leave a gap with no policy. The create transaction compiles and activates the standard default bundle before it makes the organization usable. Organization creation fails if compilation or activation fails. The organization cannot accept requests until that transaction commits.
+Organization creation must never leave a gap with no policy. The create transaction builds, validates, and activates the standard default source bundle before it makes the organization usable. Organization creation fails if compilation or activation fails. The organization cannot accept requests until that transaction commits.
 
-An engine upgrade validates and recompiles every active source bundle before deployment. Deployment pins the engine build and compatible compiled bundle set as one release. Rollback restores the prior engine release and its matching bundle snapshots. The running process never interprets an incompatible bundle or recompiles it on first authorization.
+An engine upgrade validates every active source bundle before deployment. Deployment pins the engine build and compatible source bundle set as one release. Rollback restores the prior engine release and its matching bundle snapshots. The running process never loads an incompatible bundle.
 
-A Rego profile or compiler upgrade cannot silently change active source semantics. Offline conformance and migration checks must approve changed decisions before publication. Old source stays valid only when the new profile declares it compatible. Otherwise migration blocks the upgrade.
+A Rego profile or interpreter upgrade cannot silently change active source semantics. Offline conformance and migration checks must approve changed decisions before publication. Old source stays valid only when the new profile declares it compatible. Otherwise migration blocks the upgrade.
 
 Dynamic session and workflow grants change too often to republish the static authoring bundle for every approval. Valet supplies them as signed or database-rooted request facts under a fixed Rego data namespace. Their canonical bytes are covered by `inputDigest`. Each fact includes grant ID, scope ID, exact policy key, issuer, creation time, revocation state, and source approval ID. Missing, expired, revoked, cross-scope, or malformed facts do not match.
 
@@ -400,7 +397,7 @@ The local Valet engine trusts Valet's supplied facts. A future TVC proof shows t
 
 ### Product goals and limits
 
-The policy builder is a safe authoring view over canonical policy data. It is not a second policy language. The builder emits Rego v1 and data under the active compatibility profile. The same Rust compiler prepares bundles for local and future TVC evaluation. The builder does not call OPA or emit OPA-specific artifacts.
+The policy builder is a safe authoring view over canonical policy data. It is not a second policy language. The builder emits Rego v1 and data under the active compatibility profile. The same Rust engine validates source bundles for local and future TVC evaluation. The builder does not call OPA or emit OPA-specific artifacts.
 
 The builder must cover every `AuthorizationKind` in this design. It must make the selected context, subject, target, conditions, decision, obligations, precedence, and provenance visible. It must use safe defaults and show the effect of a draft before publication.
 
@@ -429,8 +426,8 @@ Proposed module boundaries are:
 - `packages/api/src/authorization/builder/operators.ts`: condition operator registry and type compatibility.
 - `packages/api/src/authorization/builder/validation.ts`: structural, semantic, conflict, permission, and sensitive-value checks.
 - `packages/api/src/authorization/builder/service.ts`: draft lifecycle, review state, authorization, and audit.
-- `crates/valet-policy-engine/`: Rego compatibility validation, deterministic compilation, source maps, and evaluation.
-- `packages/api/src/authorization/bundles/compiler.ts`: host assembly of builder and migrated source into canonical Rego and data.
+- `crates/valet-policy-engine/`: Rego compatibility validation, deterministic interpretation, provenance, and evaluation.
+- `packages/api/src/authorization/bundles/source-builder.ts`: host assembly of builder and migrated source into canonical Rego and data.
 - `packages/api/src/authorization/bundles/publisher.ts`: content-addressed publication and transactional activation.
 
 The current `packages/web/src/components/settings/policies-section.tsx` can become a compatibility view or compose the new builder primitives. It must not keep a separate matcher model after cutover.
@@ -467,7 +464,7 @@ The registry covers these contexts:
 | Credential | `credential.use`, `credential.delegate` | Service, credential owner, delegation source, requested use, and session or workflow owner. Secret fields are excluded. |
 | Egress | `egress.connect` | Scheme, normalized host, port, protocol, destination class, redirect policy, and declared scope. |
 
-Common editor primitives handle typed equality, set membership, order comparisons, presence, time windows, subject membership, owner relationships, and Boolean groups. Context descriptors can expose only operators valid for a field type. For example, the egress descriptor can expose host suffix matching, while a numeric sandbox field can expose bounded comparisons. Descriptor extensions must map to canonical input fields and registered compiler behavior.
+Common editor primitives handle typed equality, set membership, order comparisons, presence, time windows, subject membership, owner relationships, and Boolean groups. Context descriptors can expose only operators valid for a field type. For example, the egress descriptor can expose host suffix matching, while a numeric sandbox field can expose bounded comparisons. Descriptor extensions must map to canonical input fields and registered source-builder behavior.
 
 ### Authoring model
 
@@ -578,19 +575,19 @@ type PublishRequest = {
 };
 ```
 
-Unknown fields follow the document schema rule. A newer schema can preserve an opaque extension only when its namespace, digest behavior, compiler owner, and provenance are registered. Otherwise the server rejects the document. The client must not drop unknown fields during an edit.
+Unknown fields follow the document schema rule. A newer schema can preserve an opaque extension only when its namespace, digest behavior, source-builder owner, and provenance are registered. Otherwise the server rejects the document. The client must not drop unknown fields during an edit.
 
 ### Validation, compilation, and round trip
 
-The browser performs fast schema checks for feedback. The API repeats all structural checks and performs semantic validation. Only the server can compile, review, publish, activate, or roll back a bundle.
+The browser performs fast schema checks for feedback. The API repeats all structural checks and performs semantic validation. Only the server can build, validate, review, publish, activate, or roll back a bundle.
 
 Validation checks descriptor versions, selectors, field types, operators, Boolean structure, effects, obligations, time bounds, sensitive values, authority, and publication permission. It also reports exact-target conflicts, same-specificity conflicts, organization and team denies, grants, overrides, plugin and risk defaults, approval obligations, unreachable rules, contradictory conditions, and effects that cross contexts through shared facts.
 
-Preview calls `AuthorizationService` with either the active bundle digest or a server-compiled draft bundle digest. It never uses a browser evaluator or a separate preview resolver. Explain output shows matched and rejected rules, authority layers, computed specificity, conditions, defaults, grants, obligations, and the final reason code.
+Preview calls `AuthorizationService` with either the active bundle digest or a server-built draft source bundle digest. It never uses a browser evaluator or a separate preview resolver. Explain output shows matched and rejected rules, authority layers, computed specificity, conditions, defaults, grants, obligations, and the final reason code.
 
-The builder emits canonical Rego v1 and data under the active compatibility profile. The Rust compiler produces the deterministic IR and maps each instruction to document ID, rule ID, field path, author, source version, and Rego span. Migrated and advanced sources carry the same provenance.
+The builder emits canonical Rego v1 and data under the active compatibility profile. The source builder maps each Rego rule to document ID, rule ID, field path, author, source version, and Rego span. Migrated and advanced sources carry the same provenance.
 
-The generated diff shows rule, Rego, data, compiled artifact, engine compatibility, digest, and sampled impact changes. The publisher never changes a rule to make it valid. It publishes one content-addressed bundle and future signed pin for the Valet Rust engine in local or TVC deployment.
+The generated diff shows rule, Rego, data, provenance, engine compatibility, digest, and sampled impact changes. The publisher never changes a rule to make it valid. It publishes one content-addressed bundle and future signed pin for the Valet Rust engine in local or TVC deployment.
 
 A visual round trip must preserve semantics, provenance, Rego version, capability profile, and engine compatibility. If an expression cannot map to the current builder schema or engine version, the builder shows it as read-only. The user must create a migration issue or use an approved advanced path. Saving another rule must preserve the unsupported source byte-for-byte and include it in the policy digest.
 
@@ -602,11 +599,11 @@ The policy overview groups active rules by context and authority. It also shows 
 
 The rule editor presents scope, subjects, target, decision, conditions, obligations, and time bounds in that order. The condition builder uses nested groups with keyboard-accessible add, remove, move, and grouping controls. Labels, descriptions, errors, and focus order must work with screen readers. Color is not the only signal for allow, approval, deny, conflict, or validation state.
 
-The advanced editor shows structured source or Rego only when the advanced policy gate permits it. It lists language coverage and built-in capabilities and rejects unsupported requirements before review. It shows provenance, generated output, compiled version, and engine compatibility. The effective-policy view explains the active result for a selected subject and request. Decision inspection opens the stored `ExplainTrace`, proof status, obligations, approval facts, and separate execution outcome.
+The advanced editor shows structured source or Rego only when the advanced policy gate permits it. It lists language coverage and built-in capabilities and rejects unsupported requirements before review. It shows provenance, generated output, interpreter version, and engine compatibility. The effective-policy view explains the active result for a selected subject and request. Decision inspection opens the stored `ExplainTrace`, proof status, obligations, approval facts, and separate execution outcome.
 
 Conflict preview identifies rules that overlap at exact targets or specificity tiers. Impact preview evaluates selected redacted samples against the active or draft bundle through `AuthorizationService`. It labels incomplete coverage and never claims that samples prove safety. Cross-context impact lists shared facts or obligations that changed.
 
-Drafts save without activation. Review freezes a draft version and records reviewers, comments, validation results, source diff, and expected base digest. Publish requires a current validation result and any required approval. Activation uses compare-and-swap on the active digest. A stale base, missing review, compiler error, unknown extension, or failed audit write blocks publication.
+Drafts save without activation. Review freezes a draft version and records reviewers, comments, validation results, source diff, and expected base digest. Publish requires a current validation result and any required approval. Activation uses compare-and-swap on the active digest. A stale base, missing review, source validation error, unknown extension, or failed audit write blocks publication.
 
 Rollback creates a new draft from a prior published version and sends it through validation, review, publication, and activation. It does not move the active pointer without a new audit event. Safe defaults select the narrowest subject and target, no secret fields, no unbounded allow, and `require_approval` where the context supports it.
 
@@ -642,7 +639,7 @@ The importer preserves original row IDs, source tables, timestamps, authors, mat
 The implementation must resolve these gates before builder publication is enabled:
 
 1. Decide whether the UI permits advanced Rego or only validated structured extensions.
-2. Define who can register arbitrary condition schemas and compiler handlers.
+2. Define who can register arbitrary condition schemas and source-builder handlers.
 3. Decide whether a draft can contain organization and team rules or must have one owner scope.
 4. Set limits and indexing for large rule sets, validation, preview samples, and explain traces.
 5. Select the default diff view for rule, generated Rego, data, and impact changes.
@@ -653,7 +650,7 @@ The implementation must resolve these gates before builder publication is enable
 Attested evaluation can prove these claims:
 
 - the measured native Rust host used the expected Valet engine build;
-- the engine used the source and compiled bundle bytes named by `policyDigest`;
+- the engine used the source bundle bytes named by `policyDigest`;
 - the engine used the input bytes named by `inputDigest`; and
 - the signed decision envelope contains the resulting decision.
 
@@ -661,7 +658,7 @@ Attestation does not prove that a host-supplied `userId`, team membership, resou
 
 Inputs that must survive a hostile host need a trusted issuer. Options include signed identity claims, signed policy pins, signed approval facts, TKMS-backed consensus records, or data fetched and verified inside the attested workload. The decision envelope must identify the issuer and digest for each rooted fact set. Audit and UI text must not describe an attested decision as proof of identity unless the identity inputs have such a root.
 
-Local evaluation trusts the Valet host for facts and enforcement. TVC attests the Valet engine code, compiled bundle, and evaluated input. It does not attest host claims. A later attested-execution phase can move selected side effects behind the TVC boundary.
+Local evaluation trusts the Valet host for facts and enforcement. TVC attests the Valet engine code, source bundle, and evaluated input. It does not attest host claims. A later attested-execution phase can move selected side effects behind the TVC boundary.
 
 ## Approval and replay semantics
 
@@ -695,7 +692,7 @@ Audit writes are durable in Valet for both evaluator types. A TVC replica is sta
 
 ### Deployment model
 
-`TvcAttestedEvaluator` uses a pool of stateless TVC replicas. Each replica runs a native Rust host around the pinned Valet engine crate and compiled bundle. Any healthy replica can evaluate a request for that deployment. Replicas hold no durable session, grant, approval, or idempotency state. Valet selects the active bundle and sends the complete evaluated input.
+`TvcAttestedEvaluator` uses a pool of stateless TVC replicas. Each replica runs a native Rust host around the pinned Valet engine crate and source bundle. Any healthy replica can evaluate a request for that deployment. Replicas hold no durable session, grant, approval, or idempotency state. Valet selects the active bundle and sends the complete evaluated input.
 
 TVC public ingress currently supports HTTP/1 applications. The client uses HTTP/1.1 request and response semantics. It does not require HTTP/2, WebSockets, server push, or streaming bodies. Requests and responses have explicit byte limits, content type, schema version, and timeout. Retries use the same request ID and idempotency key.
 
@@ -711,7 +708,7 @@ Content-Type: application/json
 { signedDecisionEnvelope, appProof, bootProofRef }
 ```
 
-Production can send a content-addressed bundle reference after TVC supports a trusted immutable bundle store. The response still binds the exact source, compiled bundle, engine, input, and decision digests.
+Production can send a content-addressed bundle reference after TVC supports a trusted immutable bundle store. The response still binds the exact source, source bundle, engine, input, and decision digests.
 
 ### Signed decision envelope
 
@@ -719,7 +716,7 @@ The TVC envelope is signed by the enclave Ephemeral Key. Its App Proof payload i
 
 - proof type and schema version;
 - deployment, native Rust host, and Valet engine build digests;
-- source and compiled bundle digests;
+- source and source bundle manifest digests;
 - request ID and request subject digest;
 - input and policy manifest digests;
 - decision digest and effect;
@@ -756,7 +753,7 @@ The labels describe authoring inputs, not separate runtime engines. The Valet Ru
 
 ### Action policies
 
-`action_policies`, `action_policy_overrides`, and `runtime_grants` remain authoring and fact storage during migration. The compiler maps them into Rego and canonical data. Their current matcher operators, context scope, team behavior, and provenance IDs remain representable.
+`action_policies`, `action_policy_overrides`, and `runtime_grants` remain authoring and fact storage during migration. The source builder maps them into Rego and canonical data. Their current matcher operators, context scope, team behavior, and provenance IDs remain representable.
 
 The final cutover deletes the TypeScript precedence evaluator. Policy CRUD can keep structured rows as canonical authoring data if the UI needs them. Each policy authoring write must validate, publish, and activate its canonical draft in one transaction before it reports success. If activation fails, the write fails and the old active bundle remains.
 
@@ -792,7 +789,7 @@ The system fails closed for these conditions:
 - invalid Rego or invalid decision output;
 - bundle, input, or subject digest mismatch;
 - engine timeout, resource-limit breach, crash, or unavailable local adapter;
-- unsupported Rego, capability-profile, compiler, IR, contract, or engine version;
+- unsupported Rego, capability-profile, interpreter, contract, or engine version;
 - missing required facts;
 - stale or conflicting approval resolution;
 - unknown obligation;
@@ -803,7 +800,7 @@ The system fails closed for these conditions:
 
 For action requests that can ask a human, policy can return `require_approval`. Infrastructure failure does not synthesize approval. It denies with a corrective operator reason. Today, an interactive personal-session resolver or policy-store error becomes `require_approval` with `resolver_error` provenance. The cutover intentionally changes that behavior to deny. This also differs from the prototype's unattested approval fallback.
 
-There is no decision cache initially. Every request evaluates against the active compiled bundle and current fact snapshot. Valet atomically replaces the loaded engine bundle when the active digest changes. A later cache needs a separate design for revocation, dynamic facts, proof replay, and bounded staleness.
+There is no decision cache initially. Every request evaluates against the active source bundle and current fact snapshot. Valet atomically replaces the loaded engine bundle when the active digest changes. A later cache needs a separate design for revocation, dynamic facts, proof replay, and bounded staleness.
 
 Operational metrics include evaluation count and latency by kind and effect, active bundle digest, bundle activation failures, fail-closed reason counts, obligation failures, proof verification failures, approval age, idempotent replays, and decisions without execution outcomes. Metrics use IDs and digests, not raw parameters.
 
@@ -826,9 +823,9 @@ Operational metrics include evaluation count and latency by kind and effect, act
 | A capability-built-in gains ambient authority | The default host interface is empty. Profiles require supplied facts, explicit injection, or validation rejection. |
 | Native and WebAssembly targets drift | Both targets share one Rust implementation and conformance corpus. A target cannot ship until its decisions and limits agree. |
 | Engine upgrade changes decisions | Releases pin engine and bundle versions. Offline migration checks and paired rollback artifacts gate upgrades. |
-| Compiler output is nondeterministic | Canonical inputs, sorted encoding, repeated-build tests, and artifact digests block unstable bundles. |
-| Policy exhausts CPU or memory | Source, compile, instruction, time, memory, depth, and result limits fail closed. Exact limits remain a gate. |
-| The owned engine misses latency targets | Native and WebAssembly benchmarks cover compile latency, evaluation latency, throughput, and memory before target selection. |
+| Source bundle output is nondeterministic | Canonical inputs, sorted encoding, repeated-build tests, and digests block unstable bundles. |
+| Policy exhausts CPU or memory | Source, instruction, time, memory, depth, and result limits fail closed. Exact limits remain a gate. |
+| The owned engine misses latency targets | Native and WebAssembly benchmarks cover load latency, evaluation latency, throughput, and memory before target selection. |
 | Rust substrate drifts or is compromised | Valet pins and audits dependencies and tests them against its published compatibility profile. Owning the contract does not remove supply-chain risk. |
 | Database operator drops audit rows | Valet monitoring can detect sequence gaps and missing outcomes. Future signed or chained records improve external verification. |
 
@@ -839,7 +836,7 @@ Preparatory pull requests add typed contracts, the Rust engine and compatibility
 The one replacement pull request then:
 
 - creates the production `AuthorizationService` with the local Valet Rust engine as its only evaluator;
-- activates the compiled policy bundles;
+- activates the validated source policy bundles;
 - converges interactive and workflow action paths;
 - moves `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard in `packages/api/src/policies/admin.ts`, and the preview in `packages/api/src/routes/policies.ts` to the canonical service;
 - requires each web and API policy authoring write to validate, publish, and activate its canonical draft in one transaction before success;
@@ -870,7 +867,7 @@ These changes replace the evaluator behind the contract. They do not revive the 
 
 ### Action precedence migration
 
-An org denies a service but allows one exact action. A team requires approval for that same action. A session grant covers the action. The compiler preserves both specificity and authority layers. The exact org allow beats the broader org deny. The team approval requirement remains. The grant then allows the session request. An exact team deny would still block it.
+An org denies a service but allows one exact action. A team requires approval for that same action. A session grant covers the action. The generated Rego preserves both specificity and authority layers. The exact org allow beats the broader org deny. The team approval requirement remains. The grant then allows the session request. An exact team deny would still block it.
 
 ### Cross-path convergence
 
@@ -895,9 +892,9 @@ The active bundle is incompatible, invalid, or unavailable to the Valet engine. 
 ## Open questions and decision gates
 
 1. **Native and WebAssembly targets:** Select the first local target after packaging, isolation, performance, and cross-target compatibility tests.
-2. **Deterministic compilation:** Freeze canonical AST, IR or bytecode, numeric, Unicode, set, iteration, and source-map rules.
+2. **Deterministic interpretation:** Freeze numeric, Unicode, set, iteration, value-format, and limit rules for the interpreter.
 3. **Source compatibility:** Define Rego and profile migration, deprecation windows, unsupported-capability handling, and builder round-trip rules.
-4. **Security review:** Review parser, compiler, evaluator, unsafe Rust, Regorus, dependency supply chain, host boundary, and denial-of-service controls.
+4. **Security review:** Review parser, interpreter, evaluator, unsafe Rust, Regorus, dependency supply chain, host boundary, and denial-of-service controls.
 5. **Bundle publication transaction:** Define the database transaction boundary for authoring rows, bundle versions, the active pointer, and audit. The write cannot report success before activation.
 6. **Policy source signatures:** Decide when local policy administration must produce signed pins, before TVC or with TVC.
 7. **Identity roots:** Select trusted issuers for user, team, workload, and service identities. Host assertions remain explicit until then.
