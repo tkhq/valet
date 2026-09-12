@@ -7,12 +7,52 @@
 import { Turnkey } from "@turnkey/sdk-server";
 import type { TurnkeyDeploymentConfig } from "./config.js";
 
-type Api = ReturnType<Turnkey["apiClient"]>;
-type Body<K extends keyof Api> = Api[K] extends (input: infer I) => unknown ? I : never;
+// The parameter shapes are declared here rather than derived from the SDK's
+// types on purpose: the api package imports this module's declarations, and
+// a type derived from `@turnkey/sdk-server` drags that package's typings
+// (cross-fetch, buffer) into the api program, where they redefine `Headers`
+// and `Blob` and break unrelated files. These mirror
+// `v1ApiKeyParamsV2`, `v1AuthenticatorParamsV2`, `v1RootUserParamsV5`, and
+// `v1UserParamsV4`; the SDK checks them structurally at the call sites below.
 
-export type RootUserParams = Body<"createSubOrganization">["rootUsers"][number];
-export type UserParams = Body<"createUsers">["users"][number];
-export type ApiKeyParams = Body<"createApiKeys">["apiKeys"][number];
+export type AuthenticatorTransport =
+  | "AUTHENTICATOR_TRANSPORT_BLE"
+  | "AUTHENTICATOR_TRANSPORT_INTERNAL"
+  | "AUTHENTICATOR_TRANSPORT_NFC"
+  | "AUTHENTICATOR_TRANSPORT_USB"
+  | "AUTHENTICATOR_TRANSPORT_HYBRID";
+
+export interface ApiKeyParams {
+  apiKeyName: string;
+  /** Compressed P-256 point, hex. */
+  publicKey: string;
+  curveType: "API_KEY_CURVE_P256";
+  expirationSeconds?: string;
+}
+
+export interface AuthenticatorParams {
+  authenticatorName: string;
+  challenge: string;
+  attestation: {
+    credentialId: string;
+    clientDataJson: string;
+    attestationObject: string;
+    transports: AuthenticatorTransport[];
+  };
+}
+
+export interface RootUserParams {
+  userName: string;
+  userEmail?: string;
+  apiKeys: ApiKeyParams[];
+  authenticators: AuthenticatorParams[];
+  /** Always empty here; typed so the literal `[]` satisfies the SDK. */
+  oauthProviders: never[];
+}
+
+export interface UserParams extends RootUserParams {
+  userTags: string[];
+}
 
 export interface PolicyParams {
   policyName: string;
