@@ -78,6 +78,8 @@ git diff --check
 make e2e E2E_ARGS="--only docs-lint"
 ```
 
+The repository docs-lint command checks its curated maintained-doc list. It does not lint files under `docs/specs` or `docs/plans`. Run the STE linter directly against these two files when Python is available.
+
 ## PR 2: Typed contracts and durable identities
 
 **Depends on:** PR 1
@@ -139,7 +141,7 @@ pnpm typecheck
 
 **Scope**
 
-- Compile `action_policies`, team policies, `action_policy_overrides`, plugin defaults, and risk defaults into Rego and static data.
+- Compile `action_policies`, team policies, `action_policy_overrides`, plugin defaults, risk defaults, and the standard new-organization default into Rego and static data.
 - Convert `runtime_grants` and approval resolutions into canonical dynamic facts.
 - Encode action, service, and risk specificity.
 - Encode org deny, team deny, grant, override, strict org/team result, and default authority layers.
@@ -199,6 +201,9 @@ pnpm typecheck
 
 - Build and inject one `AuthorizationService` from `packages/api/src/engine/host.ts`.
 - Route interactive plugin actions and workflow tool nodes through local OPA.
+- Move workflow analysis and pre-approval in `packages/api/src/workflows/permissions.ts` to `AuthorizationService`.
+- Move the `upsertOverride` bounds guard in `packages/api/src/policies/admin.ts` to `AuthorizationService`.
+- Move the `/api/org/policies/preview` path in `packages/api/src/routes/policies.ts` to `AuthorizationService`.
 - Re-evaluate approved requests with canonical approval facts.
 - Persist the decision before the action and persist execution outcome separately.
 - Make audit reservation failure block external execution.
@@ -206,17 +211,22 @@ pnpm typecheck
 - Remove direct `resolveActionPolicy` calls from `packages/api/src/plugins/action-invoker.ts`.
 - Reduce `packages/api/src/policies/service.ts` to authoring, grant storage, audit compatibility, or delete it where replacements exist.
 - Keep `PolicyResolver` only as a thin engine compatibility adapter if needed.
+- Remove the TypeScript evaluator from runtime, preview, workflow analysis, and override write guards.
 - Remove production risk-default fallback for covered actions.
+- Change personal-session resolver and policy-store errors from `require_approval` to deny.
+- Activate a standard default bundle in each new-organization transaction, or use the digest-pinned compiled default until activation completes.
 - Do not include a feature flag, shadow path, dual evaluation, or old-engine fallback.
 
 **Acceptance checks**
 
 - Current action-policy API fixtures compile and drive OPA decisions.
-- Interactive and workflow calls with equal facts return equal decisions.
+- Interactive and workflow calls return equal decisions when `appliesIn` and all session or workflow-scoped facts are equal.
+- Tests permit intentional differences from `appliesIn`, `sessionId`, or `workflowExecutionId` policy and grant scope.
 - Existing policy precedence cases pass under OPA.
 - Approval replay survives restart and remains bound to one request subject.
 - Resolver, bundle, obligation, and audit failures deny without executing.
-- Repository search finds no live TypeScript action-policy evaluator and no direct workflow policy resolver.
+- Repository search finds no TypeScript evaluator in runtime, `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard, or policy preview.
+- A new organization has an active valid bundle before it accepts an authorization request.
 - Review the diff explicitly for `shadow`, `fallback`, and dual evaluator wiring.
 
 **Validation**
@@ -235,9 +245,10 @@ make e2e
 
 **Scope**
 
-- Route `packages/engine/src/builtin-tools/index.ts` and API-built `ToolDef` tools through `AuthorizationService`.
+- Route built-ins from `packages/engine/src/builtin-tools/index.ts` and API-built tools through `AuthorizationService`.
 - Define action IDs and capability classes for file, process, approval, thread, child, and model-switch tools.
-- Replace dormant `ToolDef.requiresApproval` policy behavior with the canonical decision adapter. Keep the field only if a non-policy use remains.
+- Update `ToolDef` in `packages/engine/src/types.ts`. Today, `requiresApproval` only prevents concurrent dispatch in `packages/engine/src/tool-bridge.ts`; it does not enforce approval.
+- Replace that concurrency-only signal with the canonical decision adapter or a clearly named concurrency field.
 - Enforce redaction and obligations before and after tool execution.
 
 **Acceptance checks**
@@ -352,6 +363,7 @@ make e2e
 - Deploy stateless TVC replicas.
 - Define the signed decision App Proof payload.
 - Verify App Proof signatures and linked Boot Proofs against pinned deployment, manifest, application, PCR, and account expectations.
+- Reject TVC debug-mode deployments, including Boot Proofs with zero PCR values.
 - Bind request nonce, subject, input, policy, decision, and obligation digests.
 - Keep durable audit, approvals, request reservation, and idempotency in Valet.
 - Add signed policy pins and trusted fact issuers where required.
@@ -360,7 +372,7 @@ make e2e
 **Acceptance checks**
 
 - A valid proof for the expected build and digests permits enforcement.
-- Any proof, nonce, digest, key, manifest, PCR, or freshness mismatch denies.
+- Any proof, nonce, digest, key, manifest, PCR, freshness, or debug-mode check failure denies.
 - Any replica can process a request without local session state.
 - A retry with the same request identity returns the same stored Valet decision or a byte-equivalent verified envelope.
 - HTTP/2, streaming, and WebSocket behavior are not required.

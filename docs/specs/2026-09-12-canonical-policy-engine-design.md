@@ -23,7 +23,10 @@ Valet currently has several authorization mechanisms:
 - `packages/engine/src/types.ts` defines `PolicyResolveInput`, `PolicyDecision`, and `PolicyResolver` for interactive plugin actions.
 - `packages/api/src/plugins/action-invoker.ts` calls `resolveActionPolicy` directly for workflow actions. It does not use the engine resolver contract.
 - `packages/engine/src/plugin-catalog.ts` enforces interactive plugin action decisions.
-- `packages/engine/src/builtin-tools/index.ts` defines built-in tools. `ToolDef.requiresApproval` exists, but it is not the canonical action policy path.
+- `packages/engine/src/builtin-tools/index.ts` defines built-in tools. `packages/engine/src/types.ts` defines `ToolDef.requiresApproval`. Today, `packages/engine/src/tool-bridge.ts` uses that field only to prevent concurrent dispatch. It does not enforce approval.
+- `packages/api/src/workflows/permissions.ts` previews workflow policy and writes pre-approval overrides through the TypeScript policy core.
+- `packages/api/src/policies/admin.ts` uses the TypeScript core in the `upsertOverride` bounds guard.
+- `packages/api/src/routes/policies.ts` uses `resolveActionPolicy` for policy previews.
 - `packages/api/src/services/plugin-entitlements.ts` evaluates plugin visibility outside the action policy engine.
 - `packages/api/src/services/session-access.ts` and route-specific services enforce resource access with direct checks.
 - Credential delegation, child sessions, sandbox settings, and scoped egress each have separate checks.
@@ -83,6 +86,7 @@ The implementation can be prepared as a stack of pull requests. The final cutove
 - route both interactive and workflow actions through `AuthorizationService`;
 - remove the matching and precedence implementation from `packages/api/src/policies/resolution.ts`;
 - remove direct workflow calls to `resolveActionPolicy`;
+- move workflow permission preview, override bounds checks, and policy preview to `AuthorizationService`;
 - remove all absent-resolver risk defaults from covered production wiring; and
 - leave `PolicyResolver` only as a typed adapter if the engine still needs that symbol.
 
@@ -118,9 +122,11 @@ Authority layers then resolve in this order:
 3. A valid dynamic session or workflow grant.
 4. A personal override for a personal owner.
 5. The strictest non-deny org and team result at their winning specificities.
-6. The policy bundle default.
+6. The plugin default as a lowest-specificity action layer.
+7. The risk default as the next lowest-specificity action layer.
+8. The policy bundle default when the domain has no plugin or risk default.
 
-A more specific allow can override a less specific deny in the same org or team layer. A deny that wins its layer cannot be loosened by a grant or personal override. Team executions do not use personal overrides. The bundle default is `require_approval` for action-like operations and `deny` for access or capability checks that cannot ask a human.
+A more specific allow can override a less specific deny in the same org or team layer. A deny that wins its layer cannot be loosened by a grant or personal override. Team executions do not use personal overrides. Plugin and risk defaults are part of Rego, not host fallback code. The bundle default is `require_approval` for action-like operations and `deny` for access or capability checks that cannot ask a human.
 
 This choice preserves current Valet behavior for rules such as an exact action exception under a service restriction. It differs from the TVC prototype, where any matching deny dominates globally. Migration must compile each current row into a specificity-bearing Rego rule and compare representative production policy snapshots before cutover. The comparison is an offline migration check, not shadow evaluation of live requests.
 
@@ -208,7 +214,7 @@ type AuthorizationRequest = {
     actorUserId?: string;
     sessionId?: string;
     threadId?: string;
-    workflowRunId?: string;
+    workflowExecutionId?: string;
     workflowNodeId?: string;
     parentSessionId?: string;
   };
@@ -271,6 +277,8 @@ Each organization has one active logical bundle version. A bundle contains:
 - the deterministic manifest.
 
 Static policy publication follows `draft`, `validated`, `published`, `active`, and `retired` states. Validation compiles Rego, checks the entry point and output schema, checks referenced data, and computes the canonical digest. Activation is a transaction that advances the active version pointer and records the actor.
+
+Organization creation must never leave a gap with no policy. The create transaction compiles and activates the standard default bundle before it makes the organization usable. If transactional compilation is not available, the evaluator applies an embedded, digest-pinned default bundle until the transaction activates the organization bundle. Organization creation fails if neither bundle is valid. The embedded default has the same plugin, risk, and bundle defaults as a newly compiled organization bundle.
 
 Dynamic session and workflow grants change too often to republish the static authoring bundle for every approval. Valet supplies them as signed or database-rooted request facts under a fixed Rego data namespace. Their canonical bytes are covered by `inputDigest`. Each fact includes grant ID, scope ID, exact policy key, issuer, creation time, revocation state, and source approval ID. Missing, expired, revoked, cross-scope, or malformed facts do not match.
 
@@ -356,7 +364,7 @@ The TVC envelope is signed by the enclave Ephemeral Key. Its App Proof payload i
 - replica ephemeral public key; and
 - a nonce supplied by Valet to prevent response substitution.
 
-Valet verifies the envelope before enforcement. It verifies the App Proof signature, then verifies that the App Proof key equals the `public_key` in a valid Boot Proof. Boot Proof verification checks the AWS attestation chain, expected PCR values, QOS manifest binding, application digest, operator approvals, and expected TVC account or deployment identity. Valet pins acceptable application and manifest identities through release configuration.
+Valet verifies the envelope before enforcement. It verifies the App Proof signature, then verifies that the App Proof key equals the `public_key` in a valid Boot Proof. Boot Proof verification checks the AWS attestation chain, expected PCR values, QOS manifest binding, application digest, operator approvals, and expected TVC account or deployment identity. Valet rejects debug-mode deployments, including attestations with zero PCR values. Valet pins acceptable application and manifest identities through release configuration.
 
 A proof verification failure is a deny. A valid proof with a mismatched request ID, nonce, subject digest, input digest, policy digest, decision digest, or expired verifier freshness window is also a deny.
 
@@ -429,7 +437,7 @@ The system fails closed for these conditions:
 - no trusted manifest or application digest; and
 - audit reservation failure before an external side effect.
 
-For action requests that can ask a human, policy can return `require_approval`. Infrastructure failure does not synthesize approval. It denies with a corrective operator reason. This differs from the prototype's unattested approval fallback.
+For action requests that can ask a human, policy can return `require_approval`. Infrastructure failure does not synthesize approval. It denies with a corrective operator reason. Today, an interactive personal-session resolver or policy-store error becomes `require_approval` with `resolver_error` provenance. The cutover intentionally changes that behavior to deny. This also differs from the prototype's unattested approval fallback.
 
 There is no decision cache initially. Every request evaluates against the active bundle and current fact snapshot. OPA can prepare a bundle in memory, but Valet must atomically replace that prepared instance when the active digest changes. A later cache needs a separate design that covers revocation, dynamic facts, proof replay, and bounded staleness.
 
@@ -440,7 +448,7 @@ Operational metrics include evaluation count and latency by kind and effect, act
 | Threat | Control and remaining limit |
 |---|---|
 | Prompt injection requests a dangerous action | The model cannot bypass the host enforcement point. A missing enforcement point remains a code defect. |
-| Workflow and interactive paths disagree | Both paths use one request adapter and one service. Cross-path tests cover equal inputs. |
+| Workflow and interactive paths disagree | Both paths use one service. Cross-path tests expect equal decisions only when `appliesIn` and all session or workflow-scoped facts are equal. |
 | A broad allow bypasses a narrow deny | Specificity and tie semantics are encoded once in Rego. Migration checks current row snapshots. |
 | A grant is replayed in another session or run | Grant facts and approvals bind the stable request subject and scope IDs. |
 | Policy bundle is changed or rolled back | Digests, activation history, and future signed pins make changes visible. Local host compromise can still alter local state. |
@@ -461,8 +469,9 @@ The one replacement pull request then:
 - creates the production `AuthorizationService` with local OPA as its only evaluator;
 - activates the compiled policy bundles;
 - converges interactive and workflow action paths;
+- moves `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard in `packages/api/src/policies/admin.ts`, and the preview in `packages/api/src/routes/policies.ts` to the canonical service;
 - activates deterministic approval replay and split decision and execution audits;
-- removes the old TypeScript action-policy evaluator; and
+- removes the old TypeScript action-policy evaluator from every runtime, preview, and write guard; and
 - adds no shadow mode or legacy runtime fallback.
 
 Later pull requests can route built-in tools and adjacent domains through the same service. Those domains keep their current checks until their own atomic cutover. They must not create another policy evaluator. The action-policy engine itself is replaced in one cutover.
@@ -489,7 +498,7 @@ An org denies a service but allows one exact action. A team requires approval fo
 
 ### Cross-path convergence
 
-An interactive `call_tool` request and a workflow tool node use the same service, fully qualified action ID, actor, owner, parameters, and grants. Both construct the same policy input apart from explicit source fields that do not alter policy. Both receive the same decision, reason, rules, and obligations.
+An interactive `call_tool` request and a workflow tool node use the same service, fully qualified action ID, actor, owner, parameters, and grants. When both requests also use the same `appliesIn` value and the same session or workflow-scoped facts, both receive the same decision, reason, rules, and obligations. A real session request and workflow request can differ when an `appliesIn` rule or a scoped grant intentionally distinguishes them.
 
 ### Approval replay
 
