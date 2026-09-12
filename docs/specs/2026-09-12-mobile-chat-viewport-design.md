@@ -33,3 +33,11 @@ Run web tests, typecheck, the full make e2e scorecard, and changelog commit vali
 - A 390-by-400 viewport kept the composer and menu usable. This simulates reduced space, not the native keyboard lifecycle.
 - The full web suite passed 2,969 tests. The targeted suite passed 78 tests. Web typecheck passed. Independent standards and requirements reviews found no remaining issues.
 - Physical iOS gesture and keyboard testing remains outstanding.
+
+The full `make e2e` run reported 28 passed, 3 failed, and 4 optional suites skipped.
+The API bundle passed on rerun after the parallel web build produced its assets.
+The unchanged engine archive test calls `/bin/tar`, which does not exist on this macOS host.
+The Kubernetes provider test hit a clock race between the eviction cutoff and its mock event timestamp.
+All 90 provider tests passed separately. The initial Kubernetes unit-only scorecard row also passed.
+All GitHub CI checks passed for the implementation commit.
+[PR #672](https://github.com/tkhq/valet/pull/672) records the final isolated Kubernetes suite result.

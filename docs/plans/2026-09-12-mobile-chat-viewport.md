@@ -10,5 +10,5 @@
 - [x] Update Markdown, MessageItem, and MessageList width and wrapping rules. Contain table and code overflow locally.
 - [x] Compact SessionHeader and TopNav. Test phone menu callbacks, pending states, and team permission filtering.
 - [x] Apply scoped touch behavior and verify browser gestures, field focus, resize, and short viewport behavior.
-- [ ] Run web tests, typecheck, browser checks, full e2e, and independent review. Record results in the spec.
-- [ ] Commit with accepted subjects and Changelog trailers. Open a new PR against dev-v2.
+- [x] Run web tests, typecheck, browser checks, full e2e, and independent review. Record results in the spec.
+- [x] Commit with accepted subjects and Changelog trailers. Open a new PR against dev-v2.
