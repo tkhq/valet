@@ -929,6 +929,8 @@ CREATE TABLE "authorization_decisions" (
 --> statement-breakpoint
 CREATE INDEX "authorization_decisions_org_created" ON "authorization_decisions" ("org_id","created_at");
 --> statement-breakpoint
+CREATE INDEX "authorization_decisions_idempotency_key" ON "authorization_decisions" ("idempotency_key");
+--> statement-breakpoint
 CREATE INDEX "authorization_decisions_request" ON "authorization_decisions" ("request_id");
 --> statement-breakpoint
 CREATE INDEX "authorization_decisions_subject" ON "authorization_decisions" ("request_subject_digest");

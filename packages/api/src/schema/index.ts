@@ -1605,6 +1605,7 @@ export const authorizationDecisions = pgTable(
   },
   (t) => [
     index("authorization_decisions_org_created").on(t.orgId, t.createdAt),
+    index("authorization_decisions_idempotency_key").on(t.idempotencyKey),
     index("authorization_decisions_request").on(t.requestId),
     index("authorization_decisions_subject").on(t.requestSubjectDigest),
     check("authorization_decisions_evaluator_kind", sql`${t.evaluatorKind} IN ('local_valet', 'tvc_attested')`),
