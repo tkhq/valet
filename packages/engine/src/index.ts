@@ -275,4 +275,4 @@ export {
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 export { formatTranscriptText } from "./transcript-formatter.js";
-export { nestedKubernetesDecision, NESTED_KUBERNETES_UNSUPPORTED } from "./sandbox/nested-kubernetes.js";
+export { nestedKubernetesDecision, NESTED_KUBERNETES_IDENTITY, NESTED_KUBERNETES_UNSUPPORTED } from "./sandbox/nested-kubernetes.js";

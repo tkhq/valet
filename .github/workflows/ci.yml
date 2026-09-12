@@ -129,6 +129,8 @@ jobs:
         run: |
           bash docker/cgroup-delegation_test.sh
           bash docker/userns-preflight_test.sh
+          id dockerd >/dev/null 2>&1 || sudo useradd -m -u 1500 dockerd
+          sudo -u dockerd bash docker/valet-kubernetes_test.sh
 
   # The same thresholded STE lint the e2e "docs-lint" suite runs, promoted to
   # a blocking check. The runner's system python3 is enough; no setup step.

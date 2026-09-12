@@ -13,7 +13,7 @@
  * also the emitted step order, which matters for determinism.
  */
 import { createHash } from "node:crypto";
-import type { SandboxResources } from "@valet/engine";
+import { NESTED_KUBERNETES_IDENTITY, type SandboxResources } from "@valet/engine";
 import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
 import { parse as parseYaml } from "yaml";
 import { parseStorageQuantity } from "@valet/sandbox-kubernetes";
@@ -377,7 +377,7 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   const identity = `${baseImage}|${cloneUrl}@${commitSha}|${identityHash}`;
   lines.push("");
   lines.push(`LABEL valet.prebuild.identity="${identity}"`);
-  if (kubernetes) lines.push(`LABEL dev.valet.capability.nested-kubernetes="nested-kubernetes:v1:896546d59c819d3a1bcf837e1bb0aa04fa4a6fecc3b555c51b5b4f5aefcc4079"`);
+  if (kubernetes) lines.push(`LABEL dev.valet.capability.nested-kubernetes="${NESTED_KUBERNETES_IDENTITY}"`);
   lines.push("");
 
   return lines.join("\n");

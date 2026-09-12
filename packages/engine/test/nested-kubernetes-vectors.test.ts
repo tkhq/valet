@@ -2,13 +2,16 @@ import { readFileSync, writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { NESTED_KUBERNETES_IDENTITY } from "../src/index.js";
 import {
+  archiveKind,
   capabilityKernel,
   K3S_ARGV,
   K3S_ENV,
   lifecycleKernel,
   mapKernel,
   statusKernel,
+  readImportResult,
   validateArchive,
 } from "../../../docker/valet-kubernetes.mjs";
 
@@ -19,6 +22,7 @@ interface Vectors {
   lifecycleVectors: Vector<Record<string, unknown>, Record<string, unknown>>[];
   statusVectors: Vector<Record<string, unknown>, { exit: number; persistedAfter: string; stdout: string }>[];
   acceptanceVectors: { id: string; mode: string; step: string; check: string; expected: string; covers: string[] }[];
+  lockDigest: string;
   artifacts: { arch: string; name: string; version: string; url: string; sha256: string }[];
   k3sArgv: string[];
   k3sEnv: Record<string, string>;
@@ -37,6 +41,10 @@ describe("nested Kubernetes normative vectors", () => {
   });
   it.each(vectors.statusVectors)("executes $id", ({ input, expected }) => {
     expect(statusKernel(input)).toEqual(expected);
+  });
+
+  it("binds the production capability identity to the normative lock", () => {
+    expect(NESTED_KUBERNETES_IDENTITY).toBe(`nested-kubernetes:v1:${vectors.lockDigest}`);
   });
 
   it("uses the normative process contract", () => {
@@ -88,7 +96,44 @@ describe("nested Kubernetes normative vectors", () => {
   });
 });
 
+function tarHeader(name: string): Buffer {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, "utf8");
+  for (const [offset, value, width] of [[100, "0000644\0", 8], [108, "0000000\0", 8], [116, "0000000\0", 8], [124, "00000000000\0", 12], [136, "00000000000\0", 12]] as const) header.write(value, offset, width, "ascii");
+  header.fill(0x20, 148, 156); header.write("0", 156, 1, "ascii"); header.write("ustar\0", 257, 6, "ascii"); header.write("00", 263, 2, "ascii");
+  const sum = header.reduce((total, byte) => total + byte, 0);
+  header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+  return header;
+}
+
 describe("archive validation", () => {
+  it("inspects a many-entry archive without buffering its full listing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-kubernetes-tar-"));
+    const archive = join(dir, "many.tar");
+    const headers = Array.from({ length: 12_000 }, (_, index) => tarHeader(`entry-${String(index).padStart(5, "0")}-${"x".repeat(70)}`));
+    writeFileSync(archive, Buffer.concat([...headers, tarHeader("manifest.json"), Buffer.alloc(1024)]));
+    expect(archiveKind(archive)).toEqual({ kind: "docker" });
+  });
+
+  it("rejects traversal even when an archive also has a valid marker", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-kubernetes-unsafe-tar-"));
+    const archive = join(dir, "unsafe.tar");
+    writeFileSync(archive, Buffer.concat([tarHeader("../escape"), tarHeader("manifest.json"), Buffer.alloc(1024)]));
+    expect(archiveKind(archive)).toEqual({ error: "Use a safe OCI-layout or Docker-save tar archive." });
+  });
+
+  it("governs missing and invalid import result files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-kubernetes-result-"));
+    const result = join(dir, "result");
+    expect(readImportResult(result)).toEqual({ error: "The image import did not record a result. Check free workspace storage and server.log, then retry." });
+    writeFileSync(result, "\n");
+    expect(readImportResult(result)).toEqual({ error: "The image import result is invalid. Check server.log, then retry." });
+    writeFileSync(result, "not-a-code\n");
+    expect(readImportResult(result)).toEqual({ error: "The image import result is invalid. Check server.log, then retry." });
+    writeFileSync(result, "0\n");
+    expect(readImportResult(result)).toEqual({ code: 0 });
+  });
+
   it("accepts a regular absolute archive and rejects links", () => {
     const dir = mkdtempSync(join(tmpdir(), "valet-kubernetes-"));
     const archive = join(dir, "image.tar");

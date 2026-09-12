@@ -2,7 +2,7 @@
 import {
   closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync,
   readFileSync, readdirSync, realpathSync, renameSync, rmSync, statfsSync, statSync, fstatSync,
-  unlinkSync, writeFileSync, chmodSync,
+  unlinkSync, writeFileSync, chmodSync, rmdirSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -159,27 +159,31 @@ function assertOwnedFile(path, mode) {
     throw Object.assign(new Error(`${path} has unsafe ownership, type, or mode. Recreate the sandbox before retrying.`), { exitCode: 21 });
   }
 }
-function withLock(shared, fn) {
+export function withLock(shared, fn) {
   mkdirSync(dirname(LOCK), { recursive: true, mode: 0o700 });
   const fd = openSync(LOCK, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+  const ready = `${LOCK}.${process.pid}.${randomUUID()}.ready`;
+  let holder;
   try {
-    if (fstatSync(fd).uid !== 1500) throw Object.assign(new Error("The Kubernetes lock has unsafe ownership. Recreate the sandbox before retrying."), { exitCode: 21 });
+    const lockStat = fstatSync(fd);
+    if (lockStat.uid !== 1500) throw Object.assign(new Error("The Kubernetes lock has unsafe ownership. Recreate the sandbox before retrying."), { exitCode: 21 });
     chmodSync(LOCK, 0o600); assertOwnedFile(LOCK, 0o600);
+    const parent = procIdentity(process.pid);
+    const script = String.raw`set -eu; ready=$1; pid=$2; start=$3; boot=$4; uid=$5; trap 'rm -f "$ready"' EXIT; : > "$ready"; same_parent() { [ -r "/proc/$pid/stat" ] && [ "$(awk '{ print $22 }' "/proc/$pid/stat")" = "$start" ] && [ "$(cat /proc/sys/kernel/random/boot_id)" = "$boot" ] && [ "$(sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$pid/status")" = "$uid" ]; }; while same_parent; do sleep 0.1; done`;
     const stdio = Array(fd + 1).fill("ignore"); stdio[fd] = fd;
-    const holder = spawn("/usr/bin/flock", ["--no-fork", shared ? "-s" : "-x", "-w", "30", `/proc/self/fd/${fd}`, "/bin/sh", "-c", "kill -STOP $$; exec sleep 2147483647"], { stdio });
+    holder = spawn("/usr/bin/flock", ["--no-fork", shared ? "-s" : "-x", "-w", "30", `/proc/self/fd/${fd}`, "/bin/sh", "-c", script, "holder", ready, String(parent.pid), parent.startTime, parent.bootId, String(parent.uid)], { stdio });
     const deadline = Date.now() + 31_000;
     while (Date.now() < deadline) {
-      let state = "";
-      try { state = readFileSync(`/proc/${holder.pid}/status`, "utf8").match(/^State:\s+(.)/m)?.[1] ?? ""; } catch { break; }
-      if (state === "T") {
-        try { return fn(); } finally { try { process.kill(holder.pid, "SIGCONT"); process.kill(holder.pid, "SIGTERM"); } catch {} }
-      }
-      if (state === "Z") break;
+      if (existsSync(ready)) return fn();
+      if (processGone(holder.pid)) break;
       sleep(10);
     }
-    try { process.kill(holder.pid, "SIGKILL"); } catch {}
     throw Object.assign(new Error("The Kubernetes operation lock is busy. Retry the command."), { exitCode: 24 });
-  } finally { closeSync(fd); }
+  } finally {
+    if (holder) { try { process.kill(holder.pid, "SIGTERM"); } catch {} }
+    try { unlinkSync(ready); } catch {}
+    closeSync(fd);
+  }
 }
 function stateSnapshot() {
   const stored = readJson(STATUS_PATH, { state: "stopped", error: null });
@@ -204,7 +208,7 @@ function checks() {
   check("subgid", () => readFileSync("/etc/subgid", "utf8").split("\n").includes("dockerd:65536:65535"), "Rebuild the sandbox image from the normative lock.");
   check("tun", () => { const s = statSync("/dev/net/tun"); return s.isCharacterDevice() && s.rdev === 2760; }, "Configure TUN 10:200 in the RuntimeClass.");
   check("kmsg", () => { const s = statSync("/dev/kmsg"); return s.isCharacterDevice() && s.rdev === 259; }, "Bind null 1:3 to /dev/kmsg in the RuntimeClass.");
-  check("sysReadOnly", () => !commandOk(["/bin/sh", "-c", "touch /sys/.valet-write-test"]), "Mount the broad /sys path read-only.");
+  check("sysReadOnly", () => commandOk(["/bin/sh", "-c", "probe=/sys/.valet-write-test; ! touch \"$probe\" 2>/dev/null || { rm -f \"$probe\"; exit 1; }"]), "Mount the broad /sys path read-only.");
   check("cgroup", () => ["cpu", "cpuset", "memory", "pids"].every((v) => readFileSync("/sys/fs/cgroup/init/cgroup.controllers", "utf8").split(/\s+/).includes(v)), "Delegate cpu, cpuset, memory, and pids below /init.");
   check("slirp4netns", () => { const found = spawnSync("/usr/bin/dpkg-query", ["-W", "-f=${Version}", "slirp4netns"], { encoding: "utf8" }); return realpathSync("/usr/bin/slirp4netns") === "/usr/bin/slirp4netns" && found.status === 0 && found.stdout === "1.2.0-1"; }, "Install Debian Bookworm slirp4netns=1.2.0-1.");
   for (const tool of ["/usr/local/bin/k3s", "/usr/local/bin/kubectl", "/usr/bin/tini", "/usr/bin/flock"]) check(tool.split("/").pop(), () => statSync(tool).isFile(), "Rebuild the sandbox image from the normative lock.");
@@ -363,6 +367,10 @@ function ownedCgroups(path, result = []) {
   result.push(path);
   return result;
 }
+export function removeOwnedCgroupDirectories(scope) {
+  const paths = ownedCgroups(scope); if (!paths) return false;
+  try { for (const path of paths) rmdirSync(path); return true; } catch { return false; }
+}
 function cleanupOwned() {
   if (!existsSync(SCOPE)) return true;
   if (!ownedCgroups(SCOPE)) return false;
@@ -375,11 +383,10 @@ function cleanupOwned() {
   }
   try {
     if (!/^populated 0$/m.test(readFileSync(join(SCOPE, "cgroup.events"), "utf8"))) return false;
-    const paths = ownedCgroups(SCOPE); if (!paths) return false;
-    for (const path of paths) rmSync(path);
-    return true;
+    return removeOwnedCgroupDirectories(SCOPE);
   } catch { return false; }
 }
+function stoppedReport() { process.stdout.write(statusKernel({ persisted: "stopped", identity: "dead", readiness: "unknown" }).stdout); return 0; }
 function stop() {
   let stopped = false; let unsafe = false; let active = null;
   withLock(false, () => {
@@ -390,7 +397,7 @@ function stop() {
     active = readJson(OP_PATH, null);
     if (active && ownerValid(active.owner)) { active.cancelRequested = true; atomicJson(OP_PATH, active); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH }); }
   });
-  if (stopped) return emit(statusKernel({ persisted: "stopped", identity: "dead", readiness: "unknown" }));
+  if (stopped) return stoppedReport();
   if (unsafe) return fail("The server identity is not owned. Recreate the sandbox before cleanup.", 21);
   if (active?.worker && ownerValid(active.worker)) terminate(active.worker.pid);
   if (active && ownerValid(active.owner)) {
@@ -418,7 +425,7 @@ function stop() {
     rmSync(ROOT, { recursive: true, force: true }); committed = true;
   });
   return committed
-    ? emit(statusKernel({ persisted: "stopped", identity: "dead", readiness: "unknown" }))
+    ? stoppedReport()
     : fail("The stop Operation was superseded. Retry the command.", 4);
 }
 export function validateArchive(path, freeBytes = statfsSync(ROOT).bavail * statfsSync(ROOT).bsize) {
@@ -426,14 +433,22 @@ export function validateArchive(path, freeBytes = statfsSync(ROOT).bavail * stat
   try { const s = lstatSync(path); if (!s.isFile() || s.isSymbolicLink()) return "Use a regular archive file, not a link or device."; if (s.size > freeBytes) return "Free workspace storage, then retry the import."; return null; }
   catch { return "Select an existing regular OCI-layout or Docker-save tar archive."; }
 }
-function archiveKind(path) {
-  const listed = spawnSync("/bin/tar", ["-tf", path], { encoding: "utf8", timeout: 30_000 });
-  if (listed.status !== 0) return null;
-  const names = listed.stdout.split("\n").filter(Boolean).map((name) => name.replace(/^\.\//, ""));
-  if (names.some((name) => name.startsWith("/") || name.split("/").includes(".."))) return null;
-  if (names.includes("manifest.json")) return "docker";
-  if (names.includes("oci-layout") && names.includes("index.json")) return "oci";
-  return null;
+export function archiveKind(path) {
+  const inspect = String.raw`{ name=$0; sub(/^\.\//, "", name); count=split(name, part, "/"); if (substr(name, 1, 1)=="/") bad=1; for (i=1; i<=count; i++) if (part[i]=="..") bad=1; if (name=="manifest.json") docker=1; if (name=="oci-layout") layout=1; if (name=="index.json") hasIndex=1 } END { if (bad) print "unsafe"; else if (docker) print "docker"; else if (layout && hasIndex) print "oci"; else print "unknown" }`;
+  const listed = spawnSync("/bin/bash", ["-o", "pipefail", "-c", 'exec /bin/tar --list --file "$1" | /usr/bin/awk "$2"', "archive", path, inspect], {
+    encoding: "utf8", timeout: 30_000, maxBuffer: 1024, stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (listed.error?.code === "ETIMEDOUT") return { error: "Archive inspection timed out. Use a valid OCI-layout or Docker-save tar archive." };
+  if (listed.status !== 0 || listed.stdout.trim() === "unsafe") return { error: "Use a safe OCI-layout or Docker-save tar archive." };
+  const kind = listed.stdout.trim();
+  return kind === "docker" || kind === "oci" ? { kind } : { error: "Use an OCI-layout or Docker-save tar archive." };
+}
+export function readImportResult(path) {
+  try {
+    const raw = readFileSync(path, "utf8").trim();
+    const code = Number(raw);
+    return raw !== "" && Number.isInteger(code) && code >= 0 && code <= 255 ? { code } : { error: "The image import result is invalid. Check server.log, then retry." };
+  } catch { return { error: "The image import did not record a result. Check free workspace storage and server.log, then retry." }; }
 }
 function recoverStaleImport() {
   let stale = null; let recovery = null; let leaderReady = false;
@@ -478,7 +493,8 @@ function importArchives(paths) {
     try {
       copyFileSync(path, staged, constants.COPYFILE_EXCL); chmodSync(staged, 0o600); const after = lstatSync(path);
       if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) { failure = { message: "The archive changed during staging. Stop its writer, then retry.", exit: 2 }; break; }
-      if (!archiveKind(staged)) { failure = { message: "Use an OCI-layout or Docker-save tar archive.", exit: 2 }; break; }
+      const archive = archiveKind(staged);
+      if (!archive.kind) { failure = { message: archive.error, exit: 2 }; break; }
       const argv = ["/usr/local/bin/k3s", "ctr", "--address", `${ROOT}/run/k3s/containerd/containerd.sock`, "--namespace", "k8s.io", "images", "import", "--digests", staged];
       const worker = spawn("/bin/sh", ["-c", '"$@"; code=$?; printf "%s\n" "$code" > "$VALET_IMPORT_RESULT"', "import", ...argv], { detached: true, env: { ...process.env, VALET_IMPORT_RESULT: resultPath }, stdio: "inherit" });
       worker.unref();
@@ -489,8 +505,10 @@ function importArchives(paths) {
         sleep(100);
       }
       if (failure) break;
-      const code = Number(readFileSync(resultPath, "utf8").trim());
-      if (code !== 0) { failure = { message: "The image import failed. Check the archive and server.log, then retry.", exit: Number.isInteger(code) ? code : 1 }; break; }
+      const importResult = readImportResult(resultPath);
+      if (importResult.error) { failure = { message: importResult.error, exit: 22 }; break; }
+      if (importResult.code !== 0) { failure = { message: "The image import failed. Check the archive and server.log, then retry.", exit: importResult.code }; break; }
+    } catch { failure = { message: "The image import could not stage or read its result. Free workspace storage, check server.log, then retry.", exit: 22 }; break;
     } finally { for (const file of [staged, resultPath]) { try { unlinkSync(file); } catch {} } }
   }
   let committed = false;

@@ -1,3 +1,4 @@
+import { NESTED_KUBERNETES_IDENTITY } from "@valet/engine";
 import type { BakeQueueItem, ListBakeQueueResponse } from "../wire/types.js";
 /**
  * `SourceService` — the generation-path core (sandbox-reconcile plan, Task
@@ -683,7 +684,7 @@ function canonicalRecipeJson(recipe: RecipeStep[], setup: string[], kubernetes =
   return JSON.stringify({
     steps: recipe.map((s) => ({ id: s.id, lockfile: s.lockfile, command: s.command })),
     setup,
-    ...(kubernetes ? { capability: "nested-kubernetes:v1:896546d59c819d3a1bcf837e1bb0aa04fa4a6fecc3b555c51b5b4f5aefcc4079" } : {}),
+    ...(kubernetes ? { capability: NESTED_KUBERNETES_IDENTITY } : {}),
   });
 }
 

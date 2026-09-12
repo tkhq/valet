@@ -66,6 +66,12 @@ expected="$UID_GID $tree/init $tree/init/cgroup.procs $tree/init/cgroup.threads 
 [ "$(stat -c '%n %u:%g %s' "$tree/cpu.max" "$tree/memory.max" "$tree/pids.max")" = "$limits_before" ] \
   || fail "outer limits changed"
 
+# The three-argument path enables only the requested nested-Kubernetes controllers.
+tree=$TMP/requested; make_tree "$tree"; install_fake_cgroup "$tree"
+establish_cgroup_topology "$tree" "$USER_NAME" "cpu cpuset memory pids"
+contains "$enable_log" '+cpu +cpuset +memory +pids'
+! grep -qw io "$tree/init/cgroup.subtree_control" || fail "the requested controller path enabled io"
+
 # A bounded second pass handles one arrival. Persistent arrivals fail closed.
 tree=$TMP/race; make_tree "$tree"; echo 1 > "$tree/init/cgroup.procs"; install_fake_cgroup "$tree"
 arrival=0; cgroup_move_pid() {
@@ -154,4 +160,26 @@ for profile in headless full; do
   [ "$status" -eq "$expected" ] || fail "$profile returned $status instead of $expected"
 done
 for error in "$TMP"/*.err; do contains "$error" 'valet-docker RuntimeClass'; done
+# Headless Kubernetes startup must propagate preflight failure without later side effects.
+fail_preflight=$TMP/fail-preflight; printf '#!/bin/sh\nexit 37\n' > "$fail_preflight"; chmod +x "$fail_preflight"
+side_effect=$TMP/headless-side-effect
+fake_docker=$TMP/fake-docker; printf '#!/bin/sh\necho docker >> "%s"\n' "$side_effect" > "$fake_docker"; chmod +x "$fake_docker"
+sed -e "s|/kubernetes-preflight.sh|$fail_preflight|" -e "s|/start-docker.sh|$fake_docker|" \
+  -e "s|exec tail -f /dev/null|echo tail >> '$side_effect'|" "$ROOT/start-headless.sh" > "$TMP/start-headless-k8s.sh"
+set +e; VALET_SANDBOX_KUBERNETES=1 bash "$TMP/start-headless-k8s.sh"; status=$?; set -e
+[ "$status" -eq 37 ] || fail "headless preflight returned $status"
+[ ! -e "$side_effect" ] || fail "headless startup continued after preflight failure"
+
+# Kubernetes-only preflight forces the full outer map check.
+map_probe=$TMP/map-probe; cat > "$map_probe" <<'SH'
+#!/bin/sh
+[ "${VALET_DOCKER_USERNS:-}" = 1 ] || exit 99
+exit 1
+SH
+chmod +x "$map_probe"
+sed "s|/userns-preflight.sh|$map_probe|" "$ROOT/kubernetes-preflight.sh" > "$TMP/kubernetes-preflight.sh"
+set +e; VALET_SANDBOX_KUBERNETES=1 VALET_SANDBOX_EPOCH=test bash "$TMP/kubernetes-preflight.sh" 2> "$TMP/map-preflight.err"; status=$?; set -e
+[ "$status" -eq 20 ] || fail "Kubernetes map failure returned $status"
+contains "$TMP/map-preflight.err" 'The outer ID map is incomplete'
+
 echo "cgroup delegation tests passed"

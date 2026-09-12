@@ -9,7 +9,7 @@ import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandb
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
-import { buildSandboxManifest, credsSecretName, DOCKER_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
+import { buildSandboxManifest, credsSecretName, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
 import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
 import type { K8sProviderConfig, ResourceRequirements, SandboxCR, SandboxCRRead } from "../src/types.js";
 import type {
@@ -460,6 +460,13 @@ describe("exec identity threading (docker flag → exec layer)", () => {
     expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser("echo hi")]);
   });
 
+  it("restore() of a nested-Kubernetes CR runs non-privileged exec as dockerd", async () => {
+    const { provider, execApi } = makeExecProvider({ [NESTED_KUBERNETES_LABEL_KEY]: "true" });
+    const sandbox = await provider.restore("sb-kubernetes");
+    await sandbox.exec("echo hi");
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser("echo hi")]);
+  });
+
   it("restore() of a docker-labeled CR keeps privileged exec unwrapped", async () => {
     const { provider, execApi } = makeExecProvider({ [DOCKER_LABEL_KEY]: "true" });
     const sandbox = await provider.restore("sb-docker");
@@ -472,6 +479,13 @@ describe("exec identity threading (docker flag → exec layer)", () => {
     const sandbox = await provider.restore("sb-plain");
     await sandbox.exec("echo hi");
     expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+  });
+
+  it("create({ nestedKubernetes: true }) threads the workload user into exec", async () => {
+    const { provider, execApi } = makeExecProvider({ [NESTED_KUBERNETES_LABEL_KEY]: "true" });
+    const sandbox = await provider.create({ workspace: "sb-kubernetes", nestedKubernetes: true });
+    await sandbox.exec("echo hi");
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser("echo hi")]);
   });
 
   it("create({ docker: true }) threads the flag into the exec layer", async () => {

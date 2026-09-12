@@ -121,6 +121,7 @@ import {
   buildSandboxManifest,
   credsSecretName,
   DOCKER_LABEL_KEY,
+  NESTED_KUBERNETES_LABEL_KEY,
   resolveWorkspaceStorageRequest,
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
@@ -869,7 +870,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           ? async () => {
             const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
             if (podName === null || await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName) === null) return undefined;
-            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker)));
+            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes)));
           }
           : undefined,
         neverReadyOwner,
@@ -1070,7 +1071,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       throw err;
     }
     await clearNeverReadyOwner(this.deps.objectsApi, this.cfg, name);
-    const sandbox = this.makeSandbox(name, Boolean(opts.docker));
+    const sandbox = this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes));
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
     return sandbox;
@@ -1088,7 +1089,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // Re-derive the exec-identity flag from the CR's own label — the CR is
     // the only per-sandbox state that survives an api restart (there is no
     // in-memory registry to consult, unlike sandbox-docker).
-    return this.makeSandbox(id, cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true");
+    return this.makeSandbox(id, cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true" || cr.metadata.labels?.[NESTED_KUBERNETES_LABEL_KEY] === "true");
   }
 
   /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
@@ -1220,7 +1221,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
   }
 
-  private makeSandbox(id: string, docker: boolean): KubernetesSandbox {
+  private makeSandbox(id: string, workloadUser: boolean): KubernetesSandbox {
     return new KubernetesSandbox(
       {
         objectsApi: this.deps.objectsApi,
@@ -1230,7 +1231,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         evictionApi: this.deps.evictionApi,
         pvcApi: this.deps.pvcApi,
         cfg: this.cfg,
-        docker,
+        docker: workloadUser,
       },
       id,
     );

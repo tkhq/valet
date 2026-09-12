@@ -7,7 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { homeInitContainer, persistentHomeMounts, withHomeLinks, WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION } from "./home-persistence.js";
-import type { SandboxCreateOpts } from "@valet/engine";
+import { NESTED_KUBERNETES_IDENTITY, type SandboxCreateOpts } from "@valet/engine";
 import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, parseStorageQuantity } from "./quantity.js";
 import type {
   K8sProviderConfig,
@@ -46,7 +46,8 @@ export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
 export const IMAGE_FINGERPRINT_ENV = "VALET_SANDBOX_IMAGE_FINGERPRINT";
 export const NESTED_KUBERNETES_ANNOTATION_KEY = "valet.dev/capability.nested-kubernetes";
-export const NESTED_KUBERNETES_IDENTITY = "nested-kubernetes:v1:896546d59c819d3a1bcf837e1bb0aa04fa4a6fecc3b555c51b5b4f5aefcc4079";
+export { NESTED_KUBERNETES_IDENTITY };
+export const NESTED_KUBERNETES_LABEL_KEY = "valet.dev/nested-kubernetes";
 
 /** Immutable generation marker for the requested image before admission mutation. */
 export function imageFingerprint(image: string): string {
@@ -318,7 +319,7 @@ export function buildSandboxManifest(
 
   if (opts.docker || opts.nestedKubernetes) {
     container.securityContext = {
-      privileged: false,
+      ...(opts.nestedKubernetes ? { privileged: false } : {}),
       seccompProfile: { type: "Unconfined" },
       capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
       procMount: "Unmasked",
@@ -460,6 +461,7 @@ export function buildSandboxManifest(
   }
 
   const labels: Record<string, string> = { [SESSION_LABEL_KEY]: name };
+  if (opts.nestedKubernetes) labels[NESTED_KUBERNETES_LABEL_KEY] = "true";
   if (opts.docker) labels[DOCKER_LABEL_KEY] = "true";
 
   return {
