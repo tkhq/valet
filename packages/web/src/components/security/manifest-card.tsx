@@ -101,7 +101,7 @@ export function ManifestCard({
   const summary = summarizeManifest(cells, findings);
   return (
     <section className="border-b border-line px-4 py-3" aria-label="Engagement manifest">
-      <div className="flex items-center gap-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="font-semibold text-ink">
           Engagement {status === "completed" ? "complete" : "failed"}
         </span>

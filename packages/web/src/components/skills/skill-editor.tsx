@@ -173,7 +173,7 @@ export function SkillEditor({
             id="skill-invocation"
             value={invocation}
             onChange={(e) => setInvocation(e.target.value === "prompt" ? "prompt" : "context")}
-            className="h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
+            className="h-9 max-sm:min-h-11 max-sm:text-base w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg]"
           >
             <option value="context">Context — load as reference</option>
             <option value="prompt">Prompt — substitute args and send</option>
@@ -228,7 +228,7 @@ export function SkillEditor({
 
       {!!error && <p className="text-sm text-danger-500">{errorText(error, "Could not save the skill. Try again.")}</p>}
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Button type="submit" size="sm" disabled={!complete || pending}>
           {pending && <Spinner size={12} />}
           {editing ? "Save" : "Create skill"}

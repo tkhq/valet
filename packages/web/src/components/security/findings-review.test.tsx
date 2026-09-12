@@ -6,7 +6,7 @@
  * hostile evidence rendering inert (spec threat 8), admin gating of
  * verify/refute, and link chips.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement, ReactNode } from "react";
@@ -63,6 +63,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { FindingsReview, groupFindings, VERIFY_REASON } from "./findings-review";
+import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const engagement: SecurityEngagementWire = {
   id: "eng-1",
@@ -148,7 +149,57 @@ beforeEach(() => {
   listFindingsMock.mockResolvedValue({ findings: [], nextCursor: null });
 });
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe("FindingsReview list", () => {
+  it.each([true, false])("moves focus only for mobile drill-in navigation (mobile=%s)", async (mobile) => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: mobile, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    listFindingsMock.mockResolvedValue({ findings: [finding({ id: "f-focus" })], nextCursor: null });
+    renderReview();
+    const [row] = await screen.findAllByRole("option");
+    const list = screen.getByRole("listbox", { name: "Findings" });
+    const back = screen.getByRole("button", { name: "← Back to findings" });
+    list.focus();
+    fireEvent.click(row);
+    expect(document.activeElement).toBe(mobile ? back : list);
+    if (mobile) {
+      fireEvent.click(back);
+      expect(document.activeElement).toBe(list);
+      expect(row.getAttribute("aria-selected")).toBe("true");
+    }
+  });
+  it("preserves filter values while the phone filter controls are collapsed", async () => {
+    renderReview();
+    const toggle = screen.getByRole("button", { name: "Filters" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByLabelText("Filter by path"), { target: { value: "src/auth" } });
+    await waitFor(() => expect(listFindingsMock).toHaveBeenCalledWith("s-1", expect.objectContaining({ path: "src/auth" })));
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(screen.getByLabelText("Filter by path")).toHaveProperty("value", "src/auth");
+  });
+
+  it("expands review details and resets them for another finding", async () => {
+    listFindingsMock.mockResolvedValue({ findings: [finding({ id: "a" }), finding({ id: "b" })], nextCursor: null });
+    renderReview();
+    await screen.findAllByRole("option");
+    const toggle = screen.getByRole("button", { name: "Review details" });
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getAllByRole("option")[1]);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps the fix handoff available in the phone action menu", async () => {
+    listFindingsMock.mockResolvedValue({ findings: [finding({ id: "f-fix" })], nextCursor: null });
+    renderReview();
+    await screen.findByRole("article");
+    fireEvent.keyDown(screen.getByRole("button", { name: "Finding actions" }), { key: "Enter" });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Start a fix" }));
+    expect(useComposerPrefillStore.getState().consume()).toBe("Spawn a fix session for finding f-fix via sec_handoff");
+  });
+
   it("renders one row per finding with severity-first default sort", async () => {
     listFindingsMock.mockResolvedValue({
       findings: [
@@ -163,6 +214,23 @@ describe("FindingsReview list", () => {
     // Severity outranks recency by default: critical (older) first.
     expect(rows[0].textContent).toContain("Critical issue");
     expect(rows[1].textContent).toContain("Low issue");
+  });
+
+  it("keeps the selected finding and note draft when returning to the list", async () => {
+    listFindingsMock.mockResolvedValue({
+      findings: [finding({ id: "first", title: "First finding" }), finding({ id: "second", title: "Second finding" })],
+      nextCursor: null,
+    });
+    renderReview();
+    const rows = await screen.findAllByRole("option");
+    fireEvent.click(rows.find((row) => row.textContent?.includes("Second finding"))!);
+    fireEvent.change(screen.getByRole("textbox", { name: "Add a note" }), { target: { value: "Keep this reasoning" } });
+    fireEvent.click(screen.getByRole("button", { name: "← Back to findings" }));
+    fireEvent.click(rows.find((row) => row.textContent?.includes("Second finding"))!);
+    expect(screen.getByRole("article", { name: "Second finding" })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Add a note" })).toHaveProperty("value", "Keep this reasoning");
+    fireEvent.click(rows.find((row) => row.textContent?.includes("First finding"))!);
+    expect(screen.getByRole("textbox", { name: "Add a note" })).toHaveProperty("value", "");
   });
 
   it("resizes the findings list pane via the keyboard and persists it", async () => {
@@ -436,6 +504,18 @@ describe("FindingsReview keyboard triage", () => {
 });
 
 describe("FindingsReview hostile evidence", () => {
+  it("shows a refute failure inside the open dialog", async () => {
+    listFindingsMock.mockResolvedValue({ findings: [finding({ id: "f-error" })], nextCursor: null });
+    reviewMock.mockRejectedValue(new Error("Review failed. Reload the page to retry."));
+    renderReview();
+    await screen.findByRole("article");
+    fireEvent.click(screen.getByRole("button", { name: "Refute" }));
+    const dialog = screen.getByRole("dialog", { name: "Refute finding" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Refute reason" }), { target: { value: "Evidence is incomplete." } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Refute" }));
+    expect(await within(dialog).findByRole("alert")).toHaveProperty("textContent", "Review failed. Reload the page to retry.");
+  });
+
   it("renders an evidence body with HTML injection as inert text", async () => {
     listFindingsMock.mockResolvedValue({
       findings: [

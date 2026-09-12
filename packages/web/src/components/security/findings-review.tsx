@@ -1,6 +1,6 @@
 import { blobUrl } from "~/lib/blob-url";
 export { blobUrl } from "~/lib/blob-url";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   Check,
@@ -12,6 +12,8 @@ import {
   FileWarning,
   Hammer,
   MessageSquare,
+  MoreHorizontal,
+  SlidersHorizontal,
   Wrench,
   X,
 } from "lucide-react";
@@ -37,6 +39,10 @@ import {
   Dialog,
   DialogContent,
   DialogFooter,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
   Input,
   SelectMenu,
   Spinner,
@@ -44,6 +50,7 @@ import {
 } from "~/components/primitives";
 import { ServiceIcon } from "~/components/service-icon";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { cn } from "~/lib/cn";
 import { relativeTime } from "~/lib/relative-time";
@@ -193,6 +200,7 @@ export function FindingsReview({
   const [pathInput, setPathInput] = useState("");
   const path = useDebouncedValue(pathInput, 250);
   const [sort, setSort] = useState<SortKey>("severity");
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const filters: SecurityFindingsFilters = useMemo(
     () => ({
@@ -223,6 +231,16 @@ export function FindingsReview({
   // the mount-time-state rule. A j/k or click wins over a later URL sync.
   const [selectedId, setSelectedId] = useState<string | null>(initialFindingId ?? null);
   const userTouchedSelection = useRef(false);
+  const [mobileDetail, setMobileDetail] = useState(Boolean(initialFindingId));
+  const listRef = useRef<HTMLDivElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
+  const pendingFocus = useRef<"list" | "detail" | null>(null);
+  useLayoutEffect(() => {
+    const target = pendingFocus.current;
+    pendingFocus.current = null;
+    if (target === "detail") backRef.current?.focus();
+    if (target === "list") listRef.current?.focus();
+  }, [mobileDetail, selectedId]);
   // The list is the sized (left) pane; the detail fills the rest. Side-by-side
   // only at `xl`, so the handle and width are `xl:`-gated below.
   const listPane = useResizablePane({
@@ -236,11 +254,16 @@ export function FindingsReview({
   });
   useEffect(() => {
     if (userTouchedSelection.current) return;
-    if (initialFindingId) setSelectedId(initialFindingId);
+    if (initialFindingId) {
+      setSelectedId(initialFindingId);
+      setMobileDetail(true);
+    }
   }, [initialFindingId]);
   function select(id: string) {
+    if (window.matchMedia?.("(max-width: 767px)").matches) pendingFocus.current = "detail";
     userTouchedSelection.current = true;
     setSelectedId(id);
+    setMobileDetail(true);
   }
 
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -316,7 +339,10 @@ export function FindingsReview({
         break;
       case "r":
         e.preventDefault();
-        if (selected && canAdminister) setRefuteTarget(selected);
+        if (selected && canAdminister) {
+          setActionError(null);
+          setRefuteTarget(selected);
+        }
         break;
       case "i":
         e.preventDefault();
@@ -346,71 +372,88 @@ export function FindingsReview({
 
   return (
     <section
-      className="flex flex-1 flex-col min-h-[calc(100dvh-13rem)]"
+      className="flex min-w-0 flex-1 flex-col min-h-0 md:min-h-[calc(100dvh-13rem)]"
       aria-label="Findings review"
     >
-      {/* Filters + export header */}
-      <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-line">
-        <SelectMenu
-          value={severity}
-          options={SEVERITY_OPTIONS}
-          onChange={setSeverity}
-          triggerClassName="h-7 text-xs"
-        />
-        <SelectMenu
-          value={status}
-          options={STATUS_OPTIONS}
-          onChange={setStatus}
-          triggerClassName="h-7 text-xs"
-        />
-        <SelectMenu
-          value={cellId}
-          options={cellOptions}
-          onChange={setCellId}
-          triggerClassName="h-7 text-xs"
-        />
-        <Input
-          value={pathInput}
-          onChange={(e) => setPathInput(e.target.value)}
-          placeholder="Filter by path"
-          aria-label="Filter by path"
-          className="h-7 w-36 text-xs"
-        />
-        <SelectMenu
-          value={sort}
-          options={[
-            { value: "severity", label: "By severity" },
-            { value: "recency", label: "By recency" },
-          ]}
-          onChange={setSort}
-          triggerClassName="h-7 text-xs"
-        />
-        <span className="flex-1" />
-        {filterActive && findings.length > 0 && (
+      {/* Keep phone detail focused; Back restores the filter state. */}
+      <div className={cn(mobileDetail && selected && "hidden md:block")}>
+        {/* Filters + export header */}
+        <div className="flex flex-wrap items-center gap-1.5 px-4 py-2 border-b border-line md:px-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2 md:hidden">
+            <span className="text-sm tabular-nums text-muted">{rows.length} {rows.length === 1 ? "finding" : "findings"}</span>
+          </div>
           <Button
             variant="ghost"
-            size="sm"
-            onClick={() =>
-              setIssueTarget({ mode: "digest", findingIds: findings.map((f) => f.id) })
-            }
+            className="md:hidden"
+            aria-expanded={filtersOpen}
+            aria-controls={`finding-filters-${sessionId}`}
+            onClick={() => setFiltersOpen((open) => !open)}
           >
-            <FileWarning className="h-3.5 w-3.5 mr-1" aria-hidden />
-            File digest
+            <SlidersHorizontal className="h-4 w-4" aria-hidden />
+            Filters{filterActive ? " •" : ""}
           </Button>
-        )}
-        <Button variant="ghost" size="sm" onClick={() => setExportOpen(true)}>
-          <Download className="h-3.5 w-3.5 mr-1" aria-hidden />
-          Export
-        </Button>
-      </div>
-
-      {(findings.length > 0 || diff) && (
-        <div className="border-b border-line px-3 py-2 space-y-2">
-          {diff && <RescanBreakdown diff={diff} />}
-          {findings.length > 0 && <SeverityBar counts={severityCounts} />}
+          <div id={`finding-filters-${sessionId}`} className={cn("order-last w-full flex-wrap gap-2 border-t border-line py-3 md:contents", filtersOpen ? "flex" : "hidden")}>
+            <SelectMenu
+              value={severity}
+              options={SEVERITY_OPTIONS}
+              onChange={setSeverity}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+            <SelectMenu
+              value={status}
+              options={STATUS_OPTIONS}
+              onChange={setStatus}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+            <SelectMenu
+              value={cellId}
+              options={cellOptions}
+              onChange={setCellId}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+            <Input
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+              placeholder="Filter by path"
+              aria-label="Filter by path"
+              className="h-11 w-full text-base md:h-7 md:w-36 md:text-xs"
+            />
+            <SelectMenu
+              value={sort}
+              options={[
+                { value: "severity", label: "By severity" },
+                { value: "recency", label: "By recency" },
+              ]}
+              onChange={setSort}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+          </div>
+          <span className="hidden md:flex-1 md:block" />
+          {filterActive && findings.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() =>
+                setIssueTarget({ mode: "digest", findingIds: findings.map((f) => f.id) })
+              }
+            >
+              <FileWarning className="h-3.5 w-3.5 mr-1" aria-hidden />
+              File digest
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => setExportOpen(true)}>
+            <Download className="h-3.5 w-3.5 mr-1" aria-hidden />
+            Export
+          </Button>
         </div>
-      )}
 
+        {(findings.length > 0 || diff) && (
+          <div className="border-b border-line px-3 py-2 space-y-2">
+            {diff && <RescanBreakdown diff={diff} />}
+            {findings.length > 0 && <SeverityBar counts={severityCounts} />}
+          </div>
+        )}
+      </div>
       {actionError && (
         <div className="px-3 py-1.5 text-xs text-danger-600 bg-danger-wash border-b border-line">
           {actionError}
@@ -423,11 +466,12 @@ export function FindingsReview({
       <div className="flex flex-1 flex-col xl:flex-row min-h-0" style={listPane.containerStyle}>
         {/* List */}
         <div
+          ref={listRef}
           role="listbox"
           aria-label="Findings"
           tabIndex={0}
           onKeyDown={handleListKeyDown}
-          className="xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line overflow-y-auto max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400"
+          className={cn("min-w-0 xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line md:overflow-y-auto md:max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400", mobileDetail && selected && "hidden md:block")}
         >
           {query.isPending ? (
             <div className="px-3 py-4 text-xs text-muted">
@@ -477,7 +521,11 @@ export function FindingsReview({
         />
 
         {/* Detail */}
-        <div className="flex-1 min-w-0 overflow-y-auto">
+        <div className={cn("flex-1 min-w-0 md:overflow-y-auto", !(mobileDetail && selected) && "hidden md:block")}>
+          <Button ref={backRef} variant="ghost" className="mx-2 mt-1 min-h-11 text-muted md:hidden" onClick={() => {
+            pendingFocus.current = "list";
+            setMobileDetail(false);
+          }}>← Back to findings</Button>
           {selected ? (
             <FindingDetail
               finding={selected}
@@ -497,7 +545,7 @@ export function FindingsReview({
                 );
               }}
               onVerify={() => verify(selected)}
-              onRefute={() => setRefuteTarget(selected)}
+              onRefute={() => { setActionError(null); setRefuteTarget(selected); }}
               onFileIssue={() => setIssueTarget({ mode: "single", finding: selected })}
               onFix={() => {
                 useComposerPrefillStore
@@ -519,6 +567,7 @@ export function FindingsReview({
       <RefuteDialog
         finding={refuteTarget}
         pending={review.isPending}
+        error={actionError}
         onClose={() => setRefuteTarget(null)}
         onSubmit={(finding, reason) => {
           setActionError(null);
@@ -581,7 +630,7 @@ function FindingListRow({
                 e.stopPropagation();
                 onToggleGroup(row.finding.fingerprint);
               }}
-              className="text-muted hover:text-ink shrink-0"
+              className="flex min-h-11 min-w-11 items-center justify-center text-muted hover:text-ink shrink-0 md:min-h-0 md:min-w-0"
             >
               {expanded ? (
                 <ChevronDown className="h-3.5 w-3.5" aria-hidden />
@@ -635,7 +684,7 @@ function FindingRowLine({
       aria-selected={selected}
       onClick={() => onSelect(finding.id)}
       className={cn(
-        "px-3 py-2 cursor-pointer text-xs min-w-0",
+        "min-h-11 px-4 py-4 md:px-3 md:py-2 cursor-pointer text-sm md:text-xs min-w-0",
         selected ? "bg-moss-wash" : "hover:bg-ink-wash",
       )}
     >
@@ -656,7 +705,7 @@ function FindingRowLine({
             </Badge>
           </span>
         )}
-        <span className="font-medium text-ink min-w-0 flex-1 line-clamp-2">{finding.title}</span>
+        <span className="font-semibold leading-5 text-ink min-w-0 flex-1 line-clamp-2 md:font-medium md:leading-normal">{finding.title}</span>
         {trailing && <span className="shrink-0">{trailing}</span>}
       </div>
       {/* Line 2: the metadata that used to crowd the title off the row. */}
@@ -735,16 +784,25 @@ function FindingDetail({
   onOpenChild?: (childId: string) => void;
 }) {
   const url = blobUrl(engagement, finding.file, finding.line);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const actions = useResponsiveOverlay("md");
+  useEffect(() => setMetadataOpen(false), [finding.id]);
+  function copyPermalink() {
+    const permalink = new URL(window.location.href);
+    permalink.searchParams.set("finding", finding.id);
+    void navigator.clipboard.writeText(permalink.toString());
+    onNotice("Permalink copied.");
+  }
   return (
-    <article className="px-4 py-3 space-y-3 text-xs" aria-label={finding.title}>
-      <header className="space-y-1">
+    <article className="min-w-0 break-words px-4 pb-5 pt-2 space-y-5 text-sm leading-6 md:py-3 md:space-y-3 md:text-xs md:leading-normal" aria-label={finding.title}>
+      <header className="space-y-2 md:space-y-1">
         <div className="flex items-center gap-2 flex-wrap">
           <SeverityBadge severity={finding.severity} />
           <FindingStatusChip status={finding.status} />
-          <h3 className="text-sm font-semibold text-ink">{finding.title}</h3>
+          <h3 className="w-full text-xl font-semibold leading-7 tracking-tight text-ink md:w-auto md:text-sm md:leading-normal md:tracking-normal">{finding.title}</h3>
         </div>
         {finding.file && (
-          <div className="font-mono">
+          <div className="min-w-0 break-all font-mono text-xs leading-5 md:leading-normal">
             {url ? (
               <a
                 href={url}
@@ -775,6 +833,7 @@ function FindingDetail({
               variant="secondary"
               disabled={reviewPending || finding.status === "verified"}
               onClick={onVerify}
+              className="max-md:flex-1 max-md:bg-moss max-md:text-white max-md:hover:bg-moss max-md:hover:opacity-90 max-md:active:opacity-95 max-md:focus-visible:ring-moss max-md:dark:bg-moss max-md:dark:text-paper max-md:dark:hover:bg-moss"
             >
               <Check className="h-3.5 w-3.5 mr-1" aria-hidden />
               Verify
@@ -784,62 +843,84 @@ function FindingDetail({
               variant="secondary"
               disabled={reviewPending || finding.status === "refuted"}
               onClick={onRefute}
+              className="max-md:flex-1"
             >
               <X className="h-3.5 w-3.5 mr-1" aria-hidden />
               Refute
             </Button>
           </>
         )}
-        <Button size="sm" variant="secondary" onClick={onFileIssue}>
-          File issue
-        </Button>
-        <Button size="sm" variant="secondary" onClick={onFix}>
-          <Hammer className="h-3.5 w-3.5 mr-1" aria-hidden />
-          Fix
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            const permalink = new URL(window.location.href);
-            permalink.searchParams.set("finding", finding.id);
-            void navigator.clipboard.writeText(permalink.toString());
-            onNotice("Permalink copied.");
-          }}
-        >
-          <Copy className="h-3.5 w-3.5 mr-1" aria-hidden />
-          Copy permalink
-        </Button>
+        <div className="hidden md:contents">
+          <Button size="sm" variant="secondary" onClick={onFileIssue}>
+            File issue
+          </Button>
+          <Button size="sm" variant="secondary" onClick={onFix}>
+            <Hammer className="h-3.5 w-3.5 mr-1" aria-hidden />
+            Fix
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={copyPermalink}
+          >
+            <Copy className="h-3.5 w-3.5 mr-1" aria-hidden />
+            Copy permalink
+          </Button>
+        </div>
+        <div className="md:hidden">
+          <DropdownMenu open={actions.open} onOpenChange={actions.setOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="secondary" aria-label="Finding actions"><MoreHorizontal className="h-4 w-4" aria-hidden />More</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={onFileIssue}><FileWarning className="h-4 w-4" aria-hidden />File issue</DropdownMenuItem>
+              <DropdownMenuItem onSelect={onFix}><Hammer className="h-4 w-4" aria-hidden />Start a fix</DropdownMenuItem>
+              <DropdownMenuItem onSelect={copyPermalink}><Copy className="h-4 w-4" aria-hidden />Copy permalink</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       {/* Evidence — hostile data; escaped markdown only (see module note). */}
-      <div className="border border-line rounded-md px-3 py-2">
+      <div className="min-w-0 overflow-x-auto md:rounded-md md:border md:border-line md:px-3 md:py-2">
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted md:hidden">Evidence</h4>
         <Markdown>{finding.body}</Markdown>
       </div>
 
-      {/* Provenance */}
-      <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5">
-        <dt className="text-muted">Cell</dt>
-        <dd className="font-mono">
-          {cell ? `${cell.dir} (${cell.persona})` : finding.cellId}
-        </dd>
-        <dt className="text-muted">Reported</dt>
-        <dd>{new Date(finding.createdAt).toLocaleString()}</dd>
-        <dt className="text-muted">Fingerprint</dt>
-        <dd className="font-mono">{finding.fingerprint}</dd>
-        {finding.statusActor && (
-          <>
-            <dt className="text-muted">Reviewed by</dt>
-            <dd className="font-mono">{finding.statusActor}</dd>
-          </>
-        )}
-        {finding.statusReason && (
-          <>
-            <dt className="text-muted">Reason</dt>
-            <dd>{finding.statusReason}</dd>
-          </>
-        )}
-      </dl>
+      {/* Provenance stays available without crowding the phone evidence. */}
+      <div className="border-y border-line md:border-0">
+        <Button
+          variant="ghost"
+          className="w-full justify-between px-0 text-muted md:hidden"
+          aria-expanded={metadataOpen}
+          aria-controls={`finding-metadata-${finding.id}`}
+          onClick={() => setMetadataOpen((open) => !open)}
+        >
+          Review details<ChevronDown className={cn("h-4 w-4", metadataOpen && "rotate-180")} aria-hidden />
+        </Button>
+        <dl id={`finding-metadata-${finding.id}`} className={cn("grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 pb-3 text-xs md:grid md:gap-y-0.5 md:pb-0", metadataOpen ? "grid" : "hidden")}>
+          <dt className="text-muted">Cell</dt>
+          <dd className="min-w-0 break-all font-mono">
+            {cell ? `${cell.dir} (${cell.persona})` : finding.cellId}
+          </dd>
+          <dt className="text-muted">Reported</dt>
+          <dd>{new Date(finding.createdAt).toLocaleString()}</dd>
+          <dt className="text-muted">Fingerprint</dt>
+          <dd className="min-w-0 break-all font-mono">{finding.fingerprint}</dd>
+          {finding.statusActor && (
+            <>
+              <dt className="text-muted">Reviewed by</dt>
+              <dd className="min-w-0 break-all font-mono">{finding.statusActor}</dd>
+            </>
+          )}
+          {finding.statusReason && (
+            <>
+              <dt className="text-muted">Reason</dt>
+              <dd>{finding.statusReason}</dd>
+            </>
+          )}
+        </dl>
+      </div>
 
       {/* Filed issues */}
       {(finding.links ?? []).length > 0 && (
@@ -850,7 +931,7 @@ function FindingDetail({
               href={link.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline"
+              className="inline-flex min-h-11 md:min-h-0 items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline"
             >
               <ServiceIcon slug={link.provider} label={link.provider} size="sm" />
               {link.externalId}
@@ -878,7 +959,7 @@ function FindingDetail({
                   <button
                     type="button"
                     onClick={() => onOpenChild(handoff.childSessionId)}
-                    className="inline-flex items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline shrink-0"
+                    className="inline-flex min-h-11 md:min-h-0 items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline shrink-0"
                     aria-label={`Open fix session ${handoff.title}`}
                   >
                     <ExternalLink className="h-3 w-3" aria-hidden />
@@ -888,7 +969,7 @@ function FindingDetail({
                   <Link
                     to="/sessions/$sessionId"
                     params={{ sessionId: handoff.childSessionId }}
-                    className="inline-flex items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline shrink-0"
+                    className="inline-flex min-h-11 md:min-h-0 items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline shrink-0"
                     aria-label={`Open fix session ${handoff.title}`}
                   >
                     <ExternalLink className="h-3 w-3" aria-hidden />
@@ -911,7 +992,7 @@ function FindingDetail({
                 <button
                   type="button"
                   onClick={() => onSelectSibling(sibling.id)}
-                  className="text-accent-600 dark:text-accent-100 hover:underline text-left"
+                  className="min-h-11 md:min-h-0 break-words text-accent-600 dark:text-accent-100 hover:underline text-left"
                 >
                   {sibling.title}
                   {sibling.file ? ` — ${sibling.file}` : ""}
@@ -964,7 +1045,7 @@ function FindingNotes({
           {comments.map((comment) => (
             <li key={comment.id} className="border border-line rounded-md px-2.5 py-1.5">
               <div className="flex items-center gap-2 text-[11px] text-muted">
-                <span className="font-mono">{comment.authorUserId}</span>
+                <span className="min-w-0 break-all font-mono">{comment.authorUserId}</span>
                 <span>{relativeTime(comment.createdAt)}</span>
               </div>
               {/* Escaped text: a plain string node never parses HTML. */}
@@ -1007,11 +1088,13 @@ function FindingNotes({
 function RefuteDialog({
   finding,
   pending,
+  error,
   onClose,
   onSubmit,
 }: {
   finding: SecurityFindingWire | null;
   pending: boolean;
+  error: string | null;
   onClose: () => void;
   onSubmit: (finding: SecurityFindingWire, reason: string) => void;
 }) {
@@ -1028,6 +1111,7 @@ function RefuteDialog({
         description={finding ? finding.title : undefined}
       >
         <div className="space-y-2">
+          {error && <p role="alert" className="text-sm text-danger-600">{error}</p>}
           <Textarea
             value={reason}
             onChange={(e) => setReason(e.target.value)}

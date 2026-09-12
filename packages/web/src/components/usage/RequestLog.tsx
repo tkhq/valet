@@ -26,7 +26,7 @@ export function RequestLog({ items, selectedId, onSelect, nextCursor, onLoadMore
 
   return (
     <div>
-      <div className="overflow-x-auto rounded border border-line">
+      <div className="max-w-full overflow-x-auto rounded border border-line">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-line bg-paper-muted">
@@ -50,7 +50,7 @@ export function RequestLog({ items, selectedId, onSelect, nextCursor, onLoadMore
                   onClick={() => onSelect(item.id)}
                   onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onSelect(item.id); }}
                   aria-pressed={isSelected}
-                  className={`border-b border-line last:border-0 cursor-pointer ${isSelected ? "bg-moss/10" : "hover:bg-ink-wash/30"}`}
+                  className={`h-11 border-b border-line last:border-0 cursor-pointer sm:h-auto ${isSelected ? "bg-moss-wash" : "hover:bg-ink-wash"}`}
                 >
                   <td className="px-3 py-2 text-muted whitespace-nowrap">
                     {new Date(item.createdAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
@@ -81,7 +81,7 @@ export function RequestLog({ items, selectedId, onSelect, nextCursor, onLoadMore
             type="button"
             onClick={onLoadMore}
             disabled={isLoading}
-            className="rounded px-3 py-1.5 text-sm border border-line text-muted hover:text-ink hover:border-ink disabled:opacity-50"
+            className="min-h-11 rounded px-3 py-1.5 text-sm border border-line text-muted hover:text-ink hover:border-ink disabled:opacity-50"
           >
             {isLoading ? "Loading…" : "Load more"}
           </button>

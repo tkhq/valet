@@ -13,8 +13,8 @@
  * also match.
  */
 import { useEffect } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, it, vi, afterEach } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WorkflowDefinition } from "@valet/workflow";
 import { ApiError } from "~/api/client";
@@ -31,7 +31,7 @@ function AssistantStub() {
   useEffect(() => {
     assistantMounts += 1;
   }, []);
-  return <p>the conversation</p>;
+  return <><p>the conversation</p><input aria-label="Assistant draft" /></>;
 }
 
 function baseDefinition(): WorkflowDefinition {
@@ -56,7 +56,68 @@ function baseDefinition(): WorkflowDefinition {
   };
 }
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe("Editor", () => {
+  it("moves phone focus into the inspector and back to the canvas control", () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("max-width"), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
+    fireEvent.click(screen.getByText("hello"));
+    const back = screen.getByRole("button", { name: "Back to canvas" });
+    expect(document.activeElement).toBe(back);
+    const prompt = screen.getByLabelText("Prompt");
+    prompt.focus();
+    fireEvent.change(prompt, { target: { value: "Keep typing" } });
+    expect(document.activeElement).toBe(prompt);
+    fireEvent.click(back);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Show canvas" }));
+  });
+
+  it("does not move desktop focus into the phone inspector navigation", () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
+    const control = screen.getByRole("button", { name: "More editor actions" });
+    control.focus();
+    fireEvent.click(screen.getByText("hello"));
+    expect(document.activeElement).toBe(control);
+  });
+
+  it("preserves the mounted assistant and its draft across compact view switches", () => {
+    assistantMounts = 0;
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} assistant={<AssistantStub />} />);
+    fireEvent.click(screen.getByRole("button", { name: "Show assistant" }));
+    const draft = screen.getByLabelText("Assistant draft");
+    fireEvent.change(draft, { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Show canvas" }));
+    fireEvent.click(screen.getByText("hello"));
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Edited on phone" } });
+    fireEvent.click(screen.getByRole("button", { name: "Back to canvas" }));
+    expect(screen.queryByTestId("inspector")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show assistant" }));
+    expect(screen.getByLabelText("Assistant draft")).toBe(draft);
+    expect(draft).toHaveProperty("value", "Keep this draft");
+    expect(assistantMounts).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Show canvas" }));
+    fireEvent.click(screen.getByText("Edited on phone"));
+    expect(screen.getByLabelText("Prompt")).toHaveProperty("value", "Edited on phone");
+  });
+
+  it("adds a node from the compact palette and opens its inspector", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("max-width"), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    const user = userEvent.setup();
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Add node" }));
+    await user.click(screen.getByRole("menuitem", { name: "Wait" }));
+    await waitFor(() => expect(screen.getByTestId("inspector")).toBeTruthy());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to canvas" }));
+    expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
+  });
+
+  it("disables compact node creation for mirrored workflows", () => {
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} readOnly />);
+    expect(screen.getByRole("button", { name: "Add node" }).matches(":disabled")).toBe(true);
+  });
+
   it("keeps a mirrored definition unchanged through controls and keyboard actions", async () => {
     const onDirtyChange = vi.fn();
     const onSave = vi.fn();
@@ -97,23 +158,24 @@ describe("Editor", () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
-  it("toggles the compact assistant panel without dropping the graph, conversation or draft", () => {
-    assistantMounts = 0;
-    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} assistant={<AssistantStub />} />);
-    const toggle = screen.getByRole("button", { name: "Show assistant" });
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(toggle);
-    expect(screen.getByRole("button", { name: "Hide panel" }).getAttribute("aria-expanded")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Hide panel" }));
-    fireEvent.click(screen.getByText("hello"));
-    expect(screen.getByRole("button", { name: "Hide panel" }).getAttribute("aria-expanded")).toBe("true");
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "mobile draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "Hide panel" }));
-    expect(screen.queryByLabelText("Prompt")).toBeNull();
-    expect(screen.getByTestId("workflow-canvas")).toBeTruthy();
-    expect(screen.getByText("mobile draft")).toBeTruthy();
-    expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
-    expect(assistantMounts).toBe(1);
+  it("closes the compact palette when desktop takes over", async () => {
+    const changes = new EventTarget();
+    const media = {
+      matches: false,
+      addEventListener: changes.addEventListener.bind(changes),
+      removeEventListener: changes.removeEventListener.bind(changes),
+    };
+    vi.stubGlobal("matchMedia", vi.fn(() => media));
+    render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Add node" }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    act(() => {
+      media.matches = true;
+      changes.dispatchEvent(new Event("change"));
+    });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.body.style.pointerEvents).not.toBe("none");
+    expect(screen.queryByTestId("unsaved-indicator")).toBeNull();
   });
 
   it("has no unsaved indicator and a disabled Save button before any edit", () => {

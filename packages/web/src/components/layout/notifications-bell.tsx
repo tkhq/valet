@@ -117,7 +117,7 @@ export function NotificationsBell() {
           )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[340px] max-h-[420px] overflow-y-auto">
+      <DropdownMenuContent align="end" className="w-[340px] min-w-0 max-h-[min(420px,var(--radix-dropdown-menu-content-available-height))] overflow-y-auto">
         <DropdownMenuLabel className="flex items-center justify-between gap-2">
           <span>Notifications</span>
           {unreadCount > 0 && (

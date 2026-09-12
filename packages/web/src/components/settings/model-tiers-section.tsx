@@ -106,7 +106,7 @@ export function ModelTiersSection() {
 
             return (
               <div key={tier} className="space-y-2 py-4">
-                <div className="flex items-baseline gap-2">
+                <div className="flex flex-wrap items-baseline gap-2">
                   <h3 className="text-sm font-medium text-ink">{TIER_LABELS[tier]}</h3>
                   {firstModel && <span className="text-xs text-muted">{firstModel.name}</span>}
                 </div>
@@ -119,8 +119,8 @@ export function ModelTiersSection() {
                     const model = catalogById.get(id);
                     const label = model?.name ?? id;
                     return (
-                      <div key={id} className="flex items-center gap-2 py-2">
-                        <span className="min-w-0 flex-1 truncate text-sm text-ink">{label}</span>
+                      <div key={id} className="flex flex-wrap items-center gap-2 py-2">
+                        <span className="min-w-0 basis-full break-words text-sm text-ink sm:flex-1 sm:basis-auto">{label}</span>
                         <Button
                           type="button"
                           variant="ghost"

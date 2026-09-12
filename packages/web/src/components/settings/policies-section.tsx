@@ -407,7 +407,7 @@ function NewPolicyForm({ plugins, teamId }: { plugins: PluginSummary[]; teamId?:
       <div className="space-y-4 py-4">
         <fieldset className="flex flex-wrap gap-4" aria-label="Target">
           {(["service", "actionId", "riskLevel"] as const).map((kind) => (
-            <label key={kind} className="flex items-center gap-1.5 text-sm">
+            <label key={kind} className="flex min-h-11 items-center gap-1.5 text-sm sm:min-h-0">
               <input
                 type="radio"
                 name="policy-target-kind"

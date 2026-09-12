@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ChevronDown, Settings2, ShieldCheck } from "lucide-react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
@@ -32,7 +33,7 @@ export const Route = createFileRoute("/security/")({
 export function SecurityIndexPage() {
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="border-b border-line px-6 py-4">
+      <div className="border-b border-line px-4 py-4 sm:px-6">
         <div className="flex items-baseline gap-3">
           <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
             Security reviews
@@ -40,8 +41,8 @@ export function SecurityIndexPage() {
           <WorkspaceClause />
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto p-6">
-        <div className="mx-auto max-w-4xl space-y-8">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+        <div className="mx-auto max-w-4xl space-y-6 sm:space-y-8">
           <NewReviewCard />
           <ReviewList />
         </div>
@@ -176,6 +177,8 @@ function NewReviewCard() {
   // so no mount-time-state sync is needed — each only changes on user input.
   const [preset, setPreset] = useState(SECURITY_PRESETS[0].id);
   const [pathsInput, setPathsInput] = useState("");
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const selectedPreset = SECURITY_PRESETS.find((item) => item.id === preset) ?? SECURITY_PRESETS[0];
   // "Include a written report at the end" checkbox (Part 08 §Setup Step 1).
   // The preset gates the default — the wide presets (`code-review`,
   // `code-audit`, `live-pentest`, `code-audit-plus-live`) default the box on;
@@ -224,10 +227,10 @@ function NewReviewCard() {
   }
 
   return (
-    <section className="rounded-lg border border-line bg-paper p-5 space-y-5">
-      <div className="flex items-baseline justify-between gap-3">
+    <section className="min-w-0 rounded-lg border border-line bg-paper p-4 sm:p-5 space-y-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-ink">Start a review</h2>
+          <h2 className="flex items-center gap-2 text-base font-semibold text-ink sm:text-sm"><ShieldCheck className="h-5 w-5 text-moss sm:hidden" aria-hidden />Start a review</h2>
           <p className="mt-0.5 text-xs text-muted">
             Scan a repository for security issues and triage the findings.
           </p>
@@ -246,12 +249,12 @@ function NewReviewCard() {
                 type="button"
                 aria-label={`Remove ${repo.fullName}`}
                 onClick={() => setRepo(null)}
-                className="shrink-0 text-xs text-muted hover:text-danger-500"
+                className="min-h-11 px-2 shrink-0 text-xs text-muted hover:text-danger-500 sm:min-h-0"
               >
                 Remove
               </button>
             </div>
-            <div className="mt-2.5 flex items-center gap-2">
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <Label htmlFor="review-ref" className="shrink-0 text-[11px] uppercase tracking-wide text-muted">
                 Branch
               </Label>
@@ -261,7 +264,7 @@ function NewReviewCard() {
                 value={repo.ref}
                 placeholder="default branch"
                 onChange={(e) => setRepo({ ...repo, ref: e.target.value })}
-                className="h-8 w-52 text-xs"
+                className="min-h-11 sm:min-h-0 sm:h-8 w-full sm:w-52 text-base sm:text-xs"
               />
               <span className="text-[11px] text-muted">Leave blank to scan the default branch.</span>
             </div>
@@ -302,13 +305,26 @@ function NewReviewCard() {
 
       {/* 2 · Method — selectable preset cards, each showing its passes. */}
       <div className="grid gap-1.5">
-        <div className="flex items-baseline justify-between">
-          <Label>Method</Label>
-          <span className="text-[11px] text-muted">
+        <div className="flex flex-wrap items-baseline justify-between">
+          <Label htmlFor="mobile-review-method">Method</Label>
+          <span className="hidden text-[11px] text-muted sm:inline">
             A <span className="font-mono">.valet/security.yml</span> in the repo overrides this.
           </span>
         </div>
-        <div role="radiogroup" aria-label="Review method" className="grid grid-cols-2 gap-2">
+        <div className="rounded-lg border border-moss bg-moss-wash p-3 sm:hidden">
+          <select
+            id="mobile-review-method"
+            aria-label="Review method"
+            value={preset}
+            onChange={(event) => setPreset(event.target.value)}
+            className="h-11 w-full min-w-0 rounded-md border border-line bg-paper px-2 text-base font-medium text-ink"
+          >
+            {SECURITY_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+          <p className="mt-2 text-sm leading-5 text-ink">{selectedPreset.blurb}</p>
+          <p className="mt-1 text-xs text-muted">{selectedPreset.phases.length} passes{includeReport ? " · Written report included" : ""}</p>
+        </div>
+        <div role="radiogroup" aria-label="Review method" className="hidden sm:grid sm:grid-cols-2 gap-2">
           {SECURITY_PRESETS.map((p) => {
             const selected = p.id === preset;
             return (
@@ -372,61 +388,72 @@ function NewReviewCard() {
         </div>
       </div>
 
-      {/* 3 · Model + scope — secondary controls, side by side. */}
-      <div className="grid grid-cols-2 gap-4">
-        <div className="grid gap-1.5">
-          <Label htmlFor="review-model">Model</Label>
-          <select
-            id="review-model"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="h-9 rounded-md border border-line bg-paper px-2 text-xs text-ink"
-          >
-            {SECURITY_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-                {m.note ? ` · ${m.note}` : ""}
-              </option>
-            ))}
-          </select>
-          <p className="text-[11px] text-muted">Drives the review and every sub-agent.</p>
+      <Button
+        variant="ghost"
+        className="w-full justify-between border-t border-line px-0 text-muted sm:hidden"
+        aria-expanded={optionsOpen}
+        aria-controls="review-options"
+        onClick={() => setOptionsOpen((open) => !open)}
+      >
+        <span className="inline-flex items-center gap-2"><Settings2 className="h-4 w-4" aria-hidden />Review options</span>
+        <ChevronDown className={cn("h-4 w-4 transition-transform motion-reduce:transition-none", optionsOpen && "rotate-180")} aria-hidden />
+      </Button>
+      <div id="review-options" className={cn("space-y-4 sm:block", !optionsOpen && "hidden")}>
+        {/* 3 · Model + scope — secondary controls, side by side. */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid gap-1.5">
+            <Label htmlFor="review-model">Model</Label>
+            <select
+              id="review-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="min-h-11 sm:min-h-0 sm:h-9 rounded-md border border-line bg-paper px-2 text-base sm:text-xs text-ink"
+            >
+              {SECURITY_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                  {m.note ? ` · ${m.note}` : ""}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted">Drives the review and every sub-agent.</p>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="review-paths">Scope to paths</Label>
+            <Input
+              id="review-paths"
+              value={pathsInput}
+              onChange={(e) => setPathsInput(e.target.value)}
+              placeholder="packages/api, src/auth"
+              className="min-h-11 sm:min-h-0 sm:h-9 text-base sm:text-xs"
+            />
+            <p className="text-[11px] text-muted">Optional. Narrows the sweeps to these paths.</p>
+          </div>
         </div>
+
+        {/* Written-report checkbox (Part 08 §Setup Step 1 · Report is a user
+            choice, not preset-baked). Default on for every preset; uncheck to
+            skip the report cell. */}
         <div className="grid gap-1.5">
-          <Label htmlFor="review-paths">Scope to paths</Label>
-          <Input
-            id="review-paths"
-            value={pathsInput}
-            onChange={(e) => setPathsInput(e.target.value)}
-            placeholder="packages/api, src/auth"
-            className="h-9 text-xs"
-          />
-          <p className="text-[11px] text-muted">Optional. Narrows the sweeps to these paths.</p>
+          <label className="flex min-h-11 items-center gap-2 text-xs text-ink sm:min-h-0">
+            <input
+              type="checkbox"
+              checked={includeReport}
+              onChange={(e) => setIncludeReport(e.target.checked)}
+              data-testid="review-include-report"
+              aria-label="Include a written report at the end"
+            />
+            Include a written report at the end
+          </label>
+          <p className="text-[11px] text-muted">
+            Includes a written summary and a JSON export of the results.
+          </p>
         </div>
+        <p className="text-xs text-muted sm:hidden">A .valet/security.yml file in the repository overrides the method.</p>
       </div>
-
-      {/* Written-report checkbox (Part 08 §Setup Step 1 · Report is a user
-          choice, not preset-baked). Default on for every preset; uncheck to
-          skip the report cell. */}
-      <div className="grid gap-1.5">
-        <label className="flex items-center gap-2 text-xs text-ink">
-          <input
-            type="checkbox"
-            checked={includeReport}
-            onChange={(e) => setIncludeReport(e.target.checked)}
-            data-testid="review-include-report"
-            aria-label="Include a written report at the end"
-          />
-          Include a written report at the end
-        </label>
-        <p className="text-[11px] text-muted">
-          Adds a `report` cell after `verify` that composes the audience-graded
-          markdown and a JSON snapshot. Uncheck to skip.
-        </p>
-      </div>
-
-      <div className="flex items-center justify-end gap-3 border-t border-line pt-4">
+      <div className="flex flex-col-reverse items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end sm:gap-3 sm:border-t sm:border-line sm:pt-4">
         {repo === null && (
-          <span className="text-[11px] text-muted">Pick a repository to continue.</span>
+          <span className="text-center text-xs text-muted sm:text-left sm:text-[11px]">Pick a repository to continue.</span>
         )}
         <Button onClick={configure} disabled={repo === null}>
           Configure review →
@@ -514,7 +541,7 @@ function ReviewRow({ session }: { session: SessionSummary }) {
 
   return (
     // `relative` anchors the stretched link: the whole row opens the session.
-    <li className="group relative flex items-center gap-4 rounded-md border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
+    <li className="group relative flex flex-wrap items-center gap-3 sm:gap-4 rounded-md border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
       <span
         className={cn(
           "relative mt-1.5 h-2 w-2 shrink-0 rounded-full",
@@ -531,7 +558,7 @@ function ReviewRow({ session }: { session: SessionSummary }) {
         <Link
           to="/sessions/$sessionId"
           params={{ sessionId: session.id }}
-          className="min-w-0 font-mono text-sm text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
+          className="min-w-0 break-all font-mono text-sm text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
         >
           {repoName}
           {ref !== "" && <span className="text-muted"> @ {shortRef(ref)}</span>}
@@ -562,7 +589,7 @@ function ReviewRow({ session }: { session: SessionSummary }) {
             type="button"
             variant="ghost"
             size="sm"
-            className="relative z-10 opacity-0 transition-opacity group-hover:opacity-100"
+            className="relative z-10 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
             disabled={rescan.isPending}
             onClick={() => {
               rescan.mutate(

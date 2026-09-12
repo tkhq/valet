@@ -67,7 +67,7 @@ export function WebhookSection({ workflowId }: { workflowId: string }) {
               {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
             </Button>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
               size="sm"

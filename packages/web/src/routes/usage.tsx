@@ -59,10 +59,10 @@ function StatCard({
   sub?: string;
 }) {
   return (
-    <div className="rounded border border-line bg-paper p-4">
+    <div className="min-w-0 rounded border border-line bg-paper p-3 sm:p-4">
       <div className="text-xs text-muted uppercase tracking-wide mb-1">{label}</div>
-      <div className="text-xl font-semibold text-ink tabular-nums">{value}</div>
-      {sub && <div className="text-xs text-muted mt-1">{sub}</div>}
+      <div className="break-words text-lg font-semibold text-ink tabular-nums sm:text-xl">{value}</div>
+      {sub && <div className="break-words text-xs text-muted mt-1">{sub}</div>}
     </div>
   );
 }
@@ -135,29 +135,29 @@ function ItemList({
           <Link
             to="/sessions/$sessionId"
             params={{ sessionId: item.sessionId! }}
-            className="text-moss hover:underline underline-offset-2 truncate"
+            className="block min-h-11 max-w-full break-words py-3 text-moss hover:underline underline-offset-2 sm:min-h-0 sm:py-0"
           >
             {item.label}
           </Link>
         ) : (
-          <span className="truncate text-muted">{item.label}</span>
+          <span className="break-words text-muted">{item.label}</span>
         );
 
         return (
           <div
             key={item.id}
-            className={`flex items-center gap-2 px-4 py-2 text-xs ${
-              item.isChild ? "pl-8 bg-ink-wash/10" : ""
+            className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-xs sm:flex-nowrap ${
+              item.isChild ? "pl-8 bg-ink-wash" : ""
             }`}
           >
-            <div className="flex-1 min-w-0">{labelEl}</div>
+            <div className="basis-full min-w-0 sm:basis-auto sm:flex-1">{labelEl}</div>
             <span className="tabular-nums text-muted shrink-0">
               {fmtUsd(item.costUsd)}
             </span>
-            <span className="tabular-nums text-muted shrink-0 w-20 text-right">
+            <span className="tabular-nums text-muted shrink-0 sm:w-20 sm:text-right">
               {fmt(item.totalTokens)} tok
             </span>
-            <span className="tabular-nums text-muted shrink-0 w-14 text-right">
+            <span className="tabular-nums text-muted shrink-0 sm:w-14 sm:text-right">
               {item.turns} turns
             </span>
           </div>
@@ -190,7 +190,7 @@ function UseCaseRow({
   return (
     <div className="border-b border-line last:border-0">
       <div
-        className="flex items-center gap-3 px-4 py-3 text-sm cursor-pointer hover:bg-ink-wash/20"
+        className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 text-sm cursor-pointer sm:flex-nowrap hover:bg-ink-wash"
         onClick={() => setExpanded((v) => !v)}
         role="button"
         tabIndex={0}
@@ -206,12 +206,12 @@ function UseCaseRow({
         >
           ›
         </span>
-        <span className="flex-1 text-ink font-medium">{USE_CASE_LABELS[useCase]}</span>
-        <span className="tabular-nums text-muted w-24 text-right">{fmtUsd(costUsd)}</span>
-        <span className="tabular-nums text-muted w-24 text-right">
+        <span className="min-w-0 basis-4/5 grow break-words text-ink font-medium sm:basis-auto">{USE_CASE_LABELS[useCase]}</span>
+        <span className="tabular-nums text-muted sm:w-24 sm:text-right">{fmtUsd(costUsd)}</span>
+        <span className="tabular-nums text-muted sm:w-24 sm:text-right">
           {fmt(totalTokens)} tok
         </span>
-        <span className="tabular-nums text-muted w-16 text-right">{turns} turns</span>
+        <span className="tabular-nums text-muted sm:w-16 sm:text-right">{turns} turns</span>
       </div>
       {expanded && (
         <ItemList window={window} scope={scope} teamId={teamId} useCase={useCase} />
@@ -306,12 +306,12 @@ export function UsagePage() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-6 py-10 space-y-10">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10 space-y-10">
         {/* Header — the workspace clause names the active scope, same as the
             other scoped list pages. */}
         <div>
-          <h1 className="font-display text-2xl text-ink flex items-baseline gap-3">
+          <h1 className="font-display text-2xl text-ink flex flex-wrap items-baseline gap-x-3 gap-y-1">
             Usage
             <WorkspaceClause />
           </h1>
@@ -343,9 +343,9 @@ export function UsagePage() {
               key={w}
               type="button"
               onClick={() => handleWindowChange(w)}
-              className={`rounded px-3 py-1 text-sm border ${
+              className={`min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 ${
                 window === w
-                  ? "border-moss text-moss bg-moss/10 font-medium"
+                  ? "border-moss text-moss bg-moss-wash font-medium"
                   : "border-line text-muted hover:text-ink hover:border-ink"
               }`}
             >
@@ -353,13 +353,13 @@ export function UsagePage() {
             </button>
           ))}
           {personalWorkspace && isOrgAdmin && (
-            <div className="flex items-center gap-1 ml-4 rounded border border-line overflow-hidden text-sm">
+            <div className="flex items-center gap-1 sm:ml-4 rounded border border-line overflow-hidden text-sm">
               <button
                 type="button"
                 onClick={() => setPersonalScope("me")}
-                className={`px-3 py-1 ${
+                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
                   scope === "me"
-                    ? "bg-moss/10 text-moss font-medium"
+                    ? "bg-moss-wash text-moss font-medium"
                     : "text-muted hover:text-ink"
                 }`}
                 aria-pressed={scope === "me"}
@@ -369,9 +369,9 @@ export function UsagePage() {
               <button
                 type="button"
                 onClick={() => setPersonalScope("org")}
-                className={`px-3 py-1 ${
+                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
                   scope === "org"
-                    ? "bg-moss/10 text-moss font-medium"
+                    ? "bg-moss-wash text-moss font-medium"
                     : "text-muted hover:text-ink"
                 }`}
                 aria-pressed={scope === "org"}
@@ -384,7 +384,7 @@ export function UsagePage() {
             <a
               href={csvHref}
               download
-              className="ml-auto rounded px-3 py-1 text-sm border border-line text-muted hover:text-ink hover:border-ink"
+              className="inline-flex w-full items-center justify-center sm:ml-auto sm:w-auto min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 border-line text-muted hover:text-ink hover:border-ink"
               aria-label={`Download CSV (${window}, ${scope})`}
             >
               Download CSV ({window}, {scope})
@@ -446,7 +446,7 @@ export function UsagePage() {
                 className="rounded border border-line overflow-hidden"
               >
                 {/* Header row */}
-                <div className="flex items-center gap-3 px-4 py-2 bg-paper-muted border-b border-line text-xs font-medium text-muted">
+                <div className="hidden sm:flex items-center gap-3 px-4 py-2 bg-paper-muted border-b border-line text-xs font-medium text-muted">
                   <span className="w-3" />
                   <span className="flex-1">Use case</span>
                   <span className="w-24 text-right">Cost (USD)</span>
@@ -482,7 +482,7 @@ export function UsagePage() {
               {skillRows.length === 0 ? (
                 <p className="text-sm text-muted">No skill use in this window.</p>
               ) : (
-                <div className="overflow-x-auto rounded border border-line">
+                <div className="max-w-full overflow-x-auto rounded border border-line">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-line bg-paper-muted">
@@ -502,7 +502,7 @@ export function UsagePage() {
                     </thead>
                     <tbody>
                       {skillRows.map((row) => (
-                        <tr key={row.skillKey} className="border-b border-line last:border-0 hover:bg-ink-wash/30">
+                        <tr key={row.skillKey} className="border-b border-line last:border-0 hover:bg-ink-wash">
                           <td className="px-3 py-2 text-ink">{row.name}</td>
                           <td className="px-3 py-2 text-muted">
                             {row.origin === "plugin" && row.pluginName
@@ -528,7 +528,7 @@ export function UsagePage() {
               {modelRows.length === 0 ? (
                 <p className="text-sm text-muted">No data.</p>
               ) : (
-                <div className="overflow-x-auto rounded border border-line">
+                <div className="max-w-full overflow-x-auto rounded border border-line">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-line bg-paper-muted">
@@ -545,7 +545,7 @@ export function UsagePage() {
                       {modelRows.map((row) => (
                         <tr
                           key={row.model ?? "unknown"}
-                          className="border-b border-line last:border-0 hover:bg-ink-wash/30"
+                          className="border-b border-line last:border-0 hover:bg-ink-wash"
                         >
                           <td
                             className="px-3 py-2 text-ink truncate max-w-[14rem]"
@@ -591,7 +591,7 @@ export function UsagePage() {
                   <div className="text-xs text-muted mb-3 space-y-2">
                     <p>Average agents active per day, including child agents and workflows.</p>
                     <details>
-                      <summary className="cursor-pointer">How active agents are counted</summary>
+                      <summary className="min-h-11 cursor-pointer py-3 sm:min-h-0 sm:py-0">How active agents are counted</summary>
                       <p className="mt-2">
                         Each session with recorded token usage counts once per member per UTC day.
                         {" "}Averages cover {dailyAgentWindow.days} UTC calendar {dailyAgentWindow.days === 1 ? "day" : "days"}, including zero-activity days and today so far.
@@ -602,7 +602,7 @@ export function UsagePage() {
                     </details>
                   </div>
                 )}
-                <div className="overflow-x-auto rounded border border-line">
+                <div className="max-w-full overflow-x-auto rounded border border-line">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-line bg-paper-muted">
@@ -617,7 +617,7 @@ export function UsagePage() {
                       {byUserRows.map((row) => (
                         <tr
                           key={row.userId}
-                          className="border-b border-line last:border-0 hover:bg-ink-wash/30"
+                          className="border-b border-line last:border-0 hover:bg-ink-wash"
                         >
                           <td className="px-3 py-2 text-ink truncate max-w-[14rem]" title={row.name}>
                             {row.name || <span className="text-muted italic">unknown</span>}

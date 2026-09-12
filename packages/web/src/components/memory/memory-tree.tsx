@@ -286,7 +286,7 @@ function TreeRow({
         <button
           type="button"
           onClick={() => onToggle(node.path)}
-          className="flex w-full items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted hover:text-ink"
+          className="flex w-full min-h-11 md:min-h-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted hover:text-ink"
           style={{ paddingLeft: 8 + depth * 12 }}
           aria-expanded={isOpen}
         >
@@ -326,7 +326,7 @@ function TreeRow({
       onClick={() => onSelect(entry.path)}
       aria-current={isActive ? "page" : undefined}
       className={cn(
-        "flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-sm",
+        "flex w-full min-h-11 md:min-h-0 items-center gap-1.5 rounded px-2 py-1 text-left text-sm",
         isActive ? "bg-moss-wash font-medium text-moss" : "text-ink hover:bg-ink-wash",
       )}
       style={{ paddingLeft: 20 + depth * 12 }}

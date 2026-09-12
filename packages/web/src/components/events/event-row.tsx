@@ -26,7 +26,7 @@ export function EventRow({
           onClick={onToggle}
           aria-expanded={open}
           aria-label={open ? `Collapse ${event.summary}` : `Expand ${event.summary}`}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="flex min-h-11 min-w-0 flex-1 flex-wrap items-center gap-2 text-left sm:flex-nowrap"
         >
           <ChevronRight
             className={`h-4 w-4 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`}
@@ -35,10 +35,10 @@ export function EventRow({
           <Badge variant="accent" className="shrink-0">
             {event.service}
           </Badge>
-          <span className="shrink-0 font-mono text-xs text-muted">{event.eventKey}</span>
-          <span className="min-w-0 flex-1 truncate text-sm text-ink">{event.summary}</span>
+          <span className="min-w-0 break-all font-mono text-xs text-muted sm:shrink-0">{event.eventKey}</span>
+          <span className="order-1 basis-full break-words text-sm text-ink sm:order-none sm:min-w-0 sm:flex-1 sm:basis-auto sm:truncate">{event.summary}</span>
           {event.actor?.login && (
-            <span className="hidden shrink-0 text-xs text-muted sm:block">{event.actor.login}</span>
+            <span className="break-all text-xs text-muted sm:shrink-0">{event.actor.login}</span>
           )}
           <span className="shrink-0 text-xs text-muted">{formatWhen(event.receivedAt)}</span>
         </button>
@@ -47,7 +47,7 @@ export function EventRow({
           params={{ eventId: event.id }}
           aria-label={`Open ${event.summary}`}
           title="Open this event at its own URL"
-          className="shrink-0 rounded-sm p-1 text-muted hover:text-ink"
+          className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-sm p-1 sm:min-h-0 sm:min-w-0 text-muted hover:text-ink"
         >
           <ExternalLink className="h-3.5 w-3.5" aria-hidden />
         </Link>
@@ -70,7 +70,7 @@ function EventDetail({ eventId }: { eventId: string }) {
 
   const { event, deliveries } = detailQ.data;
   return (
-    <div className="ml-6 mt-2 space-y-3 border-l border-line pl-4">
+    <div className="mt-2 min-w-0 space-y-3 border-l border-line pl-3 sm:ml-6 sm:pl-4">
       <div>
         <p className="mb-1 text-xs font-medium text-muted">Deliveries</p>
         <DeliveryList deliveries={deliveries} />

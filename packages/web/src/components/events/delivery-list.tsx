@@ -42,7 +42,7 @@ export function DeliveryList({
         <li key={d.id}>
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={DELIVERY_VARIANT[d.status]}>{d.status}</Badge>
-            <span className="text-xs text-ink">{d.subscriptionName ?? d.subscriptionId}</span>
+            <span className="break-all text-xs text-ink">{d.subscriptionName ?? d.subscriptionId}</span>
             <span className="text-xs text-muted">{deliveryStatusLine(d, now)}</span>
             {d.deliveredAt !== null && (
               <span className="text-xs text-muted">delivered {formatWhen(d.deliveredAt)}</span>

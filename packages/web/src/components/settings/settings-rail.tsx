@@ -1,3 +1,6 @@
+import { ChevronDown } from "lucide-react";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "~/components/primitives";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 import { useOrg } from "~/api/settings";
@@ -90,6 +93,7 @@ const MEMBER_ORGANIZATION_ITEMS = [
 ] as const;
 
 export function SettingsRail() {
+  const sectionMenu = useResponsiveOverlay("sm");
   const { teamId } = useWorkspaceScope();
   const orgQ = useOrg();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -104,16 +108,43 @@ export function SettingsRail() {
   // plain member gets no Models link at all (see MODELS_ITEM's comment).
   const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
+  const groups = [
+    { label: teamId === undefined ? "You" : "Team", items: teamId === undefined ? youItems : TEAM_ITEMS },
+    ...(showOrganizationGroup ? [{ label: "Organization", items: organizationItems }] : []),
+  ];
+  const currentGroup = groups.find((group) => group.items.some((item) => item.to === pathname));
+  const current = currentGroup?.items.find((item) => item.to === pathname);
+  const currentLabel = current ? `${currentGroup?.label} / ${current.label}` : "Choose section";
+
   return (
-    <nav aria-label="Settings" className="w-full min-w-0 shrink-0 space-y-3 text-sm sm:w-[200px] sm:space-y-6">
-      <RailGroup
-        label={teamId === undefined ? "You" : "Team"}
-        items={teamId === undefined ? youItems : TEAM_ITEMS}
-        pathname={pathname}
-      />
-      {showOrganizationGroup && (
-        <RailGroup label="Organization" items={organizationItems} pathname={pathname} />
-      )}
+    <nav aria-label="Settings" className="w-full shrink-0 text-sm sm:w-[200px]">
+      <div className="sm:hidden">
+        <DropdownMenu open={sectionMenu.open} onOpenChange={sectionMenu.setOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button variant="secondary" className="w-full justify-between" aria-label={`Settings section: ${currentLabel}`}>
+              <span className="truncate">{currentLabel}</span>
+              <ChevronDown className="h-4 w-4 shrink-0" aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+            {groups.map((group) => (
+              <DropdownMenuGroup key={group.label} aria-label={group.label}>
+                <DropdownMenuLabel>{group.label}</DropdownMenuLabel>
+                {group.items.map((item) => (
+                  <DropdownMenuItem key={item.to} asChild>
+                    <Link to={item.to} aria-current={pathname === item.to ? "page" : undefined} className={pathname === item.to ? "bg-moss-wash text-moss" : undefined}>
+                      {item.label}
+                    </Link>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      <div className="hidden space-y-6 sm:block">
+        {groups.map((group) => <RailGroup key={group.label} {...group} pathname={pathname} />)}
+      </div>
     </nav>
   );
 }

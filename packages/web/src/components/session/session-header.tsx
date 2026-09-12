@@ -371,9 +371,9 @@ export function SessionHeader({
   // session the person is in the middle of naming.
   if (editingTitle) {
     return (
-      <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
+      <header className="border-b border-line bg-paper px-3 py-2 min-h-[--nav-height] shrink-0 flex flex-wrap items-center gap-2 sm:px-4 sm:gap-3">
         <form
-          className="min-w-0"
+          className="min-w-0 max-w-full flex-1"
           onSubmit={(e) => {
             e.preventDefault();
             void commitRename();
@@ -382,7 +382,7 @@ export function SessionHeader({
           <Input
             autoFocus
             aria-label="Session title"
-            className="h-7 w-64 text-sm font-semibold"
+            className="w-full sm:h-7 sm:w-64 sm:max-w-full font-semibold"
             value={titleDraft}
             onChange={(e) => setTitleDraft(e.target.value)}
             onBlur={() => void commitRename()}
@@ -397,7 +397,7 @@ export function SessionHeader({
         <span className="text-xs text-muted shrink-0 hidden sm:inline">
           Enter to save, Esc to cancel
         </span>
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex max-w-full flex-wrap items-center gap-1.5">
           {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
           <SandboxChip sandbox={sandbox} />
           <ConnectionBadge conn={conn} />
@@ -408,15 +408,15 @@ export function SessionHeader({
   }
 
   return (
-    <header className="border-b border-line bg-paper px-4 h-[--nav-height] flex items-center gap-3">
+    <header className="border-b border-line bg-paper px-3 py-2 min-h-[--nav-height] shrink-0 flex flex-wrap items-center gap-2 sm:px-4 sm:gap-3">
       <Tooltip content={workspaceHint} delayDuration={400}>
-        <div className="min-w-0 flex items-baseline gap-2 cursor-default">
+        <div className="min-w-0 max-w-full flex flex-wrap items-baseline gap-2 cursor-default">
           {canRename ? (
             <button
               type="button"
               onClick={beginRename}
               aria-label={`Rename session: ${title}`}
-              className="text-sm font-semibold tracking-tight truncate text-ink font-display rounded px-0.5 -mx-0.5 hover:bg-line/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+              className="max-sm:min-h-11 max-sm:text-left text-sm font-semibold tracking-tight truncate text-ink font-display rounded px-0.5 -mx-0.5 hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
             >
               {rename.isPending ? <Spinner size={14} /> : title}
             </button>
@@ -440,7 +440,7 @@ export function SessionHeader({
             // The test hook lets a test assert THIS element rather than the
             // team's name appearing anywhere in the header, which a title
             // regression could satisfy on its own.
-            <Badge variant="accent" className="shrink-0" data-testid="owning-team">
+            <Badge variant="accent" className="max-w-full truncate" data-testid="owning-team">
               {team?.name ?? "Team"}
             </Badge>
           )}
@@ -463,7 +463,7 @@ export function SessionHeader({
           )}
         </div>
       </Tooltip>
-      <div className="ml-auto flex items-center gap-1.5">
+      <div className="ml-auto flex max-w-full flex-wrap items-center gap-1.5">
         {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
         {canAdminister && (
           <Tooltip content={modelHint}>

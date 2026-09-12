@@ -131,7 +131,7 @@ export function SubscriptionsPanel() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted">
           A subscription runs a workflow or prompts an orchestrator when a matching event arrives.
         </p>
@@ -203,10 +203,10 @@ function SubscriptionRow({
   const channelScope = mentionChannelScope(sub);
 
   return (
-    <div className="flex items-center gap-3 py-3">
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-medium text-ink">{sub.name}</span>
+    <div className="flex flex-wrap items-center gap-3 py-3 sm:flex-nowrap">
+      <div className="min-w-0 basis-full sm:basis-auto sm:flex-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="break-words text-sm font-medium text-ink">{sub.name}</span>
           {/* Ownership varies row to row, so it is badged: "Org", the
               team's name (`OwnerBadge`), or "Personal" for a COLLEAGUE's.
               An unbadged row is yours. The scoped list returns no
@@ -230,7 +230,7 @@ function SubscriptionRow({
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           {sub.eventKeys.map((k) => (
-            <span key={k} className="font-mono text-xs text-muted">
+            <span key={k} className="break-all font-mono text-xs text-muted">
               {k}
             </span>
           ))}

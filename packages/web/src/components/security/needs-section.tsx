@@ -110,7 +110,7 @@ function NeedsHumanItem({
                 ? "Your decision…"
                 : "The credential, scope, or dependency the persona needs…"
             }
-            className="text-[11px]"
+            className="text-base md:text-[11px]"
           />
           <div className="flex items-center gap-2">
             <Button

@@ -145,7 +145,7 @@ function KnownProviderCard({
   return (
     <div className="space-y-3 py-4">
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-ink">{KNOWN_LABEL[kind]}</span>
           {showDeploymentBadge && <Badge variant="neutral">using deployment key</Badge>}
         </div>
@@ -156,8 +156,8 @@ function KnownProviderCard({
         />
       </div>
 
-      <div className="flex items-end gap-2">
-        <div className="flex-1 space-y-1">
+      <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-end">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor={`${kind}-key`}>API key</Label>
           <Input
             id={`${kind}-key`}
@@ -245,7 +245,7 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-medium uppercase tracking-wider text-muted">Models</span>
         <Button type="button" variant="ghost" size="sm" onClick={() => setPickerOpen((v) => !v)}>
           {pickerOpen ? "Done" : "Add models"}
@@ -310,7 +310,7 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
                 key={m.id}
                 type="button"
                 onClick={() => addModel(m)}
-                className="flex w-full items-center justify-between rounded px-2 py-1 text-left text-sm text-ink hover:bg-ink-wash"
+                className="flex min-h-11 w-full flex-wrap items-center justify-between gap-2 rounded sm:min-h-0 px-2 py-1 text-left text-sm text-ink hover:bg-ink-wash"
               >
                 <span className="truncate">{m.id}</span>
                 <span className="ml-2 shrink-0 text-xs text-muted">{m.name}</span>
@@ -427,12 +427,12 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
         </Button>
       </div>
 
-      <div className="flex gap-2">
-        <div className="flex-1 space-y-1">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor={`${provider.id}-name`}>Name</Label>
           <Input id={`${provider.id}-name`} value={name} onChange={(e) => setName(e.target.value)} />
         </div>
-        <div className="flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor={`${provider.id}-baseUrl`}>Base URL</Label>
           <Input
             id={`${provider.id}-baseUrl`}
@@ -445,8 +445,8 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
         </Button>
       </div>
 
-      <div className="flex items-end gap-2">
-        <div className="flex-1 space-y-1">
+      <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-end">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor={`${provider.id}-key`}>API key</Label>
           <Input
             id={`${provider.id}-key`}
@@ -468,7 +468,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
       </div>
 
       <div className="space-y-2">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-medium uppercase tracking-wider text-muted">Models</span>
           <Button type="button" variant="ghost" size="sm" onClick={handleFetchModels} disabled={probe.isPending}>
             {probe.isPending ? "Fetching…" : "Fetch models"}
@@ -482,7 +482,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
         {knownIds.size > 0 && (
           <div className="flex flex-wrap gap-3">
             {Array.from(knownIds).map((id) => (
-              <label key={id} className="flex items-center gap-1.5 text-sm text-ink">
+              <label key={id} className="flex min-h-11 items-center gap-1.5 text-sm text-ink sm:min-h-0">
                 <input
                   type="checkbox"
                   checked={selectedIds.has(id)}
@@ -501,7 +501,7 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
             aria-label={`Test model for ${provider.name}`}
             value={testModelId}
             onChange={(e) => setTestModelId(e.target.value)}
-            className="h-8 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+            className="h-12 max-w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-8 sm:text-sm text-[--fg]"
           >
             {provider.models.map((m) => (
               <option key={m.id} value={m.id}>
@@ -592,12 +592,12 @@ function CreateCustomProviderRow() {
 
   return (
     <div className="space-y-2 py-4">
-      <div className="flex gap-2">
-        <div className="flex-1 space-y-1">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-provider-name">Name</Label>
           <Input id="new-provider-name" value={name} onChange={(e) => setName(e.target.value)} />
         </div>
-        <div className="flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-provider-baseUrl">Base URL</Label>
           <Input
             id="new-provider-baseUrl"
@@ -607,7 +607,7 @@ function CreateCustomProviderRow() {
           />
         </div>
       </div>
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <Button type="button" onClick={submit} disabled={!name.trim() || !baseUrl.trim() || createProvider.isPending}>
           {createProvider.isPending ? "Creating…" : "Create"}
         </Button>

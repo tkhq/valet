@@ -80,7 +80,7 @@ export function MarkdownEditor({
         // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus={autoFocus}
         style={{ minHeight, maxHeight: `max(${minHeight}, 70vh)` }}
-        className="w-full resize-y rounded-md border border-line bg-paper p-3 font-mono text-sm leading-relaxed text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
+        className="w-full resize-y rounded-md border border-line bg-paper p-3 font-mono text-sm max-sm:text-base leading-relaxed text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
       />
       <div
         ref={previewRef}

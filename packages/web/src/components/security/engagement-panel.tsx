@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   useEngagement,
@@ -88,6 +88,11 @@ export function EngagementPanel({
   const cancelMutation = useCancelEngagement(sessionId);
   const resumeMutation = useResumeEngagement(sessionId);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [section, setSection] = useState(initialFindingId ? "findings" : "overview");
+  useEffect(() => {
+    if (initialFindingId) setSection("findings");
+  }, [initialFindingId]);
+  const sectionClass = (name: string) => cn("min-w-0 shrink-0 md:block", section !== name && "hidden");
   const navigate = useNavigate();
   const rescan = useRescanReview();
 
@@ -131,187 +136,221 @@ export function EngagementPanel({
     // Fills the aside so the findings pane (flex-1 below) can grow to the bottom
     // — no empty box under it. The overview sections above keep their natural
     // height; findings absorbs the slack and scrolls internally.
-    <div className="flex flex-1 flex-col min-h-0">
-      {closed && (engagement.status === "completed" || engagement.status === "failed") && (
-        <ManifestCard
-          cells={cells}
-          findings={flattenFindings(allFindingsQ.data?.pages)}
-          status={engagement.status}
-          cost={cost}
-          diff={diff}
-          baseRef={engagement.baseRef}
-          changedPaths={engagement.changedPaths}
-          onRescan={canAdminister ? startRescan : undefined}
-          rescanPending={rescan.isPending}
-        />
-      )}
-      {/* While the re-scan still runs, the diff banner lives above the header
-          (the manifest card only renders once terminal). fixedCount is null
-          until then. */}
-      {diff && !terminal && (
-        <RescanDiffBanner
-          diff={diff}
-          terminal={false}
-          baseRef={engagement.baseRef}
-          changedPaths={engagement.changedPaths}
-          className="mx-4 mt-3"
-        />
-      )}
-      {rescan.isError && (
-        <div className="mx-4 mt-2 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
-          {apiErrorText(rescan.error)}
-        </div>
-      )}
-      <div className="border-b border-line px-4 py-2 text-xs text-muted flex items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <span className="font-mono text-ink">{engagement.repoFullName}</span>
-          {engagement.repoRef !== "" && (
-            <span className="font-mono"> @ {engagement.repoRef.slice(0, 12)}</span>
-          )}
-          <span> · {engagement.status}</span>
-          <CostChip cost={cost} className="ml-1" />
-          <span className="block text-[11px] text-muted">
-            {engagement.hasRepoConfig
-              ? "Configured by .valet/security.yml"
-              : "Preset: Code review"}
-          </span>
-        </div>
-        {cancellable && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setConfirmCancel(true)}
-          >
-            Cancel review
+    <div className="flex flex-1 flex-col min-h-0 min-w-0">
+      <div className="sticky top-0 z-10 shrink-0 border-b border-line bg-paper px-3 py-2 md:hidden">
+        <label htmlFor={`security-section-${sessionId}`} className="sr-only">Review section</label>
+        <select
+          id={`security-section-${sessionId}`}
+          value={section}
+          onChange={(event) => setSection(event.target.value)}
+          className="h-11 w-full min-w-0 border-0 bg-paper px-1 text-base font-semibold text-ink"
+        >
+          <option value="overview">Overview</option>
+          <option value="findings">Findings</option>
+          <option value="steps">Steps ({cells.length})</option>
+          <option value="needs">Needs ({needs?.filter((need) => need.status === "open").length ?? 0} open)</option>
+          <option value="coverage">Coverage</option>
+          <option value="report">Report</option>
+        </select>
+        {needs && needs.some((need) => need.status === "open") && section !== "needs" && (
+          <Button variant="ghost" className="mt-1 w-full text-warning-fg" onClick={() => setSection("needs")}>
+            Review open needs ({needs.filter((need) => need.status === "open").length}) →
           </Button>
         )}
       </div>
-      <ConfirmDialog
-        open={confirmCancel}
-        onOpenChange={(open) => {
-          setConfirmCancel(open);
-          if (!open) cancelMutation.reset();
-        }}
-        title="Cancel this security review?"
-        description="This stops the engagement and fails every unsettled cell. It cannot be resumed."
-        confirmLabel="Cancel review"
-        pendingLabel="Cancelling…"
-        pending={cancelMutation.isPending}
-        error={cancelMutation.isError ? apiErrorText(cancelMutation.error) : undefined}
-        onConfirm={() => {
-          cancelMutation.mutate(undefined, { onSuccess: () => setConfirmCancel(false) });
-        }}
-      />
-      {/* Resume banner (v1 Part 09 §Resume contract). Renders on a terminal
-          engagement (completed | failed) that carries at least one open need,
-          at least one failed cell, or at least one pending cell that never
-          dispatched. Admin-gated button; a non-admin sees the banner but not
-          the button. */}
-      {resumable && resumableStats && (() => {
-        const parts: string[] = [];
-        if (resumableStats.openNeeds > 0) {
-          parts.push(
-            `${resumableStats.openNeeds} unresolved need${resumableStats.openNeeds === 1 ? "" : "s"}`,
-          );
-        }
-        if (resumableStats.failedCells > 0) {
-          parts.push(
-            `${resumableStats.failedCells} failed cell${resumableStats.failedCells === 1 ? "" : "s"}`,
-          );
-        }
-        if (resumableStats.pendingCells > 0) {
-          parts.push(
-            `${resumableStats.pendingCells} pending cell${resumableStats.pendingCells === 1 ? "" : "s"}`,
-          );
-        }
-        const summary =
-          parts.length === 0
-            ? "unfinished work"
-            : parts.length === 1
-              ? parts[0]
-              : parts.length === 2
-                ? `${parts[0]} and ${parts[1]}`
-                : `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
-        return (
-        <div
-          className="mx-4 mt-3 rounded border border-warning-500/40 bg-warning-500/10 px-3 py-2 text-xs text-warning-700"
-          data-testid="resume-banner"
-          role="status"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="font-semibold">This review closed with {summary}.</div>
-              <p className="mt-0.5">
-                Resume to re-run only the affected cells with the input you provide. Completed cells stay untouched.
-              </p>
-              {resumeMutation.isError && (
-                <p className="mt-1 text-danger-600" data-testid="resume-error">
-                  {apiErrorText(resumeMutation.error)}
+      <div className={sectionClass("overview")}>
+        {closed && (engagement.status === "completed" || engagement.status === "failed") && (
+          <ManifestCard
+            cells={cells}
+            findings={flattenFindings(allFindingsQ.data?.pages)}
+            status={engagement.status}
+            cost={cost}
+            diff={diff}
+            baseRef={engagement.baseRef}
+            changedPaths={engagement.changedPaths}
+            onRescan={canAdminister ? startRescan : undefined}
+            rescanPending={rescan.isPending}
+          />
+        )}
+        {/* While the re-scan still runs, the diff banner lives above the header
+            (the manifest card only renders once terminal). fixedCount is null
+            until then. */}
+        {diff && !terminal && (
+          <RescanDiffBanner
+            diff={diff}
+            terminal={false}
+            baseRef={engagement.baseRef}
+            changedPaths={engagement.changedPaths}
+            className="mx-4 mt-3"
+          />
+        )}
+        {rescan.isError && (
+          <div className="mx-4 mt-2 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
+            {apiErrorText(rescan.error)}
+          </div>
+        )}
+        <div className="border-b border-line px-4 py-2 text-xs text-muted flex flex-wrap items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <span className="font-mono break-all text-ink">{engagement.repoFullName}</span>
+            {engagement.repoRef !== "" && (
+              <span className="font-mono"> @ {engagement.repoRef.slice(0, 12)}</span>
+            )}
+            <span> · {engagement.status}</span>
+            <CostChip cost={cost} className="ml-1" />
+            <span className="block text-[11px] text-muted">
+              {engagement.hasRepoConfig
+                ? "Configured by .valet/security.yml"
+                : "Preset: Code review"}
+            </span>
+          </div>
+          {cancellable && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setConfirmCancel(true)}
+            >
+              Cancel review
+            </Button>
+          )}
+        </div>
+        <ConfirmDialog
+          open={confirmCancel}
+          onOpenChange={(open) => {
+            setConfirmCancel(open);
+            if (!open) cancelMutation.reset();
+          }}
+          title="Cancel this security review?"
+          description="This stops the engagement and fails every unsettled cell. It cannot be resumed."
+          confirmLabel="Cancel review"
+          pendingLabel="Cancelling…"
+          pending={cancelMutation.isPending}
+          error={cancelMutation.isError ? apiErrorText(cancelMutation.error) : undefined}
+          onConfirm={() => {
+            cancelMutation.mutate(undefined, { onSuccess: () => setConfirmCancel(false) });
+          }}
+        />
+        {/* Resume banner (v1 Part 09 §Resume contract). Renders on a terminal
+            engagement (completed | failed) that carries at least one open need,
+            at least one failed cell, or at least one pending cell that never
+            dispatched. Admin-gated button; a non-admin sees the banner but not
+            the button. */}
+        {resumable && resumableStats && (() => {
+          const parts: string[] = [];
+          if (resumableStats.openNeeds > 0) {
+            parts.push(
+              `${resumableStats.openNeeds} unresolved need${resumableStats.openNeeds === 1 ? "" : "s"}`,
+            );
+          }
+          if (resumableStats.failedCells > 0) {
+            parts.push(
+              `${resumableStats.failedCells} failed cell${resumableStats.failedCells === 1 ? "" : "s"}`,
+            );
+          }
+          if (resumableStats.pendingCells > 0) {
+            parts.push(
+              `${resumableStats.pendingCells} pending cell${resumableStats.pendingCells === 1 ? "" : "s"}`,
+            );
+          }
+          const summary =
+            parts.length === 0
+              ? "unfinished work"
+              : parts.length === 1
+                ? parts[0]
+                : parts.length === 2
+                  ? `${parts[0]} and ${parts[1]}`
+                  : `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+          return (
+          <div
+            className="mx-4 mt-3 rounded border border-warning-500/40 bg-warning-500/10 px-3 py-2 text-xs text-warning-700"
+            data-testid="resume-banner"
+            role="status"
+          >
+            <div className="flex flex-col items-start justify-between gap-3 sm:flex-row">
+              <div className="min-w-0">
+                <div className="font-semibold">This review closed with {summary}.</div>
+                <p className="mt-0.5">
+                  Resume to re-run only the affected cells with the input you provide. Completed cells stay untouched.
                 </p>
+                {resumeMutation.isError && (
+                  <p className="mt-1 text-danger-600" data-testid="resume-error">
+                    {apiErrorText(resumeMutation.error)}
+                  </p>
+                )}
+              </div>
+              {canAdminister ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => resumeMutation.mutate(undefined)}
+                  disabled={resumeMutation.isPending}
+                  data-testid="resume-button"
+                >
+                  {resumeMutation.isPending ? "Resuming…" : "Resume review"}
+                </Button>
+              ) : (
+                <span className="text-[11px] text-muted">Ask a session admin to resume.</span>
               )}
             </div>
-            {canAdminister ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => resumeMutation.mutate(undefined)}
-                disabled={resumeMutation.isPending}
-                data-testid="resume-button"
-              >
-                {resumeMutation.isPending ? "Resuming…" : "Resume review"}
-              </Button>
-            ) : (
-              <span className="text-[11px] text-muted">Ask a session admin to resume.</span>
-            )}
           </div>
-        </div>
-        );
-      })()}
-      {/* The finalized config + plan, at-a-glance and read-only. The user
-          configured this pre-creation on `/security/new`. */}
-      {/* Config context; the plan list shows only before cells materialize —
-          once they do, the live cell rail below is the single plan view. */}
-      <ReviewSummary engagement={engagement} planCells={planCells} showPlan={cells.length === 0} />
-      {/* Blocking asks the human must answer (pivot-coordinator) — kept near the
-          top so they are not missed. */}
-      {needs && needs.length > 0 && (
-        <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />
-      )}
+          );
+        })()}
+        {/* The finalized config + plan, at-a-glance and read-only. The user
+            configured this pre-creation on `/security/new`. */}
+        {/* Config context; the plan list shows only before cells materialize —
+            once they do, the live cell rail below is the single plan view. */}
+        <ReviewSummary engagement={engagement} planCells={planCells} showPlan={cells.length === 0} />
+      </div>
+      <div className={sectionClass("needs")}>
+        {(!needs || needs.length === 0) && <p className="p-4 text-sm text-muted md:hidden">No needs require your input.</p>}
+        {/* Blocking asks the human must answer (pivot-coordinator) — kept near the
+            top so they are not missed. */}
+        {needs && needs.length > 0 && (
+          <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />
+        )}
 
-      {/* The engagement steps — collapsible so a long plan (triads multiply the
-          cells) stays a one-line strip and the findings triage below is
-          readable; expand for the full rail. */}
-      <StepsPanel cells={cells} onOpenChild={onOpenChild} />
+      </div>
+      {/* Expand the steps to inspect the full cell rail. */}
+      <div className={sectionClass("steps")}>
+        <StepsPanel cells={cells} onOpenChild={onOpenChild} />
+      </div>
 
       {/* Findings — the primary triage surface, kept high so it is always in
           view; it fills the panel. Coverage and the report sit below it as
           secondary reference the user scrolls to. */}
-      <div className="border-t border-line" />
-      <FindingsReview
-        sessionId={sessionId}
-        engagement={engagement}
-        cells={cells}
-        canAdminister={canAdminister}
-        initialFindingId={initialFindingId}
-        polling={engagement.status === "running"}
-        diff={diff}
-        onOpenChild={onOpenChild}
-      />
-
-      {coverageQ.data && <CoverageSection coverage={coverageQ.data.coverage} cells={cells} />}
-
-      {/* The report artifact (M-P3): shown once the engagement has started — a
-          report exists, is generating, or is pending the report cell. Hidden
-          while planning, where no report is possible yet. */}
-      {engagement.status !== "planning" && (
-        <ReportSection
+      <div className={cn(sectionClass("findings"), "md:flex md:flex-1 md:flex-col")}>
+        <div className="border-t border-line" />
+        <FindingsReview
           sessionId={sessionId}
-          report={report}
-          generating={reportGenerating}
-          hasReportStep={cells.some((c) => c.persona === "report")}
+          engagement={engagement}
+          cells={cells}
+          canAdminister={canAdminister}
+          initialFindingId={initialFindingId}
+          polling={engagement.status === "running"}
+          diff={diff}
+          onOpenChild={onOpenChild}
         />
-      )}
+      </div>
+      <div className={sectionClass("coverage")}>
+        {coverageQ.data ? <CoverageSection coverage={coverageQ.data.coverage} cells={cells} /> : (
+          <p className="p-4 text-sm text-muted md:hidden">{coverageQ.isError ? "Could not load coverage. Reload the page to retry." : "Loading coverage…"}</p>
+        )}
+      </div>
+      <div className={sectionClass("report")}>
+        {engagement.status === "planning" && <p className="p-4 text-sm text-muted md:hidden">The report becomes available after the review starts.</p>}
+
+        {/* The report artifact (M-P3): shown once the engagement has started — a
+            report exists, is generating, or is pending the report cell. Hidden
+            while planning, where no report is possible yet. */}
+        {engagement.status !== "planning" && (
+          <ReportSection
+            sessionId={sessionId}
+            report={report}
+            generating={reportGenerating}
+            hasReportStep={cells.some((c) => c.persona === "report")}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -339,7 +378,10 @@ export function SecuritySessionLayout({
   /** Open a persona child as the `?child=` slide-over (threaded to the rail). */
   onOpenChild?: (childId: string) => void;
 }) {
-  const [pane, setPane] = useState<MobilePane>("chat");
+  const [pane, setPane] = useState<MobilePane>(initialFindingId ? "panel" : "chat");
+  useEffect(() => {
+    if (initialFindingId) setPane("panel");
+  }, [initialFindingId]);
   // The right-hand panel is the sized pane; chat fills the rest. 480px = the
   // previous fixed 30rem width.
   const panel = useResizablePane({
@@ -383,7 +425,7 @@ export function SecuritySessionLayout({
         <aside
           aria-label="Security panel"
           className={cn(
-            "flex-col min-h-0 overflow-y-auto border-line",
+            "min-w-0 flex-col min-h-0 overflow-y-auto border-line",
             "md:w-[var(--sec-panel-w)] md:max-w-[70vw]",
             pane === "panel" ? "flex flex-1 md:flex-none" : "hidden md:flex",
           )}
@@ -417,7 +459,7 @@ function MobileTab({
       aria-selected={active}
       onClick={onSelect}
       className={cn(
-        "flex-1 px-3 py-2 text-xs font-medium inline-flex items-center justify-center gap-1.5",
+        "min-h-11 flex-1 px-3 py-2 text-sm font-medium inline-flex items-center justify-center gap-1.5",
         active ? "text-ink border-b-2 border-moss" : "text-muted",
       )}
     >

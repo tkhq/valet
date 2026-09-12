@@ -62,7 +62,7 @@ function queryReducedMotion(): boolean {
 }
 
 const NAME_SIZE: Record<PresenceSize, string> = {
-  hero: "font-display text-3xl text-ink",
+  hero: "min-w-0 break-words font-display text-3xl text-ink",
   nav: "font-display text-sm font-medium text-ink",
 };
 
@@ -103,12 +103,12 @@ export function PresenceMark({
   const reducedMotion = usePrefersReducedMotion();
 
   return (
-    <div className={cn("inline-flex", LAYOUT[size], WRAP_GAP[size], className)}>
+    <div className={cn("inline-flex max-w-full", LAYOUT[size], WRAP_GAP[size], className)}>
       <NameTag className={NAME_SIZE[size]}>{name}</NameTag>
       <span
         aria-hidden
         data-presence={state}
-        className={cn(presenceDotClassName(state, reducedMotion), DOT_SIZE[size], "rounded-full")}
+        className={cn(presenceDotClassName(state, reducedMotion), DOT_SIZE[size], "shrink-0 rounded-full")}
       />
     </div>
   );

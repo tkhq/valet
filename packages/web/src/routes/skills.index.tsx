@@ -111,9 +111,9 @@ export function SkillsIndexPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10">
-        <div className="flex items-end justify-between gap-4">
-          <div className="flex items-baseline gap-3">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-3">
             <h1 className="font-display text-2xl text-ink">Skills</h1>
             <WorkspaceClause />
           </div>

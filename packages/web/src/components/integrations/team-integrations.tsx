@@ -18,7 +18,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
         <h1 className="font-display text-2xl text-ink">Integrations</h1>
         {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
         <div className="mt-10 space-y-6">

@@ -66,7 +66,7 @@ export function ActivityStrip({
   onRetry?: () => void;
 }) {
   return (
-    <section className="rounded-lg border border-line bg-paper">
+    <section className="min-w-0 rounded-lg border border-line bg-paper">
       <header className="px-4 py-3 border-b border-line">
         <h2 className="font-display text-base text-ink">Activity</h2>
       </header>
@@ -80,7 +80,7 @@ export function ActivityStrip({
           <div className="text-xs text-danger-500">
             Couldn't load activity.{" "}
             {onRetry && (
-              <button type="button" className="underline" onClick={onRetry}>
+              <button type="button" className="min-h-11 px-2 underline sm:min-h-0" onClick={onRetry}>
                 Retry
               </button>
             )}
@@ -95,9 +95,9 @@ export function ActivityStrip({
               <li key={e.id}>
                 <a
                   href={e.href}
-                  className="flex items-center justify-between gap-3 py-2 text-sm hover:text-moss"
+                  className="flex min-h-11 flex-wrap items-center justify-between gap-x-3 gap-y-1 sm:flex-nowrap py-2 text-sm hover:text-moss"
                 >
-                  <span className="flex min-w-0 items-center gap-2">
+                  <span className="flex min-w-0 max-w-full items-center gap-2">
                     <span
                       className={cn(
                         "h-1.5 w-1.5 shrink-0 rounded-full",
@@ -105,7 +105,7 @@ export function ActivityStrip({
                       )}
                       aria-hidden
                     />
-                    <span className="truncate text-ink">{e.title}</span>
+                    <span className="min-w-0 break-words text-ink sm:truncate">{e.title}</span>
                   </span>
                   <span className="shrink-0 text-xs text-muted">{relativeTime(e.createdAt)}</span>
                 </a>

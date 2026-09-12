@@ -128,6 +128,22 @@ describe("TopNav", () => {
     ];
   });
 
+  it("opens a mobile navigation menu and closes after selecting a destination", async () => {
+    renderNav();
+    await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Security" })).toBeTruthy();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Sessions" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("applies entitlement filtering to mobile destinations", async () => {
+    securityPlugins = [];
+    renderNav();
+    await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+    expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: "Security" })).toBeNull();
+  });
+
   it("renders the Valet logo, not the orchestrator's name", async () => {
     renderNav();
     expect(await screen.findByText("Valet")).toBeTruthy();

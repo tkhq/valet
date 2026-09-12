@@ -81,7 +81,7 @@ export function AssistantPage() {
               patchMe.mutate({ newThreadBehavior });
             }
           }}
-          className="h-9 w-full rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+          className="h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:text-sm text-[--fg]"
         >
           <option value="keep_current">Keep current settings</option>
           <option value="use_defaults">Use configured defaults</option>

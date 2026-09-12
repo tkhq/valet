@@ -104,7 +104,7 @@ export function WorkflowsIndexPage() {
                   search: t.id === "workflows" ? {} : { tab: t.id },
                 })
               }
-              className={`shrink-0 rounded-t px-2 py-1.5 text-sm sm:px-3 border-b-2 ${
+              className={`min-h-11 shrink-0 rounded-t px-2 py-1.5 sm:min-h-0 text-sm sm:px-3 border-b-2 ${
                 tab === t.id
                   ? "border-ink font-medium text-ink"
                   : "border-transparent text-muted hover:text-ink"
@@ -417,13 +417,13 @@ function ScopedRunsTab() {
             <Link
               to="/workflows/runs/$runId"
               params={{ runId: r.runId }}
-              className="flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink/30"
+              className="flex flex-col items-start justify-between gap-3 rounded border sm:flex-row sm:items-center border-line bg-paper px-4 py-3 hover:border-ink-wash-strong"
             >
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium text-ink">{r.workflowName}</div>
-                <div className="truncate text-xs text-muted font-mono">{r.runId}</div>
+              <div className="min-w-0 max-w-full">
+                <div className="break-words text-sm font-medium text-ink sm:truncate">{r.workflowName}</div>
+                <div className="break-all text-xs text-muted font-mono sm:truncate">{r.runId}</div>
               </div>
-              <div className="flex shrink-0 items-center gap-3">
+              <div className="flex max-w-full flex-wrap items-center gap-3">
                 <span className="text-xs text-muted">{new Date(r.createdAt).toLocaleString()}</span>
                 <RunStatusChip status={r.status} outcome={r.outcome} needsApproval={false} />
               </div>

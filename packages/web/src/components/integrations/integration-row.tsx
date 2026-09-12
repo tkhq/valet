@@ -272,13 +272,13 @@ function ServiceBlock({
   const controls = !service.connected ? (
     unconfigured || orgProvided ? null : connectControl
   ) : repair && !unconfigured && !orgProvided ? (
-    <span className="flex items-center gap-3">
+    <span className="flex flex-wrap items-center gap-3">
       {shareControl}
       {disconnectControl}
       {connectControl}
     </span>
   ) : (
-    <span className="flex items-center gap-3">
+    <span className="flex flex-wrap items-center gap-3">
       {shareControl}
       {disconnectControl}
     </span>

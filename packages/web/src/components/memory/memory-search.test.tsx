@@ -9,6 +9,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 const treeEntries = [
   { path: "a.md", title: "Alpha note", type: "note", pinned: false, updatedAt: 0, dir: false, sizeBytes: 10 },
 ];
+let emptyTree = false;
 const searchResults = [
   {
     path: "b.md",
@@ -46,7 +47,7 @@ vi.mock("~/api/settings", () => ({
 
 vi.mock("~/api/memory", () => ({
   useMemoryTree: () => ({
-    data: { entries: treeEntries },
+    data: { entries: emptyTree ? [] : treeEntries },
     isLoading: false,
     error: null,
     refetch: vi.fn(),
@@ -63,11 +64,18 @@ import { MemorySearchPane } from "./memory-search";
 
 describe("MemorySearchPane", () => {
   beforeEach(() => {
+    emptyTree = false;
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("explains an empty memory list", () => {
+    emptyTree = true;
+    render(<MemorySearchPane onSelect={vi.fn()} />);
+    expect(screen.getByText(/No memory files yet/)).toBeTruthy();
   });
 
   it("shows the tree at rest", () => {

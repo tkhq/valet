@@ -85,6 +85,7 @@ export function EventFeed({
       <div className="flex flex-wrap items-center gap-2">
         <SelectMenu
           value={scope}
+          triggerClassName="max-w-full whitespace-normal text-left"
           onChange={onScopeChange}
           triggerLabel={`Scope: ${scope === "all" ? "All" : "This workspace"}`}
           options={SCOPE_OPTIONS}
@@ -92,6 +93,7 @@ export function EventFeed({
 
         <SelectMenu
           value={service}
+          triggerClassName="max-w-full whitespace-normal text-left"
           onChange={(next) => {
             setService(next);
             setKey(ALL);
@@ -106,7 +108,7 @@ export function EventFeed({
           <SelectMenu
             value={key}
             onChange={setKey}
-            triggerClassName="font-mono text-xs"
+            triggerClassName="max-w-full break-all whitespace-normal text-left font-mono text-xs"
             options={[
               { value: ALL, label: "All events" },
               ...keysForService.map((k) => ({ value: k, label: <span className="font-mono text-xs">{k}</span> })),

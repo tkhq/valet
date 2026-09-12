@@ -126,7 +126,7 @@ export function ApprovedModelsSection() {
                   {group.models.map((model) => {
                     const checked = (approved ?? []).includes(model.id);
                     return (
-                      <label key={model.id} className="flex items-center gap-2 py-1 text-sm text-ink">
+                      <label key={model.id} className="flex min-h-11 items-center gap-2 py-1 text-sm sm:min-h-0 text-ink">
                         <Checkbox
                           checked={checked}
                           onCheckedChange={(next) => toggle(model.id, next)}

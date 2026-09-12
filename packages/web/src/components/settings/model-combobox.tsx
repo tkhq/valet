@@ -143,7 +143,7 @@ export function ModelCombobox({
               aria-selected={false}
               onMouseDown={(e) => e.preventDefault()}
               onClick={clear}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-muted hover:bg-ink-wash"
+              className="flex min-h-11 w-full sm:min-h-0 items-center gap-2 px-3 py-1.5 text-left text-sm text-muted hover:bg-ink-wash"
             >
               {emptyLabel}
             </button>
@@ -163,14 +163,14 @@ export function ModelCombobox({
                     aria-selected={value === tier}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => select(tier)}
-                    className="flex w-full flex-col items-stretch gap-0.5 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+                    className="flex min-h-11 w-full sm:min-h-0 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
                   >
-                    <span className="flex items-center gap-2">
+                    <span className="flex min-w-0 items-center gap-2">
                       {value === tier && <Check className="h-3.5 w-3.5 text-moss" />}
-                      <span className="text-ink">{TIER_LABELS[tier]}</span>
+                      <span className="min-w-0 break-words text-ink">{TIER_LABELS[tier]}</span>
                     </span>
                     {subtitle && (
-                      <span className="pl-[22px] text-xs text-muted leading-snug">{subtitle}</span>
+                      <span className="break-words pl-[22px] text-xs text-muted leading-snug">{subtitle}</span>
                     )}
                   </button>
                 );
@@ -185,11 +185,11 @@ export function ModelCombobox({
               aria-selected={value === m.id}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => select(m.id)}
-              className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+              className="flex min-h-11 w-full sm:min-h-0 flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
             >
-              <span className="flex items-center gap-2">
+              <span className="flex min-w-0 items-center gap-2">
                 {value === m.id && <Check className="h-3.5 w-3.5 text-moss" />}
-                <span className="text-ink">{curated.label}</span>
+                <span className="min-w-0 break-words text-ink">{curated.label}</span>
               </span>
               <Badge variant={speedClassBadgeVariant(curated.speedClass)}>{curated.speedClass}</Badge>
             </button>
@@ -202,11 +202,11 @@ export function ModelCombobox({
               aria-selected={value === m.id}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => select(m.id)}
-              className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+              className="flex min-h-11 w-full sm:min-h-0 flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
             >
-              <span className="flex items-center gap-2">
+              <span className="flex min-w-0 items-center gap-2">
                 {value === m.id && <Check className="h-3.5 w-3.5 text-moss" />}
-                <span className="text-ink">{m.name}</span>
+                <span className="min-w-0 break-words text-ink">{m.name}</span>
               </span>
               <span className="text-xs text-muted">{m.providerName}</span>
             </button>

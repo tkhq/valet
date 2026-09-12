@@ -78,7 +78,7 @@ export function canEditAssistant(
 /** The shared page frame — the same shell every settings surface uses, so
  * the editor never renders full-bleed. */
 function PageShell({ children }: { children: React.ReactNode }) {
-  return <div className="mx-auto max-w-3xl px-6 py-10 pb-24">{children}</div>;
+  return <div className="mx-auto min-w-0 max-w-3xl px-4 py-6 pb-24 sm:px-6 sm:py-10 sm:pb-24">{children}</div>;
 }
 
 // ── page component ────────────────────────────────────────────────────────
@@ -460,7 +460,7 @@ function AssistantEditorForm({
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="truncate font-display text-2xl text-ink">{displayName}</h1>
+              <h1 className="min-w-0 break-words font-display text-2xl sm:truncate text-ink">{displayName}</h1>
               {assistant.isDefault && <Badge variant="accent">Default</Badge>}
             </div>
             <p className="mt-0.5 text-sm text-muted">
@@ -544,7 +544,7 @@ function AssistantEditorForm({
             </p>
           )}
         </FieldRow>
-        <div className="flex items-center gap-3 py-4">
+        <div className="flex flex-wrap items-center gap-3 py-4">
           <Button
             type="button"
             onClick={saveIdentity}
@@ -554,7 +554,7 @@ function AssistantEditorForm({
             {identityPatch.isPending ? "Saving…" : "Save identity"}
           </Button>
           {identityPatch.error != null && (
-            <p className="text-xs text-danger-500">{errorText(identityPatch.error)}</p>
+            <p className="min-w-0 break-words text-xs text-danger-500">{errorText(identityPatch.error)}</p>
           )}
         </div>
       </Section>
@@ -644,16 +644,16 @@ function AssistantEditorForm({
                       // (the opacity-modifier trap, theme.css).
                       <span
                         key={n}
-                        className="inline-flex items-center gap-1 rounded-full bg-warning-wash px-2.5 py-1 text-xs text-warning-fg"
+                        className="inline-flex max-w-full items-center gap-1 rounded-full bg-warning-wash px-2.5 py-1 text-xs text-warning-fg"
                       >
-                        {n}
-                        <span className="text-[10px] opacity-70">(not found)</span>
+                        <span className="min-w-0 break-all">{n}</span>
+                        <span className="shrink-0 text-[10px] opacity-70">(not found)</span>
                         {canEdit && (
                           <button
                             type="button"
                             onClick={() => removeSkill(n)}
                             aria-label={`Remove ${n}`}
-                            className="ml-0.5 rounded text-warning-fg hover:opacity-70"
+                            className="ml-0.5 min-h-11 min-w-11 shrink-0 rounded sm:min-h-0 sm:min-w-0 text-warning-fg hover:opacity-70"
                           >
                             ×
                           </button>
@@ -675,7 +675,7 @@ function AssistantEditorForm({
                       {[...catalogSkillNames].map((skillName) => (
                         <label
                           key={skillName}
-                          className="flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm text-ink hover:bg-ink-wash"
+                          className="flex min-h-11 cursor-pointer items-center gap-2.5 sm:min-h-0 rounded-md px-2.5 py-1.5 text-sm text-ink hover:bg-ink-wash"
                         >
                           <input
                             type="checkbox"
@@ -685,7 +685,7 @@ function AssistantEditorForm({
                             disabled={!canEdit}
                             aria-label={skillName}
                           />
-                          <span className="truncate">{skillName}</span>
+                          <span className="min-w-0 break-words sm:truncate">{skillName}</span>
                         </label>
                       ))}
                     </div>
@@ -694,7 +694,7 @@ function AssistantEditorForm({
               </div>
             ))}
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <Button
               type="button"
               onClick={saveSkills}
@@ -704,7 +704,7 @@ function AssistantEditorForm({
               {skillsPatch.isPending ? "Saving…" : "Save skills"}
             </Button>
             {skillsPatch.error != null && (
-              <p className="text-xs text-danger-500">{errorText(skillsPatch.error)}</p>
+              <p className="min-w-0 break-words text-xs text-danger-500">{errorText(skillsPatch.error)}</p>
             )}
           </div>
         </div>
@@ -759,7 +759,7 @@ function AssistantEditorForm({
                     const isChecked = entry !== undefined;
                     return (
                       <div key={opt.service} className="px-3 py-2.5">
-                        <label className="flex cursor-pointer items-center gap-3">
+                        <label className="flex min-h-11 cursor-pointer items-center gap-3 sm:min-h-0">
                           <input
                             type="checkbox"
                             className="h-4 w-4 shrink-0 accent-moss"
@@ -769,16 +769,16 @@ function AssistantEditorForm({
                             aria-label={opt.label}
                           />
                           <ServiceIcon slug={opt.icon} label={opt.label} size="sm" tone="quiet" />
-                          <span className="text-sm font-medium text-ink">{opt.label}</span>
+                          <span className="min-w-0 break-words text-sm font-medium text-ink">{opt.label}</span>
                         </label>
                         {isChecked && opt.actions.length > 0 && (
-                          <div className="mt-2 space-y-0.5 pl-16">
+                          <div className="mt-2 space-y-0.5 pl-4 sm:pl-16">
                             {opt.actions.map((action) => {
                               const excluded = (entry?.excludeActions ?? []).includes(action.id);
                               return (
                                 <label
                                   key={action.id}
-                                  className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-muted hover:bg-ink-wash hover:text-ink"
+                                  className="flex min-h-11 cursor-pointer items-center gap-2 rounded sm:min-h-0 px-1.5 py-1 text-xs text-muted hover:bg-ink-wash hover:text-ink"
                                 >
                                   <input
                                     type="checkbox"
@@ -790,7 +790,7 @@ function AssistantEditorForm({
                                     disabled={!canEdit}
                                     aria-label={`Exclude ${action.name}`}
                                   />
-                                  Exclude: {action.name}
+                                  <span className="min-w-0 break-words">Exclude: {action.name}</span>
                                 </label>
                               );
                             })}
@@ -802,7 +802,7 @@ function AssistantEditorForm({
                 </div>
               ))}
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <Button
                 type="button"
                 onClick={saveIntegrations}
@@ -812,7 +812,7 @@ function AssistantEditorForm({
                 {integrationsPatch.isPending ? "Saving…" : "Save integrations"}
               </Button>
               {integrationsPatch.error != null && (
-                <p className="text-xs text-danger-500">{errorText(integrationsPatch.error)}</p>
+                <p className="min-w-0 break-words text-xs text-danger-500">{errorText(integrationsPatch.error)}</p>
               )}
             </div>
           </div>
@@ -828,7 +828,7 @@ function AssistantEditorForm({
               Automations that target this workspace open the default.
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             {assistant.isDefault ? (
               <Badge variant="accent">This is the default</Badge>
             ) : (
@@ -842,7 +842,7 @@ function AssistantEditorForm({
               </Button>
             )}
             {managePatch.error != null && (
-              <p className="text-xs text-danger-500">{errorText(managePatch.error)}</p>
+              <p className="min-w-0 break-words text-xs text-danger-500">{errorText(managePatch.error)}</p>
             )}
           </div>
         </div>

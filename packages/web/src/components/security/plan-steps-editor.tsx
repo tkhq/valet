@@ -257,7 +257,7 @@ export function PlanStepsEditor({
 
   return (
     <div data-testid="plan-steps-editor">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-xs font-semibold text-ink">Plan</h3>
         <span className="text-[11px] text-muted">
           {value.length} step{value.length === 1 ? "" : "s"}
@@ -320,10 +320,10 @@ function StepRow({
   onMoveUp: () => void;
   onMoveDown: () => void;
 }) {
-  const selectClass = "h-8 rounded border border-line bg-paper px-2 text-xs text-ink";
+  const selectClass = "min-h-11 sm:min-h-0 sm:h-8 rounded border border-line bg-paper px-2 text-base sm:text-xs text-ink";
   return (
     <div className="rounded border border-line p-2" data-testid="plan-step">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-medium text-muted">Step {index + 1}</span>
           {isPersonaDeterministic(step.persona) && (
@@ -370,7 +370,7 @@ function StepRow({
       </div>
 
       <div className="mt-2 grid gap-2">
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <div className="grid gap-1">
             <Label htmlFor={`${step.key}-persona`}>Persona</Label>
             <select
@@ -429,7 +429,7 @@ function StepRow({
             value={step.name}
             onChange={(e) => onChange({ name: e.target.value })}
             placeholder="e.g. authz-sweep"
-            className="h-8 text-xs"
+            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
           />
         </div>
 
@@ -440,7 +440,7 @@ function StepRow({
             value={step.goal}
             onChange={(e) => onChange({ goal: e.target.value })}
             placeholder="What this step must accomplish"
-            className="min-h-[3rem] rounded border border-line bg-paper px-2 py-1 text-xs text-ink"
+            className="min-h-[3rem] rounded border border-line bg-paper px-2 py-2 text-base sm:py-1 sm:text-xs text-ink"
           />
         </div>
 
@@ -451,7 +451,7 @@ function StepRow({
             value={step.pathsText}
             onChange={(e) => onChange({ pathsText: e.target.value })}
             placeholder="e.g. packages/api, src/auth"
-            className="h-8 text-xs"
+            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
           />
         </div>
 
@@ -460,7 +460,7 @@ function StepRow({
             <span className="text-xs text-muted">Reads earlier steps</span>
             <div className="flex flex-wrap gap-2">
               {Array.from({ length: index }, (_, earlier) => (
-                <label key={earlier} className="inline-flex items-center gap-1 text-[11px] text-ink">
+                <label key={earlier} className="inline-flex min-h-11 sm:min-h-0 items-center gap-1 text-[11px] text-ink">
                   <input
                     type="checkbox"
                     checked={step.reads.includes(earlier)}
@@ -478,7 +478,7 @@ function StepRow({
           </div>
         )}
 
-        <label className="inline-flex items-center gap-2 text-xs text-ink">
+        <label className="inline-flex min-h-11 sm:min-h-0 items-center gap-2 text-xs text-ink">
           <input
             type="checkbox"
             checked={step.triad}
@@ -487,7 +487,7 @@ function StepRow({
           Run as architect → worker → verifier triad
         </label>
 
-        <label className="inline-flex items-center gap-2 text-xs text-ink">
+        <label className="inline-flex min-h-11 sm:min-h-0 items-center gap-2 text-xs text-ink">
           <input
             type="checkbox"
             checked={step.review}

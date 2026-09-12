@@ -55,7 +55,7 @@ export function SandboxTabs({
   const showsGatewayPane = activeTab !== "chat";
   return (
     <div className={cn("flex min-h-0 flex-col", showsGatewayPane ? "flex-1" : "shrink-0")}>
-      <div role="tablist" aria-label="Session view" className="flex items-center gap-1 border-b border-line px-4">
+      <div role="tablist" aria-label="Session view" className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-3 sm:px-4">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -64,7 +64,7 @@ export function SandboxTabs({
             aria-selected={activeTab === t.id}
             onClick={() => onTabChange(t.id)}
             className={cn(
-              "px-2.5 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
+              "shrink-0 min-h-11 sm:min-h-0 px-2.5 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
               activeTab === t.id
                 ? "border-moss text-ink"
                 : "border-transparent text-muted hover:text-ink",

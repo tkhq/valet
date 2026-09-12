@@ -103,7 +103,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
             {gate.iteration != null ? ` • Iteration ${gate.iteration}` : ""}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <code className="font-mono text-sm font-semibold text-ink">{serviceAction}</code>
+            <code className="min-w-0 break-all font-mono text-sm font-semibold text-ink">{serviceAction}</code>
             {gate.riskLevel && <RiskBadge level={gate.riskLevel} />}
           </div>
         </div>
@@ -119,7 +119,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
       {/* Params */}
       {gate.gateParams != null && (
         <details className="text-xs text-muted">
-          <summary className="cursor-pointer select-none font-medium text-ink">
+          <summary className="min-h-11 cursor-pointer select-none py-3 font-medium sm:min-h-0 sm:py-0 text-ink">
             Parameters
           </summary>
           <pre className="mt-1.5 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
@@ -141,7 +141,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
         placeholder="Optional note"
         disabled={busy}
         className={cn(
-          "w-full rounded border border-line bg-[--bg] px-2 py-1.5 text-sm text-ink",
+          "min-h-11 w-full rounded border border-line bg-[--bg] px-2 py-1.5 sm:min-h-0 text-sm text-ink",
           "placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss",
           "disabled:opacity-50",
         )}
@@ -159,7 +159,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
               Manage policies
             </a>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button size="sm" onClick={() => fireApprove("always")} disabled={busy}>
               {busy && busyScope === "always" ? <Spinner size={12} /> : null}
               Confirm
@@ -172,7 +172,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
       )}
 
       {/* Action buttons */}
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-3">
         {/* Split-button: Approve once + dropdown */}
         <div className="flex items-center">
           <Button

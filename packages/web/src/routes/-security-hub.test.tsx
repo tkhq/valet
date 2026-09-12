@@ -159,6 +159,22 @@ beforeEach(() => {
 });
 
 describe("SecurityIndexPage", () => {
+  it("keeps the compact method and optional settings when configuring", () => {
+    renderPage();
+    pickRepo();
+    fireEvent.change(screen.getByRole("combobox", { name: "Review method" }), { target: { value: "secrets-config" } });
+    const options = screen.getByRole("button", { name: "Review options" });
+    fireEvent.click(options);
+    expect(options.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Scope to paths"), { target: { value: "src/auth" } });
+    fireEvent.click(options);
+    expect(options.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: /Configure review/ }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      search: expect.objectContaining({ preset: "secrets-config", paths: "src/auth" }),
+    }));
+  });
+
   it("shows the empty state when no security reviews exist", () => {
     renderPage();
     expect(screen.getByText("No reviews yet")).toBeTruthy();

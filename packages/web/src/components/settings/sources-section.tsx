@@ -360,7 +360,7 @@ function RepoSourceRow({
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-muted">
             Enabled
             <Switch
@@ -606,8 +606,8 @@ function CreateExternalSourceRow() {
 
   return (
     <div className="space-y-2 py-4">
-      <div className="flex gap-2">
-        <div className="flex-1 space-y-1">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-ext-name">Name</Label>
           <Input
             id="new-ext-name"
@@ -616,7 +616,7 @@ function CreateExternalSourceRow() {
             placeholder="Node 22"
           />
         </div>
-        <div className="flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-ext-ref">Image ref</Label>
           <Input
             id="new-ext-ref"
@@ -625,7 +625,7 @@ function CreateExternalSourceRow() {
             placeholder="registry.example.com/valet-base:node22"
           />
         </div>
-        <div className="flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-ext-pull-secret">Pull secret name (optional)</Label>
           <Input
             id="new-ext-pull-secret"
@@ -635,7 +635,7 @@ function CreateExternalSourceRow() {
           />
         </div>
       </div>
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <Button
           type="button"
           onClick={submit}

@@ -30,12 +30,12 @@ export function UsageCard() {
   const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd) ?? []));
 
   return (
-    <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
-      <header className="px-4 py-3 border-b border-line flex items-center justify-between">
+    <section className="min-w-0 rounded-lg border border-line bg-paper flex flex-col min-h-0">
+      <header className="px-4 py-3 border-b border-line flex flex-wrap items-center justify-between gap-x-3">
         <h2 className="font-display text-base text-ink">Usage</h2>
         <Link
           to="/usage"
-          className="text-xs text-moss hover:underline underline-offset-2"
+          className="inline-flex min-h-11 items-center text-xs text-moss sm:min-h-0 hover:underline underline-offset-2"
         >
           View all usage →
         </Link>
@@ -50,7 +50,7 @@ export function UsageCard() {
         {usageQ.error && (
           <div className="text-xs text-danger-500">
             Couldn't load usage.{" "}
-            <button type="button" className="underline" onClick={() => usageQ.refetch()}>
+            <button type="button" className="min-h-11 px-2 underline sm:min-h-0" onClick={() => usageQ.refetch()}>
               Retry
             </button>
           </div>
@@ -176,7 +176,7 @@ export function windowCostDisplay(w: UsageWindow): WindowCostDisplay {
 function WindowStat({ label, window: w }: { label: string; window: UsageWindow }) {
   const cost = windowCostDisplay(w);
   return (
-    <div className="rounded-md bg-moss-wash px-2.5 py-2">
+    <div className="min-w-0 break-words rounded-md bg-moss-wash px-2.5 py-2">
       <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
       <div className="mt-0.5 font-display text-lg text-ink leading-tight">{cost.text}</div>
       <div className="text-[10px] text-muted tabular-nums">

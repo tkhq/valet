@@ -58,7 +58,7 @@ export function MemorySearchPane({ activePath, onSelect }: MemorySearchPaneProps
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="relative p-2">
         <Search className="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
         <Input
@@ -67,14 +67,14 @@ export function MemorySearchPane({ activePath, onSelect }: MemorySearchPaneProps
           onKeyDown={onKeyDown}
           placeholder="Search memory…"
           aria-label="Search memory"
-          className="h-8 pl-8 pr-8 text-sm"
+          className="h-8 pl-8 pr-12 text-sm"
         />
         {query.length > 0 && (
           <button
             type="button"
             onClick={clear}
             aria-label="Clear search"
-            className="absolute right-4 top-1/2 -translate-y-1/2 text-muted hover:text-ink"
+            className="absolute right-2 top-1/2 flex min-h-11 min-w-11 items-center justify-center -translate-y-1/2 text-muted hover:text-ink"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -102,6 +102,11 @@ export function MemorySearchPane({ activePath, onSelect }: MemorySearchPaneProps
                   Retry
                 </button>
               </div>
+            )}
+            {treeQ.data?.entries.length === 0 && (
+              <p className="px-2 py-4 text-sm text-muted md:hidden">
+                No memory files yet. New files appear here when your assistant saves them.
+              </p>
             )}
             {treeQ.data && (
               <MemoryTree entries={treeQ.data.entries} activePath={activePath} onSelect={onSelect} />

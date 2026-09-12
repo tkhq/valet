@@ -48,7 +48,7 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
         <h1 className="font-display text-2xl text-ink">Artifacts</h1>
         <p className="mt-1 text-sm text-muted">
           {owner.ownerType === "team"
@@ -103,15 +103,15 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
 
   return (
     <div className="py-2.5">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col items-stretch justify-between gap-2 sm:flex-row sm:items-center sm:gap-3">
         <Link
           to="/a/$token"
           params={{ token: artifact.token }}
-          className="min-w-0 flex-1 rounded px-1 py-0.5 hover:bg-ink-wash"
+          className="min-w-0 flex-1 rounded px-1 py-0.5 max-sm:min-h-11 hover:bg-ink-wash"
         >
           <div className="flex min-w-0 items-center gap-2">
             <span aria-hidden>{artifact.icon}</span>
-            <span className="min-w-0 flex-1 truncate text-sm text-ink">{artifact.title}</span>
+            <span className="min-w-0 flex-1 break-words text-sm text-ink sm:truncate">{artifact.title}</span>
           </div>
           <p className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-muted">
             <span>{artifact.format}</span>
@@ -129,11 +129,11 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
             <span>updated {relativeTime(artifact.updatedAt)}</span>
           </p>
         </Link>
-        <div className="flex shrink-0 items-center gap-3">
+        <div className="flex shrink-0 flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={() => void copy(artifact.url)}
-            className="text-xs text-muted hover:text-ink"
+            className="max-sm:min-h-11 max-sm:px-2 text-xs text-muted hover:text-ink"
           >
             {copied ? "Copied" : "Copy link"}
           </button>
@@ -147,7 +147,7 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
               revoke.reset();
               setConfirmRevoke(true);
             }}
-            className="text-xs text-danger-500 hover:underline disabled:pointer-events-none disabled:opacity-50"
+            className="max-sm:min-h-11 max-sm:px-2 text-xs text-danger-500 hover:underline disabled:pointer-events-none disabled:opacity-50"
           >
             {revoke.isPending ? "Revoking…" : "Revoke"}
           </button>}

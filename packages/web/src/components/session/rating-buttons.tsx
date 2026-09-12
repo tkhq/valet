@@ -35,7 +35,7 @@ export function RatingButtons({
           disabled={disabled}
           onClick={() => onRate(active ? null : rating)}
           className={cn(
-            "rounded p-1 text-muted/70 hover:text-[--fg] hover:bg-ink-wash transition-colors",
+            "inline-flex items-center justify-center max-sm:min-h-11 max-sm:min-w-11 rounded p-1 text-muted hover:text-[--fg] hover:bg-ink-wash transition-colors",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
             "disabled:opacity-50",
             active &&

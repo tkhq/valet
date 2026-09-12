@@ -166,7 +166,7 @@ export function ChangelogPage() {
                 const next = CHANGELOG_CATEGORIES.find((value) => value === event.target.value);
                 go({ category: next, page: undefined });
               }}
-              className="h-9 rounded border border-line bg-paper px-3 text-sm text-ink"
+              className="h-9 max-sm:min-h-11 max-sm:text-base rounded border border-line bg-paper px-3 text-sm text-ink"
             >
               <option value="all">All change types</option>
               {CHANGELOG_CATEGORIES.map((value) => (
@@ -179,7 +179,7 @@ export function ChangelogPage() {
               onChange={(event) =>
                 go({ sort: event.target.value === "oldest" ? "oldest" : undefined, page: undefined })
               }
-              className="h-9 rounded border border-line bg-paper px-3 text-sm text-ink"
+              className="h-9 max-sm:min-h-11 max-sm:text-base rounded border border-line bg-paper px-3 text-sm text-ink"
             >
               <option value="newest">Newest first</option>
               <option value="oldest">Oldest first</option>
@@ -218,7 +218,7 @@ export function ChangelogPage() {
                             href={`https://github.com/tkhq/valet/commit/${checkpointSha}`}
                             target="_blank"
                             rel="noreferrer"
-                            className="font-mono hover:text-moss hover:underline"
+                            className="inline-flex max-sm:min-h-11 items-center font-mono hover:text-moss hover:underline"
                           >
                             Build {checkpointSha.slice(0, 9)}
                           </a>
@@ -228,7 +228,7 @@ export function ChangelogPage() {
                             href={checkpointUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-moss hover:underline"
+                            className="inline-flex max-sm:min-h-11 items-center gap-1 text-moss hover:underline"
                           >
                             {unreleased ? "Build" : "Release"} <ExternalLink className="h-3 w-3" aria-hidden />
                           </a>
@@ -269,7 +269,7 @@ export function ChangelogPage() {
                                               href={`https://github.com/tkhq/valet/pull/${entry.sources.pullRequest}`}
                                               target="_blank"
                                               rel="noreferrer"
-                                              className="whitespace-nowrap hover:text-moss hover:underline"
+                                              className="inline-flex max-sm:min-h-11 items-center whitespace-nowrap hover:text-moss hover:underline"
                                             >
                                               PR #{entry.sources.pullRequest}
                                             </a>
@@ -279,7 +279,7 @@ export function ChangelogPage() {
                                             target="_blank"
                                             rel="noreferrer"
                                             aria-label={`Commit ${commit}`}
-                                            className="font-mono hover:text-moss hover:underline"
+                                            className="inline-flex max-sm:min-h-11 items-center font-mono hover:text-moss hover:underline"
                                           >
                                             {commit.slice(0, 9)}
                                           </a>

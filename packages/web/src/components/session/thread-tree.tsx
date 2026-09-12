@@ -449,7 +449,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             type="button"
             onClick={() => setShowArchived((v) => !v)}
             aria-expanded={showArchived}
-            className="w-full flex items-center gap-2 rounded px-2 py-1 text-xs text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash"
+            className="w-full max-md:min-h-11 flex items-center gap-2 rounded px-2 py-1 text-xs text-muted hover:text-ink hover:bg-ink-wash transition-colors focus-visible:outline-none focus-visible:bg-ink-wash"
           >
             <Archive className="h-3 w-3 shrink-0" aria-hidden />
             <span>{showArchived ? "Hide archived" : "Show archived"}</span>
@@ -476,7 +476,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                     type="button"
                     aria-label={`Unarchive ${t.title ?? t.id}`}
                     onClick={() => void setArchived.mutateAsync({ threadId: t.id, archived: false })}
-                    className="shrink-0 rounded p-0.5 hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
+                    className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
                   >
                     <ArchiveRestore className="h-3 w-3" aria-hidden />
                   </button>
@@ -651,7 +651,7 @@ function ThreadNode({
                 child: undefined,
               })}
               className={cn(
-                "flex-1 min-w-0 flex items-center py-2 text-sm",
+                "flex-1 min-w-0 max-md:min-h-11 flex items-center py-2 text-sm",
                 "focus-visible:outline-none focus-visible:bg-ink-wash",
                 active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
               )}
@@ -690,7 +690,7 @@ function ThreadNode({
             aria-label={`${collapsed ? "Expand" : "Collapse"} subconversations for ${label}`}
             aria-expanded={!collapsed}
             onClick={toggleCollapsed}
-            className="shrink-0 rounded p-1 text-muted hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
+            className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-1 text-muted hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
           >
             <ChevronDown
               className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")}
@@ -703,7 +703,7 @@ function ThreadNode({
             <button
               type="button"
               aria-label={`Thread menu: ${label}`}
-              className="shrink-0 rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
+              className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-1 text-muted opacity-0 max-md:opacity-100 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
             >
               <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
             </button>
@@ -740,7 +740,7 @@ function ThreadNode({
                 to="/chat"
                 search={(prev) => ({ ...prev, child: c.sessionId })}
                 className={cn(
-                  "flex-1 min-w-0 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
+                  "flex-1 min-w-0 max-md:min-h-11 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
                   "focus-visible:outline-none focus-visible:bg-ink-wash",
                   // Settled children recede: their work is done and their
                   // compute reclaimed — visually distinct from live ones.
@@ -769,7 +769,7 @@ function ThreadNode({
                   type="button"
                   aria-label={`Dismiss ${c.title || c.sessionId}`}
                   onClick={() => onDismissChild(c.sessionId)}
-                  className="shrink-0 rounded p-0.5 text-muted opacity-0 group-hover/child:opacity-100 focus-visible:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
+                  className="inline-flex items-center justify-center max-md:min-h-11 max-md:min-w-11 shrink-0 rounded p-0.5 text-muted opacity-0 max-md:opacity-100 group-hover/child:opacity-100 focus-visible:opacity-100 hover:text-ink hover:bg-ink-wash focus-visible:outline-none"
                 >
                   <X className="h-3 w-3" aria-hidden />
                 </button>

@@ -72,7 +72,7 @@ export function WorkflowAssistantPanel({
                 <button
                   type="button"
                   onClick={() => useComposerPrefillStore.getState().set(suggestion.prompt)}
-                  className="rounded-full border border-line px-2.5 py-1 text-[11px] text-ink transition-colors hover:border-moss hover:bg-moss-wash focus:outline-none focus-visible:ring-2 focus-visible:ring-moss"
+                  className="min-h-11 rounded-full border border-line sm:min-h-0 px-2.5 py-1 text-[11px] text-ink transition-colors hover:border-moss hover:bg-moss-wash focus:outline-none focus-visible:ring-2 focus-visible:ring-moss"
                 >
                   {suggestion.label}
                 </button>

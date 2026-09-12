@@ -190,7 +190,7 @@ export function IdentityFields({
               onChange={(e) => setName(e.target.value)}
               placeholder="Name your assistant"
               autoFocus={variant === "onboarding"}
-              className="flex-1"
+              className="min-w-0 flex-1"
             />
             <Button
               type="button"
@@ -214,7 +214,7 @@ export function IdentityFields({
                 key={trait}
                 type="button"
                 onClick={() => setPersonality((current) => appendTraitSentence(current, trait))}
-                className="rounded-full border border-line px-2.5 py-1 text-xs text-muted hover:border-moss hover:text-ink transition-colors"
+                className="min-h-11 rounded-full border border-line px-2.5 py-1 sm:min-h-0 text-xs text-muted hover:border-moss hover:text-ink transition-colors"
               >
                 {trait}
               </button>

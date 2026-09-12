@@ -35,7 +35,7 @@ export function ApprovalCard({ runId, nodeId, prompt }: ApprovalCardProps) {
           <p className="text-xs font-medium uppercase tracking-wide text-accent-700 dark:text-accent-400">
             Waiting on you
           </p>
-          <p className="text-sm font-medium text-ink">{prompt ?? `Approval required: ${nodeId}`}</p>
+          <p className="break-words text-sm font-medium text-ink">{prompt ?? `Approval required: ${nodeId}`}</p>
         </div>
       </div>
       <Input
@@ -44,7 +44,7 @@ export function ApprovalCard({ runId, nodeId, prompt }: ApprovalCardProps) {
         placeholder="Optional note"
         aria-label="Optional note"
       />
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Button size="sm" onClick={() => respond(true)} disabled={resolve.isPending}>
           Approve
         </Button>

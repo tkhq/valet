@@ -103,7 +103,7 @@ export interface SelectFieldProps {
 }
 
 const SELECT_CLASS =
-  "h-9 w-full rounded border border-line bg-paper px-3 text-sm text-ink transition-colors " +
+  "h-12 w-full rounded border border-line bg-paper px-3 text-base sm:h-9 sm:text-sm text-ink transition-colors " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss";
 
 export function SelectField({ label, value, onChange, options }: SelectFieldProps) {

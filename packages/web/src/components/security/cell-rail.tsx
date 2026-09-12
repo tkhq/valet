@@ -151,7 +151,7 @@ function CellRow({
         overAge && "bg-warning-wash/60 border-l-2 border-l-amber-500",
       )}
     >
-      <div className="flex items-center gap-2 min-w-0">
+      <div className="flex flex-wrap items-center gap-2 min-w-0">
         <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
           {running && (
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-moss opacity-60" />
@@ -192,7 +192,7 @@ function CellRow({
             <button
               type="button"
               onClick={() => onOpenChild(cell.childSessionId!)}
-              className="inline-flex items-center gap-1 text-muted hover:text-moss shrink-0"
+              className="inline-flex min-h-11 md:min-h-0 items-center gap-1 text-muted hover:text-moss shrink-0"
               aria-label={`Open ${cell.dir} child session`}
             >
               <ExternalLink className="h-3 w-3" aria-hidden />
@@ -203,7 +203,7 @@ function CellRow({
             <Link
               to="/sessions/$sessionId"
               params={{ sessionId: cell.childSessionId }}
-              className="inline-flex items-center gap-1 text-muted hover:text-moss shrink-0"
+              className="inline-flex min-h-11 md:min-h-0 items-center gap-1 text-muted hover:text-moss shrink-0"
               aria-label={`Open ${cell.dir} child session`}
             >
               <ExternalLink className="h-3 w-3" aria-hidden />
@@ -211,7 +211,7 @@ function CellRow({
             </Link>
           ))}
       </div>
-      <div className="mt-0.5 text-muted truncate">{cell.goal}</div>
+      <div className="mt-0.5 break-words text-muted md:truncate">{cell.goal}</div>
       {running && cell.progress && (
         <div className="mt-0.5 font-mono text-[11px] text-ink/80">{progressLine(cell.progress)}</div>
       )}

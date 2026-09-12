@@ -15,7 +15,7 @@ export function CardHeading({
     <div className="flex items-start gap-3">
       <ServiceIcon slug={slug} label={title} />
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{title}</span>
           {state}
         </div>
@@ -29,8 +29,8 @@ export function CardHeading({
 
 export function CardFooter({ meta, right }: { meta?: string | null; right?: React.ReactNode }) {
   return (
-    <div className="mt-auto flex items-center justify-between gap-3 pt-4">
-      <span className="font-mono text-xs text-muted">{meta ?? ""}</span>
+    <div className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-4">
+      <span className="min-w-0 break-all font-mono text-xs text-muted">{meta ?? ""}</span>
       {right}
     </div>
   );

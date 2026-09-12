@@ -99,7 +99,7 @@ export function SkillGrid({
                 aria-selected={filters.filter === chip.id}
                 onClick={() => onFiltersChange({ ...filters, filter: chip.id })}
                 className={cn(
-                  "rounded-full border px-3 py-1 text-xs transition-colors",
+                  "max-sm:min-h-11 rounded-full border px-3 py-1 text-xs transition-colors",
                   filters.filter === chip.id
                     ? "border-moss bg-moss text-white"
                     : "border-line bg-paper text-muted hover:text-ink",
@@ -115,7 +115,7 @@ export function SkillGrid({
               aria-label="Filter by scope"
               value={filters.scope}
               onChange={(e) => onFiltersChange({ ...filters, scope: readScopeFilter(e.target.value) })}
-              className="rounded-md border border-line bg-paper px-2 py-1 text-xs text-ink"
+              className="max-sm:min-h-11 max-sm:text-base rounded-md border border-line bg-paper px-2 py-1 text-xs text-ink"
             >
               {SCOPE_OPTIONS.map((opt) => (
                 <option key={opt.id} value={opt.id}>

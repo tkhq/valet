@@ -190,20 +190,20 @@ function ResourceMemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPat
   }
 
   return (
-    <article className={editing ? "mx-auto max-w-6xl px-6 py-10" : "mx-auto max-w-[65ch] px-6 py-10"}>
+    <article className={editing ? "mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-10" : "mx-auto max-w-[65ch] px-4 py-6 sm:px-6 sm:py-10"}>
       <header className="mb-8 space-y-3 border-b border-line pb-6">
-        <div className="flex items-start justify-between gap-4">
-          <h1 className="font-display text-3xl leading-tight text-ink">
+        <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:gap-4">
+          <h1 className="min-w-0 break-words font-display text-2xl sm:text-3xl leading-tight text-ink">
             {file.pinned && <span aria-hidden="true">📌 </span>}
             {file.title || path}
           </h1>
           {!editing && (
-            <div className="flex shrink-0 items-center gap-2 pt-2 text-xs">
+            <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2 pt-2 text-xs">
               {!isTeamScope && <ShareControls path={path} />}
               <button
                 type="button"
                 onClick={() => downloadTextFile(memoryDownloadName(path), rendered, "text/markdown")}
-                className="text-muted hover:text-moss"
+                className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-moss"
               >
                 Download
               </button>
@@ -213,13 +213,13 @@ function ResourceMemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPat
                   onClick={() => pinMutation.mutate(!file.pinned)}
                   disabled={pinMutation.isPending}
                   aria-pressed={file.pinned}
-                  className="text-muted hover:text-moss"
+                  className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-moss"
                 >
                   {file.pinned ? "Unpin" : "Pin"}
                 </button>
               )}
               {canWrite && (
-                <button type="button" onClick={startEditing} className="text-muted hover:text-moss">
+                <button type="button" onClick={startEditing} className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-moss">
                   Edit
                 </button>
               )}
@@ -230,14 +230,14 @@ function ResourceMemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPat
                     // Per-call callbacks run only while this resource is mounted.
                     onClick={() => deleteMutation.mutate(undefined, { onSuccess: () => onDeleted?.() })}
                     disabled={deleteMutation.isPending}
-                    className="font-medium text-danger-500 hover:underline"
+                    className="max-sm:min-h-11 max-sm:px-2 font-medium text-danger-500 hover:underline"
                   >
                     {deleteMutation.isPending ? "Deleting…" : "Confirm delete"}
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmingDelete(false)}
-                    className="text-muted hover:text-ink"
+                    className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-ink"
                   >
                     Cancel
                   </button>
@@ -246,7 +246,7 @@ function ResourceMemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPat
                 <button
                   type="button"
                   onClick={() => setConfirmingDelete(true)}
-                  className="text-muted hover:text-danger-500"
+                  className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-danger-500"
                 >
                   Delete
                 </button>
@@ -285,7 +285,7 @@ function ResourceMemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPat
               Save failed: {saveMutation.error.message}. Try again — your draft is still here.
             </p>
           )}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               onClick={() => saveMutation.mutate(draft)}
@@ -316,7 +316,7 @@ function ResourceMemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPat
 
       {!editing && !isTeamScope && (
         <footer className="mt-12 border-t border-line pt-6">
-          <button type="button" onClick={askToUpdate} className="text-sm text-moss hover:underline">
+          <button type="button" onClick={askToUpdate} className="min-h-11 text-sm text-moss hover:underline">
             Ask {name} to update this
           </button>
         </footer>

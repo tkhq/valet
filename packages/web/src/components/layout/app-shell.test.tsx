@@ -86,6 +86,16 @@ describe("AppShell — sidebar controls", () => {
 });
 
 describe("AppShell — mobile sidebar drawer", () => {
+  it("closes with Escape and returns focus to the opener", async () => {
+    renderShell();
+    const opener = screen.getByRole("button", { name: /open threads/i });
+    await userEvent.click(opener);
+    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Threads" }));
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+
   it("opens the drawer via the published control, closed by default", async () => {
     renderShell();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -104,7 +114,8 @@ describe("AppShell — mobile sidebar drawer", () => {
     renderShell();
     await userEvent.click(screen.getByRole("button", { name: /open threads/i }));
     const dialog = screen.getByRole("dialog");
-    const backdrop = dialog.firstElementChild as HTMLElement;
+    const backdrop = dialog.previousElementSibling;
+    if (!(backdrop instanceof HTMLElement)) throw new Error("Missing drawer backdrop");
     await userEvent.click(backdrop);
     expect(screen.queryByRole("dialog")).toBeNull();
   });

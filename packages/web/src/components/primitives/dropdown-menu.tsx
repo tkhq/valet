@@ -15,13 +15,13 @@ export const DropdownMenuSub = RDropdown.Sub;
 export const DropdownMenuRadioGroup = RDropdown.RadioGroup;
 
 const MENU_BASE =
-  "z-50 min-w-[10rem] overflow-hidden rounded-md border border-[--border] " +
+  "z-50 min-w-[10rem] max-w-[calc(100vw-2rem)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto overscroll-contain rounded-md border border-[--border] " +
   "bg-[--bg] p-1 shadow-lg text-sm " +
   "data-[state=open]:animate-in data-[state=closed]:animate-out " +
   "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0";
 
 const ITEM_BASE =
-  "relative flex select-none items-center gap-2 rounded px-2 py-1.5 outline-none touch-manipulation " +
+  "relative flex max-sm:min-h-11 select-none items-center gap-2 rounded px-2 py-1.5 outline-none touch-manipulation " +
   "data-[highlighted]:bg-neutral-100 dark:data-[highlighted]:bg-neutral-800 " +
   "data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
 

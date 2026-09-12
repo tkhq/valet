@@ -64,7 +64,7 @@ export function RunResultPanel({ result }: RunResultPanelProps) {
       aria-label="Run result"
       className={`rounded-lg border bg-paper p-4 ${BORDER[result.outcome]}`}
     >
-      <div className="flex items-baseline gap-2">
+      <div className="flex flex-wrap items-baseline gap-2">
         <span className={`text-sm ${ACCENT[result.outcome]}`} aria-hidden>
           {GLYPH[result.outcome]}
         </span>
@@ -72,7 +72,7 @@ export function RunResultPanel({ result }: RunResultPanelProps) {
           {HEADING[result.outcome]}
         </h2>
         {result.nodeId && (
-          <span className="shrink-0 truncate font-mono text-xs text-muted">{result.nodeId}</span>
+          <span className="max-w-full break-all font-mono text-xs text-muted">{result.nodeId}</span>
         )}
       </div>
 
@@ -80,7 +80,7 @@ export function RunResultPanel({ result }: RunResultPanelProps) {
         // The message is authored prose with rendered template values in it.
         // Line breaks are the author's, so they are kept.
         <p
-          className={`mt-3 whitespace-pre-wrap text-sm leading-relaxed ${
+          className={`mt-3 whitespace-pre-wrap break-words text-sm leading-relaxed ${
             result.outcome === "failed" ? "text-danger-500" : "text-ink"
           }`}
         >
@@ -98,7 +98,7 @@ export function RunResultPanel({ result }: RunResultPanelProps) {
               <CodeBlock code={output.text} language="json" />
             </div>
           ) : (
-            <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-ink">
+            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">
               {output.text}
             </p>
           )}
@@ -127,7 +127,7 @@ function DiagnosticsBlock({ diagnostics }: { diagnostics: RunResultDiagnostic[] 
       </h3>
       <ul className="mt-2 space-y-2">
         {diagnostics.map((d) => (
-          <li key={`${d.nodeId ?? ""}:${d.field ?? ""}:${d.path}`} className="text-xs text-muted">
+          <li key={`${d.nodeId ?? ""}:${d.field ?? ""}:${d.path}`} className="break-words text-xs text-muted">
             <div>
               <code className="font-mono text-ink">{d.path}</code>
               {d.nodeId && (
