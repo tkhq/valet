@@ -6,6 +6,7 @@
  *  - `credential-scripts` → `installCredentialHelper` + git safe.directory/
  *    useHttpPath config (already part of that function).
  *  - `git-identity` → `configureGitIdentity`.
+ *  - `turnkey-session-key` → `installSessionKey` (commit signing).
  *  - `clone:<fullName>` → `prepBinding` (normal clone) or `prepPrebuiltBinding`
  *    for the position-0 binding when `snap.repoBake` is non-null.
  *
@@ -16,6 +17,7 @@
  */
 import type { PrepStep } from "@valet/engine";
 import type { ResolveSnapshot, StepSpec } from "./sandbox-spec.js";
+import { installSessionKey } from "./commit-signing-prep.js";
 import {
   installCredentialHelper,
   configureGitIdentity,
@@ -67,6 +69,22 @@ export function buildPrepSteps(
         afterResume: (sandbox) => configureGitIdentity(sandbox, snap.userName, snap.userEmail),
         async apply(sandbox) {
           await configureGitIdentity(sandbox, snap.userName, snap.userEmail);
+        },
+      });
+      continue;
+    }
+
+    if (spec.id === "turnkey-session-key") {
+      const signing = snap.commitSigning;
+      if (!signing) {
+        throw new Error("prep-steps: turnkey-session-key step without commitSigning in snapshot (programmer error)");
+      }
+      steps.push({
+        id: spec.id,
+        hash: spec.hash,
+        critical: spec.critical,
+        async apply(sandbox) {
+          await installSessionKey(sandbox, signing);
         },
       });
       continue;

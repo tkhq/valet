@@ -10,6 +10,9 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
 import type {
   AddTeamMemberRequest,
   AuthConfigResponse,
+  GetCommitSigningResponse,
+  PostCommitSigningEnrollRequest,
+  PostCommitSigningEnrollResponse,
   CreateAssistantRequest,
   CreateAssistantResponse,
   EnsureAssistantSessionResponse,
@@ -825,6 +828,10 @@ export const api = {
   // `owner` scopes the bundle to a workspace, like every other memory read:
   // a team export is the team's corpus, a team import writes into it (the
   // route authorizes the write). Omitted reads/writes your own.
+  // Commit signing (agent commit signing design).
+  getCommitSigning: () => request<GetCommitSigningResponse>("GET", "/me/commit-signing"),
+  enrollCommitSigning: (body: PostCommitSigningEnrollRequest) =>
+    request<PostCommitSigningEnrollResponse>("POST", "/me/commit-signing/enroll", body),
   exportMemory: (owner?: OwnerFilter) =>
     request<ExportMemoryResponse>("GET", `/memory/export${ownerQuery(owner)}`),
   importMemory: (body: ImportMemoryRequest, owner?: OwnerFilter) =>

@@ -1488,6 +1488,7 @@ export class EngineHost {
         apiUrl,
         stockImage,
         preflight: host.opts.prebuildPreflight,
+        sessionId,
       });
       // The repo's own command-to-credential declarations, resolved on the
       // same best-effort footing as the docker flag: read failures yield no

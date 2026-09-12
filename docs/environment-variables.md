@@ -300,6 +300,19 @@ semantics.
 | `GITHUB_APP_PRIVATE_KEY` | Yes | The App's private key PEM, raw or base64-encoded |
 | `GITHUB_APP_WEBHOOK_SECRET` | No | Webhook HMAC secret. Leave unset for a webhook-less App |
 
+## Commit signing
+
+Agents sign commits with a key held in Turnkey after the user approves each pull request (`docs/specs/2026-09-12-agent-commit-signing-design.md`). Unset, the plugin loads and its actions answer with the setup message.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `VALET_TURNKEY_ORGANIZATION_ID` | For signing | Parent Turnkey organization that owns each user's signing sub-organization |
+| `VALET_TURNKEY_API_PUBLIC_KEY` | For signing | P-256 API key of a parent user that may create sub-organizations |
+| `VALET_TURNKEY_API_PRIVATE_KEY` | For signing | Its private half |
+| `VALET_TURNKEY_API_BASE_URL` | No | Default `https://api.turnkey.com` |
+
+Set all three keyed variables or none. A partial set stops sessions from getting a session key and logs the missing names.
+
 ## Channels
 
 | Variable | Description |

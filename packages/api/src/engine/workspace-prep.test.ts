@@ -20,6 +20,7 @@ import {
   resolveStartRef,
 } from "./workspace-prep.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { valetSignScript } from "./commit-signing-script.js";
 import type { RepoBinding } from "../wire/types.js";
 import { opShimScript } from "./secrets-cli-script.js";
 
@@ -29,7 +30,7 @@ const STAGED_GH = ".valet-prep/valet-gh";
 const STAGED_SECRETS = ".valet-prep/valet-secrets";
 const STAGED_OP_SHIM = ".valet-prep/op";
 const INSTALL_CMD =
-  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && cp '.valet-prep/op' /usr/local/bin/op && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets /usr/local/bin/op";
+  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && cp '.valet-prep/op' /usr/local/bin/op && cp '.valet-prep/valet-sign' /usr/local/bin/valet-sign && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets /usr/local/bin/op /usr/local/bin/valet-sign";
 
 interface ExecCall {
   command: string;
@@ -141,6 +142,8 @@ describe("installCredentialHelper", () => {
     // The `op` shim ships beside them: an agent reaching for the real CLI gets
     // the corrective action rather than `command not found`.
     expect(sandbox.writes.get(STAGED_OP_SHIM)).toBe(opShimScript());
+    // `valet-sign` ships in the same step; commit signing is configured but off.
+    expect(sandbox.writes.get(".valet-prep/valet-sign")).toBe(valetSignScript());
 
     const commands = sandbox.execCalls.map((c) => c.command);
     expect(commands).toContain(INSTALL_CMD);
@@ -151,6 +154,8 @@ describe("installCredentialHelper", () => {
     // Discovered against a real Docker sandbox: without this, git refuses
     // to operate on the bind-mounted workspace ("dubious ownership").
     expect(commands).toContain("git config --global --fixed-value --replace-all safe.directory '*' '*'");
+    expect(commands).toContain("git config --global gpg.format ssh && git config --global gpg.ssh.program '/usr/local/bin/valet-sign'");
+    expect(commands.some((c) => c.includes("commit.gpgsign"))).toBe(false);
     // Staging dir cleanup is best-effort, but still attempted.
     expect(commands).toContain("rm -rf '.valet-prep'");
   });
