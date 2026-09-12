@@ -48,7 +48,16 @@ function mapCovers(rows) {
   return next === 65536;
 }
 
-function lifecycle({ state, command, identity, active }) {
+function lifecycle({ state, command, identity, active, owner, operationId, actualOperationId, cancelRequested }) {
+  if (command === "commit-start") return operationId === actualOperationId && owner === "valid" && !cancelRequested && identity === "valid"
+    ? { action: "commit-ready", exit: 0, next: "ready" }
+    : { action: "abandon-result", exit: 4, next: state };
+  if (command === "recover") {
+    if (owner === "valid") return { action: "wait-owner", exit: 24, next: state };
+    if (active === "start") return { action: identity === "valid" ? "adopt-start" : "clean-restart", exit: 0, next: "starting" };
+    if (active === "stop") return { action: "resume-stop", exit: 0, next: "stopping" };
+    if (active === "import") return { action: identity === "valid" ? "release-import" : "release-import-error", exit: 0, next: identity === "valid" ? "ready" : "error" };
+  }
   if (identity === "foreign") return { action: "refuse-foreign", exit: 21, next: "error" };
   if (command === "start") {
     if (state === "stopping") return { action: "report-stopping", exit: 4, next: state };
@@ -68,9 +77,9 @@ function lifecycle({ state, command, identity, active }) {
   fail(`invalid lifecycle command ${command}`);
 }
 
-function status({ persisted, identity, readiness }) {
+function status({ persisted, identity, readiness, errorReason }) {
   const path = "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml";
-  let state = persisted, error = null, exit = 4;
+  let state = persisted, error = persisted === "error" ? errorReason : null, exit = 4;
   if (persisted === "stopped") exit = 3;
   else if (persisted === "ready" && identity !== "valid") { state = "error"; error = "identity_invalid"; }
   else if (persisted === "ready" && readiness === "ready") exit = 0;
@@ -81,7 +90,10 @@ function status({ persisted, identity, readiness }) {
 function validate(spec, data) {
   if (data.schema !== 2 || data.status !== "proposed-unimplemented") fail("invalid vector header");
   const normative = spec.split("\n").filter((line) => /\b(?:MUST|MAY|SHOULD)(?: NOT)?\b/.test(line));
-  for (const line of normative) if ((line.match(/\[K\d{2,3}\]/g) ?? []).length !== 1) fail(`normative sentence needs one tag: ${line}`);
+  for (const line of normative) {
+    if ((line.match(/\b(?:MUST|MAY|SHOULD)(?: NOT)?\b/g) ?? []).length !== 1) fail(`normative line needs one clause: ${line}`);
+    if ((line.match(/\[K\d{2,3}\]/g) ?? []).length !== 1) fail(`normative line needs one tag: ${line}`);
+  }
   const tags = [...spec.matchAll(/\[K(\d{2,3})\]/g)].map((match) => `K${match[1]}`);
   if (new Set(tags).size !== tags.length) fail("duplicate requirement tag");
   const numbers = tags.map((tag) => Number(tag.slice(1))).sort((a, b) => a - b);
@@ -97,8 +109,17 @@ function validate(spec, data) {
     if (!artifact.url.startsWith("https://") || !/^[a-f0-9]{64}$/.test(artifact.sha256)) fail(`invalid artifact ${id}`);
   }
   for (const name of ["k3s", "kubectl"]) for (const arch of ["amd64", "arm64"]) if (!artifactIds.has(`${name}:${arch}`)) fail(`missing artifact ${name}:${arch}`);
-  if (!Array.isArray(data.k3sArgv) || data.k3sArgv[0] !== "/usr/local/bin/k3s" || !data.k3sArgv.includes("--rootless")) fail("invalid k3sArgv");
-  if (data.k3sEnv?.VALET_SANDBOX_KUBERNETES !== "1" || data.k3sEnv?.XDG_RUNTIME_DIR !== "/home/dockerd/.local/state/valet/kubernetes/run") fail("invalid k3sEnv");
+  const kubeconfig = "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml";
+  const dataDir = "/home/dockerd/.local/state/valet/kubernetes/data";
+  const expectedArgv = ["/usr/local/bin/k3s", "server", "--rootless", "--prefer-bundled-bin", "--snapshotter=native", "--data-dir", dataDir, "--write-kubeconfig", kubeconfig, "--write-kubeconfig-mode", "600", "--disable", "traefik", "--disable", "servicelb", "--disable", "metrics-server"];
+  if (!equal(data.k3sArgv, expectedArgv)) fail("invalid k3sArgv");
+  const expectedEnv = { HOME: "/home/dockerd", USER: "dockerd", PATH: "/usr/local/bin:/usr/bin:/bin", XDG_RUNTIME_DIR: "/home/dockerd/.local/state/valet/kubernetes/run", XDG_CONFIG_HOME: "/home/dockerd/.local/state/valet/kubernetes/config", K3S_DATA_DIR: dataDir, K3S_ROOTLESS_CIDR: "10.41.0.0/16", K3S_ROOTLESS_MTU: "65520", K3S_ROOTLESS_ENABLE_IPV6: "false", K3S_ROOTLESS_PORT_DRIVER: "builtin", K3S_ROOTLESS_DISABLE_HOST_LOOPBACK: "true" };
+  if (!equal(data.k3sEnv, expectedEnv)) fail("invalid k3sEnv");
+  if (!equal(data.sandboxEnv, { KUBECONFIG: kubeconfig, VALET_SANDBOX_KUBERNETES: "1" })) fail("invalid sandboxEnv");
+  if (!equal(data.errorReasons, ["startup_failed", "startup_timeout", "stop_failed", "import_owner_lost"])) fail("invalid errorReasons");
+  if (!Number.isSafeInteger(data.minimumFreeBytes) || data.minimumFreeBytes <= 0) fail("invalid minimumFreeBytes");
+  if (!equal(data.imageTools?.slirp4netns, { package: "slirp4netns=1.2.0-1", path: "/usr/bin/slirp4netns", provenance: "Debian bookworm main" })) fail("invalid slirp4netns contract");
+  for (const vector of data.statusVectors) if (!vector.expected.stdout.includes(`\"kubeconfig\":\"${kubeconfig}\"`)) fail(`status kubeconfig drift ${vector.id}`);
 
   const groups = ["capabilityVectors", "mapVectors", "lifecycleVectors", "statusVectors", "acceptanceVectors"];
   const vectors = groups.flatMap((group) => {
@@ -112,7 +133,7 @@ function validate(spec, data) {
     if (!Array.isArray(vector.covers) || vector.covers.length === 0) fail(`vacuous covers for ${vector.id}`);
     for (const cover of vector.covers) for (const id of expandCover(cover)) covered.add(id);
     if (vector.group === "acceptanceVectors") {
-      if (vector.mode !== "acceptance" || !/^A(?:[1-9]|1[0-3])$/.test(vector.step) || typeof vector.check !== "string" || vector.check.length < 8 || typeof vector.expected !== "string" || vector.expected.length < 8) fail(`vacuous acceptance vector ${vector.id}`);
+      if (vector.mode !== "acceptance" || !/^A(?:[1-9]|1[0-5])$/.test(vector.step) || typeof vector.check !== "string" || vector.check.length < 8 || typeof vector.expected !== "string" || vector.expected.length < 8) fail(`vacuous acceptance vector ${vector.id}`);
     } else if (vector.mode !== "kernel" || vector.input === undefined || vector.expected === undefined) fail(`vacuous kernel vector ${vector.id}`);
   }
   for (const tag of tags) if (!covered.has(tag)) fail(`uncovered requirement ${tag}`);
@@ -128,6 +149,7 @@ function validate(spec, data) {
 const result = validate(specText, source);
 const mutations = [
   ["duplicate requirement", `${specText}\n[K01]`, clone(source)],
+  ["second untagged MUST", specText.replace("[K01]", "It MUST also pass twice. [K01]"), clone(source)],
   ["missing cover", specText, (() => { const d = clone(source); d.acceptanceVectors[0].covers = ["K08-K17", "K22"]; return d; })()],
   ["unknown cover", specText, (() => { const d = clone(source); d.acceptanceVectors[0].covers.push("K999"); return d; })()],
   ["duplicate vector id", specText, (() => { const d = clone(source); d.mapVectors[0].id = d.capabilityVectors[0].id; return d; })()],

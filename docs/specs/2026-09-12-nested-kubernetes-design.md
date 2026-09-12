@@ -4,7 +4,7 @@ Date: 2026-09-12. Status: **Proposed and unimplemented**. Target: Valet v2.
 
 ## Acceptance scenario
 
-A conforming deployment MUST pass A1 through A13 in one run on each supported architecture. [K01]
+A conforming deployment MUST pass A1 through A13 per architecture and A14 through A15 once. [K01]
 
 | Step | Action | Required observation |
 |---|---|---|
@@ -21,6 +21,8 @@ A conforming deployment MUST pass A1 through A13 in one run on each supported ar
 | A11 | Request it on Docker, local, virtual, unknown, and an unready Kubernetes node. | Each fails before readiness with a corrective error. |
 | A12 | Kill the helper at each crash point in K56. | The next start or stop follows the matching recovery vector. |
 | A13 | Replace the sandbox pod while the Cluster is ready. | Valet wipes old Cluster state, keeps other PVC data, then creates a new Cluster. |
+| A14 | Rehearse staged canary activation and rollback. | Each K114 through K121 gate passes in order. Existing Clusters remain stoppable. |
+| A15 | Inventory the v1 capability surfaces and run the Mono adapter. | No excluded surface exists. K122 through K130 pass. |
 
 The L4 gate also runs Mono PR [#8098](https://github.com/tkhq/mono/pull/8098) at `9ae8720066b8af545eec68ad64789dd75b014687`.
 That oracle has the wrong containerd socket. Mono must correct it before parity can pass.
@@ -58,7 +60,7 @@ Each normative sentence has one unique requirement tag. The validator enforces t
 
 *Depends on: Part 00. Conformance: L0 to L2.*
 
-`.valet/prebuild.yaml` uses optional Boolean `kubernetes`; omission means `false`.
+`.valet/prebuild.yaml` uses optional Boolean `kubernetes`. Omission means `false`.
 The loader MUST reject other types with `use kubernetes: true or false`. [K08]
 A successful repository read MUST persist the value in `agent_sessions.kubernetes`, whose default is false. [K09]
 A failed read MUST preserve a stored true value. [K10]
@@ -84,7 +86,7 @@ A false request MUST leave bake identity, manifest, environment, startup, and ku
 A true request uses the existing Kubernetes `docker:true` profile.
 The manifest MUST set `hostUsers:false` and `privileged:false`. [K23]
 Its maximum added capabilities MUST be exactly `SYS_ADMIN` and `NET_ADMIN`. [K24]
-Its seccomp profile MUST be `Unconfined`, and its AppArmor profile MUST be `unconfined`. [K25]
+Its seccomp and AppArmor profiles MUST be `Unconfined` and `unconfined`, respectively. [K25]
 Its `procMount` MUST be `Unmasked`. [K26]
 Nested Kubernetes MUST add no grant beyond K24 through K26. [K27]
 The manifest MUST add no hostPath, host socket, host namespace, host PID, host IPC, or host network. [K28]
@@ -100,7 +102,7 @@ It MUST exclude kmsg `1:11`, wildcard device rules, and cgroup device permission
 Kubernetes 1.35 sandbox nodes MUST set `userNamespaces.idsPerPod:131072`. [K33]
 The image MUST declare UID and GID subordinate ranges `65536:65535` for UID 1500. [K34]
 
-Only capability-enabled image startup MUST perform K35 through K37. [K35]
+Only capability-enabled image startup MUST perform K36 through K37. [K35]
 Enabled startup MUST create Services, empty Manager, and enable `cpu cpuset memory pids`. [K36]
 Enabled startup MUST delegate Manager control files to UID 1500 without changing outer limits. [K37]
 Ordinary sandbox startup MUST NOT install, validate, export, or modify nested Kubernetes state. [K38]
@@ -117,10 +119,11 @@ A pin change MUST update both architectures, lockDigest, identities, vectors, an
 
 k3s rootless mode uses its embedded RootlessKit Go library.
 The k3s pin MUST also pin that source dependency at RootlessKit `v1.0.1`. [K43]
-The image MUST NOT install a standalone RootlessKit binary. [K44]
+Nested Kubernetes MUST NOT install an additional standalone RootlessKit artifact. [K44]
+The existing `/usr/bin/rootlesskit` remains part of `docker-ce-rootless-extras` for Docker use.
 
-`XDG_RUNTIME_DIR` MUST equal `<Root>/run`, and `XDG_CONFIG_HOME` MUST equal `<Root>/config`. [K45]
-`K3S_DATA_DIR` MUST equal `<Root>/data`, and `KUBECONFIG` MUST equal `<Root>/kubeconfig.yaml`. [K46]
+The XDG variables MUST match `XDG_RUNTIME_DIR=<Root>/run` and `XDG_CONFIG_HOME=<Root>/config`. [K45]
+The path variables MUST match `K3S_DATA_DIR=<Root>/data` and `KUBECONFIG=<Root>/kubeconfig.yaml`. [K46]
 The exact argv MUST match the `k3sArgv` vector. [K47]
 The Helper MUST rename kubeconfig context `default` to `valet-kubernetes` once and reject any other initial context. [K48]
 
@@ -129,7 +132,7 @@ The Helper MUST rename kubeconfig context `default` to `valet-kubernetes` once a
 *Depends on: Parts 00 through 03. Conformance: L1 to L3.*
 
 Root contains `data`, `run`, `config`, `server.log`, `server.pid.json`, `operation.json`, and `state.json`.
-Root directories MUST use mode 0700, and Root files MUST use mode 0600 with UID 1500. [K49]
+Root paths MUST use UID 1500 with directory mode 0700 and file mode 0600. [K49]
 The adjacent `<Root>.lock` MUST be a non-symlinked UID 1500 file with mode 0600. [K50]
 All state replacement MUST use write, fsync, rename, and parent-directory fsync. [K51]
 
@@ -140,7 +143,8 @@ An epoch mismatch MUST remove all Root contents before any launch. [K54]
 Epoch cleanup MUST preserve `<Root>.lock` and every PVC path outside Root. [K55]
 Tests MUST cover crashes before launch, after launch, after readiness, during stop, and during each archive import. [K56]
 A13 MUST prove that pod replacement removes old Cluster data and keeps unrelated PVC data. [K57]
-A successful stop MUST remove Root contents, Root, and Scope after it closes the lock. [K58]
+Stop MUST remove owned Root contents, Root, and Scope while the adjacent exclusive lock remains held. [K58]
+The lock file is outside Root. Stop releases it only after deletion and preserves every other PVC path.
 
 `server.pid.json` records PID, proc start time, boot ID, UID, cgroup, argv digest, epoch, and Operation ID.
 A valid identity MUST match every field, UID 1500, the current epoch, Scope, and K47. [K59]
@@ -157,9 +161,9 @@ Pinned source maps `/run/k3s/containerd` to `$XDG_RUNTIME_DIR/k3s/containerd` in
 Import MUST call `k3s ctr --address <Root>/run/k3s/containerd/containerd.sock --namespace k8s.io images import --digests ARCHIVE`. [K64]
 A7 MUST trace this exact address and prove the socket accepts an import. [K65]
 The Helper MUST accept absolute regular OCI-layout or Docker-save tar archives only. [K66]
-It MUST preserve argument order and MUST NOT discover images. [K67]
+Import MUST preserve argument order without image discovery. [K67]
 A duplicate import MUST succeed with the same content-addressed image records. [K68]
-A failed archive MAY leave blobs or records; retrying it MUST be safe. [K69]
+A failed archive MAY leave retry-safe content-addressed blobs or records. [K69]
 Failure MUST stop later archives while retaining earlier completed imports. [K70]
 The Helper MUST reject links, devices, directories, changing files, and files larger than free Root storage. [K71]
 It MUST stage each archive as a 0600 Root temporary file and remove that file after the attempt. [K72]
@@ -189,12 +193,24 @@ Stop during start MUST set `cancelRequested`, persist `stopping`, and perform bo
 Start during stop MUST report stopping and exit 4. [K86]
 Stop during import MUST request cancellation, wait for the current archive process, then clean the Cluster. [K87]
 A recovering command MUST adopt only an Operation whose epoch and process identity match. [K88]
+`operation.json` records type, ID, cancel flag, epoch, and owner PID identity.
+The owner identity MUST include PID, proc start time, boot ID, UID, and epoch. [K135]
+A command MUST NOT replace an Operation while its owner identity remains valid. [K136]
+A command MAY release a stale claim only after the complete owner identity becomes invalid. [K137]
+A final commit MUST recheck its Operation ID, valid owner identity, and false cancel flag under exclusive lock. [K138]
+A failed commit guard MUST abandon its result without overwriting newer ready or error state. [K139]
+Stale start recovery MUST adopt a matching live leader or clean a dead matching leader before restart. [K145]
+Stale stop recovery MUST resume bounded cleanup without signaling an unvalidated leader. [K146]
+Stale import recovery MUST remove staging and choose ready for a ready leader or `error:import_owner_lost` otherwise. [K147]
 
 The lifecycle kernel is `(persistedState, operation, identity, activeOperation) -> decision`.
 It MUST match every lifecycle vector. [K89]
 The status kernel is `(persistedState, identity, readiness) -> derivedReport`.
 It MUST match every status vector without changing persisted state. [K90]
 A persisted ready state with dead, missing, or mismatched identity MUST report `error:identity_invalid` and exit 4. [K91]
+`state.json` error states store one token from the normative `errorReasons` vector.
+Status MUST report the persisted token without replacing it. [K140]
+A valid ready identity with failed readiness MUST derive `error:readiness_failed` without a state write. [K141]
 
 Successful mutating commands MUST emit the derived compact status JSON and exit 0. [K92]
 Status MUST always emit compact JSON, including error reports. [K93]
@@ -202,7 +218,8 @@ Status exits MUST be 0 for ready, 3 for stopped, and 4 for every other report. [
 Mutating command failure MUST emit one corrective stderr error and no success JSON. [K95]
 Diagnose MUST emit deterministic check JSON and exit 20 when any prerequisite fails. [K96]
 Import from a non-ready state MUST emit one corrective stderr error, no JSON, and exit 4. [K97]
-Logs MAY contain time data; vector-compared JSON MUST NOT contain time data. [K98]
+Vector-compared JSON MUST exclude time data. [K98]
+Logs can contain time data.
 
 Stop MUST send SIGTERM to the owned group, wait 10 seconds, then send SIGKILL and wait 2 seconds. [K99]
 It MUST use validated Scope `cgroup.kill` for survivors and wait 10 seconds for `populated 0`. [K100]
@@ -283,3 +300,8 @@ The managed environment MUST match `k3sEnv` and set `VALET_SANDBOX_KUBERNETES=1`
 The Helper MUST clear every unlisted `K3S_*`, `CONTAINERD_*`, and `ROOTLESSKIT_*` variable before launch. [K132]
 Stop MUST terminate a canceled archive process with the K99 bounded TERM and KILL sequence. [K133]
 A cold start MUST require the `minimumFreeBytes` vector within the existing PVC quota. [K134]
+Launcher and enabled sandbox-global variables MUST match `k3sEnv` and `sandboxEnv`, respectively. [K142]
+The image MUST provide Debian Bookworm `slirp4netns=1.2.0-1` at `/usr/bin/slirp4netns`. [K143]
+Diagnose MUST verify that slirp4netns path and package version without downloading a tool. [K144]
+Stop cleanup MUST preserve every PVC path outside Root. [K148]
+Start MUST take the same adjacent exclusive lock before it creates Root. [K149]
