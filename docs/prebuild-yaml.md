@@ -21,6 +21,9 @@ Two layer-size rules worth knowing when writing `setup` commands:
 
 ## Fields
 
+The proposed `kubernetes` field is unimplemented. Its authoritative design is
+[First-class nested Kubernetes v1](specs/2026-09-12-nested-kubernetes-design.md).
+
 ### `setup`
 
 Type: `string[]`

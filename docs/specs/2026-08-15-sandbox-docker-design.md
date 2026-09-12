@@ -223,6 +223,8 @@ root. Consequences:
     create `k3s_evac` below that sibling without evacuating sandbox
     services or enabling controllers at a populated manager. Mono owns
     creation and cleanup of `tkhq-k3s`; Valet does not create it.
+    The proposed first-class replacement moves this ownership to Valet.
+    See `2026-09-12-nested-kubernetes-design.md`.
   - Containment: the private cgroup namespace makes the sandbox container
     cgroup appear as `/sys/fs/cgroup`. The visible root and all CPU,
     memory, and PID limit files stay owned by mapped root. Ancestor limits
