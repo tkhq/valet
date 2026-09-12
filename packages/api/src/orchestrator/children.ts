@@ -108,6 +108,24 @@ function newChildSessionId(): string {
   return `child_${randomUUID()}`;
 }
 
+async function cleanupFailedSpawn(
+  deps: ChildrenDeps,
+  childSessionId: string,
+  workspace: string,
+  error: unknown,
+): Promise<never> {
+  await deps.engineHost.destroy(childSessionId).catch((cleanupError: unknown) => {
+    console.error(`buildChildSpawner: failed to destroy partial child ${childSessionId}:`, cleanupError);
+  });
+  await deps.db.transaction(async (tx) => {
+    await tx.delete(childWatches).where(eq(childWatches.childSessionId, childSessionId));
+    await tx.delete(sessionRepos).where(eq(sessionRepos.sessionId, childSessionId));
+    await tx.delete(agentSessions).where(eq(agentSessions.id, childSessionId));
+  });
+  await rm(workspace, { recursive: true, force: true });
+  throw error;
+}
+
 /**
  * Host policy for `SpawnChildRequest.repo` (the `task` tool's free-form repo
  * string). Accepts `owner/repo` shorthand, an `https://host/owner/repo[.git]`
@@ -298,6 +316,18 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       .limit(1);
     const credentialOwnerMode = parentRows[0]?.credentialOwnerMode === "actor" ? "actor" : "owner";
 
+    if (req.sessionId) {
+      const [existingRows, existingRepos, existingWatches, existingEngine] = await Promise.all([
+        deps.db.select().from(agentSessions).where(eq(agentSessions.id, childSessionId)).limit(1),
+        deps.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, childSessionId)),
+        deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)).limit(1),
+        deps.engineStore.getSession(childSessionId),
+      ]);
+      if (existingRows.length || existingRepos.length || existingWatches.length || existingEngine) {
+        throw new Error(`child session id ${childSessionId} already belongs to an existing session`);
+      }
+    }
+
     // Commit the authoritative shape and repo binding together before the
     // build. Capability persistence and SpecProvider both read these rows.
     const now = Date.now();
@@ -363,17 +393,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       docker: req.docker,
       resources: req.resources,
       startupWarnings: warnings,
-    }).catch(async (error: unknown) => {
-      await deps.engineHost.destroy(childSessionId).catch((cleanupError: unknown) => {
-        console.error(`buildChildSpawner: failed to destroy partial child ${childSessionId}:`, cleanupError);
-      });
-      await deps.db.transaction(async (tx) => {
-        await tx.delete(sessionRepos).where(eq(sessionRepos.sessionId, childSessionId));
-        await tx.delete(agentSessions).where(eq(agentSessions.id, childSessionId));
-      });
-      await rm(workspace, { recursive: true, force: true });
-      throw error;
-    });
+    }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     // No `author`: the parent AGENT composed this prompt, and `author`
     // means "the person who wrote this" — it renders as a `[from: …]` line
@@ -384,7 +404,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
-    });
+    }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     await deps.db
       .insert(childWatches)
@@ -400,7 +420,8 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         // Durable: the settlement can arrive after a restart (rearm), and
         // the child.settled signal must still inherit this origin.
         originJson: ctx.origin !== undefined ? JSON.stringify(ctx.origin) : null,
-      });
+      })
+      .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     watcher.arm({
       childSessionId,

@@ -390,6 +390,37 @@ describe("buildChildSpawner", () => {
     expect(readdirSync(deps.workspaceRoot!)).toHaveLength(0);
   });
 
+  it("cleans a prompt failure and safely retries its preassigned id", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await deps.engineHost.sessionFor("parent-prompt-failure", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    const original = deps.engineHost.childSessionFor.bind(deps.engineHost);
+    vi.spyOn(deps.engineHost, "childSessionFor").mockImplementation(async (...args) => {
+      const child = await original(...args);
+      vi.spyOn(child, "prompt").mockRejectedValueOnce(new Error("prompt failed"));
+      return child;
+    });
+    const spawn = buildChildSpawner(deps, new ChildWatcher(deps));
+    const req = { sessionId: "child-prompt-failure", prompt: "work", repo: "acme/widgets" };
+    const ctx = {
+      parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user", owner: { type: "user" as const, id: "local-user" },
+    };
+
+    await expect(spawn(req, ctx)).rejects.toThrow("prompt failed");
+    expect(await deps.engineStore.getSession(req.sessionId)).toBeNull();
+    expect(await deps.db.select().from(agentSessions).where(eq(agentSessions.id, req.sessionId))).toHaveLength(0);
+    expect(await deps.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, req.sessionId))).toHaveLength(0);
+    expect(await deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, req.sessionId))).toHaveLength(0);
+
+    vi.mocked(deps.engineHost.childSessionFor).mockRestore();
+    await expect(spawn(req, ctx)).resolves.toMatchObject({ childSessionId: req.sessionId });
+    await expect(spawn(req, ctx)).rejects.toThrow("already belongs to an existing session");
+    expect(await deps.engineStore.getSession(req.sessionId)).not.toBeNull();
+  });
+
   it("full-profile child resolves its sandbox image with the child's profile — not the headless default", async () => {
     // Isolated + customImage provider so buildSpecProvider wires image
     // resolution (resolveBaseImage consults the org's per-profile base bakes).

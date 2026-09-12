@@ -104,6 +104,7 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
   });
 
   afterEach(async () => {
+    if (sandbox?.id) await sandbox.exec("rm -rf -- ./* ./.??*").catch(() => {});
     if (sandbox?.id) await provider.destroy(sandbox.id).catch(() => {});
     await rm(tmp, { recursive: true, force: true });
   });
@@ -120,16 +121,18 @@ describeDocker("prebuilt-image fetch-on-start prep (docker)", () => {
     async () => {
       sandbox = await provider.create({ workspace: tmp, image: IMAGE_REF });
 
-      const dirs = computeTargetDirs([binding]);
+      const pinned = { ...binding, ref: "master", resolvedRef: bakedSha };
+      const dirs = computeTargetDirs([pinned]);
       await installCredentialHelper(sandbox, "http://127.0.0.1:1"); // unreachable — tokenless public repo
       await configureGitIdentity(sandbox);
-      await prepPrebuiltBinding(sandbox, dirs[0], binding, { bakedSha, recipe: [] });
+      await prepPrebuiltBinding(sandbox, dirs[0], pinned, { bakedSha, recipe: [] });
 
-      // The repo landed in its subdir (spec decision 15: single-repo sessions
-      // clone into <repoName>/, not the workspace root). `dirs[0]` is "Hello-World".
+      // Single-repo sessions clone into the "Hello-World" subdirectory.
       const head = await sandbox.exec("git rev-parse HEAD", { cwd: dirs[0] });
       expect(head.exitCode).toBe(0);
       expect(head.stdout.trim()).toBe(bakedSha);
+      const branch = await sandbox.exec("git branch --show-current", { cwd: dirs[0] });
+      expect(branch.stdout.trim()).toBe("master");
 
       // The untracked marker the baked setup produced survived the `cp -a`
       // staging — proof we did NOT re-clone (which would lose it).
