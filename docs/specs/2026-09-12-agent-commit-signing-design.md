@@ -178,7 +178,7 @@ Actions: `Approve` (approves), `Reject` (danger). The renderer shows every value
 
 S1, GitHub App permission. GitHub Apps have a user permission "SSH signing keys" (`git_signing_ssh_public_keys`). `POST` and `DELETE /user/ssh_signing_keys` are user-to-server, access `write` (docs.github.com, permissions required for GitHub Apps). The Valet App needs that permission added and users must re-authorize. Not yet exercised against a live App.
 
-S2, sandbox tooling. Both sandbox images install `openssh-client` and git. A Linux `tk` built from `tkhq/tk` main runs in the `Dockerfile.sandbox` base stage and authenticates with an expiring session API key.
+S2, sandbox tooling and GitHub. Both sandbox images install `openssh-client` and git. A Linux `tk` built from `tkhq/tk` main runs in the `Dockerfile.sandbox` base stage and authenticates with an expiring session API key. A commit signed with a disposable Ed25519 key registered through `POST /user/ssh_signing_keys` shows `verified=true reason=valid` on GitHub, and stays verified after `DELETE /user/ssh_signing_keys/{id}`. Disposable keys work.
 
 S3, `tk ssh git-sign` from git. Against the dev organization, `git commit` with `gpg.format=ssh` and `gpg.ssh.program=tk` reaches `SIGN_RAW_PAYLOAD_V2` and Turnkey's policy engine. Findings:
 
