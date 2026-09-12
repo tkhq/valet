@@ -180,9 +180,10 @@ S1, GitHub App permission. GitHub Apps have a user permission "SSH signing keys"
 
 S2, sandbox tooling and GitHub. Both sandbox images install `openssh-client` and git. A Linux `tk` built from `tkhq/tk` main runs in the `Dockerfile.sandbox` base stage and authenticates with an expiring session API key. A commit signed with a disposable Ed25519 key registered through `POST /user/ssh_signing_keys` shows `verified=true reason=valid` on GitHub, and stays verified after `DELETE /user/ssh_signing_keys/{id}`. Disposable keys work.
 
-S3, `tk ssh git-sign` from git. Against the dev organization, `git commit` with `gpg.format=ssh` and `gpg.ssh.program=tk` reaches `SIGN_RAW_PAYLOAD_V2` and Turnkey's policy engine. Findings:
+S3, `tk ssh git-sign` from git. In a dev sub-organization laid out as this design says (passkey-approved `CREATE_SUB_ORGANIZATION_V7`, `valet-agent` with a discarded key plus an expiring session key, `agent-session` and `agent-signing` tags, the one allow policy), `git commit` with `gpg.format=ssh` and `gpg.ssh.program=tk` produced a commit that `ssh-keygen` verifies: `Good "git" signature for carey@turnkey.io with ED25519 key`. Findings:
 
 - Git passes `-U` when `user.signingkey` is a literal `key::` public key. `tk`'s parser refused it. Fixed in `tkhq/tk` branch `carey/git-sign-accept-agent-flag`.
+- Git calls `gpg.ssh.program` to verify as well (`-Y find-principals`, `-Y check-novalidate`). `valet-sign` hands every operation except `-Y sign` to `ssh-keygen`, or `git verify-commit` fails in the sandbox.
 - An `EFFECT_ALLOW` policy on `user.id` and `private_key.id` evaluated `OUTCOME_ALLOW` for a non-root user with an expiring API key.
 - When the signing user is a root user under a 2-of-2 quorum, `tk` exits non-zero with the activity id and fingerprint and git fails with `failed to write commit object`. This is the Phase 2 path, and it fails closed.
 - Turnkey refuses `CREATE_USERS_V4` when the only API key has an expiration. Enrollment creates the agent user with a discarded non-expiring key.

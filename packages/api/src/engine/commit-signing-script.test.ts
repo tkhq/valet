@@ -10,6 +10,11 @@ describe("valetSignScript", () => {
     expect(script).toContain('exec "$TK" ssh git-sign "$@"');
   });
 
+  it("hands every operation except signing to ssh-keygen", () => {
+    expect(script).toContain('*"-Y sign"*) ;;');
+    expect(script).toContain('*) exec ssh-keygen "$@" ;;');
+  });
+
   it("reads the session key and the env file from the fixed paths and embeds no secret", () => {
     expect(script).toContain('ENV_FILE="/run/valet/turnkey/env"');
     expect(script).toContain('KEY_FILE="/run/valet/turnkey/session.json"');
