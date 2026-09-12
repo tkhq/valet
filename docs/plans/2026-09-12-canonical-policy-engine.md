@@ -183,12 +183,15 @@ pnpm typecheck
 - Extend `packages/web/src/api/policies.ts` with typed builder requests.
 - Map current action policies, team policies, overrides, grants, entitlements, plugin defaults, risk defaults, and the bundle default into provenance-preserving views.
 - Compile builder documents into the same content-addressed Rego and data bundle used by local OPA and the future TVC evaluator.
-- Keep publication inactive until PR 7 moves every policy write to canonical bundle publication.
+- Keep publication inactive until PR 7 makes each effective-policy write validate, publish, and activate a canonical draft in one transaction.
 - Add no client evaluator, UI-only semantics, shadow mode, dual evaluation, or runtime fallback.
 
 **Acceptance checks**
 
-- One builder handles action, workflow, route, resource, entitlement, delegation, sandbox, credential, and egress contexts through descriptors.
+- Each `AuthorizationKind` maps to one descriptor: `tool.action` and `tool.builtin` use Tool and action, with tool class distinguishing built-ins.
+- `workflow.action` uses Workflow. `route.access` uses Route and API. `resource.access` uses Resource. `plugin.entitlement` uses Entitlement.
+- `delegation.create` and `agent.signal` use Delegation and child session, with edge type distinguishing signals.
+- `sandbox.capability` uses Sandbox capability. `credential.use` and `credential.delegate` use Credential. `egress.connect` uses Egress.
 - Common fields stay generic while context-specific fields and operators come from capability schemas.
 - The server rejects unknown fields, invalid operator and type pairs, unsupported obligations, sensitive values, stale versions, and unauthorized publication.
 - Visual edits preserve rule identity, source provenance, and unknown registered extensions.
@@ -247,8 +250,10 @@ pnpm typecheck
 - Move workflow analysis and pre-approval in `packages/api/src/workflows/permissions.ts` to `AuthorizationService`.
 - Move the `upsertOverride` bounds guard in `packages/api/src/policies/admin.ts` to `AuthorizationService`.
 - Move the `/api/org/policies/preview` path in `packages/api/src/routes/policies.ts` to `AuthorizationService`.
-- Move every organization, team, override, entitlement, grant, approval, and default policy write to canonical builder data or dynamic facts and bundle publication.
-- Remove legacy web and API write paths that can change policy without publishing the canonical bundle.
+- Make each organization, team, override, entitlement, or default policy authoring write validate, publish, and activate its canonical draft in one transaction before success.
+- If activation fails, fail the authoring write and keep the old active bundle.
+- Persist grants and approvals as canonical dynamic facts in their own transactions. They do not republish the static bundle.
+- Remove legacy web and API paths that can change effective policy without the authoring transaction.
 - Re-evaluate approved requests with canonical approval facts.
 - Persist the decision before the action and persist execution outcome separately.
 - Make audit reservation failure block external execution.
@@ -271,7 +276,9 @@ pnpm typecheck
 - Approval replay survives restart and remains bound to one request subject.
 - Resolver, bundle, obligation, and audit failures deny without executing.
 - Repository search finds no TypeScript evaluator in runtime, `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard, or policy preview.
-- Every web and API policy mutation publishes canonical data or a canonical dynamic fact. No legacy form can write around bundle publication.
+- Every web and API policy authoring write validates, publishes, and activates its canonical draft in one transaction before success.
+- A failed activation leaves the old active bundle unchanged. No legacy form can write around this transaction.
+- Grant and approval mutations persist canonical dynamic facts atomically and do not republish the static bundle.
 - A new organization has an active valid bundle before it accepts an authorization request.
 - Review the diff explicitly for `shadow`, `fallback`, and dual evaluator wiring.
 
@@ -469,9 +476,10 @@ make e2e
 6. Publish valid bundles for every active organization before PR 7 deploys.
 7. Block PR 7 deployment if any organization lacks a valid active bundle or has an unsupported legacy expression.
 8. Deploy PR 7 once. Local OPA becomes the only action evaluator at process start.
-9. Move every policy write to canonical bundle publication in the same pull request.
-10. Remove old evaluator metrics, alerts, forms, write routes, and code in the same pull request.
-11. Route later domains through their own atomic surface pull requests.
+9. Move every effective-policy write to transactional canonical draft validation, publication, and activation in the same pull request.
+10. Verify that failed activation rejects the write and keeps the old active bundle.
+11. Remove old evaluator metrics, alerts, forms, write routes, and code in the same pull request.
+12. Route later domains through their own atomic surface pull requests.
 
 Offline comparison is migration validation. It is not shadow mode because it does not evaluate live requests or retain two production decisions.
 
@@ -499,7 +507,8 @@ The stack is complete when:
 - Built-ins, entitlements, routes, resources, delegation, sandbox capabilities, credentials, and egress use the contract where applicable.
 - `PolicyResolver` contains no policy logic.
 - The builder covers every registered context without adding another policy language or evaluator.
-- Every policy write produces canonical builder data, dynamic facts, or bundle publication with source provenance.
+- Every effective-policy write validates, publishes, and activates its canonical draft in one transaction with source provenance.
+- Every grant or approval mutation persists one canonical dynamic fact transactionally with source provenance.
 - The repository contains no live old action evaluator, shadow path, or legacy fallback.
 - Decision records and execution outcomes are separate and linked.
 - Approval replay is deterministic and subject-bound.

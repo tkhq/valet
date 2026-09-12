@@ -277,7 +277,7 @@ Each organization has one active logical bundle version. A bundle contains:
 - dynamic grant and approval facts that apply to the request; and
 - the deterministic manifest.
 
-Static policy publication follows `draft`, `validated`, `published`, `active`, and `retired` states. Validation compiles Rego, checks the entry point and output schema, checks referenced data, and computes the canonical digest. Activation is a transaction that advances the active version pointer and records the actor.
+Static policy publication follows `draft`, `validated`, `published`, `active`, and `retired` states. Validation compiles Rego, checks the entry point and output schema, checks referenced data, and computes the canonical digest. A policy authoring write creates or updates and validates a canonical draft. It then publishes and activates that draft in one transaction before it reports success. If activation fails, the write fails and the old active bundle remains. A standalone draft save does not change effective policy.
 
 Organization creation must never leave a gap with no policy. The create transaction compiles and activates the standard default bundle before it makes the organization usable. Organization creation fails if compilation or activation fails. The organization cannot accept requests until that transaction commits.
 
@@ -345,17 +345,17 @@ Generic rule fields are rule ID, source scope, subject selector, context ID, tar
 
 The registry covers these contexts:
 
-| Context | Context-specific capabilities |
-|---|---|
-| Tool and action | Service, fully qualified action, risk, parameter schema, plugin default, and tool class. |
-| Workflow | Definition, node, `workflowExecutionId`, owner, trigger, `appliesIn`, and workflow grant scope. |
-| Route and API | HTTP method, route ID, authenticated principal type, operation, and concealment requirement. |
-| Resource | Resource type, stable ID, owner, tenant, visibility, requested operation, and query obligation. |
-| Entitlement | Plugin, instance availability, organization mode, team set, and feature operation. |
-| Delegation and child session | Parent, child, edge type, target owner, repository, model tier, hop count, and inherited authority. |
-| Sandbox capability | Profile, provider, image, Docker, CPU, memory, mount, terminal, and requested capability. |
-| Credential | Service, credential owner, delegation source, requested use, and session or workflow owner. Secret fields are excluded. |
-| Egress | Scheme, normalized host, port, protocol, destination class, redirect policy, and declared scope. |
+| Context descriptor | `AuthorizationKind` values | Context-specific capabilities |
+|---|---|---|
+| Tool and action | `tool.action`, `tool.builtin` | Service, fully qualified action, risk, parameter schema, plugin default, and tool class. The tool class distinguishes built-ins. |
+| Workflow | `workflow.action` | Definition, node, `workflowExecutionId`, owner, trigger, `appliesIn`, and workflow grant scope. |
+| Route and API | `route.access` | HTTP method, route ID, authenticated principal type, operation, and concealment requirement. |
+| Resource | `resource.access` | Resource type, stable ID, owner, tenant, visibility, requested operation, and query obligation. |
+| Entitlement | `plugin.entitlement` | Plugin, instance availability, organization mode, team set, and feature operation. |
+| Delegation and child session | `delegation.create`, `agent.signal` | Parent, child, edge type, target owner, repository, model tier, hop count, and inherited authority. The edge type distinguishes agent signals. |
+| Sandbox capability | `sandbox.capability` | Profile, provider, image, Docker, CPU, memory, mount, terminal, and requested capability. |
+| Credential | `credential.use`, `credential.delegate` | Service, credential owner, delegation source, requested use, and session or workflow owner. Secret fields are excluded. |
+| Egress | `egress.connect` | Scheme, normalized host, port, protocol, destination class, redirect policy, and declared scope. |
 
 Common editor primitives handle typed equality, set membership, order comparisons, presence, time windows, subject membership, owner relationships, and Boolean groups. Context descriptors can expose only operators valid for a field type. For example, the egress descriptor can expose host suffix matching, while a numeric sandbox field can expose bounded comparisons. Descriptor extensions must map to canonical input fields and registered compiler behavior.
 
@@ -395,7 +395,8 @@ type PolicyBuilderDocument = {
 };
 
 type ContextDescriptor = {
-  id: AuthorizationKind;
+  id: string;
+  kinds: AuthorizationKind[];
   schemaVersion: number;
   subjectTypes: string[];
   targetSchema: FieldDescriptor[];
@@ -520,7 +521,7 @@ The migration importer maps current sources into builder views:
 - plugin defaults and risk defaults become inherited read-only action layers.
 - the standard bundle default becomes the final inherited layer.
 
-The current organization and team forms can read imported builder projections during migration. At final cutover, all web and API policy writes must create a builder draft and publish a canonical bundle. No endpoint can keep writing policy rows without bundle publication.
+The current organization and team forms can read imported builder projections during migration. At final cutover, each web or API policy authoring write must create or update and validate a canonical draft. The same transaction must publish and activate the draft before the write reports success. If activation fails, the write fails and the old active bundle remains. No endpoint can change effective policy without this transaction. Standalone draft saves remain non-enforcing.
 
 The importer preserves original row IDs, source tables, timestamps, authors, matchers, and ownership in provenance. It rejects an expression that has no lossless builder or advanced-source representation. The migration records an explicit issue for that expression and blocks affected bundle activation. It never weakens, drops, or approximates the expression.
 
@@ -554,7 +555,7 @@ The local OPA phase trusts the Valet host for all facts and enforcement. The TVC
 
 A `require_approval` decision creates one durable gate bound to `requestSubjectDigest` and the original decision digest. Resolution is append-only. The first valid terminal resolution wins. Repeated delivery of the same resolution ID returns the stored result. A different terminal resolution for the same version is rejected.
 
-An `approve_once` resolution authorizes one replay of the same request subject. A session or workflow grant creates a separate dynamic fact with its own durable ID and scope. An always-allow action updates authoring data and publishes a new bundle. It does not mutate the original decision.
+An `approve_once` resolution authorizes one replay of the same request subject. A session or workflow grant creates a separate dynamic fact with its own durable ID and scope. An always-allow action uses the transactional policy authoring write to activate a new bundle. It does not mutate the original decision.
 
 After approval, Valet re-evaluates the request with the approval fact or grant included. It does not execute only because a UI callback said yes. The new decision must bind the same request subject. A changed parameter, resource, actor, or target produces a different subject and requires a new decision.
 
@@ -644,7 +645,7 @@ The labels describe authoring inputs, not separate runtime engines. OPA evaluate
 
 `action_policies`, `action_policy_overrides`, and `runtime_grants` remain authoring and fact storage during migration. The compiler maps them into Rego and canonical data. Their current matcher operators, context scope, team behavior, and provenance IDs remain representable.
 
-The final cutover deletes the TypeScript precedence evaluator. Policy CRUD can continue to write structured rows if the UI needs them. Every write must publish or invalidate the affected bundle before it reports success.
+The final cutover deletes the TypeScript precedence evaluator. Policy CRUD can keep structured rows as canonical authoring data if the UI needs them. Each policy authoring write must validate, publish, and activate its canonical draft in one transaction before it reports success. If activation fails, the write fails and the old active bundle remains.
 
 ### Resource access
 
@@ -719,8 +720,9 @@ The one replacement pull request then:
 - activates the compiled policy bundles;
 - converges interactive and workflow action paths;
 - moves `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard in `packages/api/src/policies/admin.ts`, and the preview in `packages/api/src/routes/policies.ts` to the canonical service;
-- requires every web and API policy mutation to update canonical builder data or dynamic facts and publish the affected bundle;
-- removes forms and endpoints that can write policy without canonical publication;
+- requires each web and API policy authoring write to validate, publish, and activate its canonical draft in one transaction before success;
+- keeps the old active bundle when that transaction fails;
+- removes forms and endpoints that can change effective policy without this transaction;
 - activates deterministic approval replay and split decision and execution audits;
 - removes the old TypeScript action-policy evaluator from every runtime, preview, and write guard; and
 - adds no shadow mode or legacy runtime fallback.
@@ -770,7 +772,7 @@ The active OPA bundle is invalid or unavailable. Valet records a denied decision
 ## Open questions and decision gates
 
 1. **OPA runtime:** Choose WebAssembly, an embedded runtime, or a managed local sidecar. The gate is bounded latency, deterministic bundle replacement, maintained Node support, and no decision-time network lookup.
-2. **Bundle publication transaction:** Decide whether policy writes activate a bundle in the same database transaction or through an outbox with writes blocked until activation.
+2. **Bundle publication transaction:** Define the database transaction boundary for authoring rows, bundle versions, the active pointer, and audit. The write cannot report success before activation.
 3. **Policy source signatures:** Decide when local policy administration must produce signed pins, before TVC or with TVC.
 4. **Identity roots:** Select trusted issuers for user, team, workload, and service identities. Host assertions remain explicit until then.
 5. **List authorization:** Define the limited query-obligation vocabulary before route and resource cutover.
