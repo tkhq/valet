@@ -12,10 +12,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { WireQueueState } from "@valet/api/wire";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { ApiError } from "~/api/client";
-import { useComposerDraftStore } from "~/stores/composer-drafts";
+import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
+const sendState = { pending: false };
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
 const addUserMessage = vi.fn(() => "user-opt-1");
 const setMessageQueueItemId = vi.fn();
@@ -41,7 +42,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
-    useSendPrompt: () => ({ isPending: false, mutateAsync: sendMutateAsync }),
+    useSendPrompt: () => ({ isPending: sendState.pending, mutateAsync: sendMutateAsync }),
     useAbortThread: () => ({
       isPending: false,
       mutateAsync: abortMutateAsync,
@@ -108,6 +109,7 @@ function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
 
 beforeEach(() => {
   queueStateRef.current = undefined;
+  sendState.pending = false;
   useComposerPrefillStore.setState({ text: null });
   // Drafts live in a module-global store keyed by (session, thread) — the
   // same key across tests would leak one test's draft into the next.
@@ -117,6 +119,93 @@ beforeEach(() => {
   abortMutateAsync.mockClear();
   addUserMessage.mockClear();
   setMessageQueueItemId.mockClear();
+});
+
+describe("Composer — compact layout", () => {
+  it("expands on input focus and collapses when the empty composer loses focus", () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "Message" });
+    const form = input.closest("form");
+    expect(form?.dataset.expanded).toBe("false");
+    act(() => input.focus());
+    expect(form?.dataset.expanded).toBe("true");
+    act(() => input.blur());
+    expect(form?.dataset.expanded).toBe("false");
+  });
+
+  it("keeps its layout when focus moves from the input to an action", () => {
+    renderComposer("streaming");
+    const input = screen.getByRole("textbox", { name: "Message" });
+    const stop = screen.getByRole("button", { name: "Stop" });
+    act(() => stop.focus());
+    expect(input.closest("form")?.dataset.expanded).toBe("false");
+    act(() => input.focus());
+    act(() => stop.focus());
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    act(() => stop.blur());
+    expect(input.closest("form")?.dataset.expanded).toBe("false");
+  });
+
+  it("focuses pointer-activated actions before the textarea can blur", () => {
+    renderComposer("streaming");
+    const input = screen.getByRole("textbox", { name: "Message" });
+    const stop = screen.getByRole("button", { name: "Stop" });
+    act(() => input.focus());
+    expect(fireEvent.mouseDown(stop, { button: 0 })).toBe(false);
+    expect(document.activeElement).toBe(stop);
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    act(() => stop.blur());
+    expect(input.closest("form")?.dataset.expanded).toBe("false");
+  });
+
+  it("keeps a draft expanded after blur, then collapses when the draft is cleared", () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "Message" });
+    act(() => input.focus());
+    fireEvent.change(input, { target: { value: "A draft" } });
+    act(() => input.blur());
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    act(() => useComposerDraftStore.getState().setText(draftKey("orchestrator:user-1", "thread-1"), ""));
+    expect(input.closest("form")?.dataset.expanded).toBe("false");
+  });
+
+  it("collapses when a focused action disappears after the agent stops", async () => {
+    const view = renderComposer("streaming");
+    const input = screen.getByRole("textbox", { name: "Message" });
+    act(() => input.focus());
+    act(() => screen.getByRole("button", { name: "Stop" }).focus());
+    view.rerenderComposer("idle");
+    await waitFor(() => expect(input.closest("form")?.dataset.expanded).toBe("false"));
+  });
+
+  it("stays expanded while sending and restores input focus after the draft clears", () => {
+    const view = renderComposer();
+    const input = screen.getByRole("textbox", { name: "Message" });
+    act(() => input.focus());
+    fireEvent.change(input, { target: { value: "Send this draft" } });
+    sendState.pending = true;
+    view.rerenderComposer();
+    fireEvent.blur(input);
+    act(() => useComposerDraftStore.getState().clear(draftKey("orchestrator:user-1", "thread-1")));
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    sendState.pending = false;
+    view.rerenderComposer();
+    expect(document.activeElement).toBe(input);
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    act(() => input.blur());
+    expect(input.closest("form")?.dataset.expanded).toBe("false");
+  });
+
+  it("expands for intake errors and collapses when they are dismissed", () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "Message" });
+    const key = draftKey("orchestrator:user-1", "thread-1");
+    act(() => useComposerDraftStore.getState().setFileErrors(key, ["Choose a smaller file."]));
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    expect(screen.getByText("Choose a smaller file.")).toBeDefined();
+    act(() => useComposerDraftStore.getState().setFileErrors(key, []));
+    expect(input.closest("form")?.dataset.expanded).toBe("false");
+  });
 });
 
 describe("Composer — prefill consumption", () => {

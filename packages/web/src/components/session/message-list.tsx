@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { cn } from "~/lib/cn";
+import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
 import type { StreamMessage } from "~/stores/stream";
 import { MessageItem } from "./message-item";
@@ -31,6 +33,7 @@ export function MessageList({
   agentBusy = false,
   pendingIds,
   viewerId,
+  header,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -55,9 +58,12 @@ export function MessageList({
    * by name, which is accurate, just not "You"-ified.
    */
   viewerId?: string;
+  /** Full-page chat controls share the transcript sticky layer. */
+  header?: ReactNode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const scrollHeader = useScrollHeader(containerRef, threadId);
   // The ref above drives the auto-scroll effect and must stay a ref: the
   // effect reads it in the same tick a message lands. This mirror exists
   // only so the button can render, and it flips at the same threshold.
@@ -73,22 +79,24 @@ export function MessageList({
   // the "Latest" button. Reset only — `visible` recomputes on the same
   // threadId change, so the effect below (declared after this one, runs
   // after it) does the single scroll write.
-  useEffect(() => {
+  useLayoutEffect(() => {
     stickToBottomRef.current = true;
     setScrolledAway(false);
   }, [threadId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     if (stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
+      scrollHeader.syncPosition();
     }
-  }, [visible]);
+  }, [visible, scrollHeader.syncPosition]);
 
   function onScroll() {
     const el = containerRef.current;
     if (!el) return;
+    scrollHeader.onScroll();
     const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
     const nearBottom = distanceFromBottom < 80; // "near bottom"
     stickToBottomRef.current = nearBottom;
@@ -101,6 +109,7 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    scrollHeader.syncPosition();
     // Set both here rather than waiting for the scroll event. A programmatic
     // scroll to an already-bottom list fires no event, which would leave the
     // button on screen with nothing left to do.
@@ -108,47 +117,75 @@ export function MessageList({
     setScrolledAway(false);
   }
 
-  if (visible.length === 0) {
-    return (
-      <div className="flex-1 grid place-items-center text-sm text-muted">
-        No messages yet — try sending a prompt below.
-      </div>
-    );
-  }
 
   return (
-    <div className="flex-1 relative min-h-0">
+    <div className="flex-1 relative min-h-0 min-w-0">
       <div
         ref={containerRef}
         onScroll={onScroll}
-        className="h-full overflow-y-auto divide-y divide-[--border]"
+        onWheelCapture={(event) => scrollHeader.recordIntent(event.target)}
+        onTouchMove={(event) => scrollHeader.recordIntent(event.target)}
+        onPointerDown={(event) => scrollHeader.recordIntent(event.target)}
+        onPointerMove={(event) => { if (event.buttons) scrollHeader.recordIntent(event.target); }}
+        onKeyDown={(event) => {
+          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            scrollHeader.recordIntent(event.target);
+          }
+        }}
+        tabIndex={0}
+        aria-label="Conversation"
+        data-testid="message-list"
+        className="flex h-full w-full min-w-0 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
-        {visible.map((m, i) =>
-          m.compaction ? (
-            <CompactionDivider key={m.id} message={m} />
-          ) : m.signal ? (
-            <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
-          ) : m.command ? (
-            <CommandResult key={m.id} message={m} />
-          ) : (
-            <MessageItem
-              key={m.id}
-              message={m}
-              suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
-              queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
-              viewerId={viewerId}
-            />
-          ),
+        {header && (
+          <div
+            ref={scrollHeader.headerRef}
+            data-testid="thread-header"
+            data-hidden={scrollHeader.hidden}
+            onFocusCapture={scrollHeader.onFocus}
+            onBlurCapture={scrollHeader.onBlur}
+            className={cn(
+              "sticky top-0 z-20 shrink-0 bg-paper transition-transform duration-200 ease-out motion-reduce:transition-none sm:transform-none",
+              scrollHeader.hidden ? "-translate-y-full" : "translate-y-0",
+            )}
+          >
+            {header}
+          </div>
+        )}
+        {visible.length === 0 ? (
+          <div className="flex-1 grid place-items-center text-sm text-muted">
+            No messages yet — try sending a prompt below.
+          </div>
+        ) : (
+          <div className="shrink-0 divide-y divide-[--border]">
+            {visible.map((m, i) =>
+              m.compaction ? (
+                <CompactionDivider key={m.id} message={m} />
+              ) : m.signal ? (
+                <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
+              ) : m.command ? (
+                <CommandResult key={m.id} message={m} />
+              ) : (
+                <MessageItem
+                  key={m.id}
+                  message={m}
+                  suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
+                  queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
+                  viewerId={viewerId}
+                />
+              ),
+            )}
+          </div>
         )}
       </div>
       {/* Only while the reader is away from the bottom. At the bottom the
           list already follows the agent, so the control has no job. */}
-      {scrolledAway && (
+      {visible.length > 0 && scrolledAway && (
         <button
           type="button"
           onClick={scrollToBottom}
           aria-label="Jump to latest message"
-          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-line bg-paper/90 px-3 py-1 text-xs text-muted shadow-sm backdrop-blur transition-colors hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-line bg-paper max-sm:min-h-11 px-3 py-1 text-xs text-muted shadow-sm transition-colors hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
         >
           <ArrowDown className="h-3 w-3" aria-hidden />
           Latest

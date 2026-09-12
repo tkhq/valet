@@ -29,6 +29,8 @@ let headerThreads: Array<{
   model?: string;
   reasoning?: string | null;
 }> = [];
+let sessionRating: "positive" | "negative" | null = null;
+let ratingPending = false;
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 let replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -69,8 +71,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
     useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
-    useSessionRatings: () => ({ data: { session: null, entries: {} }, isLoading: false, error: null }),
-    useRateSession: () => ({ isPending: false, mutate: rateSessionMutate }),
+    useSessionRatings: () => ({ data: { session: sessionRating, entries: {} }, isLoading: false, error: null }),
+    useRateSession: () => ({ isPending: ratingPending, mutate: rateSessionMutate }),
   };
 });
 
@@ -171,6 +173,9 @@ function idleModel(threadId: string) {
 beforeEach(() => {
   useStreamStore.setState({ bySession: {} });
   deleteMutateAsync.mockClear();
+  rateSessionMutate.mockClear();
+  sessionRating = null;
+  ratingPending = false;
   setModelMutate.mockClear();
   setThreadModelMutate.mockClear();
   setReasoningMutate.mockClear();
@@ -387,6 +392,33 @@ describe("SessionHeader — pause control", () => {
 });
 
 describe("SessionHeader — overflow menu", () => {
+  it("clears an active phone rating and disables ratings while saving", async () => {
+    sessionRating = "positive";
+    const view = renderHeader({ state: "ready", epoch: 1 });
+    await userEvent.click(screen.getByRole("button", { name: "Session menu" }));
+    const good = screen.getByRole("menuitemcheckbox", { name: "Good session" });
+    expect(good.getAttribute("aria-checked")).toBe("true");
+    await userEvent.click(good);
+    expect(rateSessionMutate).toHaveBeenCalledWith(null);
+    view.unmount();
+    ratingPending = true;
+    renderHeader({ state: "ready", epoch: 1 });
+    await userEvent.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "Bad session" }).getAttribute("data-disabled")).not.toBeNull();
+  });
+
+  it("keeps phone pause readiness and failure reporting", async () => {
+    pauseMutateAsync = vi.fn().mockRejectedValue(new Error("Wait for the current turn to finish."));
+    const view = renderHeader({ state: "suspended", epoch: 1 });
+    await userEvent.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: "Pause session" }).getAttribute("data-disabled")).not.toBeNull();
+    view.unmount();
+    renderHeader({ state: "ready", epoch: 1 });
+    await userEvent.click(screen.getByRole("button", { name: "Session menu" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Pause session" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Wait for the current turn to finish.");
+  });
+
   it("has no direct trash button; the ⋯ menu holds Replace sandbox and Delete session", async () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
@@ -646,7 +678,7 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
     );
   });
 
-  it("hides the switch from a plain team member", () => {
+  it("hides the switch from a plain team member", async () => {
     // Same rule as pause and delete: the switch restarts a sandbox the
     // whole team shares, so it follows `canAdminister`.
     teamsData = {
@@ -683,7 +715,10 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
         />
       </TooltipProvider>,
     );
-    expect(screen.queryByRole("button", { name: "Session menu" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.queryByRole("menuitem", { name: /turn .*terminal/i })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /delete|replace|pause/i })).toBeNull();
+    expect(screen.getByRole("menuitem", { name: "Copy transcript" })).toBeTruthy();
   });
 });
 
@@ -897,14 +932,14 @@ describe("SessionHeader — team assistant", () => {
     expect(screen.getByText("repo")).toBeTruthy();
   });
 
-  // Delete lives behind the ⋯ menu, so the menu trigger is what a
-  // non-admin must not see. Asserting on the trigger, not on a Delete
-  // button, keeps this pinned to the control that actually gates the action.
-  it("hides pause and the session menu from a plain team member", () => {
+  it("keeps phone copy and ratings available without team admin actions", async () => {
     withTeam("member");
     renderTeamHeader();
     expect(screen.queryByRole("button", { name: /pause/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Session menu" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.queryByRole("menuitem", { name: /turn .*terminal/i })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /delete|replace|pause/i })).toBeNull();
+    expect(screen.getByRole("menuitem", { name: "Copy transcript" })).toBeTruthy();
   });
 
   it("shows pause and the session menu to a team admin", () => {

@@ -230,7 +230,7 @@ export function TopNav() {
   // header) instead. The presence dot stays: it still reflects the
   // orchestrator's live state at a glance from anywhere in the app.
   return (
-    <header className="h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-1 px-2 md:gap-4 md:px-3">
+    <header className="max-sm:[--nav-height:3rem] h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-1 px-2 md:gap-4 md:px-3">
       <SidebarToggle />
 
       <Link

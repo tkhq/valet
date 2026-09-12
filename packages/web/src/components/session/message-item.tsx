@@ -72,14 +72,14 @@ export const MessageItem = memo(function MessageItem({
   // viewer's own messages (and authorless rows) keep the "You" treatment.
   const teammate = isUser ? senderLabel(message.author, viewerId) : undefined;
   return (
-    <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
+    <article className={cn("group min-w-0 px-3 py-3 sm:px-4", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
       {/* Row background spans full width; the content column is capped at a
           readable measure and centered — prose and tool cards both benefit. */}
       <div className={cn(
-        "mx-auto flex w-full max-w-4xl gap-3",
+        "mx-auto flex w-full min-w-0 max-w-4xl gap-3",
         isUser && "border-l-4 border-moss pl-3"
       )}>
-        <Avatar size="sm">
+        <Avatar size="sm" className="hidden sm:flex">
           <AvatarFallback>
             {teammate ? (
               userInitials(teammate)
@@ -91,7 +91,7 @@ export const MessageItem = memo(function MessageItem({
           </AvatarFallback>
         </Avatar>
         <div className="flex-1 min-w-0 space-y-2">
-          <div className="text-xs text-muted flex items-center gap-2">
+          <div className="text-xs text-muted flex min-w-0 flex-wrap items-center gap-2">
             <span className="font-medium text-[--fg]/80">
               {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
             </span>
@@ -99,7 +99,7 @@ export const MessageItem = memo(function MessageItem({
             <span>{formatTime(message.createdAt)}</span>
             {message.role === "assistant" && message.model && (
               <span
-                className="font-mono text-[10px] text-muted opacity-80"
+                className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
                 title={message.model}
               >
                 {shortModelLabel(message.model)}

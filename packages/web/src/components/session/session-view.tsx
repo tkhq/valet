@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
@@ -103,6 +103,22 @@ export function SessionView({
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
   const tab = activeTab ?? localTab;
   const setTab = onTabChange ?? setLocalTab;
+  const viewRef = useRef<HTMLDivElement>(null);
+  const restoreTabFocus = useRef(false);
+  function changeTab(next: SandboxTabId) {
+    const active = document.activeElement;
+    restoreTabFocus.current = next !== tab && active instanceof HTMLElement
+      && active.getAttribute("role") === "tab"
+      && Boolean(viewRef.current?.contains(active));
+    setTab(next);
+  }
+  useLayoutEffect(() => {
+    if (!restoreTabFocus.current) return;
+    restoreTabFocus.current = false;
+    // Chat owns the sliding strip; gateway tabs own the fixed strip.
+    // Keep keyboard focus on the selected replacement when it moves.
+    viewRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
+  }, [tab]);
   const threads = useThreads(sessionId);
   // Open the WS — pipes events into the store keyed by sessionId.
   useSessionWebSocket(sessionId);
@@ -194,32 +210,40 @@ export function SessionView({
     );
   }
 
+  const sessionHeader = (
+    <SessionHeader
+      session={session.data}
+      agentStatus={threadStatus.status}
+      turnStartedAt={threadStatus.turnStartedAt}
+      conn={stream.conn}
+      sandbox={stream.sandbox}
+      threadId={effectiveThreadId}
+      messages={stream.messages}
+    />
+  );
+  const sandboxTabs = (
+    <SandboxTabs
+      sessionId={sessionId}
+      profile={session.data.profile}
+      activeTab={tab}
+      onTabChange={changeTab}
+      sandbox={stream.sandbox}
+    />
+  );
+
   return (
     <ComposerDropContext.Provider value={dropChannel}>
-    <div className="flex-1 flex flex-col min-h-0">
-      {panel ? (
-        <PanelHeader sessionId={sessionId} title={session.data.title} onClose={onClose} />
-      ) : (
-        <SessionHeader
-          session={session.data}
-          agentStatus={threadStatus.status}
-          turnStartedAt={threadStatus.turnStartedAt}
-          conn={stream.conn}
-          sandbox={stream.sandbox}
-          threadId={effectiveThreadId}
-          messages={stream.messages}
-        />
+    <div ref={viewRef} className="flex-1 flex flex-col min-h-0">
+      {(panel || tab !== "chat") && (
+        <>
+          {panel ? <PanelHeader sessionId={sessionId} title={session.data.title} onClose={onClose} /> : sessionHeader}
+          {sandboxTabs}
+        </>
       )}
-      <SandboxTabs
-        sessionId={sessionId}
-        profile={session.data.profile}
-        activeTab={tab}
-        onTabChange={setTab}
-        sandbox={stream.sandbox}
-      />
       {tab === "chat" ? (
         <PageDropTarget>
           <MessageList
+            header={panel ? undefined : <>{sessionHeader}{sandboxTabs}</>}
             messages={stream.messages}
             threadId={effectiveThreadId}
             onOpenChild={onOpenChild}
