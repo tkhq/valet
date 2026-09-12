@@ -25,6 +25,19 @@
     @apply bg-[--bg] text-[--fg] font-sans antialiased;
   }
 
+  /* Phone gestures pan app content without scaling the fixed app shell.
+     Inheritance covers nested scrollers and portaled menus. Components
+     with their own gestures (for example React Flow) keep their overrides. */
+  @media (pointer: coarse) {
+    body {
+      touch-action: pan-x pan-y;
+    }
+
+    * {
+      touch-action: inherit;
+    }
+  }
+
   *, *::before, *::after {
     @apply border-[--border];
   }

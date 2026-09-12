@@ -33,6 +33,15 @@ describe("Markdown", () => {
     expect(screen.getByText("world")).toBeTruthy();
   });
 
+  it("keeps wide table contents intact in a keyboard-accessible region", () => {
+    const hash = "14827038440abcee14b0ede8020ef0bd4117d510".repeat(3);
+    render(<Markdown>{`| Commit | Status |\n| --- | --- |\n| ${hash} | Ready |`}</Markdown>);
+    const region = screen.getByRole("region", { name: "Table" });
+    expect(region.tabIndex).toBe(0);
+    expect(region.contains(screen.getByRole("table"))).toBe(true);
+    expect(screen.getByRole("cell", { name: hash }).textContent).toBe(hash);
+  });
+
   it("tokenizes a fenced code block via CodeBlock", () => {
     const { container } = render(<Markdown>{"```typescript\nconst x = 1;\n```"}</Markdown>);
     expect(container.querySelector(".code-block")).toBeTruthy();

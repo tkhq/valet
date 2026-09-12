@@ -309,11 +309,11 @@ export function ModelPicker({
           variant="ghost"
           size="sm"
           disabled={disabled}
-          className="font-normal gap-1.5"
+          className="min-w-0 max-w-full font-normal gap-1.5"
           aria-label={`Choose model: ${triggerLabel}${triggerReasoning}`}
           aria-describedby={ariaDescription ? descriptionId : undefined}
         >
-          <Sparkles className="h-3.5 w-3.5 text-muted" aria-hidden />
+          <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
           <span className="truncate text-xs">
             {triggerLabel}
             {triggerReasoning}

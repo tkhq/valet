@@ -89,7 +89,7 @@ export function Markdown({
       className={cn(
         // Base prose styles + dark mode invert. `max-w-none` so chat text
         // can use the full message column.
-        "prose prose-sm prose-neutral dark:prose-invert max-w-none",
+        "prose prose-sm prose-neutral dark:prose-invert min-w-0 max-w-none [overflow-wrap:anywhere] max-sm:text-base",
         // First/last whitespace tidy.
         "prose-p:leading-relaxed prose-p:my-2 first:prose-p:mt-0 last:prose-p:mb-0",
         // Headings — small bumps; chat shouldn't have giant h1s.
@@ -99,7 +99,7 @@ export function Markdown({
         // the pill styles don't also apply to `<code>` inside fenced blocks
         // (the inner code element there should be transparent + inherit).
         "[&_:not(pre)>code]:bg-neutral-100 dark:[&_:not(pre)>code]:bg-neutral-800",
-        "[&_:not(pre)>code]:text-ink",
+        "[&_:not(pre)>code]:text-ink [&_:not(pre)>code]:whitespace-pre-wrap [&_:not(pre)>code]:[overflow-wrap:anywhere]",
         "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5",
         "[&_:not(pre)>code]:text-[0.85em] [&_:not(pre)>code]:font-normal",
         "prose-code:before:content-none prose-code:after:content-none",
@@ -128,6 +128,11 @@ export function Markdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          table: ({ children }) => (
+            <div className="max-w-full overflow-x-auto overscroll-x-contain" tabIndex={0} role="region" aria-label="Table">
+              <table className="w-max min-w-full [overflow-wrap:normal]">{children}</table>
+            </div>
+          ),
           // External links open in a new tab and do not leak referrer.
           // Inside a memory document, a cross-reference to another memory
           // file navigates in place instead, and an in-page anchor stays in

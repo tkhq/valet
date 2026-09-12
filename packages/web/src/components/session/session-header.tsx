@@ -9,6 +9,8 @@ import {
   RefreshCw,
   SquareTerminal,
   Trash2,
+  ThumbsUp,
+  ThumbsDown,
 } from "lucide-react";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import {
@@ -17,6 +19,9 @@ import {
   ConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuCheckboxItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuItem,
   DropdownMenuTrigger,
   Input,
@@ -55,6 +60,7 @@ import { RatingButtons } from "./rating-buttons";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { sameModelSpec } from "~/lib/models";
 import { useCopyToClipboard } from "~/lib/use-copy";
 import { formatElapsed, useElapsedSeconds } from "~/lib/use-elapsed";
@@ -105,6 +111,7 @@ export function SessionHeader({
   messages?: Message[];
 }) {
   const navigate = useNavigate();
+  const sessionMenu = useResponsiveOverlay("sm");
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
   const setThreadModel = useSetThreadModel(session.id);
@@ -397,7 +404,7 @@ export function SessionHeader({
         <span className="text-xs text-muted shrink-0 hidden sm:inline">
           Enter to save, Esc to cancel
         </span>
-        <div className="ml-auto flex max-w-full flex-wrap items-center gap-1.5">
+        <div className="ml-auto hidden max-w-full flex-wrap items-center gap-1.5 sm:flex">
           {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
           <SandboxChip sandbox={sandbox} />
           <ConnectionBadge conn={conn} />
@@ -408,9 +415,9 @@ export function SessionHeader({
   }
 
   return (
-    <header className="border-b border-line bg-paper px-3 py-2 min-h-[--nav-height] shrink-0 flex flex-wrap items-center gap-2 sm:px-4 sm:gap-3">
+    <header className="border-b border-line bg-paper px-3 py-1 min-h-[--nav-height] shrink-0 flex min-w-0 flex-wrap items-center gap-1 sm:px-4 sm:py-2 sm:gap-3">
       <Tooltip content={workspaceHint} delayDuration={400}>
-        <div className="min-w-0 max-w-full flex flex-wrap items-baseline gap-2 cursor-default">
+        <div className="min-w-0 flex-1 sm:flex-initial max-w-full flex flex-wrap items-baseline gap-2 cursor-default">
           {canRename ? (
             <button
               type="button"
@@ -440,7 +447,7 @@ export function SessionHeader({
             // The test hook lets a test assert THIS element rather than the
             // team's name appearing anywhere in the header, which a title
             // regression could satisfy on its own.
-            <Badge variant="accent" className="max-w-full truncate" data-testid="owning-team">
+            <Badge variant="accent" className="hidden sm:inline-flex max-w-full truncate" data-testid="owning-team">
               {team?.name ?? "Team"}
             </Badge>
           )}
@@ -457,17 +464,16 @@ export function SessionHeader({
               workspace names are case-sensitive paths, and shouting them in
               caps misrepresents them. */}
           {session.workspace && !isAssistantSession && (
-            <span className="text-[10px] font-mono tracking-wide text-muted truncate">
+            <span className="hidden sm:inline text-[10px] font-mono tracking-wide text-muted truncate">
               {shortenWorkspace(session.workspace)}
             </span>
           )}
         </div>
       </Tooltip>
-      <div className="ml-auto flex max-w-full flex-wrap items-center gap-1.5">
-        {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
+      <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
         {canAdminister && (
           <Tooltip content={modelHint}>
-            <span>
+            <span className="min-w-0">
               <ModelPicker
                 currentId={configuredModel}
                 displayId={activeModel ?? configuredModel}
@@ -500,53 +506,100 @@ export function SessionHeader({
             </span>
           </Tooltip>
         )}
-        <SandboxChip sandbox={sandbox} />
-        <ConnectionBadge conn={conn} />
-        <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
-        <RatingButtons
-          subject="session"
-          value={ratings.data?.session ?? null}
-          disabled={rateSession.isPending}
-          onRate={(rating) => rateSession.mutate(rating)}
-        />
-        <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={copyTranscript}
-            aria-label="Copy transcript"
-          >
-            {copied ? (
-              <Check className="h-4 w-4 text-moss" />
-            ) : (
-              <ClipboardCopy className="h-4 w-4" />
-            )}
-          </Button>
-        </Tooltip>
+        <div className="hidden sm:contents">
+          <SandboxChip sandbox={sandbox} />
+          <ConnectionBadge conn={conn} />
+          <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
+          <RatingButtons
+            subject="session"
+            value={ratings.data?.session ?? null}
+            disabled={rateSession.isPending}
+            onRate={(rating) => rateSession.mutate(rating)}
+          />
+          <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={copyTranscript}
+              aria-label="Copy transcript"
+            >
+              {copied ? (
+                <Check className="h-4 w-4 text-moss" />
+              ) : (
+                <ClipboardCopy className="h-4 w-4" />
+              )}
+            </Button>
+          </Tooltip>
+        </div>
         {canAdminister && (
-          <>
-            <Tooltip content="Pause session — sandbox sleeps until the next message">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={pauseSession}
-                disabled={sandbox?.state !== "ready" || pause.isPending}
-                aria-label="Pause session"
+          <Tooltip content="Pause session — sandbox sleeps until the next message">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={pauseSession}
+              disabled={sandbox?.state !== "ready" || pause.isPending}
+              className="hidden sm:inline-flex"
+              aria-label="Pause session"
+            >
+              {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
+            </Button>
+          </Tooltip>
+        )}
+        <DropdownMenu open={sessionMenu.open} onOpenChange={sessionMenu.setOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "sm:hidden")} aria-label="Session menu">
+              {del.isPending || replace.isPending || setProfile.isPending ? (
+                <Spinner size={14} />
+              ) : (
+                <MoreHorizontal className="h-4 w-4" />
+              )}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <div className="sm:hidden">
+              <DropdownMenuLabel className="max-w-64 break-words">
+                {title}{teamId !== null ? ` · ${team?.name ?? "Team"}` : ""}
+              </DropdownMenuLabel>
+              <div className="flex max-w-64 flex-wrap items-center gap-2 px-2 py-1.5">
+                <SandboxChip sandbox={sandbox} />
+                <ConnectionBadge conn={conn} />
+                <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
+              </div>
+              <DropdownMenuCheckboxItem
+                checked={ratings.data?.session === "positive"}
+                disabled={rateSession.isPending}
+                onCheckedChange={(checked) => rateSession.mutate(checked ? "positive" : null)}
               >
-                {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
-              </Button>
-            </Tooltip>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" aria-label="Session menu">
-                  {del.isPending || replace.isPending || setProfile.isPending ? (
-                    <Spinner size={14} />
-                  ) : (
-                    <MoreHorizontal className="h-4 w-4" />
-                  )}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
+                <ThumbsUp className="h-4 w-4" aria-hidden />Good session
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                checked={ratings.data?.session === "negative"}
+                disabled={rateSession.isPending}
+                onCheckedChange={(checked) => rateSession.mutate(checked ? "negative" : null)}
+              >
+                <ThumbsDown className="h-4 w-4" aria-hidden />Bad session
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuItem
+                onSelect={(event) => {
+                  event.preventDefault();
+                  void copyTranscript();
+                }}
+              >
+                <ClipboardCopy className="h-4 w-4" aria-hidden />{copied ? "Transcript copied" : "Copy transcript"}
+              </DropdownMenuItem>
+              {canAdminister && (
+                <DropdownMenuItem
+                  disabled={sandbox?.state !== "ready" || pause.isPending}
+                  onSelect={() => void pauseSession()}
+                >
+                  <Moon className="h-4 w-4" aria-hidden />
+                  {pause.isPending ? "Pausing…" : "Pause session"}
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuSeparator />
+            </div>
+            {canAdminister && (
+              <>
                 <DropdownMenuItem
                   disabled={setProfile.isPending}
                   onSelect={() => setConfirmServices(true)}
@@ -593,11 +646,12 @@ export function SessionHeader({
                     {isTeamAssistant ? "Delete this team's assistant…" : "Delete session…"}
                   </DropdownMenuItem>
                 )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </>
-        )}
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
+      {actionError && <p role="alert" className="basis-full min-w-0 break-words text-xs text-danger-500">{actionError}</p>}
       {moving && (
         <MoveSessionDialog
           sessionId={session.id}

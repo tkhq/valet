@@ -117,11 +117,12 @@ export function MessageList({
   }
 
   return (
-    <div className="flex-1 relative min-h-0">
+    <div className="flex-1 relative min-h-0 min-w-0">
       <div
         ref={containerRef}
         onScroll={onScroll}
-        className="h-full overflow-y-auto divide-y divide-[--border]"
+        data-testid="message-list"
+        className="h-full w-full min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain divide-y divide-[--border]"
       >
         {visible.map((m, i) =>
           m.compaction ? (
@@ -148,7 +149,7 @@ export function MessageList({
           type="button"
           onClick={scrollToBottom}
           aria-label="Jump to latest message"
-          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-line bg-paper/90 px-3 py-1 text-xs text-muted shadow-sm backdrop-blur transition-colors hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-line bg-paper max-sm:min-h-11 px-3 py-1 text-xs text-muted shadow-sm transition-colors hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
         >
           <ArrowDown className="h-3 w-3" aria-hidden />
           Latest
