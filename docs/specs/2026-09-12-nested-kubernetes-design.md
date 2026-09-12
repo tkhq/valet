@@ -1,6 +1,12 @@
 # First-class nested Kubernetes v1
 
-Date: 2026-09-12. Status: **Proposed and unimplemented**. Target: Valet v2.
+Date: 2026-09-12. Status: **Implemented through L2; L3 validation is pending**. Target: Valet v2.
+
+The implementation runs L0 vectors against production kernels. Image and provider tests cover L1 and L2.
+L3 requires a compatible nested-user-namespace runtime. L4 requires a deployed canary and A1 through A15.
+Do not deploy this change from the implementation PR.
+
+**Mono follow-up:** First fix Mono #8098 to use the K64 socket. After deployed L4 passes, shrink Mono to the adapter in K122 through K126.
 
 ## Acceptance scenario
 
@@ -47,7 +53,7 @@ Each normative sentence has one unique requirement tag. The validator enforces t
 | L1 | Image | L0, artifact lock, Helper contract, and image goldens |
 | L2 | Provider | L1, schema propagation, admission goldens, and provider failure tests |
 | L3 | Runtime | L2, generic lifecycle, crash, import, and persistence tests |
-| L4 | Deployed | L3, A1 through A13, and corrected Mono acceptance |
+| L4 | Deployed | L3, A1 through A15, and corrected Mono acceptance |
 
 **INV-1, bounded authority**: The Helper MUST control only Root, its process tree, and Scope. [K02]
 **INV-2, Valet ownership**: Valet MUST own capability resolution, artifacts, lifecycle, readiness, and generic tests. [K03]
@@ -265,7 +271,7 @@ Stage 1 MUST remain Kubernetes 1.34 without `idsPerPod`. [K114]
 Stage 2 MUST upgrade control plane and all node groups to 1.35 with health gates. [K115]
 Stage 2 MUST set `idsPerPod:131072`, preserve OCI device rules, and pass A2 before image rollout. [K116]
 Stage 3 MUST deploy the capability-disabled image and run ordinary sandbox regressions. [K117]
-Stage 4 MUST enable one canary repository, pass A1 through A13, then widen access. [K118]
+Stage 4 MUST enable one canary repository, pass A1 through A15, then widen access. [K118]
 
 Rollback MUST disable new capability admission while existing Clusters remain stoppable. [K119]
 An image rollback MUST retain the Helper until all managed Clusters stop. [K120]
@@ -296,12 +302,21 @@ The JSON vectors are normative.
 Implementation tests MUST consume these vectors without copied values. [K128]
 The validator MUST execute kernels and reject duplicate, missing, unknown, or vacuous vector coverage. [K129]
 Acceptance-only vectors MUST name an A-step and a concrete falsifying check. [K130]
-The managed environment MUST match `k3sEnv` and set `VALET_SANDBOX_KUBERNETES=1`. [K131]
+The launcher-only environment MUST match `k3sEnv`. The enabled sandbox-global environment comes from `sandboxEnv`. [K131]
 The Helper MUST clear every unlisted `K3S_*`, `CONTAINERD_*`, and `ROOTLESSKIT_*` variable before launch. [K132]
 Stop MUST terminate a canceled archive process with the K99 bounded TERM and KILL sequence. [K133]
 A cold start MUST require the `minimumFreeBytes` vector within the existing PVC quota. [K134]
-Launcher and enabled sandbox-global variables MUST match `k3sEnv` and `sandboxEnv`, respectively. [K142]
+The launcher MUST receive `k3sEnv`. The sandbox manifest MUST supply `sandboxEnv`; the launcher inherits those sandbox-global variables. [K142]
 The image MUST provide Debian Bookworm `slirp4netns=1.2.0-1` at `/usr/bin/slirp4netns`. [K143]
 Diagnose MUST verify that slirp4netns path and package version without downloading a tool. [K144]
 Stop cleanup MUST preserve every PVC path outside Root. [K148]
 Start MUST take the same adjacent exclusive lock before it creates Root. [K149]
+
+## Implementation errata after PR #666 approval
+
+These errata are normative for the stacked implementation. They do not rewrite the approved specification branch.
+
+1. K136, K138, and K139 require kernel vectors. Acceptance-range coverage does not satisfy them. The validator MUST require `life-live-owner-no-theft` and `life-start-commit-after-stop` by ID. Deleting either vector MUST fail validation.
+2. The lifecycle kernel is total. `recover` with no active Operation returns a no-op report. Final-commit guards apply to start, import, and stop. Concurrent import during a live import waits for the owner. The lifecycle vectors define these branches.
+3. K131 and K142 distinguish environment sources. `sandboxEnv` supplies sandbox-global variables. `k3sEnv` supplies launcher-only variables.
+4. The informative L4 rollout range is A1 through A15.

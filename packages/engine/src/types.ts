@@ -1340,6 +1340,8 @@ export interface SandboxCreateOpts {
    * ignore the flag.
    */
   docker?: boolean;
+  /** Request first-class nested Kubernetes v1. Unsupported providers reject it. */
+  nestedKubernetes?: boolean;
 }
 
 /**
@@ -1367,6 +1369,8 @@ export interface SandboxCapabilities {
    * docker-in-sandbox). Absent means not supported; the flag is ignored.
    */
   dockerSupport?: boolean;
+  /** Exact nested Kubernetes capability version, or false when unsupported. */
+  nestedKubernetes?: false | "v1";
   /**
    * Whether the backend can scale an idle sandbox to zero and later wake it
    * with its workspace intact (hibernation). When true, the provider MUST

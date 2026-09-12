@@ -791,6 +791,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       // constructed without secretsApi cannot honor updateCreds().
       credsMount: Boolean(this.deps.secretsApi),
       dockerSupport: true,
+      nestedKubernetes: "v1",
     };
   }
 

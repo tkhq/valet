@@ -104,6 +104,8 @@ export interface PrebuildOverride {
   setup?: string[];
   skipDetect?: boolean;
   docker?: boolean;
+  /** Start one managed nested Kubernetes v1 cluster in the sandbox. */
+  kubernetes?: boolean;
   resources?: PrebuildResources;
   /** Workspace volume size this repo requests (Kubernetes quantity, e.g.
    * "4Gi"). The api reads it at session create time. Like `docker`, this is a
@@ -167,6 +169,12 @@ export async function loadPrebuildOverride(
       throw new Error(".valet/prebuild.yaml: docker must be a boolean");
     }
     override.docker = obj.docker;
+  }
+  if (obj.kubernetes !== undefined) {
+    if (typeof obj.kubernetes !== "boolean") {
+      throw new Error(".valet/prebuild.yaml: use kubernetes: true or false");
+    }
+    override.kubernetes = obj.kubernetes;
   }
   if (obj.resources !== undefined) {
     if (typeof obj.resources !== "object" || obj.resources === null || Array.isArray(obj.resources)) {
@@ -242,6 +250,8 @@ export interface ResolvedRecipe {
   image?: string;
   /** Docker daemon inside sandbox, when the repo enables it. */
   docker?: boolean;
+  /** First-class nested Kubernetes v1 capability. */
+  kubernetes?: boolean;
 }
 
 /**
@@ -265,6 +275,7 @@ export async function resolveRecipe(
     baseSetup: override?.baseSetup ?? [],
     image: override?.image,
     ...(override?.docker !== undefined ? { docker: override.docker } : {}),
+    ...(override?.kubernetes !== undefined ? { kubernetes: override.kubernetes } : {}),
   };
 }
 
@@ -324,6 +335,7 @@ export interface GenerateDockerfileOpts {
   commitSha: string;
   recipe: RecipeStep[];
   setup?: string[];
+  kubernetes?: boolean;
 }
 
 /**
@@ -341,7 +353,7 @@ export interface GenerateDockerfileOpts {
  * commands and override `setup` commands run there via `WORKDIR`.
  */
 export function generateDockerfile(opts: GenerateDockerfileOpts): string {
-  const { baseImage, cloneUrl, commitSha, recipe, setup = [] } = opts;
+  const { baseImage, cloneUrl, commitSha, recipe, setup = [], kubernetes = false } = opts;
 
   const lines: string[] = [];
   lines.push(`FROM ${baseImage}`);
@@ -365,6 +377,7 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   const identity = `${baseImage}|${cloneUrl}@${commitSha}|${identityHash}`;
   lines.push("");
   lines.push(`LABEL valet.prebuild.identity="${identity}"`);
+  if (kubernetes) lines.push(`LABEL dev.valet.capability.nested-kubernetes="nested-kubernetes:v1:896546d59c819d3a1bcf837e1bb0aa04fa4a6fecc3b555c51b5b4f5aefcc4079"`);
   lines.push("");
 
   return lines.join("\n");

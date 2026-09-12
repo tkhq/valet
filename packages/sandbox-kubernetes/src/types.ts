@@ -83,6 +83,7 @@ export interface SeccompProfile {
 /** `corev1.SecurityContext` subset — container-level security context fields
  * the manifest builder sets for rootless DinD sandboxes. */
 export interface ContainerSecurityContext {
+  privileged?: boolean;
   seccompProfile?: SeccompProfile;
   /** `corev1.Capabilities` subset — capabilities to add to the container.
    * Used for rootless DinD: adds SYS_ADMIN (uid_map write) and NET_ADMIN
@@ -94,11 +95,12 @@ export interface ContainerSecurityContext {
   procMount?: "Unmasked" | "Default";
 }
 
-/** `corev1.EnvVar` subset — name/value pairs only (we never emit valueFrom). */
-export interface EnvVar {
+/** `corev1.EnvVar` subset used by sandbox manifests. */
+export type EnvVar = { name: string; value: string; valueFrom?: never } | {
   name: string;
-  value: string;
-}
+  value?: never;
+  valueFrom: { fieldRef: { fieldPath: "metadata.uid" } };
+};
 
 /** The provider-facing resource-options shape — mirrors
  * `SandboxCreateOpts.resources` (packages/engine/src/types.ts). Field docs

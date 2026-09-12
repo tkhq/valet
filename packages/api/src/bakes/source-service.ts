@@ -465,6 +465,8 @@ export async function resolveRecipeFromGitHub(
 export interface RepoPrebuildFlags {
   /** `docker: true` — run a rootless docker daemon in the sandbox. */
   docker: boolean;
+  /** `kubernetes: true` — request nested Kubernetes v1. */
+  kubernetes?: boolean;
   /** Authoritative repository CPU and memory overrides. An empty object
    * means the file is absent or does not declare resource overrides. */
   resources?: PrebuildResources;
@@ -544,6 +546,7 @@ export async function repoPrebuildFlags(
       if (controller.signal.aborted) return { docker: false, outcome: "error" };
       value = {
         docker: override?.docker === true,
+        ...(override?.kubernetes === true ? { kubernetes: true } : {}),
         resources: override?.resources ?? {},
         ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
         outcome: override === null ? "absent" : "declared",
@@ -555,7 +558,7 @@ export async function repoPrebuildFlags(
       );
       // Not a repo answer — return defaults WITHOUT caching, so the next
       // session retries instead of inheriting a transient failure.
-      return { docker: false, outcome: "error" };
+      return { docker: false, kubernetes: false, outcome: "error" };
     }
     // Crude size cap: clear the whole map rather than LRU-evict. The map holds
     // at most ~1000 entries (owner/repo@ref strings + small objects), which is
@@ -676,10 +679,11 @@ const DECAY_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Canonical recipe JSON — mirrors `recipe.ts`'s private helper so the
  * identity hash covers full step content (id + lockfile + command) plus the
  * setup list, deterministic regardless of key order. */
-function canonicalRecipeJson(recipe: RecipeStep[], setup: string[]): string {
+function canonicalRecipeJson(recipe: RecipeStep[], setup: string[], kubernetes = false): string {
   return JSON.stringify({
     steps: recipe.map((s) => ({ id: s.id, lockfile: s.lockfile, command: s.command })),
     setup,
+    ...(kubernetes ? { capability: "nested-kubernetes:v1:896546d59c819d3a1bcf837e1bb0aa04fa4a6fecc3b555c51b5b4f5aefcc4079" } : {}),
   });
 }
 
@@ -693,6 +697,7 @@ export interface RecipeSnapshot {
   recipe: RecipeStep[];
   setup: string[];
   image?: string;
+  kubernetes?: boolean;
 }
 
 function readSetupCommands(source: ImageSourceRow): string[] {
@@ -1074,7 +1079,7 @@ export class SourceService {
     if (source.kind === "base") return this.baseIdentity(source, parentIdentity);
     // repo
     const parent = parentIdentity ?? stock;
-    const recipeHash = sha256Hex(canonicalRecipeJson(recipe?.recipe ?? [], recipe?.setup ?? []));
+    const recipeHash = sha256Hex(canonicalRecipeJson(recipe?.recipe ?? [], recipe?.setup ?? [], recipe?.kubernetes === true));
     return sha256Hex(`${parent}|${source.repoFullName ?? ""}|${recipeHash}`);
   }
 
@@ -1325,7 +1330,7 @@ export class SourceService {
     }
     const baseImage = await this.resolveBaseImage(source, resolved.image);
 
-    const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
+    const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image, kubernetes: resolved.kubernetes };
     const parentIdent = await this.parentIdentity(source);
     const identity = this.identityHash(source, parentIdent, snapshot);
 
@@ -1367,6 +1372,7 @@ export class SourceService {
       baseImage,
       recipe: resolved.recipe,
       setup: resolved.setup.length > 0 ? resolved.setup : undefined,
+      kubernetes: resolved.kubernetes,
       imageRef,
       gitToken: gitToken.token ?? undefined,
     };

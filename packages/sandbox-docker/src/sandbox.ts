@@ -997,6 +997,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       coldStartEstimateMs: 8000,
       credsMount: true,
       dockerSupport: true,
+      nestedKubernetes: false,
     };
   }
 

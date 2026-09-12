@@ -92,6 +92,13 @@ describe("loadPrebuildOverride", () => {
     });
   });
 
+  it("parses the nested Kubernetes capability and rejects other types", async () => {
+    await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "kubernetes: true\n" })))
+      .resolves.toEqual({ kubernetes: true });
+    await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "kubernetes: yes please\n" })))
+      .rejects.toThrow("use kubernetes: true or false");
+  });
+
   it("returns an empty object for an empty file", async () => {
     const override = await loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "" }));
     expect(override).toEqual({});

@@ -219,6 +219,11 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  {
+    describe: "agent_sessions.kubernetes column",
+    probe: { kind: "column", table: "agent_sessions", column: "kubernetes" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "kubernetes" boolean DEFAULT false NOT NULL',
+  },
   { describe: "team deletion requests", probe: { kind: "table", table: "team_deletion_requests" }, sql: `CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "team_id" text NOT NULL,
   "resource_type" text NOT NULL, "resource_id" text NOT NULL, "resource_label" text NOT NULL,

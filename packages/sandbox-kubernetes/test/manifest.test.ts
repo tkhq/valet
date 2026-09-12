@@ -495,7 +495,7 @@ describe("docker flag (rootless DinD)", () => {
     expect(json).not.toContain("dev-fuse");
     expect(json).not.toContain("dev-tun");
     expect(json).not.toContain("hostPath");
-    expect(json).not.toContain("privileged");
+    expect(cr.spec.podTemplate.spec.containers[0]?.securityContext?.privileged).toBe(false);
   });
 
   it("sets pod-level fsGroup 1500 so the workspace PVC is group-writable by dockerd", () => {
@@ -645,5 +645,44 @@ describe("workspace storage sizing (TKAI-385: repo-declared size)", () => {
     );
     expect(workspaceStorage(cr)).toBe("1Gi");
     errSpy.mockRestore();
+  });
+});
+
+describe("nested Kubernetes security profile", () => {
+  it("uses exactly the existing bounded Docker grants", () => {
+    const cr = buildSandboxManifest(
+      { ...baseConfig, dockerRuntimeClassName: "valet-docker" },
+      "nested",
+      { nestedKubernetes: true },
+    );
+    const pod = cr.spec.podTemplate.spec;
+    const container = pod.containers[0]!;
+    expect(pod.hostUsers).toBe(false);
+    expect(pod.runtimeClassName).toBe("valet-docker");
+    expect(container.securityContext).toEqual({
+      privileged: false,
+      seccompProfile: { type: "Unconfined" },
+      capabilities: { add: ["SYS_ADMIN", "NET_ADMIN"] },
+      procMount: "Unmasked",
+    });
+    const podJson = JSON.stringify(pod);
+    expect(podJson).not.toContain("hostNetwork");
+    expect(podJson).not.toContain("hostPID");
+    expect(podJson).not.toContain("hostIPC");
+    expect(pod.volumes?.some((volume) => "hostPath" in volume)).not.toBe(true);
+    expect(container.env).toEqual(expect.arrayContaining([
+      { name: "VALET_SANDBOX_KUBERNETES", value: "1" },
+      { name: "KUBECONFIG", value: "/home/dockerd/.local/state/valet/kubernetes/kubeconfig.yaml" },
+      { name: "VALET_SANDBOX_EPOCH", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } },
+    ]));
+    expect(container.env).not.toContainEqual({ name: "VALET_SANDBOX_DOCKER", value: "1" });
+  });
+
+  it("leaves ordinary sandbox environment and security unchanged", () => {
+    const cr = buildSandboxManifest(baseConfig, "ordinary", {});
+    const container = cr.spec.podTemplate.spec.containers[0]!;
+    expect(container.securityContext).toBeUndefined();
+    expect(container.env?.some(({ name }) => name === "KUBECONFIG" || name === "VALET_SANDBOX_KUBERNETES")).toBe(false);
+    expect(cr.spec.podTemplate.spec.hostUsers).toBeUndefined();
   });
 });

@@ -223,6 +223,7 @@ export class DockerImageBuilder implements ImageBuilder {
               commitSha: spec.commitSha,
               recipe: spec.recipe,
               setup: spec.setup,
+              kubernetes: spec.kubernetes,
             });
 
       tmpDir = await this.mkdtempFn(join(tmpdir(), "valet-prebuild-"));

@@ -226,7 +226,7 @@ COPY --from=gateway-build /out/gateway /gateway
 # the non-root `dockerd` user. Pinned; bump deliberately.
 ARG DOCKER_VERSION=5:29.7.2-1~debian.12~bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gnupg uidmap fuse-overlayfs slirp4netns iproute2 iptables \
+      gnupg uidmap fuse-overlayfs slirp4netns=1.2.0-1 iproute2 iptables \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
@@ -238,6 +238,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker-ce-rootless-extras=${DOCKER_VERSION} \
         docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
+
+# First-class nested Kubernetes v1 artifacts. The vector lock supplies these hashes.
+ARG K3S_VERSION=v1.31.5+k3s1
+ARG KUBECTL_VERSION=v1.31.5
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) K3S_URL="https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s"; K3S_SHA=399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091; KUBECTL_URL="https://dl.k8s.io/release/v1.31.5/bin/linux/amd64/kubectl"; KUBECTL_SHA=fbecbfd375b3686002c2e81d51c390172f5ffba3d6b47920d55342cb03f557af ;; \
+      arm64) K3S_URL="https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-arm64"; K3S_SHA=b719566c43ab1379fe2a7ce477e02bc1c79ea106bdaa7223fa9f6e19a735b477; KUBECTL_URL="https://dl.k8s.io/release/v1.31.5/bin/linux/arm64/kubectl"; KUBECTL_SHA=697c8b4239f9e53cba46296e114bcc02c726b5c7a45e1c464804aad56e5c7a86 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; esac \
+    && curl -fsSL -o /usr/local/bin/k3s "${K3S_URL}" \
+    && curl -fsSL -o /usr/local/bin/kubectl "${KUBECTL_URL}" \
+    && echo "${K3S_SHA}  /usr/local/bin/k3s" | sha256sum -c - \
+    && echo "${KUBECTL_SHA}  /usr/local/bin/kubectl" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/k3s /usr/local/bin/kubectl
 
 # Exec-identity contract: `dockerd` gets its own primary group plus ONE
 # supplementary group: `docker` (already created by the docker-ce
@@ -259,10 +273,12 @@ RUN (getent group docker >/dev/null || groupadd docker) \
     && echo "dockerd:65536:65535" >> /etc/subgid
 
 COPY docker/cgroup-delegation.sh /cgroup-delegation.sh
+COPY docker/kubernetes-preflight.sh /kubernetes-preflight.sh
+COPY docker/valet-kubernetes.mjs /usr/local/bin/valet-kubernetes
 COPY docker/userns-preflight.sh /userns-preflight.sh
 COPY docker/start-docker.sh /start-docker.sh
 COPY docker/start-headless.sh /start-headless.sh
-RUN chmod +x /cgroup-delegation.sh /userns-preflight.sh /start-docker.sh /start-headless.sh
+RUN chmod +x /cgroup-delegation.sh /kubernetes-preflight.sh /usr/local/bin/valet-kubernetes /userns-preflight.sh /start-docker.sh /start-headless.sh
 
 COPY docker/start-full.sh /start-full.sh
 RUN chmod +x /start-full.sh
