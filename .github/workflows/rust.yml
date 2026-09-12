@@ -1,0 +1,43 @@
+name: Rust
+
+on:
+  push:
+    branches: [main, dev-v2]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "crates/**"
+      - ".github/workflows/rust.yml"
+  # Do not filter by base branch. Stacked PRs target feature branches.
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "crates/**"
+      - ".github/workflows/rust.yml"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup reads the pinned repository toolchain file.
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --locked
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

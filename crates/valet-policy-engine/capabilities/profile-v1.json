@@ -8,7 +8,7 @@
   "default_host_capabilities": [],
   "inventory_source": "regorus-0.12.0/src/builtins",
   "inventory_builtin_count": 163,
-  "limits": {"max_modules":256,"max_rego_source_bytes":1048576,"max_policy_data_bytes":8388608,"max_input_bytes":8388608,"max_parsed_nodes":250000,"max_compiled_policy_bytes":16777216,"max_evaluation_instructions":1000000,"max_document_depth":128,"max_comprehension_values":100000,"max_explain_events":10000,"max_decision_output_bytes":1048576},
+  "limits": {"enforced":{"max_rego_source_bytes":1048576,"max_policy_data_bytes":8388608,"max_input_bytes":8388608,"max_decision_output_bytes":1048576},"declared_v2":{"max_modules":256,"max_parsed_nodes":250000,"max_compiled_policy_bytes":16777216,"max_evaluation_instructions":1000000,"max_document_depth":128,"max_comprehension_values":100000,"max_explain_events":10000}},
   "builtins": [
     {"name":"__builtin_sets.intersection","class":"pure","status":"available_unverified","evidence":"substrate_source_inventory","known_gap":"Required conformance fixture is pending"},
     {"name":"__builtin_sets.union","class":"pure","status":"available_unverified","evidence":"substrate_source_inventory","known_gap":"Required conformance fixture is pending"},
