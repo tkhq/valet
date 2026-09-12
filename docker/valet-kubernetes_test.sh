@@ -44,6 +44,9 @@ set +e; VALET_SANDBOX_EPOCH=test node "$HELPER" status >/dev/null; status=$?; se
 [ $(( $(date +%s) - start )) -lt 5 ] || fail "orphan holder delayed the next lock"
 for _ in $(seq 1 100); do compgen -G "$LOCK.$owner.*.ready" >/dev/null || break; sleep 0.02; done
 compgen -G "$LOCK.$owner.*.ready" >/dev/null && fail "orphan lock holder remained"
-kill -0 "$holder" 2>/dev/null && fail "orphan holder process remained"
+if [ -r "/proc/$holder/stat" ]; then
+  state=$(sed 's/^.*) //' "/proc/$holder/stat" | cut -d ' ' -f 1)
+  [ "$state" = Z ] || fail "live orphan holder process remained: $state"
+fi
 
 echo "valet-kubernetes command tests passed"

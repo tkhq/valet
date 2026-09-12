@@ -173,12 +173,12 @@ set +e; VALET_SANDBOX_KUBERNETES=1 bash "$TMP/start-headless-k8s.sh"; status=$?;
 # Kubernetes-only preflight forces the full outer map check.
 map_probe=$TMP/map-probe; cat > "$map_probe" <<'SH'
 #!/bin/sh
-[ "${VALET_DOCKER_USERNS:-}" = 1 ] || exit 99
+[ "${VALET_DOCKER_USERNS:-}" = 1 ] || exit 0
 exit 1
 SH
 chmod +x "$map_probe"
 sed "s|/userns-preflight.sh|$map_probe|" "$ROOT/kubernetes-preflight.sh" > "$TMP/kubernetes-preflight.sh"
-set +e; VALET_SANDBOX_KUBERNETES=1 VALET_SANDBOX_EPOCH=test bash "$TMP/kubernetes-preflight.sh" 2> "$TMP/map-preflight.err"; status=$?; set -e
+set +e; env -u VALET_DOCKER_USERNS VALET_SANDBOX_KUBERNETES=1 VALET_SANDBOX_EPOCH=test bash "$TMP/kubernetes-preflight.sh" 2> "$TMP/map-preflight.err"; status=$?; set -e
 [ "$status" -eq 20 ] || fail "Kubernetes map failure returned $status"
 contains "$TMP/map-preflight.err" 'The outer ID map is incomplete'
 
