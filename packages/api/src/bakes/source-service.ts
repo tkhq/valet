@@ -354,14 +354,16 @@ export async function resolveHeadSha(
   token: string | null,
   owner: string,
   repo: string,
+  signal?: AbortSignal,
 ): Promise<ResolvedHead> {
-  const repoInfo = await fetchGithubJson(deps, token, `/repos/${owner}/${repo}`);
+  const repoInfo = await fetchGithubJson(deps, token, `/repos/${owner}/${repo}`, signal);
   const defaultBranch =
     isRecord(repoInfo) && typeof repoInfo.default_branch === "string" ? repoInfo.default_branch : "main";
   const commit = await fetchGithubJson(
     deps,
     token,
     `/repos/${owner}/${repo}/commits/${encodeURIComponent(defaultBranch)}`,
+    signal,
   );
   const sha = isRecord(commit) && typeof commit.sha === "string" ? commit.sha : undefined;
   if (!sha) throw new Error(`GitHub API returned no sha for ${owner}/${repo}@${defaultBranch}`);
@@ -581,6 +583,23 @@ export async function repoPrebuildFlags(
   return waitForRepoFlags(entry, signal);
 }
 
+/** Resolves a mutable repository ref, then reads and caches flags at that commit. */
+export async function resolvedRepoPrebuildFlags(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<{ sha: string; flags: RepoPrebuildFlags }> {
+  const sha = /^[0-9a-f]{40}$/i.test(ref)
+    ? ref
+    : await resolveRefSha(deps, token, owner, repo, ref, signal);
+  if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error("GitHub returned an invalid commit SHA");
+  const flags = await repoPrebuildFlags(deps, token, owner, repo, sha, signal);
+  return { sha, flags };
+}
+
 async function waitForRepoFlags(entry: RepoFlagsInflight, signal?: AbortSignal): Promise<RepoPrebuildFlags> {
   if (!signal) return entry.promise;
   const abort = () => entry.controller.abort();
@@ -605,14 +624,16 @@ export async function resolveRefSha(
   owner: string,
   repo: string,
   ref?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (ref === undefined || ref === "") {
-    return (await resolveHeadSha(deps, token, owner, repo)).sha;
+    return (await resolveHeadSha(deps, token, owner, repo, signal)).sha;
   }
   const commit = await fetchGithubJson(
     deps,
     token,
     `/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`,
+    signal,
   );
   const sha = isRecord(commit) && typeof commit.sha === "string" ? commit.sha : undefined;
   if (!sha) throw new Error(`GitHub API returned no sha for ${owner}/${repo}@${ref}`);

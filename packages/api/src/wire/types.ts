@@ -107,7 +107,10 @@ export interface RepoBinding {
   host?: string;
   fullName: string;
   cloneUrl: string;
+  /** User-selected branch/tag. `resolvedRef` pins startup without replacing it. */
   ref?: string;
+  /** Immutable checkout snapshot populated internally before sandbox startup. */
+  resolvedRef?: string;
   auth?: "auto" | "app" | "user";
 }
 

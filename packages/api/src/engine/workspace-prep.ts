@@ -383,9 +383,39 @@ async function assertCloneTargetEmpty(sandbox: Sandbox, dir: string): Promise<vo
   }
 }
 
-/** Best-effort refresh of an already-cloned dir: `git fetch origin`, then
- * `git checkout {ref}` when a ref is pinned. Offline-tolerant — failures
- * are logged and prep continues to the next binding, never thrown. */
+async function checkoutResolvedRef(
+  sandbox: Sandbox,
+  dir: string,
+  binding: RepoBinding,
+): Promise<{ command: string; result: ExecResult }> {
+  const sha = binding.resolvedRef!;
+  const ref = binding.ref;
+  let branch = false;
+  if (ref && ref !== "HEAD" && !isCommitSha(ref)) {
+    const localRef = `refs/heads/${ref}`;
+    const remoteRef = `refs/remotes/origin/${ref}`;
+    const valid = await safeExec(sandbox, `git check-ref-format ${shQuote(localRef)}`, { cwd: dir });
+    const remote = valid.exitCode === 0
+      ? await safeExec(sandbox, `git show-ref --verify --quiet -- ${shQuote(remoteRef)}`, { cwd: dir })
+      : valid;
+    branch = valid.exitCode === 0 && remote.exitCode === 0;
+  }
+  const command = branch
+    ? `git checkout -B ${shQuote(ref!)} ${shQuote(sha)} --`
+    : `git checkout --detach ${shQuote(sha)} --`;
+  const result = await safeExecGrowRetry(
+    sandbox, command, { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+    `git checkout ${sha} for ${binding.fullName}`,
+  );
+  if (result.exitCode === 0 && branch) {
+    const upstream = `git branch --set-upstream-to=${shQuote(`origin/${ref}`)} -- ${shQuote(ref!)}`;
+    const configured = await safeExec(sandbox, upstream, { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS });
+    if (configured.exitCode !== 0) console.error(`workspace prep: ${upstream} failed: ${configured.stderr}`);
+  }
+  return { command, result };
+}
+
+/** Refresh an existing clone. Failures remain offline-tolerant. */
 async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
   const fetch = await safeExecGrowRetry(
     sandbox,
@@ -398,18 +428,25 @@ async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: Repo
       `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — continuing: ${fetch.stderr || fetch.stdout}`,
     );
   }
-  if (binding.ref) {
-    const checkout = await safeExecGrowRetry(
-      sandbox,
-      `git checkout ${shQuote(binding.ref)}`,
-      { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
-      `git checkout ${binding.ref} for ${binding.fullName}`,
+  const checkout = binding.resolvedRef
+    ? await checkoutResolvedRef(sandbox, dir, binding)
+    : binding.ref
+      ? {
+          command: `git checkout ${shQuote(binding.ref)}`,
+          result: await safeExecGrowRetry(
+            sandbox, `git checkout ${shQuote(binding.ref)}`,
+            { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+            `git checkout ${binding.ref} for ${binding.fullName}`,
+          ),
+        }
+      : undefined;
+  if (checkout && checkout.result.exitCode !== 0) {
+    if (binding.resolvedRef) throw new Error(
+      execFailureMessage(`workspace prep: immutable checkout failed for ${binding.fullName}`, checkout.result),
     );
-    if (checkout.exitCode !== 0) {
-      console.error(
-        `workspace prep: git checkout ${binding.ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
-      );
-    }
+    console.error(
+      `workspace prep: ${checkout.command} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.result.stderr || checkout.result.stdout}`,
+    );
   }
 }
 
@@ -466,6 +503,13 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
     );
     return false;
   }
+  if (binding.resolvedRef) {
+    const checkout = await checkoutResolvedRef(sandbox, dir, binding);
+    if (checkout.result.exitCode !== 0) throw new Error(
+      execFailureMessage(`workspace prep: immutable checkout failed for ${binding.fullName}`, checkout.result),
+    );
+    return true;
+  }
   const ref = binding.ref ?? (await resolveRemoteDefaultBranch(sandbox, dir));
   if (!ref) {
     console.error(
@@ -473,15 +517,17 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
     );
     return true;
   }
+  const pinned = isCommitSha(ref);
+  const command = pinned
+    ? `git checkout ${shQuote(ref)}`
+    : `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`;
   const checkout = await safeExecGrowRetry(
-    sandbox,
-    `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`,
-    { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
-    `git checkout -B ${ref} for ${binding.fullName}`,
+    sandbox, command, { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+    `git checkout ${ref} for ${binding.fullName}`,
   );
   if (checkout.exitCode !== 0) {
     console.error(
-      `workspace prep: git checkout -B ${ref} origin/${ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
+      `workspace prep: ${command} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
     );
   }
   return true;
@@ -529,24 +575,22 @@ async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): 
     throw new Error(execFailureMessage(`workspace prep: git clone failed for ${binding.fullName}`, result));
   }
 
-  if (refIsSha) {
-    // The SHA's commit/tree history is present even in a blobless clone
-    // (the filter omits only blobs, which the checkout back-fills on
-    // demand), so a detached checkout lands the exact commit.
-    const checkout = await safeExecGrowRetry(
-      sandbox,
-      `git checkout ${shQuote(binding.ref!)}`,
-      { cwd: dir },
-      `git checkout ${binding.ref} for ${binding.fullName}`,
-    );
-    if (checkout.exitCode !== 0) {
-      throw new Error(
-        execFailureMessage(
-          `workspace prep: git checkout ${binding.ref} failed for ${binding.fullName}`,
-          checkout,
-        ),
-      );
-    }
+  const checkout = binding.resolvedRef
+    ? await checkoutResolvedRef(sandbox, dir, binding)
+    : refIsSha
+      ? {
+          command: `git checkout --detach ${shQuote(binding.ref!)} --`,
+          result: await safeExecGrowRetry(
+            sandbox, `git checkout --detach ${shQuote(binding.ref!)} --`, { cwd: dir },
+            `git checkout ${binding.ref} for ${binding.fullName}`,
+          ),
+        }
+      : undefined;
+  if (checkout && checkout.result.exitCode !== 0) {
+    throw new Error(execFailureMessage(
+      `workspace prep: ${checkout.command} failed for ${binding.fullName}`,
+      checkout.result,
+    ));
   }
 }
 
@@ -632,11 +676,9 @@ async function conditionalReinstall(
  * / warm PVC) takes the SAME offline-tolerant refresh path as any existing
  * clone; the baked image is irrelevant then (the workspace copy is
  * authoritative). Otherwise (cold workspace): stage the baked repo out of the
- * image, reset `origin` to the real clone url, fetch + `checkout -B` the target
- * ref off origin's head (`refreshStagedPrebuild` — moves the tree PAST the
- * baked commit, unlike a plain checkout of the stale baked local branch), then
- * conditionally re-run drifted installs — but ONLY when the fetch succeeded (an
- * offline fetch leaves HEAD at `bakedSha`, so there is nothing to reinstall).
+ * image, reset `origin` to the real clone URL, and fetch. A resolved start-ref
+ * checks out its immutable SHA. A named branch stays attached at that SHA.
+ * Legacy bindings without a snapshot keep the prior advance-to-origin behavior.
  */
 export async function prepPrebuiltBinding(
   sandbox: Sandbox,

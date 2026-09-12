@@ -144,6 +144,9 @@ jobs:
       - name: STE prose lint (maintained docs)
         run: python3 scripts/docs/docs_lint.py
 
+      - name: Nested Kubernetes specification vectors
+        run: node scripts/docs/validate_nested_kubernetes_spec.mjs
+
   # One required check to point branch protection at, so the shard count can
   # change without editing the protection rule. `needs` alone is not enough:
   # a skipped or cancelled dependency still satisfies it, so the result is

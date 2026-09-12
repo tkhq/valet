@@ -927,6 +927,7 @@ CREATE TABLE "session_repos" (
 	"full_name" text NOT NULL,
 	"clone_url" text NOT NULL,
 	"ref" text,
+	"resolved_ref" text,
 	"auth" text DEFAULT 'auto' NOT NULL,
 	"position" integer NOT NULL,
 	"target_dir" text

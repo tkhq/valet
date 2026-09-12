@@ -24,6 +24,7 @@ import type { RepoBinding } from "../wire/types.js";
 import { opShimScript } from "./secrets-cli-script.js";
 
 const API_URL = "https://api.valet.test";
+const PINNED_SHA = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
 const STAGED_HELPER = ".valet-prep/git-credential-valet";
 const STAGED_GH = ".valet-prep/valet-gh";
 const STAGED_SECRETS = ".valet-prep/valet-secrets";
@@ -256,28 +257,40 @@ describe("prepBinding", () => {
     expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'");
   });
 
-  it("clones with --branch when ref is set", async () => {
+  it("clones a pinned branch at its start-ref and configures upstream", async () => {
     const sandbox = new RecordingSandbox();
-    await prepBinding(sandbox, ".", binding({ ref: "release/1.0" }));
+    await prepBinding(sandbox, ".", binding({ ref: "release/1.0", resolvedRef: PINNED_SHA }));
     const commands = sandbox.execCalls.map((c) => c.command);
     expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.' --branch 'release/1.0'");
+    expect(commands).toContain(`git checkout -B 'release/1.0' '${PINNED_SHA}' --`);
+    expect(commands).toContain("git branch --set-upstream-to='origin/release/1.0' -- 'release/1.0'");
   });
 
   it("clones then checks out a SHA ref — NOT --branch (git rejects a SHA there)", async () => {
     const sandbox = new RecordingSandbox();
-    const sha = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
+    const sha = PINNED_SHA;
     await prepBinding(sandbox, ".", binding({ ref: sha }));
     const commands = sandbox.execCalls.map((c) => c.command);
     // Plain clone (no --branch), then a detached checkout of the commit.
     expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'");
     expect(commands.some((c) => c.includes("--branch"))).toBe(false);
-    expect(commands).toContain(`git checkout '${sha}'`);
+    expect(commands).toContain(`git checkout --detach '${sha}' --`);
+  });
+
+  it.each(["release-v1", "HEAD"])("keeps a pinned %s detached", async (ref) => {
+    const sandbox = new RecordingSandbox();
+    if (ref !== "HEAD") sandbox.setResult(
+      `git show-ref --verify --quiet -- 'refs/remotes/origin/${ref}'`,
+      { stdout: "", stderr: "", exitCode: 1 },
+    );
+    await prepBinding(sandbox, ".", binding({ ref, resolvedRef: PINNED_SHA }));
+    expect(sandbox.execCalls.map((c) => c.command)).toContain(`git checkout --detach '${PINNED_SHA}' --`);
   });
 
   it("fails prep when the SHA checkout fails (unreachable commit)", async () => {
     const sandbox = new RecordingSandbox();
-    const sha = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
-    sandbox.setResult(`git checkout '${sha}'`, {
+    const sha = PINNED_SHA;
+    sandbox.setResult(`git checkout --detach '${sha}' --`, {
       stdout: "",
       stderr: "error: pathspec did not match",
       exitCode: 1,
@@ -309,16 +322,15 @@ describe("prepBinding", () => {
     await expect(prepBinding(sandbox, ".", binding())).rejects.toThrow(/git clone failed/);
   });
 
-  it("fetch+checkout an existing clone instead of cloning again", async () => {
+  it("keeps an existing branch attached to its immutable start-ref", async () => {
     const sandbox = new RecordingSandbox();
     sandbox.markExistingClone(".");
-    await prepBinding(sandbox, ".", binding({ ref: "main" }));
+    await prepBinding(sandbox, ".", binding({ ref: "main", resolvedRef: PINNED_SHA }));
     const commands = sandbox.execCalls.map((c) => c.command);
     expect(commands.some((c) => c.startsWith("git clone"))).toBe(false);
     expect(commands).toContain("git fetch origin");
-    expect(commands).toContain("git checkout 'main'");
-    const fetchCall = sandbox.execCalls.find((c) => c.command === "git fetch origin");
-    expect(fetchCall?.opts?.cwd).toBe(".");
+    expect(commands).toContain(`git checkout -B 'main' '${PINNED_SHA}' --`);
+    expect(commands).not.toContain("git checkout -B 'main' 'origin/main'");
   });
 
   it("skips checkout when no ref is pinned on an existing clone", async () => {
@@ -342,14 +354,14 @@ describe("prepBinding", () => {
     errSpy.mockRestore();
   });
 
-  it("offline-tolerant: checkout failure on an existing clone logs and prep continues (does not throw)", async () => {
+  it("fails closed when an existing clone cannot check out its immutable start-ref", async () => {
     const sandbox = new RecordingSandbox();
     sandbox.markExistingClone(".");
-    sandbox.setResult("git checkout 'main'", { stdout: "", stderr: "unknown revision", exitCode: 1 });
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    await expect(prepBinding(sandbox, ".", binding({ ref: "main" }))).resolves.toBeUndefined();
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
+    sandbox.setResult(`git checkout -B 'main' '${PINNED_SHA}' --`, {
+      stdout: "", stderr: "unknown revision", exitCode: 1,
+    });
+    await expect(prepBinding(sandbox, ".", binding({ ref: "main", resolvedRef: PINNED_SHA })))
+      .rejects.toThrow("immutable checkout failed");
   });
 
   it("multiple bindings (position order): second binding clones into its subdir", async () => {
@@ -539,9 +551,9 @@ describe("prepPrebuiltBinding", () => {
   const PNPM_STEP = { id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" };
   const DIFF_CMD = "git diff --name-only 'bakedsha' HEAD -- 'pnpm-lock.yaml'";
 
-  it("cold workspace: stages the baked repo with `cp -a` (never git clone), resets origin, fetches, force-checks-out origin's ref", async () => {
+  it("cold workspace keeps the pinned branch attached at its start-ref", async () => {
     const sandbox = new RecordingSandbox();
-    await prepPrebuiltBinding(sandbox, ".", binding({ ref: "main" }), { bakedSha: "bakedsha", recipe: [] });
+    await prepPrebuiltBinding(sandbox, ".", binding({ ref: "main", resolvedRef: PINNED_SHA }), { bakedSha: "bakedsha", recipe: [] });
     const commands = sandbox.execCalls.map((c) => c.command);
     // Preserves untracked node_modules the baked install produced — a local
     // git clone would drop them.
@@ -549,13 +561,9 @@ describe("prepPrebuiltBinding", () => {
     expect(commands.some((c) => c.startsWith("git clone"))).toBe(false);
     expect(commands).toContain("git remote set-url origin 'https://github.com/acme/widgets.git'");
     expect(commands).toContain("git fetch origin");
-    // The baked LOCAL `main` sits at bakedSha; a plain `git checkout main`
-    // would stay there (git does not fast-forward an existing branch on
-    // checkout), so the workspace would never reach upstream head. A
-    // reset-to-origin `checkout -B main origin/main` is the only form that
-    // advances the freshly-staged tree past the baked commit.
-    expect(commands).toContain("git checkout -B 'main' 'origin/main'");
-    expect(commands.some((c) => c === "git checkout 'main'")).toBe(false);
+    expect(commands).toContain(`git checkout -B 'main' '${PINNED_SHA}' --`);
+    expect(commands).toContain("git branch --set-upstream-to='origin/main' -- 'main'");
+    expect(commands).not.toContain("git checkout -B 'main' 'origin/main'");
   });
 
   it("cold workspace, no ref pinned: resolves origin/HEAD's default branch and force-checks-out origin's head", async () => {
@@ -643,14 +651,14 @@ describe("prepPrebuiltBinding", () => {
   it("existing clone (restore / warm workspace): refreshes in place, never stages the image or reinstalls", async () => {
     const sandbox = new RecordingSandbox();
     sandbox.markExistingClone(".");
-    await prepPrebuiltBinding(sandbox, ".", binding({ ref: "main" }), {
+    await prepPrebuiltBinding(sandbox, ".", binding({ ref: "main", resolvedRef: PINNED_SHA }), {
       bakedSha: "bakedsha",
       recipe: [PNPM_STEP],
     });
     const commands = sandbox.execCalls.map((c) => c.command);
     expect(commands.some((c) => c.includes("cp -a /prebuilt/repo"))).toBe(false);
     expect(commands).toContain("git fetch origin");
-    expect(commands).toContain("git checkout 'main'");
+    expect(commands).toContain(`git checkout -B 'main' '${PINNED_SHA}' --`);
     // Baked-image diff/reinstall is skipped — the workspace copy is authoritative.
     expect(commands.some((c) => c.startsWith("git diff"))).toBe(false);
     expect(commands.some((c) => c === "pnpm install --frozen-lockfile")).toBe(false);

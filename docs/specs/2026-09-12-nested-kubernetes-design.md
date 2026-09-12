@@ -69,6 +69,11 @@ Each normative sentence has one unique requirement tag. The validator enforces t
 `.valet/prebuild.yaml` uses optional Boolean `kubernetes`. Omission means `false`.
 The loader MUST reject other types with `use kubernetes: true or false`. [K08]
 A successful repository read MUST persist the value in `agent_sessions.kubernetes`, whose default is false. [K09]
+Valet MUST resolve the selected repository ref to a SHA and read configuration at that SHA. [K150]
+Valet MUST persist that SHA as `resolved_ref` before it applies flags or starts checkout. [K151]
+Child creation MUST commit its app row, request resource overrides, and repository binding before capability resolution. [K152]
+A failed first child build MUST delete its app row, repository binding, and working directory. [K153]
+The persisted SHA is the session start-ref; wake and reconcile reuse it without advancing it. A named branch remains attached locally at that SHA.
 A failed read MUST preserve a stored true value. [K10]
 REST and child creation MUST use the same resolution and persistence path. [K11]
 Propagation MUST follow `PrebuildOverride` to `RepoPrebuildFlags` to `SessionMeta` to `SandboxCreateOpts`. [K12]

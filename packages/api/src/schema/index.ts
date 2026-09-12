@@ -1723,6 +1723,8 @@ export const sessionRepos = pgTable(
     fullName: text("full_name").notNull(),
     cloneUrl: text("clone_url").notNull(),
     ref: text("ref"),
+    // Immutable startup snapshot; `ref` remains the user-selected branch/tag.
+    resolvedRef: text("resolved_ref"),
     auth: text("auth", { enum: ["auto", "app", "user"] })
       .notNull()
       .default("auto"),

@@ -17,7 +17,7 @@ import {
   type SandboxStatus,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, imageSources, bakes, securityEngagements, securityCells } from "../schema/index.js";
+import { agentSessions, imageSources, bakes, securityEngagements, securityCells, sessionRepos } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -133,7 +133,11 @@ function makeNonIsolatedProvider(): SandboxProvider & { execs: string[] } {
   };
 }
 
-async function insertSession(db: TestApi["providers"]["db"], sessionId: string): Promise<void> {
+async function insertSession(
+  db: TestApi["providers"]["db"],
+  sessionId: string,
+  repo?: RepoBinding & { targetDir: string },
+): Promise<void> {
   const now = Date.now();
   await db.insert(agentSessions).values({
     id: sessionId,
@@ -147,6 +151,18 @@ async function insertSession(db: TestApi["providers"]["db"], sessionId: string):
     createdAt: now,
     updatedAt: now,
   });
+  if (repo) {
+    await db.insert(sessionRepos).values({
+      sessionId,
+      host: repo.host ?? "github",
+      fullName: repo.fullName,
+      cloneUrl: repo.cloneUrl,
+      ref: repo.ref ?? null,
+      auth: repo.auth ?? "auto",
+      position: 0,
+      targetDir: repo.targetDir,
+    });
+  }
 }
 
 const primaryBinding: RepoBinding & { targetDir: string } = {
@@ -200,7 +216,7 @@ describe("EngineHost buildSpecProvider", () => {
       },
     });
     const sessionId = "sp-resource-refresh";
-    await insertSession(api.providers.db, sessionId);
+    await insertSession(api.providers.db, sessionId, primaryBinding);
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);
     const session = await api.providers.engineHost.sessionFor(sessionId, {
@@ -249,7 +265,7 @@ describe("EngineHost buildSpecProvider", () => {
       sandboxResources: { cpu: 2, memory: "4Gi" }, createdAt: Date.now(), updatedAt: Date.now(),
     });
     const sessionId = "sp-saved-resources";
-    await insertSession(db, sessionId);
+    await insertSession(db, sessionId, primaryBinding);
     const session = await engineHost.sessionFor(sessionId, {
       userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding],
     });
