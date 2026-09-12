@@ -24,27 +24,30 @@ PR 3  OPA bundle and evaluator library    PR 4  policy data compiler
   |          |
   +----+-----+
        v
-PR 5  inert surface adapters
+PR 5  policy builder and authoring APIs
        |
        v
-PR 6  atomic local OPA action cutover
+PR 6  inert surface adapters
+       |
+       v
+PR 7  atomic local OPA action cutover
        |
        +----------+-----------+------------+
        v          v           v            v
-PR 7 built-ins  PR 8 routes  PR 9 delegation  PR 10 entitlements
-                 resources    sandbox, creds    and catalog
-                              and egress
-       \          |           |            /
-        +---------+-----------+-----------+
-                          |
-                          v
-                 PR 11 TVC attested evaluator
-                          |
-                          v
-                 PR 12 attested execution and optional TKMS
+PR 8 built-ins  PR 9 routes  PR 10 delegation  PR 11 entitlements
+                 resources     sandbox, creds     and catalog
+                               and egress
+       \          |            |             /
+        +---------+------------+------------+
+                           |
+                           v
+                  PR 12 TVC attested evaluator
+                           |
+                           v
+                  PR 13 attested execution and optional TKMS
 ```
 
-PRs 3 and 4 can be reviewed in parallel after PR 2. PRs 7 through 10 can be prepared in parallel after PR 6, but each must merge only after its dependencies. PR 11 and PR 12 are future work, not part of the immediate Valet replacement.
+PRs 3 and 4 can be reviewed in parallel after PR 2. PR 5 builds on both. PRs 8 through 11 can be prepared in parallel after PR 7, but each must merge only after its dependencies. PR 12 and PR 13 are future work, not part of the immediate Valet replacement.
 
 ## Reviewability rules
 
@@ -53,8 +56,9 @@ PRs 3 and 4 can be reviewed in parallel after PR 2. PRs 7 through 10 can be prep
 - Use fixture policy rows and static request fixtures before cutover. Do not mirror live traffic.
 - Keep generated bundle fixtures small and review their source rows beside the expected Rego or data.
 - Route a surface only when its request adapter, decision handling, audit, and failure behavior land together.
-- Make PR 6 the only pull request that changes action-policy enforcement.
-- Delete obsolete code in PR 6 rather than keeping it behind a flag.
+- Make PR 7 the only pull request that changes action-policy enforcement.
+- Delete obsolete code in PR 7 rather than keeping it behind a flag.
+- Keep builder preview on `AuthorizationService`. Do not add a browser or UI evaluator.
 
 ## PR 1: Design and implementation plan
 
@@ -145,7 +149,7 @@ pnpm typecheck
 - Convert `runtime_grants` and approval resolutions into canonical dynamic facts.
 - Encode action, service, and risk specificity.
 - Encode org deny, team deny, grant, override, strict org/team result, and default authority layers.
-- Keep `packages/api/src/policies/resolution.ts` live until PR 6.
+- Keep `packages/api/src/policies/resolution.ts` live until PR 7.
 - Use offline fixture comparisons only. Do not add runtime dual evaluation.
 
 **Acceptance checks**
@@ -165,9 +169,48 @@ pnpm --filter @valet/api test policies
 pnpm typecheck
 ```
 
-## PR 5: Inert adapters for current action paths
+## PR 5: Policy builder and canonical authoring APIs
 
 **Depends on:** PRs 3 and 4
+
+**Scope**
+
+- Add versioned builder types, context descriptors, condition operators, decisions, obligations, validation issues, diffs, explain traces, and publish requests.
+- Add the API context registry, operator registry, validation service, draft and review lifecycle, compiler integration, source maps, and audit events.
+- Add organization and team draft APIs with optimistic version checks and separate edit, review, publish, and rollback authorization points.
+- Add the policy overview, context picker, rule editor, condition builder, decision and obligation editor, advanced-source view, effective-policy explanation, conflict preview, impact preview, generated diff, review, publish, and rollback surfaces.
+- Build the web surface under `packages/web/src/routes/settings.organization.policies.tsx`, `packages/web/src/routes/settings.team.tsx`, and `packages/web/src/components/settings/policy-builder/`.
+- Extend `packages/web/src/api/policies.ts` with typed builder requests.
+- Map current action policies, team policies, overrides, grants, entitlements, plugin defaults, risk defaults, and the bundle default into provenance-preserving views.
+- Compile builder documents into the same content-addressed Rego and data bundle used by local OPA and the future TVC evaluator.
+- Keep publication inactive until PR 7 moves every policy write to canonical bundle publication.
+- Add no client evaluator, UI-only semantics, shadow mode, dual evaluation, or runtime fallback.
+
+**Acceptance checks**
+
+- One builder handles action, workflow, route, resource, entitlement, delegation, sandbox, credential, and egress contexts through descriptors.
+- Common fields stay generic while context-specific fields and operators come from capability schemas.
+- The server rejects unknown fields, invalid operator and type pairs, unsupported obligations, sensitive values, stale versions, and unauthorized publication.
+- Visual edits preserve rule identity, source provenance, and unknown registered extensions.
+- Unsupported legacy expressions remain read-only and create explicit migration issues. They are never silently converted.
+- Conflict output covers specificity, org and team denies, grants, overrides, defaults, approval obligations, unreachable rules, and contradictory conditions.
+- Preview and explain use `AuthorizationService` with an active or server-compiled draft bundle.
+- Generated diffs show rule, Rego, data, provenance, digest, and sampled impact changes.
+- Raw Rego cannot publish unless it passes the typed decision, namespace, provenance, conflict, and restricted-built-in checks.
+- Keyboard and screen-reader tests cover context selection, nested conditions, errors, review, and publication controls.
+- Draft save has no enforcement effect.
+
+**Validation**
+
+```bash
+pnpm --filter @valet/api test authorization/builder policies
+pnpm --filter @valet/web test policy-builder policies
+pnpm typecheck
+```
+
+## PR 6: Inert adapters for current action paths
+
+**Depends on:** PR 5
 
 **Scope**
 
@@ -193,9 +236,9 @@ pnpm --filter @valet/api test action-invoker authorization
 pnpm typecheck
 ```
 
-## PR 6: Atomic local OPA action cutover
+## PR 7: Atomic local OPA action cutover
 
-**Depends on:** PR 5
+**Depends on:** PR 6
 
 **Scope**
 
@@ -204,6 +247,8 @@ pnpm typecheck
 - Move workflow analysis and pre-approval in `packages/api/src/workflows/permissions.ts` to `AuthorizationService`.
 - Move the `upsertOverride` bounds guard in `packages/api/src/policies/admin.ts` to `AuthorizationService`.
 - Move the `/api/org/policies/preview` path in `packages/api/src/routes/policies.ts` to `AuthorizationService`.
+- Move every organization, team, override, entitlement, grant, approval, and default policy write to canonical builder data or dynamic facts and bundle publication.
+- Remove legacy web and API write paths that can change policy without publishing the canonical bundle.
 - Re-evaluate approved requests with canonical approval facts.
 - Persist the decision before the action and persist execution outcome separately.
 - Make audit reservation failure block external execution.
@@ -226,6 +271,7 @@ pnpm typecheck
 - Approval replay survives restart and remains bound to one request subject.
 - Resolver, bundle, obligation, and audit failures deny without executing.
 - Repository search finds no TypeScript evaluator in runtime, `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard, or policy preview.
+- Every web and API policy mutation publishes canonical data or a canonical dynamic fact. No legacy form can write around bundle publication.
 - A new organization has an active valid bundle before it accepts an authorization request.
 - Review the diff explicitly for `shadow`, `fallback`, and dual evaluator wiring.
 
@@ -239,9 +285,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 7: Built-in tools
+## PR 8: Built-in tools
 
-**Depends on:** PR 6
+**Depends on:** PR 7
 
 **Scope**
 
@@ -256,7 +302,7 @@ make e2e
 - A denied built-in never calls its implementation.
 - An approval decision binds exact arguments and re-evaluates after approval.
 - Unknown obligations deny.
-- Child tools also satisfy PR 9 policy when that pull request lands.
+- Child tools also satisfy PR 10 policy when that pull request lands.
 
 **Validation**
 
@@ -266,9 +312,9 @@ pnpm typecheck
 make e2e E2E_ARGS="--only cli,typecheck"
 ```
 
-## PR 8: Route and resource authorization
+## PR 9: Route and resource authorization
 
-**Depends on:** PR 6. Coordinate with TKAI-53 and TKAI-370.
+**Depends on:** PR 7. Coordinate with TKAI-53 and TKAI-370.
 
 **Scope**
 
@@ -294,9 +340,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 9: Delegation, sandbox capabilities, credentials, and egress
+## PR 10: Delegation, sandbox capabilities, credentials, and egress
 
-**Depends on:** PRs 6 and 7. Coordinate inter-agent work with TKAI-433.
+**Depends on:** PRs 7 and 8. Coordinate inter-agent work with TKAI-433.
 
 **Scope**
 
@@ -325,9 +371,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 10: Entitlements and plugin catalog
+## PR 11: Entitlements and plugin catalog
 
-**Depends on:** PR 6
+**Depends on:** PR 7
 
 **Scope**
 
@@ -352,9 +398,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 11: Future TVC attested evaluator
+## PR 12: Future TVC attested evaluator
 
-**Depends on:** PRs 6 through 10 as needed. This is future work.
+**Depends on:** PRs 7 through 11 as needed. This is future work.
 
 **Scope**
 
@@ -386,9 +432,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 12: Future attested execution and optional TKMS roles
+## PR 13: Future attested execution and optional TKMS roles
 
-**Depends on:** PR 11. This is future work.
+**Depends on:** PR 12. This is future work.
 
 **Scope**
 
@@ -415,15 +461,17 @@ make e2e
 
 ## Migration strategy
 
-1. Freeze semantic changes to the old TypeScript evaluator while PRs 2 through 5 are in review.
+1. Freeze semantic changes to the old TypeScript evaluator while PRs 2 through 6 are in review.
 2. Export representative, redacted policy row snapshots from development data.
 3. Compile those snapshots offline with PR 4.
-4. Review OPA results for every current precedence case. Fix the compiler or make a documented policy-data correction before cutover.
-5. Publish valid bundles for every active organization before PR 6 deploys.
-6. Block PR 6 deployment if any organization lacks a valid active bundle.
-7. Deploy PR 6 once. Local OPA becomes the only action evaluator at process start.
-8. Remove old evaluator metrics, alerts, and code in the same pull request.
-9. Route later domains through their own atomic surface pull requests.
+4. Import the snapshots into provenance-preserving builder documents with PR 5.
+5. Review OPA results for every current precedence case. Fix the compiler or record an explicit migration issue before cutover.
+6. Publish valid bundles for every active organization before PR 7 deploys.
+7. Block PR 7 deployment if any organization lacks a valid active bundle or has an unsupported legacy expression.
+8. Deploy PR 7 once. Local OPA becomes the only action evaluator at process start.
+9. Move every policy write to canonical bundle publication in the same pull request.
+10. Remove old evaluator metrics, alerts, forms, write routes, and code in the same pull request.
+11. Route later domains through their own atomic surface pull requests.
 
 Offline comparison is migration validation. It is not shadow mode because it does not evaluate live requests or retain two production decisions.
 
@@ -436,7 +484,7 @@ Rollback uses an application release and policy snapshot pair:
 3. Restore the active bundle pointer to the bundle snapshot paired with that release.
 4. Resume traffic after health and bundle checks pass.
 
-For PR 6, the previous release contains the old implementation because it predates cutover. The running new release has no switch to it. Rollback is a deployment event, not a live fallback path.
+For PR 7, the previous release contains the old implementation because it predates cutover. The running new release has no switch to it. Rollback is a deployment event, not a live fallback path.
 
 After later releases no longer have compatible old policy storage, rollback targets the most recent local OPA release, not the removed TypeScript evaluator. Database migrations in this stack must be additive until the rollback window closes. Destructive cleanup waits for a later pull request.
 
@@ -450,6 +498,8 @@ The stack is complete when:
 - Interactive and workflow actions use one service and equal semantics.
 - Built-ins, entitlements, routes, resources, delegation, sandbox capabilities, credentials, and egress use the contract where applicable.
 - `PolicyResolver` contains no policy logic.
+- The builder covers every registered context without adding another policy language or evaluator.
+- Every policy write produces canonical builder data, dynamic facts, or bundle publication with source provenance.
 - The repository contains no live old action evaluator, shadow path, or legacy fallback.
 - Decision records and execution outcomes are separate and linked.
 - Approval replay is deterministic and subject-bound.

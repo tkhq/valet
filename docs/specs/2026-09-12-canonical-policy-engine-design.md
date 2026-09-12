@@ -57,10 +57,11 @@ Related work includes:
 8. Separate a policy decision from the later execution outcome in storage and audit.
 9. Make local OPA the immediate implementation without blocking a future TVC evaluator.
 10. Design the TVC boundary for stateless replicas and durable Valet idempotency.
+11. Provide one safe policy builder for every canonical authorization context.
 
 ## Non-goals
 
-- This design does not implement a policy editor or a new policy administration experience.
+- This design specifies the policy builder, but it does not implement the builder or its administration experience.
 - This design does not define executable conformance artifacts.
 - This design does not move all tool execution into TVC in the first implementation.
 - This design does not make host identity claims true by attesting evaluation.
@@ -286,6 +287,254 @@ Approval facts follow the same rule. A fact binds the approval ID, gate ID, requ
 
 Local OPA trusts Valet's transactionally loaded facts. A future attested evaluator proves that it evaluated those supplied facts. It does not prove those facts were truthful unless a trusted issuer signed them or the proof verifier can root them elsewhere.
 
+## Policy builder
+
+### Product goals and limits
+
+The policy builder is a safe authoring view over canonical policy data. It is not a second policy language. The builder helps administrators create common rules without writing Rego. Every saved rule compiles through the same bundle compiler that supplies local OPA and the future TVC evaluator.
+
+The builder must cover every `AuthorizationKind` in this design. It must make the selected context, subject, target, conditions, decision, obligations, precedence, and provenance visible. It must use safe defaults and show the effect of a draft before publication.
+
+The builder has these non-goals:
+
+- It does not enforce policy in the browser.
+- It does not add UI-only effects, operators, priorities, or fallback semantics.
+- It does not hide a canonical rule that the visual editor cannot represent.
+- It does not store secrets, credentials, raw tokens, or unredacted sensitive request values.
+- It does not let raw Rego bypass typed validation, provenance, review, or publication controls.
+
+An advanced editor can expose raw Rego or structured policy data only if the server validates the same decision contract and provenance map. If lossless validation is not possible, the builder shows the source as read-only and requires an explicit migration or product decision.
+
+### Builder architecture
+
+The builder uses a versioned `PolicyBuilderDocument`. The document is a projection over canonical authoring data and bundle source metadata. The server owns its schema, migration, validation, compilation, and publication.
+
+Proposed module boundaries are:
+
+- `packages/web/src/routes/settings.organization.policies.tsx`: organization policy overview and builder route.
+- `packages/web/src/routes/settings.team.tsx`: team-scoped entry to the shared builder.
+- `packages/web/src/components/settings/policy-builder/`: context picker, rule editor, condition tree, decision editor, obligations, preview, diff, review, and publish controls.
+- `packages/web/src/api/policies.ts`: typed draft, validation, explain, diff, review, publish, and rollback requests.
+- `packages/api/src/authorization/builder/types.ts`: builder document, rule, condition, validation, diff, and explain types.
+- `packages/api/src/authorization/builder/contexts.ts`: policy context registry and capability descriptors.
+- `packages/api/src/authorization/builder/operators.ts`: condition operator registry and type compatibility.
+- `packages/api/src/authorization/builder/validation.ts`: structural, semantic, conflict, permission, and sensitive-value checks.
+- `packages/api/src/authorization/builder/service.ts`: draft lifecycle, review state, authorization, and audit.
+- `packages/api/src/authorization/bundles/compiler.ts`: builder and migrated source compilation into canonical Rego and data.
+- `packages/api/src/authorization/bundles/publisher.ts`: content-addressed publication and transactional activation.
+
+The current `packages/web/src/components/settings/policies-section.tsx` can become a compatibility view or compose the new builder primitives. It must not keep a separate matcher model after cutover.
+
+### Context registry and flexibility
+
+A `PolicyContextRegistry` maps each authorization context to a versioned `ContextDescriptor`. The descriptor is data consumed by both API validation and the web form. A new context registers capabilities without creating a new authorization model.
+
+Every descriptor defines:
+
+- context ID, label, description, and schema version;
+- allowed subject types and ownership scopes;
+- action and resource selectors;
+- condition fields, field types, sensitivity, and allowed operators;
+- valid decisions and whether human approval is meaningful;
+- supported obligations and approval requirements;
+- specificity dimensions and explain labels;
+- available sample or historical request shapes for preview; and
+- migration adapters for older builder documents.
+
+Generic rule fields are rule ID, source scope, subject selector, context ID, target selector, condition tree, decision, obligations, approval requirement, applies-in scope, time bounds, status, and source provenance. Context-specific fields live under typed target and condition payloads declared by the descriptor. The generic editor never guesses their meaning.
+
+The registry covers these contexts:
+
+| Context | Context-specific capabilities |
+|---|---|
+| Tool and action | Service, fully qualified action, risk, parameter schema, plugin default, and tool class. |
+| Workflow | Definition, node, `workflowExecutionId`, owner, trigger, `appliesIn`, and workflow grant scope. |
+| Route and API | HTTP method, route ID, authenticated principal type, operation, and concealment requirement. |
+| Resource | Resource type, stable ID, owner, tenant, visibility, requested operation, and query obligation. |
+| Entitlement | Plugin, instance availability, organization mode, team set, and feature operation. |
+| Delegation and child session | Parent, child, edge type, target owner, repository, model tier, hop count, and inherited authority. |
+| Sandbox capability | Profile, provider, image, Docker, CPU, memory, mount, terminal, and requested capability. |
+| Credential | Service, credential owner, delegation source, requested use, and session or workflow owner. Secret fields are excluded. |
+| Egress | Scheme, normalized host, port, protocol, destination class, redirect policy, and declared scope. |
+
+Common editor primitives handle typed equality, set membership, order comparisons, presence, time windows, subject membership, owner relationships, and Boolean groups. Context descriptors can expose only operators valid for a field type. For example, the egress descriptor can expose host suffix matching, while a numeric sandbox field can expose bounded comparisons. Descriptor extensions must map to canonical input fields and registered compiler behavior.
+
+### Authoring model
+
+A rule has one stable ID across drafts and published versions. The ID appears in generated Rego metadata, explain traces, policy diffs, decision audit, and rollback history. Copying a rule creates a new ID.
+
+A rule targets one canonical context and one authority scope. Authority scope is organization or team for standing rules, personal owner for an override, and session or workflow execution for a grant. Subject selectors choose principal type, specific principals, roles, teams, ownership relations, or authenticated workload classes allowed by the context descriptor.
+
+The target selector narrows actions, resources, or capabilities. Conditions constrain typed request and fact fields. `ConditionNode` supports nested `all`, `any`, and `not` groups plus typed comparisons. Empty groups, unknown fields, invalid operator and type pairs, and conditions on secret fields are errors.
+
+The effect is `allow`, `deny`, or `require_approval` where the context permits approval. An approval editor selects assurance, approver subject, scope, expiry, replay rule, and consensus requirement when supported. An obligation editor adds only obligations declared by the context descriptor.
+
+`appliesIn` retains `any`, `session`, and `workflow` for migrated action rules. Contexts that do not use it omit the control. Time bounds are explicit start and expiry values with a displayed time zone. Parameter constraints use the action schema when available and retain the current matcher operators only when their field types permit them.
+
+Specificity is computed from the canonical target, not from visual position. The builder displays the authority layer and computed specificity. A displayed priority is derived from authority layer, specificity, decision restrictiveness, and the canonical tie rule. Authors cannot enter an arbitrary number that bypasses org or team deny semantics.
+
+Dynamic grants and approval facts appear as read-only effective-policy entries with revoke or inspect actions where the caller has authority. They are not edited as standing rules. Plugin defaults and risk defaults appear as inherited, read-only lowest-specificity layers. The bundle default appears after them. Overrides have their own authoring view and cannot loosen a winning organization or team deny.
+
+### Design-level data shapes
+
+These shapes describe the boundary. They do not define an executable specification.
+
+```ts
+type PolicyBuilderDocument = {
+  schemaVersion: number;
+  documentId: string;
+  owner: { type: "org" | "team"; id: string };
+  baseVersionId: string;
+  draftVersion: number;
+  status: "draft" | "in_review" | "approved" | "published" | "superseded";
+  review?: { reviewId: string; requiredApprovals: number; approvals: ReviewApproval[] };
+  rules: RuleDraft[];
+  advancedSources: AdvancedPolicySource[];
+  createdBy: string;
+  updatedAt: number;
+};
+
+type ContextDescriptor = {
+  id: AuthorizationKind;
+  schemaVersion: number;
+  subjectTypes: string[];
+  targetSchema: FieldDescriptor[];
+  conditionFields: FieldDescriptor[];
+  decisions: PolicyDecision["effect"][];
+  obligations: ObligationDescriptor[];
+  specificity: SpecificityDimension[];
+};
+
+type RuleDraft = {
+  ruleId: string;
+  contextId: AuthorizationKind;
+  authority: { type: "org" | "team" | "override"; id: string };
+  subjects: SubjectSelector[];
+  target: Record<string, unknown>;
+  conditions: ConditionNode;
+  decision: DecisionDraft;
+  obligations: ObligationDraft[];
+  appliesIn?: "any" | "session" | "workflow";
+  validFrom?: number;
+  expiresAt?: number;
+  source: SourceProvenance;
+};
+
+type ConditionNode =
+  | { kind: "all" | "any"; children: ConditionNode[] }
+  | { kind: "not"; child: ConditionNode }
+  | { kind: "compare"; field: string; operator: string; value?: unknown };
+
+type DecisionDraft = {
+  effect: "allow" | "deny" | "require_approval";
+  approval?: ApprovalRequirement;
+};
+
+type ObligationDraft = {
+  type: string;
+  parameters: Record<string, unknown>;
+};
+
+type ValidationIssue = {
+  severity: "error" | "warning";
+  code: string;
+  path: string;
+  message: string;
+  relatedRuleIds?: string[];
+};
+
+type PolicyDiff = {
+  basePolicyDigest: string;
+  draftPolicyDigest: string;
+  ruleChanges: RuleChange[];
+  generatedSourceChanges: SourceChange[];
+  impactSummary: ImpactSummary;
+};
+
+type ExplainTrace = {
+  request: RedactedAuthorizationRequest;
+  bundleDigest: string;
+  decision: PolicyDecision;
+  steps: ExplainStep[];
+};
+
+type PublishRequest = {
+  documentId: string;
+  expectedDraftVersion: number;
+  expectedBasePolicyDigest: string;
+  reviewId?: string;
+  activationReason: string;
+};
+```
+
+Unknown fields follow the document schema rule. A newer schema can preserve an opaque extension only when its namespace, digest behavior, compiler owner, and provenance are registered. Otherwise the server rejects the document. The client must not drop unknown fields during an edit.
+
+### Validation, compilation, and round trip
+
+The browser performs fast schema checks for feedback. The API repeats all structural checks and performs semantic validation. Only the server can compile, review, publish, activate, or roll back a bundle.
+
+Validation checks descriptor versions, selectors, field types, operators, Boolean structure, effects, obligations, time bounds, sensitive values, authority, and publication permission. It also reports exact-target conflicts, same-specificity conflicts, organization and team denies, grants, overrides, plugin and risk defaults, approval obligations, unreachable rules, contradictory conditions, and effects that cross contexts through shared facts.
+
+Preview calls `AuthorizationService` with either the active bundle digest or a server-compiled draft bundle digest. It never uses a browser evaluator or a separate preview resolver. Explain output shows matched and rejected rules, authority layers, computed specificity, conditions, defaults, grants, obligations, and the final reason code.
+
+Compilation produces canonical Rego and data plus a source map from generated statements to document ID, rule ID, field path, author, and source version. Migrated and advanced sources carry the same map. The generated policy diff shows rule changes, data changes, generated Rego changes, digest changes, and sampled impact. The publisher never silently changes a rule to make it valid. It publishes the same content-addressed bundle, and future signed pin, for local OPA or `TvcAttestedEvaluator`.
+
+A visual round trip must preserve semantics and provenance. If a published expression cannot map back to the current builder schema, the builder shows it as an unsupported read-only source. The user must create a migration issue or use an approved advanced path. Saving another rule must preserve the unsupported source byte-for-byte and include it in the policy digest.
+
+Raw Rego is not a bypass. An advanced source must compile in the restricted package, return the typed decision shape, use registered input and data namespaces, declare rule IDs, produce source provenance, pass conflict checks, and reject forbidden built-ins or external access. If the compiler cannot prove these properties, publication fails.
+
+### UX surfaces
+
+The policy overview groups active rules by context and authority. It also shows inherited defaults, current bundle digest, draft state, review status, recent publications, and failures. A context picker starts a rule from a descriptor and states what the context protects.
+
+The rule editor presents scope, subjects, target, decision, conditions, obligations, and time bounds in that order. The condition builder uses nested groups with keyboard-accessible add, remove, move, and grouping controls. Labels, descriptions, errors, and focus order must work with screen readers. Color is not the only signal for allow, approval, deny, conflict, or validation state.
+
+The advanced editor shows structured source or Rego only when the advanced policy gate permits it. It always shows provenance requirements and generated output. The effective-policy view explains the active result for a selected subject and request. Request decision inspection opens the stored `ExplainTrace`, proof status, obligations, approval facts, and separate execution outcome.
+
+Conflict preview identifies rules that overlap at exact targets or specificity tiers. Impact preview evaluates selected redacted samples against the active or draft bundle through `AuthorizationService`. It labels incomplete coverage and never claims that samples prove safety. Cross-context impact lists shared facts or obligations that changed.
+
+Drafts save without activation. Review freezes a draft version and records reviewers, comments, validation results, source diff, and expected base digest. Publish requires a current validation result and any required approval. Activation uses compare-and-swap on the active digest. A stale base, missing review, compiler error, unknown extension, or failed audit write blocks publication.
+
+Rollback creates a new draft from a prior published version and sends it through validation, review, publication, and activation. It does not move the active pointer without a new audit event. Safe defaults select the narrowest subject and target, no secret fields, no unbounded allow, and `require_approval` where the context supports it.
+
+### API and security boundary
+
+The API exposes design-level operations to read context descriptors, create and update drafts, validate, preview, explain, submit review, approve review, publish, list versions, and start rollback. Every mutating operation uses optimistic version checks. Publication also binds the expected active policy digest.
+
+UI input is untrusted. The server authenticates the caller, authorizes the operation through the canonical service, validates tenant and owner scope, and revalidates the complete document. Cookie-authenticated mutations must apply the repository's origin and CSRF controls. API keys must have explicit policy-authoring scope and cannot inherit a browser user's authority.
+
+Organization administrators can edit organization drafts under current policy. Team administration controls team drafts. Publication can require a different permission or reviewer set from editing. The final publish permission is an open design gate, but the server always enforces it. The browser never decides who can activate policy.
+
+Policy documents contain references and typed constraints, not secrets. Sensitive condition values use server-held references or one-way digests where comparison permits them. API responses, validation issues, diffs, explain traces, audit, and telemetry apply registered redaction rules.
+
+Each draft update, review action, publication, activation, rollback, and failed publication writes an audit event. Events identify actor, owner, document and version, source and result digests, review, validation summary, and reason. Published rule provenance then follows decisions into the decision audit.
+
+### Migration of current authoring surfaces
+
+The migration importer maps current sources into builder views:
+
+- `action_policies` become organization or team action rules with target, matcher conditions, `appliesIn`, time bounds, and row ID provenance.
+- `action_policy_overrides` become override-layer rules with their current bounds and source owner.
+- `runtime_grants` become read-only session or workflow grant facts with approval and revocation provenance.
+- plugin entitlements become entitlement-context rules while `packages/api/src/services/plugin-entitlements.ts` remains the initial storage adapter.
+- plugin defaults and risk defaults become inherited read-only action layers.
+- the standard bundle default becomes the final inherited layer.
+
+The current organization and team forms can read imported builder projections during migration. At final cutover, all web and API policy writes must create a builder draft and publish a canonical bundle. No endpoint can keep writing policy rows without bundle publication.
+
+The importer preserves original row IDs, source tables, timestamps, authors, matchers, and ownership in provenance. It rejects an expression that has no lossless builder or advanced-source representation. The migration records an explicit issue for that expression and blocks affected bundle activation. It never weakens, drops, or approximates the expression.
+
+### Open policy builder gates
+
+The implementation must resolve these gates before builder publication is enabled:
+
+1. Decide whether the UI permits advanced Rego or only validated structured extensions.
+2. Define who can register arbitrary condition schemas and compiler handlers.
+3. Decide whether a draft can contain organization and team rules or must have one owner scope.
+4. Set limits and indexing for large rule sets, validation, preview samples, and explain traces.
+5. Select the default diff view for rule, generated Rego, data, and impact changes.
+6. Define separate edit, review, approve, publish, and rollback permissions.
+
 ## Trust boundary
 
 Attested execution can prove these claims:
@@ -470,6 +719,8 @@ The one replacement pull request then:
 - activates the compiled policy bundles;
 - converges interactive and workflow action paths;
 - moves `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard in `packages/api/src/policies/admin.ts`, and the preview in `packages/api/src/routes/policies.ts` to the canonical service;
+- requires every web and API policy mutation to update canonical builder data or dynamic facts and publish the affected bundle;
+- removes forms and endpoints that can write policy without canonical publication;
 - activates deterministic approval replay and split decision and execution audits;
 - removes the old TypeScript action-policy evaluator from every runtime, preview, and write guard; and
 - adds no shadow mode or legacy runtime fallback.
