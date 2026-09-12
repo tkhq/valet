@@ -131,3 +131,5 @@ The JSON editor fills its available height, keeping Apply reachable on short pho
 Browser checks confirm menu lock release and a visible Apply control at 390 by 568 pixels.
 Security review also corrected primary button interaction colors and reduced-motion handling.
 The final web suite passes 2,966 tests across 265 files.
+
+Reasoning selectors use 48-pixel controls and 16-pixel text on phones, with 36-pixel controls and 14-pixel text from the small breakpoint.

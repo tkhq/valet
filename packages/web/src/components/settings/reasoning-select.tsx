@@ -1,7 +1,7 @@
 import { useOrgReasoning } from "~/api/settings";
 import { levelsUpTo, REASONING_LABELS } from "~/lib/reasoning";
 
-const SELECT_CLASS = "h-9 w-full rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]";
+const SELECT_CLASS = "h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base text-[--fg] sm:h-9 sm:text-sm";
 
 /**
  * Small labeled `<select>` for a reasoning/thinking-level override: an

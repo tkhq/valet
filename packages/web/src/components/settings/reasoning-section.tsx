@@ -5,7 +5,7 @@ import { useOrgReasoning, usePatchOrgReasoning } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
 import { levelsUpTo, REASONING_LABELS, REASONING_LEVELS } from "~/lib/reasoning";
 
-const SELECT_CLASS = "mt-1 h-9 w-full rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]";
+const SELECT_CLASS = "mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base text-[--fg] sm:h-9 sm:text-sm";
 
 /**
  * Organization · Models — default and max reasoning levels
