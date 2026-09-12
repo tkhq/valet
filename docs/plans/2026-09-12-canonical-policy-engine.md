@@ -508,7 +508,7 @@ make e2e
 - Define the signed decision App Proof payload.
 - Verify App Proof signatures and linked Boot Proofs against pinned deployment, host, engine, bundle, PCR, and account expectations.
 - Reject TVC debug-mode deployments, including Boot Proofs with zero PCR values.
-- Bind engine, source bundle, source bundle, request nonce, subject, input, decision, and obligation digests.
+- Bind deployment, host, engine, source, source bundle manifest, request ID, subject, input, policy manifest, decision, obligation, ephemeral key, and nonce.
 - Keep authentication, proof verification, durable audit, approvals, request reservation, and idempotency in Valet.
 - Add signed policy pins and trusted fact issuers where required.
 - Replace the local deployment location only after proof and failure-path review. Do not run both locations in production.

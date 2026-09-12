@@ -180,7 +180,7 @@ Profile version 1 sets these engine limits per compilation or evaluation:
 - 256 modules and 1 MiB of Rego source;
 - 8 MiB of canonical policy data and 8 MiB of canonical input;
 - 250,000 parsed nodes and 16 MiB of source bundle bytes;
-- 1,000,000 evaluation instructions;
+- 1,000,000 deterministic evaluation work units;
 - 128 document-reference, call, and recursion depth;
 - 100,000 generated comprehension values;
 - 10,000 explain events; and
