@@ -17,7 +17,7 @@ const plugin: ValetPlugin = {
   displayName: "Turnkey",
   description: "Signed commits: a per-pull-request key in Turnkey, approved once by the user",
   actions: [turnkeyActionPlugin],
-  skills: [loadSkillFromMarkdown(skillMd, "plugin", "turnkey")],
+  skills: [loadSkillFromMarkdown(skillMd, "plugin", "commit-signing")],
   gate: {
     label: "Commit signing",
     description: "Agents can ask for a Turnkey-held key and sign commits with it after the user approves.",
