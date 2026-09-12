@@ -214,7 +214,7 @@ pnpm typecheck
 - Remove the TypeScript evaluator from runtime, preview, workflow analysis, and override write guards.
 - Remove production risk-default fallback for covered actions.
 - Change personal-session resolver and policy-store errors from `require_approval` to deny.
-- Activate a standard default bundle in each new-organization transaction, or use the digest-pinned compiled default until activation completes.
+- Compile and activate the standard default bundle in each new-organization transaction before the organization accepts requests.
 - Do not include a feature flag, shadow path, dual evaluation, or old-engine fallback.
 
 **Acceptance checks**

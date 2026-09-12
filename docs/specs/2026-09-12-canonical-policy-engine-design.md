@@ -278,7 +278,7 @@ Each organization has one active logical bundle version. A bundle contains:
 
 Static policy publication follows `draft`, `validated`, `published`, `active`, and `retired` states. Validation compiles Rego, checks the entry point and output schema, checks referenced data, and computes the canonical digest. Activation is a transaction that advances the active version pointer and records the actor.
 
-Organization creation must never leave a gap with no policy. The create transaction compiles and activates the standard default bundle before it makes the organization usable. If transactional compilation is not available, the evaluator applies an embedded, digest-pinned default bundle until the transaction activates the organization bundle. Organization creation fails if neither bundle is valid. The embedded default has the same plugin, risk, and bundle defaults as a newly compiled organization bundle.
+Organization creation must never leave a gap with no policy. The create transaction compiles and activates the standard default bundle before it makes the organization usable. Organization creation fails if compilation or activation fails. The organization cannot accept requests until that transaction commits.
 
 Dynamic session and workflow grants change too often to republish the static authoring bundle for every approval. Valet supplies them as signed or database-rooted request facts under a fixed Rego data namespace. Their canonical bytes are covered by `inputDigest`. Each fact includes grant ID, scope ID, exact policy key, issuer, creation time, revocation state, and source approval ID. Missing, expired, revoked, cross-scope, or malformed facts do not match.
 
