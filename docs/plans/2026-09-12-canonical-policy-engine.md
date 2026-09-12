@@ -8,7 +8,7 @@
 
 Prepare the pull requests as a stack. Merge them in dependency order. Documentation is the first pull request. Preparatory pull requests can add inert contracts, libraries, policy bundles, and adapters. They must not evaluate live requests twice.
 
-The action-policy behavior changes in one final local OPA cutover pull request. That pull request removes the old TypeScript evaluator. No pull request adds shadow mode. No production path falls back to the old evaluator.
+The action-policy behavior changes in one final local Valet engine cutover pull request. That pull request removes the old TypeScript evaluator. No pull request adds shadow mode. No production path falls back to the old evaluator.
 
 ## Stack and dependency graph
 
@@ -20,44 +20,47 @@ PR 2  typed contracts and audit identities
   |
   +----------+
   v          v
-PR 3  OPA bundle and evaluator library    PR 4  policy data compiler
-  |          |
-  +----+-----+
-       v
-PR 5  policy builder and authoring APIs
+PR 3  Rust engine, Rego dialect, and compiler
+  |
+  v
+PR 4  local engine adapter and bundle host    PR 5  policy data compiler
+  |                                             |
+  +----------------------+----------------------+
+                         v
+PR 6  policy builder and authoring APIs
        |
        v
-PR 6  inert surface adapters
+PR 7  inert surface adapters
        |
        v
-PR 7  atomic local OPA action cutover
+PR 8  atomic local Valet engine action cutover
        |
        +----------+-----------+------------+
        v          v           v            v
-PR 8 built-ins  PR 9 routes  PR 10 delegation  PR 11 entitlements
-                 resources     sandbox, creds     and catalog
-                               and egress
-       \          |            |             /
-        +---------+------------+------------+
-                           |
-                           v
-                  PR 12 TVC attested evaluator
-                           |
-                           v
-                  PR 13 attested execution and optional TKMS
+PR 9 built-ins  PR 10 routes  PR 11 delegation  PR 12 entitlements
+                 resources      sandbox, creds      and catalog
+                                and egress
+       \          |             |              /
+        +---------+-------------+-------------+
+                            |
+                            v
+                   PR 13 TVC Rust engine host
+                            |
+                            v
+                   PR 14 attested execution and optional TKMS
 ```
 
-PRs 3 and 4 can be reviewed in parallel after PR 2. PR 5 builds on both. PRs 8 through 11 can be prepared in parallel after PR 7, but each must merge only after its dependencies. PR 12 and PR 13 are future work, not part of the immediate Valet replacement.
+PR 3 defines the engine before PR 4 integrates a local target. PR 5 can proceed after PR 3. PR 6 builds on PRs 4 and 5. PRs 9 through 12 can be prepared after PR 8. PRs 13 and 14 are future work.
 
 ## Reviewability rules
 
 - Keep each preparatory pull request behavior-neutral in production.
-- Put policy semantics in Rego once. Do not duplicate them in test-only TypeScript.
+- Put policy rules in Rego and evaluator semantics in the Rust engine. Do not duplicate either in TypeScript.
 - Use fixture policy rows and static request fixtures before cutover. Do not mirror live traffic.
 - Keep generated bundle fixtures small and review their source rows beside the expected Rego or data.
 - Route a surface only when its request adapter, decision handling, audit, and failure behavior land together.
-- Make PR 7 the only pull request that changes action-policy enforcement.
-- Delete obsolete code in PR 7 rather than keeping it behind a flag.
+- Make PR 8 the only pull request that changes action-policy enforcement.
+- Delete obsolete code in PR 8 rather than keeping it behind a flag.
 - Keep builder preview on `AuthorizationService`. Do not add a browser or UI evaluator.
 
 ## PR 1: Design and implementation plan
@@ -65,7 +68,8 @@ PRs 3 and 4 can be reviewed in parallel after PR 2. PR 5 builds on both. PRs 8 t
 **Scope**
 
 - Add this plan and the canonical policy engine design.
-- Record local OPA as the immediate implementation.
+- Record Rego as the canonical authoring language and the Valet Rust engine as the authoritative evaluator.
+- Record that OPA is not a Valet or TVC dependency.
 - Record TVC attested evaluation and optional TKMS roles as future work.
 - Record specificity semantics, no shadow mode, and no legacy fallback.
 
@@ -90,7 +94,7 @@ The repository docs-lint command checks its curated maintained-doc list. It does
 
 **Scope**
 
-- Add portable `AuthorizationRequest`, `AuthorizationSubject`, `PolicyDecision`, `PolicyDecisionEnvelope`, obligation, redaction, and evaluator types under `packages/engine/src/authorization/`.
+- Add portable `AuthorizationRequest`, `AuthorizationSubject`, `PolicyDecisionV1`, `PolicyDecisionEnvelope`, obligation, redaction, and evaluator types under `packages/engine/src/authorization/`.
 - Add `AuthorizationService` and `AuthorizationEvaluator` interfaces in the API layer.
 - Define stable request-subject and idempotency identities for interactive, workflow, route, and resource operations.
 - Extend audit storage for policy digest, input digest, subject digest, evaluator identity, obligations, proof metadata, and separate execution attempts.
@@ -111,45 +115,83 @@ pnpm --filter @valet/api test authorization
 pnpm typecheck
 ```
 
-## PR 3: Canonical bundle and local OPA evaluator library
+## PR 3: Valet Rust engine, Rego dialect, and compiler
 
 **Depends on:** PR 2
 
 **Scope**
 
-- Add deterministic bundle manifests and RFC 8785 input serialization.
-- Add SHA-256 policy, input, decision, and subject digest helpers.
-- Add bundle validation and the single Rego decision entry point.
-- Add `LocalOpaEvaluator` with bounded evaluation and atomic prepared-bundle replacement.
-- Add no production wiring.
-- Add no decision cache.
+- Add the Valet-owned Rust policy engine crate without production wiring.
+- Declare the first supported Rego v1 dialect, built-ins, errors, limits, and compatibility rules.
+- Add parser and AST support for that declared dialect.
+- Add deterministic compilation to a versioned IR or bytecode with canonical encoding.
+- Add bounded evaluation over immutable data and explicit input.
+- Add bundle loading, contract validation, explain traces, and source maps.
+- Add native and Rust-to-WebAssembly build targets from one semantic implementation where toolchain tests permit them.
+- Keep the normal host capability interface empty.
+- Evaluate Regorus as a research substrate. Do not make it a settled dependency without the gate review.
+- Add no OPA runtime, compiler, sidecar, command, library, or generated artifact.
 
 **Acceptance checks**
 
-- Reordered JSON keys produce the same digest.
-- Changed values produce different digests.
+- Accepted dialect fixtures parse, compile, and return `PolicyDecisionV1`.
+- Unsupported syntax, imports, built-ins, host callbacks, and dialect versions fail validation.
+- Network, filesystem, wall clock, randomness, process access, and dynamic module loading are unavailable.
+- Repeated compilation of the same source and data produces identical compiled bytes and source maps.
+- Instruction, time, memory, depth, recursion, comprehension, trace, and result limits fail closed.
+- Native and WebAssembly targets return equal decisions, errors, and limit behavior for shared fixtures before both can ship.
+- The engine crate contains no authentication, proof verification, database, lock, sandbox, network enforcement, or durable audit code.
+
+**Validation**
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+## PR 4: Local Valet engine adapter and bundle host
+
+**Depends on:** PR 3
+
+**Scope**
+
+- Add deterministic bundle manifests and RFC 8785 input serialization.
+- Add SHA-256 source, compiled bundle, engine, input, decision, and subject digest helpers.
+- Add bundle compatibility checks for dialect, compiler, IR, contract, and engine versions.
+- Add `LocalValetEvaluator` over one validated native or WebAssembly target.
+- Add bounded requests, typed failures, and atomic loaded-bundle replacement.
+- Add no production wiring and no decision cache.
+- Add no OPA host or compatibility layer.
+
+**Acceptance checks**
+
+- Reordered JSON keys produce the same digest, and changed values produce different digests.
 - Archive timestamps do not affect `policyDigest` because the manifest hashes declared files.
-- Invalid Rego, unknown files, duplicate paths, and invalid decision output fail closed.
-- Evaluator timeout and bundle replacement errors return typed failures, not allow decisions.
+- Invalid source, compiled artifacts, manifests, versions, or decision output fail closed.
+- Evaluator timeout, resource-limit, and bundle replacement errors return typed failures, not allow decisions.
+- The language-neutral adapter returns the same `PolicyDecisionV1` as the engine corpus.
 
 **Validation**
 
 ```bash
 pnpm --filter @valet/api test authorization/bundles authorization/evaluators
 pnpm typecheck
+cargo test --workspace
 ```
 
-## PR 4: Current policy data compiler
+## PR 5: Current policy data compiler
 
-**Depends on:** PR 2
+**Depends on:** PR 3
 
 **Scope**
 
 - Compile `action_policies`, team policies, `action_policy_overrides`, plugin defaults, risk defaults, and the standard new-organization default into Rego and static data.
+- Restrict generated source to the declared Valet dialect and validate it with the pinned Rust compiler.
 - Convert `runtime_grants` and approval resolutions into canonical dynamic facts.
 - Encode action, service, and risk specificity.
 - Encode org deny, team deny, grant, override, strict org/team result, and default authority layers.
-- Keep `packages/api/src/policies/resolution.ts` live until PR 7.
+- Keep `packages/api/src/policies/resolution.ts` live until PR 8.
 - Use offline fixture comparisons only. Do not add runtime dual evaluation.
 
 **Acceptance checks**
@@ -160,6 +202,7 @@ pnpm typecheck
 - Team execution ignores personal overrides.
 - Revoked, expired, cross-session, and cross-workflow grants do not match.
 - The compiler output is deterministic for the same sorted source snapshot.
+- Generated Rego uses only supported syntax and built-ins and produces `PolicyDecisionV1` through the Rust engine.
 
 **Validation**
 
@@ -169,9 +212,9 @@ pnpm --filter @valet/api test policies
 pnpm typecheck
 ```
 
-## PR 5: Policy builder and canonical authoring APIs
+## PR 6: Policy builder and canonical authoring APIs
 
-**Depends on:** PRs 3 and 4
+**Depends on:** PRs 4 and 5
 
 **Scope**
 
@@ -179,11 +222,13 @@ pnpm typecheck
 - Add the API context registry, operator registry, validation service, draft and review lifecycle, compiler integration, source maps, and audit events.
 - Add organization and team draft APIs with optimistic version checks and separate edit, review, publish, and rollback authorization points.
 - Add the policy overview, context picker, rule editor, condition builder, decision and obligation editor, advanced-source view, effective-policy explanation, conflict preview, impact preview, generated diff, review, publish, and rollback surfaces.
+- Make the advanced editor show the active Valet dialect, supported constructs, rejected constructs, and engine compatibility.
 - Build the web surface under `packages/web/src/routes/settings.organization.policies.tsx`, `packages/web/src/routes/settings.team.tsx`, and `packages/web/src/components/settings/policy-builder/`.
 - Extend `packages/web/src/api/policies.ts` with typed builder requests.
 - Map current action policies, team policies, overrides, grants, entitlements, plugin defaults, risk defaults, and the bundle default into provenance-preserving views.
-- Compile builder documents into the same content-addressed Rego and data bundle used by local OPA and the future TVC evaluator.
-- Keep publication inactive until PR 7 makes each effective-policy write validate, publish, and activate a canonical draft in one transaction.
+- Emit Rego and data in the supported Valet dialect for the same Rust compiler used locally and in future TVC.
+- Include dialect, compiler, IR, contract, engine compatibility, compiled artifact, and source-map versions in builder validation and diffs.
+- Keep publication inactive until PR 8 makes each effective-policy write validate, publish, and activate a canonical draft in one transaction.
 - Add no client evaluator, UI-only semantics, shadow mode, dual evaluation, or runtime fallback.
 
 **Acceptance checks**
@@ -199,7 +244,7 @@ pnpm typecheck
 - Conflict output covers specificity, org and team denies, grants, overrides, defaults, approval obligations, unreachable rules, and contradictory conditions.
 - Preview and explain use `AuthorizationService` with an active or server-compiled draft bundle.
 - Generated diffs show rule, Rego, data, provenance, digest, and sampled impact changes.
-- Raw Rego cannot publish unless it passes the typed decision, namespace, provenance, conflict, and restricted-built-in checks.
+- Raw Rego cannot publish unless the Rust engine accepts its dialect, versions, decision contract, namespace, provenance, capabilities, and conflicts.
 - Keyboard and screen-reader tests cover context selection, nested conditions, errors, review, and publication controls.
 - Draft save has no enforcement effect.
 
@@ -211,9 +256,9 @@ pnpm --filter @valet/web test policy-builder policies
 pnpm typecheck
 ```
 
-## PR 6: Inert adapters for current action paths
+## PR 7: Inert adapters for current action paths
 
-**Depends on:** PR 5
+**Depends on:** PR 6
 
 **Scope**
 
@@ -222,7 +267,7 @@ pnpm typecheck
 - Add the compatibility adapter from engine `PolicyResolver` to `AuthorizationService`.
 - Add common obligation, approval, and audit helpers.
 - Do not wire the adapters into live production enforcement.
-- Do not invoke OPA on live requests.
+- Do not invoke the old or new evaluator on live requests.
 
 **Acceptance checks**
 
@@ -239,14 +284,14 @@ pnpm --filter @valet/api test action-invoker authorization
 pnpm typecheck
 ```
 
-## PR 7: Atomic local OPA action cutover
+## PR 8: Atomic local Valet engine action cutover
 
-**Depends on:** PR 6
+**Depends on:** PR 7
 
 **Scope**
 
 - Build and inject one `AuthorizationService` from `packages/api/src/engine/host.ts`.
-- Route interactive plugin actions and workflow tool nodes through local OPA.
+- Route interactive plugin actions and workflow tool nodes through `LocalValetEvaluator` and the pinned Rust engine.
 - Move workflow analysis and pre-approval in `packages/api/src/workflows/permissions.ts` to `AuthorizationService`.
 - Move the `upsertOverride` bounds guard in `packages/api/src/policies/admin.ts` to `AuthorizationService`.
 - Move the `/api/org/policies/preview` path in `packages/api/src/routes/policies.ts` to `AuthorizationService`.
@@ -269,10 +314,10 @@ pnpm typecheck
 
 **Acceptance checks**
 
-- Current action-policy API fixtures compile and drive OPA decisions.
+- Current action-policy API fixtures compile in the supported dialect and drive Valet engine decisions.
 - Interactive and workflow calls return equal decisions when `appliesIn` and all session or workflow-scoped facts are equal.
 - Tests permit intentional differences from `appliesIn`, `sessionId`, or `workflowExecutionId` policy and grant scope.
-- Existing policy precedence cases pass under OPA.
+- Existing policy precedence cases pass under the Valet Rust engine.
 - Approval replay survives restart and remains bound to one request subject.
 - Resolver, bundle, obligation, and audit failures deny without executing.
 - Repository search finds no TypeScript evaluator in runtime, `packages/api/src/workflows/permissions.ts`, the `upsertOverride` guard, or policy preview.
@@ -285,6 +330,7 @@ pnpm typecheck
 **Validation**
 
 ```bash
+cargo test --workspace
 pnpm --filter @valet/engine test
 pnpm --filter @valet/workflow test
 pnpm --filter @valet/api test policies action-invoker authorization
@@ -292,9 +338,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 8: Built-in tools
+## PR 9: Built-in tools
 
-**Depends on:** PR 7
+**Depends on:** PR 8
 
 **Scope**
 
@@ -309,7 +355,7 @@ make e2e
 - A denied built-in never calls its implementation.
 - An approval decision binds exact arguments and re-evaluates after approval.
 - Unknown obligations deny.
-- Child tools also satisfy PR 10 policy when that pull request lands.
+- Child tools also satisfy PR 11 policy when that pull request lands.
 
 **Validation**
 
@@ -319,9 +365,9 @@ pnpm typecheck
 make e2e E2E_ARGS="--only cli,typecheck"
 ```
 
-## PR 9: Route and resource authorization
+## PR 10: Route and resource authorization
 
-**Depends on:** PR 7. Coordinate with TKAI-53 and TKAI-370.
+**Depends on:** PR 8. Coordinate with TKAI-53 and TKAI-370.
 
 **Scope**
 
@@ -347,9 +393,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 10: Delegation, sandbox capabilities, credentials, and egress
+## PR 11: Delegation, sandbox capabilities, credentials, and egress
 
-**Depends on:** PRs 7 and 8. Coordinate inter-agent work with TKAI-433.
+**Depends on:** PRs 8 and 9. Coordinate inter-agent work with TKAI-433.
 
 **Scope**
 
@@ -378,9 +424,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 11: Entitlements and plugin catalog
+## PR 12: Entitlements and plugin catalog
 
-**Depends on:** PR 7
+**Depends on:** PR 8
 
 **Scope**
 
@@ -405,43 +451,46 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 12: Future TVC attested evaluator
+## PR 13: Future TVC Rust engine host
 
-**Depends on:** PRs 7 through 11 as needed. This is future work.
+**Depends on:** PRs 8 through 12 as needed. This is future work.
 
 **Scope**
 
-- Implement `TvcAttestedEvaluator` behind the existing evaluator contract.
+- Add a native Rust TVC host around the same pinned `valet-policy-engine` crate and bundle contract.
+- Implement `TvcAttestedEvaluator` behind the existing language-neutral evaluator contract.
 - Use bounded HTTP/1.1 requests and responses with explicit byte limits and timeouts.
-- Deploy stateless TVC replicas.
+- Deploy stateless TVC replicas with no database, lock, approval, or durable idempotency state.
 - Define the signed decision App Proof payload.
-- Verify App Proof signatures and linked Boot Proofs against pinned deployment, manifest, application, PCR, and account expectations.
+- Verify App Proof signatures and linked Boot Proofs against pinned deployment, host, engine, bundle, PCR, and account expectations.
 - Reject TVC debug-mode deployments, including Boot Proofs with zero PCR values.
-- Bind request nonce, subject, input, policy, decision, and obligation digests.
-- Keep durable audit, approvals, request reservation, and idempotency in Valet.
+- Bind engine, source bundle, compiled bundle, request nonce, subject, input, decision, and obligation digests.
+- Keep authentication, proof verification, durable audit, approvals, request reservation, and idempotency in Valet.
 - Add signed policy pins and trusted fact issuers where required.
-- Replace local OPA deployment selection only after proof and failure-path review. Do not restore the old evaluator.
+- Replace the local evaluator deployment only after proof and failure-path review. Do not run both evaluators in production.
 
 **Acceptance checks**
 
-- A valid proof for the expected build and digests permits enforcement.
+- The native TVC host returns the same `PolicyDecisionV1` as the pinned local engine for the conformance corpus.
+- A valid proof binds the expected Rust host, engine build, compiled bundle, source policy, input, and decision.
 - Any proof, nonce, digest, key, manifest, PCR, freshness, or debug-mode check failure denies.
 - Any replica can process a request without local session state.
-- A retry with the same request identity returns the same stored Valet decision or a byte-equivalent verified envelope.
+- A retry with the same request identity returns the stored Valet decision or a byte-equivalent verified envelope.
 - HTTP/2, streaming, and WebSocket behavior are not required.
-- TVC outage denies. It does not fall back to local OPA unless a separate approved deployment rollback restores the prior release.
+- A TVC outage denies. Only a release rollback can restore the prior local Valet engine deployment.
 
 **Validation**
 
 ```bash
+cargo test --workspace
 pnpm --filter @valet/api test tvc-attested authorization
 pnpm typecheck
 make e2e
 ```
 
-## PR 13: Future attested execution and optional TKMS roles
+## PR 14: Future attested execution and optional TKMS roles
 
-**Depends on:** PR 12. This is future work.
+**Depends on:** PR 13. This is future work.
 
 **Scope**
 
@@ -468,41 +517,43 @@ make e2e
 
 ## Migration strategy
 
-1. Freeze semantic changes to the old TypeScript evaluator while PRs 2 through 6 are in review.
-2. Export representative, redacted policy row snapshots from development data.
-3. Compile those snapshots offline with PR 4.
-4. Import the snapshots into provenance-preserving builder documents with PR 5.
-5. Review OPA results for every current precedence case. Fix the compiler or record an explicit migration issue before cutover.
-6. Publish valid bundles for every active organization before PR 7 deploys.
-7. Block PR 7 deployment if any organization lacks a valid active bundle or has an unsupported legacy expression.
-8. Deploy PR 7 once. Local OPA becomes the only action evaluator at process start.
-9. Move every effective-policy write to transactional canonical draft validation, publication, and activation in the same pull request.
-10. Verify that failed activation rejects the write and keeps the old active bundle.
-11. Remove old evaluator metrics, alerts, forms, write routes, and code in the same pull request.
-12. Route later domains through their own atomic surface pull requests.
+1. Freeze semantic changes to the old TypeScript evaluator while PRs 2 through 7 are in review.
+2. Freeze the first Valet Rego dialect and Rust engine contract in PR 3.
+3. Validate the selected local engine target and bundle host in PR 4.
+4. Export representative, redacted policy row snapshots from development data.
+5. Compile those snapshots to supported Rego and deterministic engine bundles with PR 5.
+6. Import the snapshots into provenance-preserving builder documents with PR 6.
+7. Compare offline Valet engine results for every current precedence case. Fix the compiler or record a migration issue before cutover.
+8. Precompile engine-compatible bundles for every active organization before PR 8 deploys.
+9. Block PR 8 if an organization lacks a valid bundle or has unsupported source.
+10. Deploy PR 8 once. The local Valet Rust engine becomes the only action evaluator at process start.
+11. Move every effective-policy write to transactional canonical draft validation, publication, and activation.
+12. Verify that failed activation rejects the write and keeps the old active bundle.
+13. Remove old evaluator metrics, alerts, forms, write routes, and code in the same pull request.
+14. Route later domains through their own atomic surface pull requests.
 
-Offline comparison is migration validation. It is not shadow mode because it does not evaluate live requests or retain two production decisions.
+Offline comparison is migration validation. It does not evaluate live requests or retain two production decisions.
 
 ## Rollback strategy
 
-Rollback uses an application release and policy snapshot pair:
+Rollback uses an application, engine, and policy bundle release set:
 
 1. Stop or drain action execution before changing application versions.
-2. Deploy the previous known-good release artifact.
-3. Restore the active bundle pointer to the bundle snapshot paired with that release.
-4. Resume traffic after health and bundle checks pass.
+2. Deploy the previous known-good application and pinned engine artifacts.
+3. Restore the active bundle pointers to snapshots compiled for that engine.
+4. Resume traffic after health, engine, and bundle compatibility checks pass.
 
-For PR 7, the previous release contains the old implementation because it predates cutover. The running new release has no switch to it. Rollback is a deployment event, not a live fallback path.
+For PR 8, the previous release contains the old implementation because it predates cutover. The new release has no switch to it. Rollback is a deployment event, not a live fallback path.
 
-After later releases no longer have compatible old policy storage, rollback targets the most recent local OPA release, not the removed TypeScript evaluator. Database migrations in this stack must be additive until the rollback window closes. Destructive cleanup waits for a later pull request.
+Later rollback targets the most recent compatible Valet Rust engine release and its bundle set. Database migrations must remain additive until the rollback window closes. Destructive cleanup waits for a later pull request.
 
-For TVC rollout, rollback deploys the last known-good local OPA release and its bundle snapshot. `TvcAttestedEvaluator` never catches an error and invokes local OPA inside the same process.
+For TVC rollout, rollback deploys the last known-good local Valet engine release and matching bundles. `TvcAttestedEvaluator` never catches an error and invokes the local evaluator in the same process.
 
 ## Final stack acceptance
 
 The stack is complete when:
 
-- OPA and Rego are the only policy evaluation format.
+- Rego is the canonical authoring language, and the Valet Rust engine is the only semantic implementation.
 - Interactive and workflow actions use one service and equal semantics.
 - Built-ins, entitlements, routes, resources, delegation, sandbox capabilities, credentials, and egress use the contract where applicable.
 - `PolicyResolver` contains no policy logic.
@@ -512,6 +563,6 @@ The stack is complete when:
 - The repository contains no live old action evaluator, shadow path, or legacy fallback.
 - Decision records and execution outcomes are separate and linked.
 - Approval replay is deterministic and subject-bound.
-- Local OPA failures deny.
+- Local Valet engine, bundle compatibility, and resource-limit failures deny.
 - Future TVC proof failures deny.
 - The full repository checks pass for each merge commit.
