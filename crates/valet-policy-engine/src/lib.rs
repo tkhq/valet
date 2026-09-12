@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use regorus::{Engine as RegorusEngine, Value as RegorusValue};
+use regorus::{
+    utils::limits::{EvaluationBudgetConfig, EvaluationBudgetError},
+    Engine as RegorusEngine, Value as RegorusValue,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -12,6 +15,8 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ENGINE_CONTRACT_VERSION: u32 = 1;
 pub const CAPABILITY_PROFILE_VERSION: u32 = 1;
 pub const REGORUS_VERSION: &str = "0.12.0";
+pub const REGORUS_REPOSITORY: &str = "https://github.com/tkhq/regorus";
+pub const REGORUS_REVISION: &str = "aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e";
 pub const REGO_VERSION: &str = "v1";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -23,6 +28,8 @@ pub struct EngineIdentity {
     pub rego_version: &'static str,
     pub substrate_name: &'static str,
     pub substrate_version: &'static str,
+    pub substrate_repository: &'static str,
+    pub substrate_revision: &'static str,
 }
 
 pub const ENGINE_IDENTITY: EngineIdentity = EngineIdentity {
@@ -33,6 +40,8 @@ pub const ENGINE_IDENTITY: EngineIdentity = EngineIdentity {
     rego_version: REGO_VERSION,
     substrate_name: "regorus",
     substrate_version: REGORUS_VERSION,
+    substrate_repository: REGORUS_REPOSITORY,
+    substrate_revision: REGORUS_REVISION,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -54,6 +63,8 @@ pub struct CapabilityProfile {
 pub struct SubstrateIdentity {
     pub name: String,
     pub version: String,
+    pub repository: String,
+    pub revision: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -74,14 +85,14 @@ pub struct EnforcedLimits {
     pub max_policy_data_bytes: usize,
     pub max_input_bytes: usize,
     pub max_decision_output_bytes: usize,
+    pub max_evaluation_work_units: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct DeclaredV2Limits {
     pub max_modules: usize,
     pub max_parsed_nodes: usize,
-    pub max_compiled_policy_bytes: usize,
-    pub max_evaluation_instructions: usize,
+    pub max_source_bundle_bytes: usize,
     pub max_document_depth: usize,
     pub max_comprehension_values: usize,
     pub max_explain_events: usize,
@@ -121,6 +132,7 @@ pub struct EvaluationRequest<'a> {
     pub policy_data_json: &'a str,
     pub input_json: &'a str,
     pub entrypoint: &'a str,
+    pub max_evaluation_work_units: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -250,6 +262,10 @@ pub enum EngineError {
     Input(String),
     #[error("Regorus could not evaluate the policy: {0}")]
     Evaluation(String),
+    #[error(
+        "The policy exceeded its deterministic work budget (consumed={consumed}, limit={limit})"
+    )]
+    EvaluationBudget { consumed: u64, limit: u64 },
     #[error("The decision exceeds the capability profile limit")]
     DecisionLimit,
     #[error("The policy returned an invalid PolicyDecisionV1: {0}")]
@@ -268,6 +284,11 @@ pub fn evaluate(request: &EvaluationRequest<'_>) -> Result<PolicyDecisionV1, Eng
     validate_source_capabilities(request.policy_source, &profile)?;
 
     let mut engine = RegorusEngine::new();
+    let work_limit = request
+        .max_evaluation_work_units
+        .unwrap_or(profile.limits.enforced.max_evaluation_work_units)
+        .min(profile.limits.enforced.max_evaluation_work_units);
+    engine.set_evaluation_budget_config(EvaluationBudgetConfig { limit: work_limit });
     engine
         .add_policy(
             request.module_id.to_owned(),
@@ -283,7 +304,16 @@ pub fn evaluate(request: &EvaluationRequest<'_>) -> Result<PolicyDecisionV1, Eng
 
     let value = engine
         .eval_rule(request.entrypoint.to_owned())
-        .map_err(|error| EngineError::Evaluation(error.to_string()))?;
+        .map_err(|error| {
+            if let Some(budget) = error.downcast_ref::<EvaluationBudgetError>() {
+                EngineError::EvaluationBudget {
+                    consumed: budget.consumed,
+                    limit: budget.limit,
+                }
+            } else {
+                EngineError::Evaluation(error.to_string())
+            }
+        })?;
     decision_from_regorus(value, &profile.limits.enforced)
 }
 

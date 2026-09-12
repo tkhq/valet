@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use valet_policy_engine::{
     capability_profile, evaluate, AuthorizationEffect, BuiltinClass, BuiltinStatus, EngineError,
-    EvaluationRequest, CAPABILITY_PROFILE_VERSION, ENGINE_IDENTITY, REGORUS_VERSION,
+    EvaluationRequest, CAPABILITY_PROFILE_VERSION, ENGINE_IDENTITY, REGORUS_REPOSITORY,
+    REGORUS_REVISION, REGORUS_VERSION,
 };
 
 const POLICY: &str = include_str!("fixtures/decision.rego");
@@ -16,6 +17,7 @@ fn request(policy_source: &str) -> EvaluationRequest<'_> {
         policy_data_json: DATA,
         input_json: INPUT,
         entrypoint: "data.valet.foundation.decision",
+        max_evaluation_work_units: None,
     }
 }
 
@@ -24,6 +26,8 @@ fn identity_pins_the_foundation_substrate_and_profile() {
     assert_eq!(ENGINE_IDENTITY.name, "valet-policy-engine");
     assert_eq!(ENGINE_IDENTITY.substrate_name, "regorus");
     assert_eq!(ENGINE_IDENTITY.substrate_version, REGORUS_VERSION);
+    assert_eq!(ENGINE_IDENTITY.substrate_repository, REGORUS_REPOSITORY);
+    assert_eq!(ENGINE_IDENTITY.substrate_revision, REGORUS_REVISION);
     assert_eq!(
         ENGINE_IDENTITY.capability_profile_version,
         CAPABILITY_PROFILE_VERSION
@@ -35,6 +39,8 @@ fn identity_pins_the_foundation_substrate_and_profile() {
 fn capability_profile_is_explicit_about_current_coverage() {
     let profile = capability_profile().expect("checked-in profile must be valid");
     assert_eq!(profile.substrate.version, REGORUS_VERSION);
+    assert_eq!(profile.substrate.repository, REGORUS_REPOSITORY);
+    assert_eq!(profile.substrate.revision, REGORUS_REVISION);
     assert!(!profile.full_rego_v1_compatible);
     assert!(profile.default_host_capabilities.is_empty());
     assert_eq!(profile.inventory_builtin_count, 163);
@@ -48,6 +54,7 @@ fn capability_profile_is_explicit_about_current_coverage() {
         "max_policy_data_bytes",
         "max_input_bytes",
         "max_decision_output_bytes",
+        "max_evaluation_work_units",
     ] {
         assert!(enforced.get(name).is_some());
         assert!(declared_v2.get(name).is_none());
@@ -55,8 +62,7 @@ fn capability_profile_is_explicit_about_current_coverage() {
     for name in [
         "max_modules",
         "max_parsed_nodes",
-        "max_compiled_policy_bytes",
-        "max_evaluation_instructions",
+        "max_source_bundle_bytes",
         "max_document_depth",
         "max_comprehension_values",
         "max_explain_events",
@@ -102,6 +108,28 @@ fn explicit_input_produces_a_typed_deterministic_decision() {
     assert_eq!(first.matched_rule_ids, ["foundation.explicit_input"]);
     assert!(first.obligations.is_empty());
     assert!(first.redactions.is_empty());
+}
+
+#[test]
+fn low_deterministic_budget_rejects_large_range_through_valet_boundary() {
+    let policy = r#"
+        package valet.foundation
+        import rego.v1
+        decision := {
+          "effect": "deny",
+          "reasonCode": "large_range",
+          "matchedRuleIds": [],
+          "obligations": [],
+          "redactions": [],
+        } if { count(numbers.range(0, 10000000)) > 0 }
+    "#;
+    let mut bounded_request = request(policy);
+    bounded_request.max_evaluation_work_units = Some(100);
+
+    assert!(matches!(
+        evaluate(&bounded_request),
+        Err(EngineError::EvaluationBudget { limit: 100, .. })
+    ));
 }
 
 #[test]
