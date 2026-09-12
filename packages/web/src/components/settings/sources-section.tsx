@@ -273,7 +273,7 @@ function RepoSourceRow({
 
   return (
     <div className="space-y-2 py-3">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-center">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium text-ink">
@@ -286,7 +286,7 @@ function RepoSourceRow({
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-muted">
             Enabled
             <Switch
@@ -312,7 +312,7 @@ function RepoSourceRow({
             type="button"
             onClick={() => setShowBakes((v) => !v)}
             aria-expanded={showBakes}
-            className="text-xs font-medium text-muted underline-offset-2 hover:text-ink hover:underline"
+            className="min-h-11 text-xs font-medium text-muted underline-offset-2 sm:min-h-0 hover:text-ink hover:underline"
           >
             {showBakes ? "Hide history" : "History"}
           </button>
@@ -518,8 +518,8 @@ function CreateExternalSourceRow() {
 
   return (
     <div className="space-y-2 py-4">
-      <div className="flex gap-2">
-        <div className="flex-1 space-y-1">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-ext-name">Name</Label>
           <Input
             id="new-ext-name"
@@ -528,7 +528,7 @@ function CreateExternalSourceRow() {
             placeholder="Node 22"
           />
         </div>
-        <div className="flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-ext-ref">Image ref</Label>
           <Input
             id="new-ext-ref"
@@ -537,7 +537,7 @@ function CreateExternalSourceRow() {
             placeholder="registry.example.com/valet-base:node22"
           />
         </div>
-        <div className="flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <Label htmlFor="new-ext-pull-secret">Pull secret name (optional)</Label>
           <Input
             id="new-ext-pull-secret"
@@ -547,7 +547,7 @@ function CreateExternalSourceRow() {
           />
         </div>
       </div>
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <Button
           type="button"
           onClick={submit}

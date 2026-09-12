@@ -28,6 +28,7 @@ export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(function Switch
         "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors touch-manipulation",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-[--bg]",
         "disabled:pointer-events-none disabled:opacity-50",
+        "max-sm:after:absolute max-sm:after:-inset-x-1 max-sm:after:-inset-y-3",
         checked ? "bg-moss" : "bg-neutral-300 dark:bg-neutral-700",
         className,
       )}

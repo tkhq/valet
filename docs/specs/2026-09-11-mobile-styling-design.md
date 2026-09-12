@@ -67,3 +67,45 @@ The second full e2e run passed 30 checks. The engine step failed on two child-pr
 Both tests passed in isolation, and the complete engine step then passed in the e2e runner.
 All 31 enabled checks passed across the full run and rerun. The same four optional integrations were skipped.
 The final flex sizing change passed browser checks, targeted tests, typecheck, production build, and independent code review.
+
+## Page layouts
+
+Home and team dashboards use narrower phone padding, wrapping titles, and touch-sized card actions.
+Usage summaries, request logs, and event filters retain readable labels at phone widths. Wide payloads scroll within their own containers.
+Workflow lists, runs, approvals, and trigger dialogs wrap long names and action groups.
+
+Security uses a section selector below the medium breakpoint. Overview, Findings, Steps, Needs, Coverage, and Report remain reachable.
+Open needs also have a visible shortcut. Selecting a finding opens its detail; Back restores the findings list and filters.
+The desktop sections and side-by-side findings view remain. Mobile setup forms stack their fields and review methods.
+
+The workflow editor uses Canvas and Assistant views below the large breakpoint. Add node opens a compact menu.
+A selected node or edge opens a full-width inspector with Back to canvas. The assistant and canvas stay mounted during view changes.
+This preserves conversation drafts and graph state. Desktop keeps its palette, canvas, and assistant column.
+
+Memory shows the file browser or selected document on phones. Files returns to the browser; search state remains mounted.
+Empty file lists explain how memory files appear. Document actions wrap above the text, and editing retains 16-pixel mobile text.
+Artifacts, Skills, and Integrations use wrapping metadata and action rows. Their existing permissions and mutations remain unchanged.
+
+Settings forms, policy matchers, model choices, and team controls fit phone widths. Native selects and custom options have larger targets.
+Shared popovers retain 16-pixel viewport margins and scroll when necessary. Switches have a larger invisible phone hit area.
+Shared field padding respects consumer icon spacing. No API or authorization behavior changes in this pass.
+
+## Page validation
+
+Three implementation agents covered Security, Settings, Home, Usage, Events, Workflows, and assistant management.
+Independent review found a missing mobile empty-memory message. A regression test and visible guidance correct it.
+Browser checks found focus loss when phone list and canvas views hid their selected items.
+Security and Workflow now move focus into detail views and back to visible navigation controls.
+Refute errors also appear inside the Security dialog so they remain visible within its focus trap.
+
+The combined web suite passes 2,861 tests. Final assistant route checks pass 30 tests.
+Web typecheck and the final production build pass. Browser checks cover 320, 375, 390, 768, 1280, and 1440-pixel widths.
+Populated checks cover team Home, Security findings, Settings policies/models/teams, Usage, Events, workflow runs, and editors.
+Additional checks cover Memory reading and editing, sharing popover bounds, empty memory, and switch hit areas.
+Light and dark screenshots were reviewed. These browser checks do not replace native-device keyboard testing.
+
+Assistant management also uses wrapping names, larger skill and integration choices, and shallower mobile action indentation.
+The full page-pass e2e run passed 29 checks and failed two infrastructure checks.
+Kubernetes reported a pod before its storage claim was available. Postgres read an extra entry from a shared test session.
+The isolated Kubernetes case passed. Both complete infrastructure scorecard steps then passed on rerun.
+All 31 enabled checks passed across the full run and reruns. Four optional integrations were skipped as listed above.

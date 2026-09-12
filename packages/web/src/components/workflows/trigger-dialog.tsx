@@ -346,7 +346,7 @@ export function TriggerDialog({
         <div className="grid gap-4">
           {/* Kind picker — only shown when creating */}
           {!isEditing && (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button
                 variant={kind === "schedule" ? "primary" : "ghost"}
                 size="sm"
@@ -403,8 +403,8 @@ export function TriggerDialog({
               {!isEditing && (
                 <fieldset className="grid gap-1">
                   <legend className="text-sm font-medium text-ink">Target</legend>
-                  <div className="flex gap-4 pt-1">
-                    <label htmlFor="target-workflow" className="flex items-center gap-1.5 text-sm">
+                  <div className="flex flex-wrap gap-x-4 pt-1">
+                    <label htmlFor="target-workflow" className="flex min-h-11 items-center gap-1.5 text-sm sm:min-h-0">
                       <input
                         id="target-workflow"
                         type="radio"
@@ -418,7 +418,7 @@ export function TriggerDialog({
                     </label>
                     <label
                       htmlFor="target-orchestrator"
-                      className="flex items-center gap-1.5 text-sm"
+                      className="flex min-h-11 items-center gap-1.5 text-sm sm:min-h-0"
                     >
                       <input
                         id="target-orchestrator"
@@ -444,7 +444,7 @@ export function TriggerDialog({
                     value={selectedWorkflowId}
                     onChange={(e) => setSelectedWorkflowId(e.target.value)}
                     disabled={isEditing}
-                    className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                    className="w-full min-w-0 truncate min-h-11 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
                   >
                     <option value="">— select workflow —</option>
                     {workflows.map((w) => (
@@ -509,7 +509,7 @@ export function TriggerDialog({
                     value={selectedWorkflowId}
                     onChange={(e) => setSelectedWorkflowId(e.target.value)}
                     disabled={isEditing}
-                    className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                    className="w-full min-w-0 truncate min-h-11 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
                   >
                     <option value="">— select workflow —</option>
                     {workflows.map((w) => (
@@ -540,7 +540,7 @@ export function TriggerDialog({
                     const entry = catalogEntries.find((c) => c.key === key);
                     setFilterRows((rows) => pruneFilterRows(rows, entry?.filters ?? []));
                   }}
-                  className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                  className="w-full min-w-0 truncate min-h-11 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
                 >
                   <option value="">— select event —</option>
                   {catalogEntries.map((entry) => (

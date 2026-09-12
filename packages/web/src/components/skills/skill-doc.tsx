@@ -89,14 +89,14 @@ export function SkillDoc({
       notice={notice}
       actions={
         writable && !editing ? (
-          <span className="flex items-center gap-2 text-xs">
+          <span className="flex flex-wrap items-center gap-2 text-xs">
             <button
               type="button"
               onClick={() => {
                 setEditing(true);
                 setConfirmingDelete(false);
               }}
-              className="text-muted hover:text-moss"
+              className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-moss"
             >
               Edit
             </button>
@@ -106,14 +106,14 @@ export function SkillDoc({
                   type="button"
                   onClick={() => remove.mutate(skill.id, { onSuccess: onDeleted })}
                   disabled={remove.isPending}
-                  className="font-medium text-danger-500 hover:underline"
+                  className="max-sm:min-h-11 max-sm:px-2 font-medium text-danger-500 hover:underline"
                 >
                   {remove.isPending ? "Deleting…" : "Confirm delete"}
                 </button>
                 <button
                   type="button"
                   onClick={() => setConfirmingDelete(false)}
-                  className="text-muted hover:text-ink"
+                  className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-ink"
                 >
                   Cancel
                 </button>
@@ -122,7 +122,7 @@ export function SkillDoc({
               <button
                 type="button"
                 onClick={() => setConfirmingDelete(true)}
-                className="text-muted hover:text-danger-500"
+                className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-danger-500"
               >
                 Delete
               </button>

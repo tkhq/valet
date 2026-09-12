@@ -4,7 +4,9 @@
  * except `trigger`: a workflow has exactly one trigger, created with the
  * definition, never added from the palette). Plan decision 10.
  */
+import { useRef } from "react";
 import { ADDABLE_NODE_TYPES, NODE_META, type AddableDagNodeType } from "../editor-model";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/primitives";
 import { NODE_ICON } from "./node-icon";
 
 export interface PaletteProps {
@@ -38,5 +40,39 @@ export function Palette({ onAdd, disabled = false }: PaletteProps) {
         );
       })}
     </div>
+  );
+}
+
+/** Compact palette keeps the canvas usable on narrow screens. */
+export function CompactPalette({ onAdd, disabled = false }: PaletteProps) {
+  const pendingTypeRef = useRef<AddableDagNodeType | null>(null);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="secondary" size="sm" disabled={disabled}>Add node</Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        onCloseAutoFocus={(event) => {
+          // Let the menu release its focus trap before opening the inspector.
+          const type = pendingTypeRef.current;
+          if (type !== null) {
+            event.preventDefault();
+            pendingTypeRef.current = null;
+            onAdd(type);
+          }
+        }}
+      >
+        {ADDABLE_NODE_TYPES.map((type) => {
+          const Icon = NODE_ICON[type];
+          return (
+            <DropdownMenuItem key={type} onSelect={() => { pendingTypeRef.current = type; }}>
+              <Icon className="h-4 w-4 shrink-0" aria-hidden />
+              {NODE_META[type].label}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

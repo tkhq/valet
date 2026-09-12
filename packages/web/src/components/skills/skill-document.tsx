@@ -51,18 +51,18 @@ export function SkillDocument({
 }) {
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10">
-        <Link to="/skills" className="text-xs text-muted underline-offset-2 hover:underline">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+        <Link to="/skills" className="inline-flex min-h-11 items-center text-xs text-muted underline-offset-2 hover:underline">
           ← Skills
         </Link>
 
-        <div className="mt-4 flex items-end justify-between gap-4">
+        <div className="mt-4 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-end">
           <div>
-            <h1 className="font-display text-2xl text-ink">{title}</h1>
+            <h1 className="break-words font-display text-2xl text-ink">{title}</h1>
             {description && <p className="mt-1 text-sm text-muted">{description}</p>}
           </div>
-          <div className="flex shrink-0 flex-col items-end gap-1.5">
-            {meta && <span className="font-mono text-xs text-muted">{meta}</span>}
+          <div className="flex max-w-full shrink-0 flex-col items-start sm:items-end gap-1.5">
+            {meta && <span className="break-all font-mono text-xs text-muted">{meta}</span>}
             {actions}
           </div>
         </div>

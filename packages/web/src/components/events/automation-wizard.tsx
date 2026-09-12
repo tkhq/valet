@@ -143,7 +143,7 @@ function AssistantSelect({
         aria-label="Assistant"
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value)}
-        className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+        className="w-full min-w-0 truncate min-h-11 rounded border border-line bg-paper px-2 py-1.5 sm:min-h-0 text-sm text-ink"
       >
         <option value="">
           {owned.find((a) => a.isDefault)?.name?.trim()
@@ -628,7 +628,7 @@ function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Ou
     <fieldset className="space-y-2">
       <legend className="mb-1 text-sm font-medium text-ink">What should happen?</legend>
       {OUTCOMES.map((o) => (
-        <label key={o.value} className="flex items-start gap-2 text-sm text-ink">
+        <label key={o.value} className="flex min-h-11 items-start gap-2 text-sm text-ink sm:min-h-0">
           <input
             type="radio"
             name="automation-outcome"
@@ -723,7 +723,7 @@ function ReplyStep({
       <div>
         <p className="mb-1.5 text-xs font-medium text-muted">Which assistant answers</p>
         <div className="space-y-1.5">
-          <label className="flex items-center gap-2 text-sm text-ink">
+          <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <input
               type="radio"
               name="automation-reply-target"
@@ -743,7 +743,7 @@ function ReplyStep({
           )}
           {scopedTeam && (
             <div>
-              <label className="flex items-center gap-2 text-sm text-ink">
+              <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
                 <input type="radio" name="automation-reply-target"
                   checked={target.orchestrator === "team"}
                   onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })} />
@@ -755,7 +755,7 @@ function ReplyStep({
               )}
             </div>
           )}
-          <label className="flex items-center gap-2 text-sm text-ink">
+          <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <input
               type="radio"
               name="automation-reply-target"
@@ -767,7 +767,7 @@ function ReplyStep({
         </div>
       </div>
 
-      <label className="flex items-start gap-2 text-sm text-ink">
+      <label className="flex min-h-11 items-start gap-2 text-sm text-ink sm:min-h-0">
         <input
           type="checkbox"
           className="mt-0.5"
@@ -841,7 +841,7 @@ function ChannelMultiSelect({
               type="button"
               aria-label={`Remove ${c.label}`}
               onClick={() => onChange(channels.filter((x) => x.id !== c.id))}
-              className="text-muted hover:text-ink"
+              className="min-h-11 min-w-11 text-muted hover:text-ink sm:min-h-0 sm:min-w-0"
             >
               ✕
             </button>
@@ -920,7 +920,7 @@ function ChannelMultiSelect({
                   toggle(o.id, o.label);
                   setQuery("");
                 }}
-                className={`block w-full px-2 py-1 text-left text-sm text-ink hover:bg-hover ${
+                className={`block min-h-11 w-full break-words px-2 py-1 text-left sm:min-h-0 text-sm text-ink hover:bg-hover ${
                   picked ? "bg-hover" : ""
                 }`}
               >
@@ -1016,7 +1016,7 @@ export function EventMatchStep({
                 {s.entries.map((entry) => (
                   <label
                     key={entry.key}
-                    className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-hover"
+                    className="flex min-h-11 cursor-pointer items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-hover"
                   >
                     <input
                       type="checkbox"
@@ -1028,7 +1028,7 @@ export function EventMatchStep({
                       {/* Plain language first — what the person recognizes, not
                           the event key (how the system is built). */}
                       <span className="block text-sm text-ink">{entry.description}</span>
-                      <span className="block font-mono text-[11px] leading-tight text-muted">{entry.key}</span>
+                      <span className="block break-all font-mono text-[11px] leading-tight text-muted">{entry.key}</span>
                     </span>
                   </label>
                 ))}
@@ -1134,7 +1134,7 @@ function ThenStep({
     <div className="space-y-1.5">
       {allowOrchestrator && (
         <>
-          <label className="flex items-center gap-2 text-sm text-ink">
+          <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <input
               type="radio"
               name="automation-target"
@@ -1155,7 +1155,7 @@ function ThenStep({
           {/* Only the active workspace's team is offered. Targeting a different
               team is a workspace change, not a form field. */}
           {scopedTeam && (
-            <label className="flex items-center gap-2 text-sm text-ink">
+            <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
               <input
                 type="radio"
                 name="automation-target"
@@ -1181,7 +1181,7 @@ function ThenStep({
               }
             />
           )}
-          <label className="flex items-center gap-2 text-sm text-ink">
+          <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <input
               type="radio"
               name="automation-target"
@@ -1194,7 +1194,7 @@ function ThenStep({
       )}
       {allowWorkflow && (
         <>
-          <label className="flex items-center gap-2 text-sm text-ink">
+          <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <input
               type="radio"
               name="automation-target"
@@ -1210,7 +1210,7 @@ function ThenStep({
                 aria-label="Workflow"
                 value={target.workflowId}
                 onChange={(e) => onTargetChange({ kind: "workflow", workflowId: e.target.value })}
-                className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                className="w-full min-w-0 truncate min-h-11 rounded border border-line bg-paper px-2 py-1.5 sm:min-h-0 text-sm text-ink"
               >
                 <option value="">— select workflow —</option>
                 {workflows.map((w) => (

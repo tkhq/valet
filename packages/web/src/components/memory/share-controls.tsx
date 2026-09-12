@@ -49,7 +49,7 @@ export function ShareControls({ path }: { path: string }) {
 
   return (
     <Popover open={panelOpen} onOpenChange={setPanelOpen}>
-      <PopoverTrigger className="text-muted hover:text-moss">Share</PopoverTrigger>
+      <PopoverTrigger className="max-sm:min-h-11 max-sm:px-2 text-muted hover:text-moss">Share</PopoverTrigger>
       <PopoverContent className="w-80 space-y-3 text-left">
         {artifact ? (
           <>
@@ -58,13 +58,13 @@ export function ShareControls({ path }: { path: string }) {
                 readOnly
                 value={artifact.url}
                 onFocus={(e) => e.currentTarget.select()}
-                className="min-w-0 flex-1 rounded border border-line bg-transparent px-2 py-1 font-mono text-[11px]"
+                className="min-w-0 flex-1 rounded border border-line bg-transparent px-2 py-1 font-mono text-[11px] max-sm:min-h-11 max-sm:text-base"
                 aria-label="Share link"
               />
               <button
                 type="button"
                 onClick={() => void copy(artifact.url)}
-                className="rounded p-1.5 text-muted hover:text-moss"
+                className="max-sm:min-h-11 max-sm:min-w-11 rounded p-1.5 text-muted hover:text-moss"
                 aria-label="Copy share link"
               >
                 {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}

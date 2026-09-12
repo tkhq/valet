@@ -85,14 +85,14 @@ export function ThreadsCard() {
   const rows = threadActivity(threadsQ.data?.threads ?? [], childrenQ.data?.children ?? []);
 
   return (
-    <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
-      <header className="px-4 py-3 border-b border-line flex items-center justify-between">
+    <section className="min-w-0 rounded-lg border border-line bg-paper flex flex-col min-h-0">
+      <header className="px-4 py-3 border-b border-line flex flex-wrap items-center justify-between gap-x-3">
         <h2 className="font-display text-base text-ink">
-          <Link to="/chat" className="hover:text-moss">
+          <Link to="/chat" className="inline-flex min-h-11 items-center hover:text-moss sm:min-h-0">
             Threads
           </Link>
         </h2>
-        <Link to="/chat" className="text-xs text-muted hover:text-moss">
+        <Link to="/chat" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-moss sm:min-h-0">
           Open chat
         </Link>
       </header>
@@ -106,7 +106,7 @@ export function ThreadsCard() {
         {threadsQ.error && (
           <div className="px-4 py-3 text-xs text-danger-500">
             Couldn't load threads.{" "}
-            <button type="button" className="underline" onClick={() => threadsQ.refetch()}>
+            <button type="button" className="min-h-11 px-2 underline sm:min-h-0" onClick={() => threadsQ.refetch()}>
               Retry
             </button>
           </div>
@@ -122,7 +122,7 @@ export function ThreadsCard() {
               <Link
                 to="/chat"
                 search={{ thread: thread.id }}
-                className="flex items-center gap-2.5 px-4 py-2 hover:bg-ink-wash transition-colors"
+                className="flex min-h-11 flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-3 sm:flex-nowrap sm:py-2 hover:bg-ink-wash transition-colors"
               >
                 <span
                   className={cn(
@@ -130,13 +130,13 @@ export function ThreadsCard() {
                     // `bg-muted-wash`, not `bg-muted/40` — the slash modifier
                     // on a `var()` token emits no rule (theme.css trap note),
                     // so the idle dot rendered invisible. Same trap killed the
-                    // row hover above: `hover:bg-ink-wash/60` emitted nothing;
+                    // row hover above: `hover:bg-ink-wash` emitted nothing;
                     // the wash token carries its own alpha, so it is used bare.
                     running > 0 ? "bg-moss animate-pulse motion-reduce:animate-none" : "bg-muted-wash",
                   )}
                   aria-label={running > 0 ? `${running} running` : "idle"}
                 />
-                <span className="flex-1 truncate text-sm text-ink">
+                <span className="min-w-0 basis-4/5 grow break-words text-sm text-ink sm:basis-auto sm:truncate">
                   {thread.title || "Untitled thread"}
                 </span>
                 <OriginPill thread={thread} />

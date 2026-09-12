@@ -131,8 +131,8 @@ function PolicyRow({
   return (
     <div className="flex items-center gap-3 py-3">
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-[--fg]">{targetLabel(policy)}</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 break-words text-sm font-medium text-[--fg]">{targetLabel(policy)}</span>
           <Badge variant={MODE_BADGE[policy.mode]}>{policy.mode}</Badge>
           <Badge variant="neutral">{policy.appliesIn}</Badge>
         </div>
@@ -214,8 +214,8 @@ function KillSwitches({
         const row = killSwitchRow(service);
         return (
           <div key={service} className="flex items-center justify-between py-3">
-            <span className="text-sm font-medium text-[--fg]">{service}</span>
-            <div className="flex items-center gap-2">
+            <span className="min-w-0 break-words text-sm font-medium text-[--fg]">{service}</span>
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted">{row ? "Blocked" : "Allowed"}</span>
               <Switch
                 aria-label={`Kill switch for ${service}`}
@@ -343,7 +343,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
       <div className="space-y-4 py-4">
         <fieldset className="flex flex-wrap gap-4" aria-label="Target">
           {(["service", "actionId", "riskLevel"] as const).map((kind) => (
-            <label key={kind} className="flex items-center gap-1.5 text-sm">
+            <label key={kind} className="flex min-h-11 items-center gap-1.5 text-sm sm:min-h-0">
               <input
                 type="radio"
                 name="policy-target-kind"
@@ -393,7 +393,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
               id="policy-risk"
               value={riskLevel}
               onChange={(e) => setRiskLevel(e.target.value as RiskLevelWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+              className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
             >
               {RISK_LEVELS.map((r) => (
                 <option key={r} value={r}>
@@ -404,14 +404,14 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
           </div>
         )}
 
-        <div className="flex gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row">
           <div>
             <Label htmlFor="policy-mode">Mode</Label>
             <select
               id="policy-mode"
               value={mode}
               onChange={(e) => setMode(e.target.value as ApprovalModeWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+              className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
             >
               {MODES.map((m) => (
                 <option key={m} value={m}>
@@ -426,7 +426,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
               id="policy-applies-in"
               value={appliesIn}
               onChange={(e) => setAppliesIn(e.target.value as PolicyAppliesInWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+              className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
             >
               {APPLIES_IN.map((a) => (
                 <option key={a} value={a}>
@@ -445,19 +445,19 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
             </Button>
           </div>
           {matchers.map((m) => (
-            <div key={m.key} className="flex items-center gap-2">
+            <div key={m.key} className="flex flex-col items-stretch gap-2 rounded border border-line p-3 sm:flex-row sm:flex-wrap sm:items-center sm:border-0 sm:p-0">
               <Input
                 aria-label="Matcher path"
                 placeholder="path"
                 value={m.path}
                 onChange={(e) => updateMatcherRow(m.key, { path: e.target.value })}
-                className="w-40"
+                className="w-full sm:w-40"
               />
               <select
                 aria-label="Matcher operator"
                 value={m.op}
                 onChange={(e) => updateMatcherRow(m.key, { op: e.target.value as ParamMatcherWire["op"] })}
-                className="h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+                className="h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
               >
                 {MATCHER_OPS.map((op) => (
                   <option key={op} value={op}>
@@ -477,7 +477,7 @@ function NewPolicyForm({ plugins }: { plugins: PluginSummary[] }) {
                 }
                 value={m.value}
                 onChange={(e) => updateMatcherRow(m.key, { value: e.target.value })}
-                className="w-40"
+                className="w-full sm:w-40"
               />
               <Button
                 type="button"

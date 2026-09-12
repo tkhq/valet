@@ -114,13 +114,13 @@ function CheckpointRow({
         <span className={`text-sm ${TEXT_COLOR[status]}`} aria-hidden>
           {RUN_STATUS_GLYPH[status]}
         </span>
-        <span className="flex-1 truncate text-sm font-medium text-ink">{checkpoint.nodeId}</span>
+        <span className="min-w-0 flex-1 break-all text-sm sm:truncate font-medium text-ink">{checkpoint.nodeId}</span>
         <span className={`text-xs ${TEXT_COLOR[status]}`}>{LABEL[status]}</span>
       </div>
       {/* The work the node started. On a failed node this is the only way
           to read what actually went wrong. */}
       {(checkpoint.sessionId || checkpoint.childRunId) && (
-        <div className="mt-1 flex gap-3 pl-6 text-xs">
+        <div className="mt-1 flex flex-wrap gap-x-3 pl-6 text-xs">
           {checkpoint.sessionId && (
             <Link
               to="/sessions/$sessionId"
@@ -129,7 +129,7 @@ function CheckpointRow({
               // it to /chat for the caller's own assistant, which is the
               // only way to land on THIS run's thread instead of the newest.
               search={checkpoint.threadId ? { thread: checkpoint.threadId } : undefined}
-              className="text-muted hover:underline"
+              className="inline-flex min-h-11 items-center text-muted hover:underline sm:min-h-0"
             >
               Open session
             </Link>
@@ -138,7 +138,7 @@ function CheckpointRow({
             <Link
               to="/workflows/runs/$runId"
               params={{ runId: checkpoint.childRunId }}
-              className="text-muted hover:underline"
+              className="inline-flex min-h-11 items-center text-muted hover:underline sm:min-h-0"
             >
               Open child run
             </Link>
@@ -146,10 +146,10 @@ function CheckpointRow({
         </div>
       )}
       {checkpoint.error != null && (
-        <div className="mt-1 pl-6 text-xs text-danger-500">{checkpoint.error}</div>
+        <div className="mt-1 break-words pl-6 text-xs text-danger-500">{checkpoint.error}</div>
       )}
       {denied && (
-        <div className="mt-1 pl-6 text-xs text-danger-500">
+        <div className="mt-1 break-words pl-6 text-xs text-danger-500">
           Denied by {denied.resolvedBy ?? "policy"}
         </div>
       )}
@@ -158,7 +158,7 @@ function CheckpointRow({
           would report the same fact twice. */}
       {checkpoint.result !== undefined && hasBody && !denied && (
         <details className="mt-2 pl-6" open={status === "failed" && !promoted}>
-          <summary className="cursor-pointer text-xs text-muted hover:text-ink">Result</summary>
+          <summary className="min-h-11 cursor-pointer py-3 text-xs sm:min-h-0 sm:py-0 text-muted hover:text-ink">Result</summary>
           <pre className="mt-1 overflow-x-auto rounded bg-[--bg] p-2 font-mono text-xs text-muted">
             {jsonPreview(checkpoint.result)}
           </pre>

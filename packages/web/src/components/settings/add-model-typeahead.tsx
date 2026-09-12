@@ -51,10 +51,10 @@ export function AddModelTypeahead({
               key={m.id}
               type="button"
               onClick={() => onAdd(m.id)}
-              className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-sm text-ink hover:bg-ink-wash"
+              className="flex min-h-11 w-full flex-wrap items-center justify-between gap-2 sm:min-h-0 px-2 py-1.5 text-left text-sm text-ink hover:bg-ink-wash"
             >
               <span className="truncate">{m.name}</span>
-              <span className="ml-2 shrink-0 text-xs text-muted">{m.providerName}</span>
+              <span className="max-w-full break-words text-xs text-muted">{m.providerName}</span>
             </button>
           ))}
           {matches.length === 0 && (

@@ -26,7 +26,7 @@ export function IdentityHeader({ info }: { info: GetOrchestratorInfoResponse }) 
 
   if (editing) {
     return (
-      <div className="rounded-lg border border-line bg-paper px-6 py-6">
+      <div className="rounded-lg border border-line bg-paper px-4 py-6 sm:px-6">
         <IdentityFields
           variant="edit"
           initialName={info.name}
@@ -42,7 +42,7 @@ export function IdentityHeader({ info }: { info: GetOrchestratorInfoResponse }) 
 
   return (
     <div className="flex items-start justify-between gap-4">
-      <div>
+      <div className="min-w-0">
         {/* The hero is the dashboard's only title, so the name carries the
             page's `h1`. Without it the first heading on `/` is a card `h2`. */}
         <PresenceMark name={name} state={info.presence} size="hero" as="h1" />

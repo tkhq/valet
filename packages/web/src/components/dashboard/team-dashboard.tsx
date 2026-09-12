@@ -132,12 +132,12 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
   const feedError = childrenQ.error ?? workflowsQ.error ?? runsQ.error;
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-8 px-6 py-8">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-8">
         {/* Header */}
         <header className="space-y-1">
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="font-display text-2xl text-ink">{team?.name ?? "Team"}</h1>
+            <h1 className="min-w-0 break-words font-display text-2xl text-ink">{team?.name ?? "Team"}</h1>
             {team && (
               <Badge variant="neutral">
                 {team.memberCount} member{team.memberCount === 1 ? "" : "s"}
@@ -149,12 +149,12 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
               <span>No assistants yet.</span>
             ) : (
               teamAssistants.map((a, i) => (
-                <span key={a.id} className="inline-flex items-center gap-1">
+                <span key={a.id} className="inline-flex min-w-0 flex-wrap items-center gap-1">
                   {i > 0 && <span aria-hidden>·</span>}
                   <Link
                     to="/assistants/$assistantId"
                     params={{ assistantId: a.id }}
-                    className="underline-offset-2 hover:text-ink hover:underline"
+                    className="inline-flex min-h-11 items-center break-all sm:min-h-0 underline-offset-2 hover:text-ink hover:underline"
                   >
                     {assistantLabel(a)}
                   </Link>
@@ -162,7 +162,7 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
                 </span>
               ))
             )}
-            <Link to="/assistants" className="text-moss underline-offset-2 hover:underline">
+            <Link to="/assistants" className="inline-flex min-h-11 items-center sm:min-h-0 text-moss underline-offset-2 hover:underline">
               Manage assistants →
             </Link>
           </div>
@@ -201,9 +201,9 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
                     <Link
                       to="/sessions/$sessionId"
                       params={{ sessionId: item.targetId }}
-                      className="flex items-baseline gap-2 px-4 py-2.5 text-sm hover:bg-ink-wash"
+                      className="flex min-h-11 flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-3 sm:flex-nowrap sm:py-2.5 text-sm hover:bg-ink-wash"
                     >
-                      <span className="min-w-0 flex-1 truncate text-ink">
+                      <span className="min-w-0 basis-full break-words text-ink sm:basis-auto sm:flex-1 sm:truncate">
                         <span className="font-medium">{item.actor}</span> ran “{item.title}”
                       </span>
                       <span className={`shrink-0 text-xs ${TONE_CLASS[item.tone]}`}>
@@ -217,9 +217,9 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
                     <Link
                       to="/workflows/runs/$runId"
                       params={{ runId: item.targetId }}
-                      className="flex items-baseline gap-2 px-4 py-2.5 text-sm hover:bg-ink-wash"
+                      className="flex min-h-11 flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-3 sm:flex-nowrap sm:py-2.5 text-sm hover:bg-ink-wash"
                     >
-                      <span className="min-w-0 flex-1 truncate text-ink">
+                      <span className="min-w-0 basis-full break-words text-ink sm:basis-auto sm:flex-1 sm:truncate">
                         <span className="font-medium">{item.title}</span> workflow run
                       </span>
                       <span className={`shrink-0 text-xs ${TONE_CLASS[item.tone]}`}>
@@ -264,11 +264,11 @@ function CardShell({
   children: React.ReactNode;
 }) {
   return (
-    <section className="flex min-h-0 flex-col rounded-lg border border-line bg-paper">
-      <header className="flex items-center justify-between border-b border-line px-4 py-3">
+    <section className="flex min-h-0 min-w-0 flex-col rounded-lg border border-line bg-paper">
+      <header className="flex flex-wrap items-center justify-between gap-x-3 border-b border-line px-4 py-3">
         <h2 className="font-display text-base text-ink">{title}</h2>
         {link && (
-          <Link to={link.to} className="text-xs text-moss underline-offset-2 hover:underline">
+          <Link to={link.to} className="inline-flex min-h-11 items-center text-xs text-moss underline-offset-2 sm:min-h-0 hover:underline">
             {link.label}
           </Link>
         )}
@@ -301,7 +301,7 @@ function WorkflowsCard({
       ) : count === 0 ? (
         <p className="text-sm text-muted">No workflows yet. Create one from the Workflows page.</p>
       ) : (
-        <div className="flex gap-6 text-sm text-ink">
+        <div className="flex flex-wrap gap-6 text-sm text-ink">
           <div>
             <div className="font-display text-xl">{count}</div>
             <div className="text-xs text-muted">workflow{count === 1 ? "" : "s"}</div>
@@ -363,7 +363,7 @@ function TeamArtifactsCard({ teamId }: { teamId: string }) {
               <Link
                 to="/a/$token"
                 params={{ token: a.token }}
-                className="min-w-0 flex-1 truncate text-ink underline-offset-2 hover:underline"
+                className="block min-h-11 min-w-0 flex-1 break-words py-3 text-ink underline-offset-2 sm:min-h-0 sm:truncate sm:py-0 hover:underline"
               >
                 {a.title || a.path}
               </Link>
@@ -390,7 +390,7 @@ function TeamMemoryCard({ teamId }: { teamId: string }) {
           No team memory yet. The team’s assistant writes here as it works.
         </p>
       ) : (
-        <div className="flex gap-6 text-sm text-ink">
+        <div className="flex flex-wrap gap-6 text-sm text-ink">
           <div>
             <div className="font-display text-xl">{stats.notes}</div>
             <div className="text-xs text-muted">notes</div>

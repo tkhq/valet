@@ -264,12 +264,12 @@ export function FilterEditor({
           .join(" ");
         return (
           <div key={row.id} className="space-y-1">
-            <div className="flex items-center gap-2">
+            <div className="grid grid-cols-2 items-center gap-2 sm:flex">
               <select
                 aria-label="Filter field"
                 value={row.field}
                 onChange={(e) => update(i, { field: e.target.value })}
-                className="min-w-0 flex-1 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                className="min-w-0 flex-1 min-h-11 rounded border border-line bg-paper px-2 py-1.5 sm:min-h-0 text-sm text-ink"
               >
                 {options.map((f) => (
                   <option key={f.field} value={f.field}>
@@ -281,7 +281,7 @@ export function FilterEditor({
                 aria-label="Filter operator"
                 value={row.op}
                 onChange={(e) => update(i, { op: e.target.value as FilterOp })}
-                className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+                className="min-h-11 min-w-0 rounded border border-line bg-paper px-2 py-1.5 sm:min-h-0 text-sm text-ink"
               >
                 {OP_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -439,7 +439,7 @@ function FilterValuePicker({
                 setQuery("");
                 setOpen(false);
               }}
-              className={`block w-full px-2 py-1 text-left text-sm text-ink hover:bg-hover ${
+              className={`block min-h-11 w-full break-words px-2 py-1 text-left sm:min-h-0 text-sm text-ink hover:bg-hover ${
                 o.id === value ? "bg-hover" : ""
               }`}
             >

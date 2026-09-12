@@ -408,7 +408,7 @@ export function Canvas({
           ))}
         </ViewportPortal>
         <Background />
-        <Controls showInteractive={!readOnly} />
+        <Controls showInteractive={!readOnly} className="max-sm:[&>button]:min-h-11 max-sm:[&>button]:min-w-11" />
       </ReactFlow>
     </div>
   );

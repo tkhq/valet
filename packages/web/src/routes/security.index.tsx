@@ -32,7 +32,7 @@ export const Route = createFileRoute("/security/")({
 export function SecurityIndexPage() {
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="border-b border-line px-6 py-4">
+      <div className="border-b border-line px-4 py-4 sm:px-6">
         <div className="flex items-baseline gap-3">
           <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
             Security reviews
@@ -224,8 +224,8 @@ function NewReviewCard() {
   }
 
   return (
-    <section className="rounded-lg border border-line bg-paper p-5 space-y-5">
-      <div className="flex items-baseline justify-between gap-3">
+    <section className="min-w-0 rounded-lg border border-line bg-paper p-4 sm:p-5 space-y-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-ink">Start a review</h2>
           <p className="mt-0.5 text-xs text-muted">
@@ -246,12 +246,12 @@ function NewReviewCard() {
                 type="button"
                 aria-label={`Remove ${repo.fullName}`}
                 onClick={() => setRepo(null)}
-                className="shrink-0 text-xs text-muted hover:text-danger-500"
+                className="min-h-11 px-2 shrink-0 text-xs text-muted hover:text-danger-500 sm:min-h-0"
               >
                 Remove
               </button>
             </div>
-            <div className="mt-2.5 flex items-center gap-2">
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <Label htmlFor="review-ref" className="shrink-0 text-[11px] uppercase tracking-wide text-muted">
                 Branch
               </Label>
@@ -261,7 +261,7 @@ function NewReviewCard() {
                 value={repo.ref}
                 placeholder="default branch"
                 onChange={(e) => setRepo({ ...repo, ref: e.target.value })}
-                className="h-8 w-52 text-xs"
+                className="min-h-11 sm:min-h-0 sm:h-8 w-full sm:w-52 text-base sm:text-xs"
               />
               <span className="text-[11px] text-muted">Leave blank to scan the default branch.</span>
             </div>
@@ -302,13 +302,13 @@ function NewReviewCard() {
 
       {/* 2 · Method — selectable preset cards, each showing its passes. */}
       <div className="grid gap-1.5">
-        <div className="flex items-baseline justify-between">
+        <div className="flex flex-wrap items-baseline justify-between">
           <Label>Method</Label>
           <span className="text-[11px] text-muted">
             A <span className="font-mono">.valet/security.yml</span> in the repo overrides this.
           </span>
         </div>
-        <div role="radiogroup" aria-label="Review method" className="grid grid-cols-2 gap-2">
+        <div role="radiogroup" aria-label="Review method" className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {SECURITY_PRESETS.map((p) => {
             const selected = p.id === preset;
             return (
@@ -373,14 +373,14 @@ function NewReviewCard() {
       </div>
 
       {/* 3 · Model + scope — secondary controls, side by side. */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="grid gap-1.5">
           <Label htmlFor="review-model">Model</Label>
           <select
             id="review-model"
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            className="h-9 rounded-md border border-line bg-paper px-2 text-xs text-ink"
+            className="min-h-11 sm:min-h-0 sm:h-9 rounded-md border border-line bg-paper px-2 text-base sm:text-xs text-ink"
           >
             {SECURITY_MODELS.map((m) => (
               <option key={m.id} value={m.id}>
@@ -398,7 +398,7 @@ function NewReviewCard() {
             value={pathsInput}
             onChange={(e) => setPathsInput(e.target.value)}
             placeholder="packages/api, src/auth"
-            className="h-9 text-xs"
+            className="min-h-11 sm:min-h-0 sm:h-9 text-base sm:text-xs"
           />
           <p className="text-[11px] text-muted">Optional. Narrows the sweeps to these paths.</p>
         </div>
@@ -408,7 +408,7 @@ function NewReviewCard() {
           choice, not preset-baked). Default on for every preset; uncheck to
           skip the report cell. */}
       <div className="grid gap-1.5">
-        <label className="flex items-center gap-2 text-xs text-ink">
+        <label className="flex min-h-11 items-center gap-2 text-xs text-ink sm:min-h-0">
           <input
             type="checkbox"
             checked={includeReport}
@@ -514,7 +514,7 @@ function ReviewRow({ session }: { session: SessionSummary }) {
 
   return (
     // `relative` anchors the stretched link: the whole row opens the session.
-    <li className="group relative flex items-center gap-4 rounded-md border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
+    <li className="group relative flex flex-wrap items-center gap-3 sm:gap-4 rounded-md border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
       <span
         className={cn(
           "relative mt-1.5 h-2 w-2 shrink-0 rounded-full",
@@ -531,7 +531,7 @@ function ReviewRow({ session }: { session: SessionSummary }) {
         <Link
           to="/sessions/$sessionId"
           params={{ sessionId: session.id }}
-          className="min-w-0 font-mono text-sm text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
+          className="min-w-0 break-all font-mono text-sm text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
         >
           {repoName}
           {ref !== "" && <span className="text-muted"> @ {shortRef(ref)}</span>}
@@ -562,7 +562,7 @@ function ReviewRow({ session }: { session: SessionSummary }) {
             type="button"
             variant="ghost"
             size="sm"
-            className="relative z-10 opacity-0 transition-opacity group-hover:opacity-100"
+            className="relative z-10 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
             disabled={rescan.isPending}
             onClick={() => {
               rescan.mutate(

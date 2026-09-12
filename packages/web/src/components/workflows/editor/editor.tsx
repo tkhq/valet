@@ -57,7 +57,8 @@ import {
 import { Canvas } from "./canvas";
 import { EdgeInspector } from "./edge-inspector";
 import { Inspector } from "./inspector";
-import { Palette } from "./palette";
+import { cn } from "~/lib/cn";
+import { CompactPalette, Palette } from "./palette";
 import { errorNodeIdsFrom, ValidationBanner } from "./validation-banner";
 
 export interface EditorProps {
@@ -128,6 +129,10 @@ function EditorDraft({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonMode, setJsonMode] = useState(false);
+  const [compactView, setCompactView] = useState<"canvas" | "assistant">("canvas");
+  const inspectorBackRef = useRef<HTMLButtonElement>(null);
+  const canvasViewRef = useRef<HTMLButtonElement>(null);
+  const wasInspectingRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Raised when the stored definition moved while the user has unsaved
   // edits. Adopting would throw their work away, so the editor asks.
@@ -212,6 +217,7 @@ function EditorDraft({
     mutate(result.definition);
     setSelectedEdgeId(null);
     setSelectedNodeId(result.nodeId);
+    setCompactView("canvas");
   }
 
   function handleNodePositionChange(nodeId: string, position: FlowPosition) {
@@ -225,12 +231,18 @@ function EditorDraft({
 
   function handleSelectNode(nodeId: string | null) {
     setSelectedNodeId(nodeId);
-    if (nodeId) setSelectedEdgeId(null);
+    if (nodeId) {
+      setSelectedEdgeId(null);
+      setCompactView("canvas");
+    }
   }
 
   function handleSelectEdge(edgeId: string | null) {
     setSelectedEdgeId(edgeId);
-    if (edgeId) setSelectedNodeId(null);
+    if (edgeId) {
+      setSelectedNodeId(null);
+      setCompactView("canvas");
+    }
   }
 
   function handleViewportChange(viewport: FlowViewport) {
@@ -255,6 +267,7 @@ function EditorDraft({
     if (!result) return;
     mutate(result.definition);
     setSelectedNodeId(result.nodeId);
+    setCompactView("canvas");
   }
 
   function handleNodeChange(nodeId: string, patch: Record<string, unknown>) {
@@ -308,6 +321,16 @@ function EditorDraft({
     setSelectedEdgeId(null);
   }
 
+  function showCanvas() {
+    clearSelection();
+    setCompactView("canvas");
+  }
+
+  function showAssistant() {
+    clearSelection();
+    setCompactView("assistant");
+  }
+
   const saveDisabled = !effectiveDirty || !validation.ok || saving === true;
 
   // The form for whatever is selected, or null when nothing is. JSON mode
@@ -333,9 +356,20 @@ function EditorDraft({
     />
   ) : null;
 
+  const inspecting = inspector !== null;
+  useEffect(() => {
+    // A phone selection hides the focused canvas node. Keep keyboard focus
+    // in the visible view without moving it on each field edit.
+    const wasInspecting = wasInspectingRef.current;
+    wasInspectingRef.current = inspecting;
+    if (!window.matchMedia?.("(max-width: 1023px)").matches) return;
+    if (inspecting) inspectorBackRef.current?.focus();
+    else if (wasInspecting && compactView === "canvas") canvasViewRef.current?.focus();
+  }, [inspecting, selectedNodeId, selectedEdgeId, compactView]);
+
   return (
-    <div className="flex h-full flex-col" data-testid="workflow-editor">
-      <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+    <div className="flex h-full min-h-0 min-w-0 flex-col" data-testid="workflow-editor">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
           {effectiveDirty && (
             <span
@@ -361,13 +395,13 @@ function EditorDraft({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
-                  <DropdownMenuItem onSelect={() => setJsonMode(true)}>Edit JSON</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => { setJsonMode(true); setCompactView("canvas"); }}>Edit JSON</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             ))}
         </div>
         {!readOnly && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {saveError && (
               <span role="alert" className="text-xs text-danger-600 dark:text-danger-500">
                 {saveError}
@@ -405,14 +439,42 @@ function EditorDraft({
 
       <ValidationBanner errors={errors} />
 
+      <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 lg:hidden" aria-label="Editor view">
+        <Button
+          size="sm"
+          variant={compactView === "canvas" ? "secondary" : "ghost"}
+          aria-label="Show canvas"
+          ref={canvasViewRef}
+          aria-pressed={compactView === "canvas"}
+          onClick={showCanvas}
+        >
+          Canvas
+        </Button>
+        <Button
+          size="sm"
+          variant={compactView === "assistant" ? "secondary" : "ghost"}
+          aria-label="Show assistant"
+          aria-pressed={compactView === "assistant"}
+          onClick={showAssistant}
+        >
+          Assistant
+        </Button>
+        {!jsonMode && <CompactPalette onAdd={handleAddNode} disabled={readOnly} />}
+      </div>
+
       <div className="flex min-h-0 flex-1">
+        {/* Visibility changes keep the canvas camera and conversation drafts mounted. */}
+        <div className={cn(
+          "min-h-0 min-w-0 flex-1 lg:flex",
+          compactView === "canvas" && !inspector ? "flex" : "hidden",
+        )}>
         {jsonMode && !readOnly ? (
           <div className="min-w-0 flex-1 overflow-y-auto p-3">
             <JsonDefinitionEditor definition={definition} onApply={handleApplyJson} />
           </div>
         ) : (
           <>
-            <Palette onAdd={handleAddNode} disabled={readOnly} />
+            <div className="hidden lg:flex"><Palette onAdd={handleAddNode} disabled={readOnly} /></div>
             <div className="min-w-0 flex-1">
               <Canvas
                 readOnly={readOnly}
@@ -430,6 +492,7 @@ function EditorDraft({
             </div>
           </>
         )}
+        </div>
         {/* ONE right-hand column, not two. It holds the assistant, and the
             selected step's form takes it over for as long as a step is
             selected. The conversation stays mounted underneath: it owns a
@@ -437,7 +500,10 @@ function EditorDraft({
             and selecting a step must drop neither. `inert` keeps the
             covered conversation out of the tab order and out of the
             accessibility tree, so only one of the two answers a query. */}
-        <div className="relative flex w-[--editor-aside] max-w-full shrink-0 flex-col border-l border-line bg-paper">
+        <div className={cn(
+          "relative min-w-0 w-full flex-col bg-paper lg:flex lg:w-[--editor-aside] lg:max-w-full lg:shrink-0 lg:border-l lg:border-line",
+          compactView === "assistant" || inspector ? "flex" : "hidden",
+        )}>
           <div className="flex min-h-0 flex-1 flex-col" inert={inspector !== null}>
             {assistant ?? (
               <p className="p-3 text-sm text-muted">Select a node or edge to edit its settings.</p>
@@ -451,9 +517,14 @@ function EditorDraft({
                   size="sm"
                   onClick={clearSelection}
                   title="Back to the assistant"
+                  className="hidden lg:inline-flex"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
                   Assistant
+                </Button>
+                <Button ref={inspectorBackRef} variant="ghost" size="sm" className="lg:hidden" onClick={showCanvas}>
+                  <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+                  Back to canvas
                 </Button>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">{inspector}</div>

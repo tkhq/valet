@@ -44,9 +44,9 @@ export function AssistantsIndexPage() {
       : workspaceAssistants(assistantsQ.data.assistants, scope, meQ.data.id);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl space-y-6 px-6 py-10">
-        <div className="flex items-baseline gap-3">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6 sm:py-10">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="font-display text-2xl text-ink">Assistants</h1>
           <WorkspaceClause />
         </div>
@@ -91,12 +91,12 @@ export function AssistantsIndexPage() {
                       {label.charAt(0).toUpperCase()}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium text-ink">{label}</span>
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="min-w-0 break-words text-sm font-medium text-ink sm:truncate">{label}</span>
                         {a.isDefault && <Badge variant="accent">Default</Badge>}
                       </span>
                       {a.personality && (
-                        <span className="block truncate text-xs text-muted">{a.personality}</span>
+                        <span className="block break-words text-xs text-muted sm:truncate">{a.personality}</span>
                       )}
                     </span>
                     <span className="shrink-0 text-xs text-muted">Edit →</span>

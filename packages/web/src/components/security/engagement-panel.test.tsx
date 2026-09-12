@@ -208,6 +208,22 @@ describe("SecuritySessionLayout", () => {
     expect(chatTab.getAttribute("aria-selected")).toBe("false");
   });
 
+  it("opens a finding permalink in the Security pane", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><TooltipProvider>
+      <SecuritySessionLayout sessionId="s-1" initialFindingId="finding-1" chat={<div>Chat</div>} />
+    </TooltipProvider></QueryClientProvider>);
+    expect(screen.getByRole("tab", { name: "Panel" }).getAttribute("aria-selected")).toBe("true");
+    const selector = await screen.findByRole("combobox", { name: "Review section" });
+    expect(selector).toHaveProperty("value", "findings");
+    fireEvent.change(selector, { target: { value: "steps" } });
+    expect(selector).toHaveProperty("value", "steps");
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: "Panel" }));
+    expect(selector).toHaveProperty("value", "steps");
+  });
+
   it("dots the Chat tab while a decision gate is pending", async () => {
     renderLayout();
     await screen.findByText("01-recon");

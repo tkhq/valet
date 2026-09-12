@@ -268,9 +268,9 @@ function WorkflowEditorPane({
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="flex items-center justify-between px-6 py-4 border-b border-line">
-        <div className="flex items-center gap-3 min-w-0">
-          <Link to="/workflows" className="text-xs text-muted hover:text-ink shrink-0">
+      <div className="flex flex-col gap-2 border-b border-line px-4 py-3 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <Link to="/workflows" className="inline-flex min-h-11 shrink-0 items-center text-xs text-muted hover:text-ink sm:min-h-0">
             ← Workflows
           </Link>
           <input
@@ -279,10 +279,10 @@ function WorkflowEditorPane({
             aria-label="Workflow name"
             placeholder="Untitled workflow"
             readOnly={mirrored}
-            className="min-w-0 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 read-only:hover:border-transparent"
+            className="min-h-11 min-w-0 flex-1 rounded border border-transparent sm:min-h-0 bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 read-only:hover:border-transparent"
           />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
             variant={drawer === "runs" ? "secondary" : "ghost"}
@@ -303,7 +303,7 @@ function WorkflowEditorPane({
               data-testid="workflow-gate-badge"
               onClick={() => setPreapproveDialog(true)}
               title="Some actions pause a run for approval. Pre-approve them to run this workflow unattended."
-              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-warning-wash px-2.5 py-1 text-xs font-medium text-warning-fg hover:opacity-80 focus-visible:ring-2 focus-visible:ring-accent-500/40"
+              className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-full sm:min-h-0 bg-warning-wash px-2.5 py-1 text-xs font-medium text-warning-fg hover:opacity-80 focus-visible:ring-2 focus-visible:ring-accent-500/40"
             >
               <ShieldAlert className="h-3.5 w-3.5" aria-hidden />
               {gatingActions.length === 1
@@ -508,10 +508,10 @@ function DrawerShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="absolute inset-y-0 right-[--editor-aside] z-10 flex w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
+    <div className="absolute inset-y-0 right-0 z-10 flex w-full lg:right-[--editor-aside] lg:w-96 max-w-full flex-col border-l border-line bg-paper shadow-xl">
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
         <span className="text-sm font-medium text-ink">{title}</span>
-        <button type="button" onClick={onClose} aria-label={`Close ${title.toLowerCase()}`} className="text-muted hover:text-ink">
+        <button type="button" onClick={onClose} aria-label={`Close ${title.toLowerCase()}`} className="min-h-11 min-w-11 text-muted hover:text-ink sm:min-h-0 sm:min-w-0">
           ✕
         </button>
       </div>

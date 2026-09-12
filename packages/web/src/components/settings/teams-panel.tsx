@@ -204,13 +204,13 @@ function TeamRow({
 
   return (
     <div className="py-3">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
           onClick={onToggle}
           aria-label={open ? `Collapse ${team.name}` : `Expand ${team.name}`}
           aria-expanded={open}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="flex min-h-11 min-w-0 basis-full flex-wrap sm:flex-1 sm:basis-auto items-center gap-2 text-left sm:min-h-0"
         >
           <ChevronRight
             className={`h-4 w-4 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`}
@@ -607,7 +607,7 @@ function AddMemberPicker({
           Add member
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-72 p-0">
+      <PopoverContent align="start" className="w-72 max-w-[calc(100vw-2rem)] p-0">
         <div className="border-b border-line p-2">
           <Input
             value={query}
@@ -656,12 +656,12 @@ function AddMemberPicker({
               aria-selected={i === active}
               onClick={() => add(m.userId)}
               onMouseEnter={() => setHighlighted(i)}
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${
+              className={`flex min-h-11 w-full flex-col items-start gap-1 px-3 py-1.5 text-left text-sm sm:min-h-0 ${
                 i === active ? "bg-ink-wash" : ""
               }`}
             >
-              <span className="min-w-0 flex-1 truncate text-ink">{m.name || m.email}</span>
-              {m.name ? <span className="shrink-0 text-xs text-muted">{m.email}</span> : null}
+              <span className="max-w-full break-words text-ink">{m.name || m.email}</span>
+              {m.name ? <span className="max-w-full break-all text-xs text-muted">{m.email}</span> : null}
             </button>
           ))}
           {hidden > 0 && (

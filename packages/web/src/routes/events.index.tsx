@@ -59,9 +59,9 @@ export function EventsPage() {
   const scope: FeedScope = search.scope ?? "workspace";
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10">
-        <div className="flex items-baseline gap-3">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="font-display text-2xl text-ink">Events</h1>
           <WorkspaceClause />
         </div>

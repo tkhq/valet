@@ -51,12 +51,12 @@ export function DropsPanel() {
       {dropsQ.data && dropsQ.data.drops.length > 0 && (
         <ul className="divide-y divide-line border-t border-line">
           {dropsQ.data.drops.map((drop) => (
-            <li key={drop.id} className="flex items-start justify-between gap-3 py-3">
+            <li key={drop.id} className="flex flex-col items-start justify-between gap-2 py-3 sm:flex-row sm:gap-3">
               <div className="min-w-0 space-y-0.5">
                 <div className="text-sm font-medium text-ink">
                   {REASON_LABEL[drop.reason] ?? drop.reason}
                 </div>
-                <p className="text-xs leading-relaxed text-muted">{drop.detail}</p>
+                <p className="break-words text-xs leading-relaxed text-muted">{drop.detail}</p>
               </div>
               <span className="shrink-0 text-xs text-muted">{relativeTime(drop.createdAt)}</span>
             </li>

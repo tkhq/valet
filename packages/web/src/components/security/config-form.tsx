@@ -195,7 +195,7 @@ export function ConfigForm({
           value={focus}
           onChange={(e) => setFocus(e.target.value)}
           placeholder="e.g. the multi-tenant data path and the webhook verifier"
-          className="min-h-[3rem] rounded border border-line bg-paper px-2 py-1 text-xs text-ink"
+          className="min-h-[3rem] rounded border border-line bg-paper px-2 py-2 text-base sm:py-1 sm:text-xs text-ink"
         />
       </div>
 
@@ -210,7 +210,7 @@ export function ConfigForm({
                   setInvariants(invariants.map((v, i) => (i === index ? e.target.value : v)))
                 }
                 placeholder="e.g. every admin route sits behind requireAdmin"
-                className="h-8 flex-1 text-xs"
+                className="min-h-11 sm:min-h-0 sm:h-8 min-w-0 flex-1 text-base sm:text-xs"
                 aria-label={`Invariant ${index + 1}`}
               />
               <Button
@@ -243,9 +243,9 @@ export function ConfigForm({
           A loaded category puts its domain attack patterns (CWE/CAPEC) in front
           of every persona. Pick the domains this repo covers.
         </p>
-        <div className="mt-1 grid grid-cols-2 gap-1" data-testid="config-categories">
+        <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-1" data-testid="config-categories">
           {KNOWN_CATEGORIES.map((cat) => (
-            <label key={cat.id} className="flex items-center gap-2 text-[11px] text-ink">
+            <label key={cat.id} className="flex min-h-11 items-center gap-2 text-[11px] text-ink sm:min-h-0">
               <input
                 type="checkbox"
                 checked={categories.includes(cat.id)}
@@ -289,7 +289,7 @@ export function ConfigForm({
                 value={host}
                 onChange={(e) => updateHost(i, e.target.value)}
                 placeholder="e.g. api.example.com or api.example.com:8443"
-                className="h-8 flex-1 text-xs"
+                className="min-h-11 sm:min-h-0 sm:h-8 min-w-0 flex-1 text-base sm:text-xs"
                 aria-label={`Authorized host ${i + 1}`}
               />
               <Button
@@ -325,7 +325,7 @@ export function ConfigForm({
                   value={cidr}
                   onChange={(e) => updateCidr(i, e.target.value)}
                   placeholder="e.g. 10.0.0.0/8"
-                  className="h-8 flex-1 text-xs"
+                  className="min-h-11 sm:min-h-0 sm:h-8 min-w-0 flex-1 text-base sm:text-xs"
                   aria-label={`Authorized CIDR ${i + 1}`}
                 />
                 <Button
@@ -355,7 +355,7 @@ export function ConfigForm({
             value={scope.loginUrl}
             onChange={(e) => setLoginUrl(e.target.value)}
             placeholder="https://api.example.com/auth/login"
-            className="h-8 text-xs"
+            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
           />
           <p className="text-[11px] text-muted">
             The pivot-coordinator POSTs to this endpoint with the credentials
@@ -372,7 +372,7 @@ export function ConfigForm({
             value={scope.signupUrl}
             onChange={(e) => setSignupUrl(e.target.value)}
             placeholder="https://api.example.com/signup"
-            className="h-8 text-xs"
+            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
           />
           <p className="text-[11px] text-muted">
             Only used by the L4 <span className="font-mono">create-test-account</span> pattern; leave blank to skip.
@@ -387,7 +387,7 @@ export function ConfigForm({
             value={scope.rateLimitRps}
             onChange={(e) => setRateLimit(e.target.value)}
             placeholder="e.g. 5"
-            className="h-8 w-24 text-xs"
+            className="min-h-11 sm:min-h-0 sm:h-8 w-24 text-base sm:text-xs"
           />
           <p className="text-[11px] text-muted">
             Integer 1..1000. Absent means each live persona picks a conservative default.

@@ -63,14 +63,14 @@ export function MemoryCard() {
   const empty = treeQ.data !== undefined && entries.length === 0;
 
   return (
-    <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
-      <header className="px-4 py-3 border-b border-line flex items-center justify-between">
+    <section className="min-w-0 rounded-lg border border-line bg-paper flex flex-col min-h-0">
+      <header className="px-4 py-3 border-b border-line flex flex-wrap items-center justify-between gap-x-3">
         <h2 className="font-display text-base text-ink">
-          <Link to="/memory" className="hover:text-moss">
+          <Link to="/memory" className="inline-flex min-h-11 items-center hover:text-moss sm:min-h-0">
             Memory
           </Link>
         </h2>
-        <Link to="/memory" className="text-xs text-muted hover:text-moss">
+        <Link to="/memory" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-moss sm:min-h-0">
           Browse
         </Link>
       </header>
@@ -84,7 +84,7 @@ export function MemoryCard() {
         {treeQ.error && (
           <div className="text-xs text-danger-500">
             Couldn't load memory.{" "}
-            <button type="button" className="underline" onClick={() => treeQ.refetch()}>
+            <button type="button" className="min-h-11 px-2 underline sm:min-h-0" onClick={() => treeQ.refetch()}>
               Retry
             </button>
           </div>
@@ -128,7 +128,7 @@ export function MemoryCard() {
                 <Link
                   to="/memory/$"
                   params={{ _splat: todayJournalPath() }}
-                  className="block text-sm text-ink leading-snug hover:text-moss"
+                  className="block min-h-11 text-sm sm:min-h-0 text-ink leading-snug hover:text-moss"
                 >
                   {summaryQ.data.summary}
                 </Link>
@@ -146,7 +146,7 @@ export function MemoryCard() {
 
 function StatTile({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-md bg-moss-wash px-2.5 py-2">
+    <div className="min-w-0 break-words rounded-md bg-moss-wash px-2.5 py-2">
       <div className="font-display text-lg text-ink leading-tight tabular-nums">{value}</div>
       <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
     </div>

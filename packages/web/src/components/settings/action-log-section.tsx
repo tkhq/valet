@@ -107,7 +107,7 @@ export function ActionLogSection({
 
   return (
     <Section title="Action log" description="Every action invocation, with the policy decision that gated it.">
-      <div className="flex flex-wrap items-end gap-3 py-4">
+      <div className="flex flex-col items-stretch gap-3 py-4 sm:flex-row sm:flex-wrap sm:items-end">
         <div>
           <label className="block text-xs font-medium text-muted" htmlFor="log-filter-service">
             Service
@@ -116,7 +116,7 @@ export function ActionLogSection({
             id="log-filter-service"
             value={draftService}
             onChange={(e) => setDraftService(e.target.value)}
-            className="mt-1 w-40"
+            className="mt-1 w-full sm:w-40"
           />
         </div>
         <div>
@@ -127,7 +127,7 @@ export function ActionLogSection({
             id="log-filter-mode"
             value={draftResolvedMode}
             onChange={(e) => setDraftResolvedMode(e.target.value)}
-            className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+            className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
           >
             <option value="">Any</option>
             {RESOLVED_MODES.map((m) => (
@@ -145,7 +145,7 @@ export function ActionLogSection({
             id="log-filter-status"
             value={draftStatus}
             onChange={(e) => setDraftStatus(e.target.value)}
-            className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+            className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
           >
             <option value="">Any</option>
             {STATUSES.map((s) => (
@@ -216,10 +216,10 @@ function LogRow({
           onClick={onToggle}
           aria-expanded={expanded}
           aria-label={`Toggle details for ${entry.invocationId}`}
-          className="flex flex-wrap items-center gap-2 text-left"
+          className="flex min-h-11 min-w-0 flex-wrap items-center gap-2 text-left sm:min-h-0"
         >
           <span className="text-xs text-muted">{new Date(entry.createdAt).toLocaleString()}</span>
-          <span className="text-sm font-medium text-[--fg]">
+          <span className="min-w-0 break-all text-sm font-medium text-[--fg]">
             {entry.service ?? "—"}
             {entry.actionId ? ` / ${entry.actionId}` : ""}
           </span>
@@ -233,7 +233,7 @@ function LogRow({
           <Link
             to="/sessions/$sessionId"
             params={{ sessionId: entry.sessionId }}
-            className="text-xs text-accent-600 underline"
+            className="inline-flex min-h-11 items-center text-xs text-accent-600 underline sm:min-h-0"
           >
             session
           </Link>
@@ -242,7 +242,7 @@ function LogRow({
           <Link
             to="/workflows/runs/$runId"
             params={{ runId: entry.workflowExecutionId }}
-            className="text-xs text-accent-600 underline"
+            className="inline-flex min-h-11 items-center text-xs text-accent-600 underline sm:min-h-0"
           >
             workflow run
           </Link>

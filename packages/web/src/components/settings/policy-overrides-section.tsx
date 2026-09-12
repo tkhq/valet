@@ -81,7 +81,7 @@ export function PolicyOverridesSection() {
         {overrides.map((o) => (
           <div key={o.id} className="flex items-center gap-3 py-3">
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-medium text-[--fg]">{targetLabel(o)}</span>
                 <Badge variant={MODE_BADGE[o.mode]}>{o.mode}</Badge>
               </div>
@@ -111,7 +111,7 @@ export function PolicyOverridesSection() {
         <div className="space-y-4 py-4">
           <fieldset className="flex flex-wrap gap-4" aria-label="Target">
             {(["service", "actionId", "riskLevel"] as const).map((kind) => (
-              <label key={kind} className="flex items-center gap-1.5 text-sm">
+              <label key={kind} className="flex min-h-11 items-center gap-1.5 text-sm sm:min-h-0">
                 <input
                   type="radio"
                   name="override-target-kind"
@@ -127,7 +127,7 @@ export function PolicyOverridesSection() {
           {targetKind === "service" && (
             <div>
               <Label htmlFor="override-service">Service</Label>
-              <div className="mt-1 w-64">
+              <div className="mt-1 w-full sm:w-64">
                 <ServiceActionCombobox
                   mode="service"
                   id="override-service"
@@ -141,7 +141,7 @@ export function PolicyOverridesSection() {
           {targetKind === "actionId" && (
             <div>
               <Label htmlFor="override-action">Action id</Label>
-              <div className="mt-1 w-64">
+              <div className="mt-1 w-full sm:w-64">
                 <ServiceActionCombobox
                   mode="action"
                   id="override-action"
@@ -159,7 +159,7 @@ export function PolicyOverridesSection() {
                 id="override-risk"
                 value={riskLevel}
                 onChange={(e) => setRiskLevel(e.target.value as RiskLevelWire)}
-                className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+                className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
               >
                 {RISK_LEVELS.map((r) => (
                   <option key={r} value={r}>
@@ -176,7 +176,7 @@ export function PolicyOverridesSection() {
               id="override-mode"
               value={mode}
               onChange={(e) => setMode(e.target.value as ApprovalModeWire)}
-              className="mt-1 h-9 rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+              className="mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-9 sm:w-auto sm:text-sm text-[--fg]"
             >
               {MODES.map((m) => (
                 <option key={m} value={m}>

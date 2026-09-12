@@ -268,11 +268,11 @@ export function SecurityNewPage() {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Fixed header + stepper. */}
-      <div className="shrink-0 border-b border-line px-6 py-4">
+      <div className="shrink-0 border-b border-line px-4 py-4 sm:px-6">
         <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
           Configure review
         </h1>
-        <p className="mt-1 text-xs text-muted">
+        <p className="mt-1 break-words text-xs text-muted">
           <span className="font-mono text-ink">{search.repo}</span>
           {search.ref ? <span className="font-mono"> @ {search.ref}</span> : null} ·{" "}
           {previewQ.data?.config.hasRepoConfig
@@ -284,7 +284,7 @@ export function SecurityNewPage() {
 
       {/* Scrolling body — one step at a time, so the page never grows unbounded. */}
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl p-6">
+        <div className="mx-auto max-w-2xl p-4 sm:p-6">
           {previewQ.isLoading ? (
             <div className="flex items-center gap-2 text-sm text-muted" data-testid="preview-loading">
               <Spinner size={14} /> Loading the seeded config and plan…
@@ -306,7 +306,7 @@ export function SecurityNewPage() {
                       id="new-model"
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      className="h-9 w-full rounded-md border border-line bg-paper px-2 text-xs text-ink"
+                      className="min-h-11 sm:min-h-0 sm:h-9 w-full rounded-md border border-line bg-paper px-2 text-base sm:text-xs text-ink"
                     >
                       {!SECURITY_MODELS.some((m) => m.id === model) && (
                         <option value={model}>{model}</option>
@@ -356,14 +356,14 @@ export function SecurityNewPage() {
 
       {/* Fixed footer — Back / Next, or Start on the last step. */}
       {loaded && (
-        <div className="shrink-0 flex items-center justify-between gap-3 border-t border-line px-6 py-3">
+        <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-3 sm:px-6">
           <Button
             variant="secondary"
             onClick={() => (stepIndex === 0 ? void navigate({ to: "/security" }) : back())}
           >
             {stepIndex === 0 ? "Cancel" : "Back"}
           </Button>
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
             {step === "plan" && planError && (
               <span className="text-[11px] text-danger-600">{planError}</span>
             )}
@@ -439,13 +439,13 @@ function StepIndicator({
         );
         return (
           <Fragment key={s.id}>
-            {i > 0 && <span className="mx-2 h-px w-8 bg-line" aria-hidden />}
+            {i > 0 && <span className="mx-1 h-px w-3 bg-line sm:mx-2 sm:w-8" aria-hidden />}
             {onJump ? (
               <button
                 type="button"
                 onClick={() => onJump(s.id)}
                 aria-current={active ? "step" : undefined}
-                className="flex items-center gap-1.5 rounded"
+                className="flex min-h-11 items-center gap-1.5 rounded sm:min-h-0"
               >
                 {inner}
               </button>
@@ -653,7 +653,7 @@ function SummaryRow({ label, children }: { label: string; children: ReactNode })
   return (
     <div className="flex px-3 py-2">
       <dt className="w-28 shrink-0 text-muted">{label}</dt>
-      <dd className="min-w-0 flex-1 text-ink">{children}</dd>
+      <dd className="min-w-0 flex-1 break-words text-ink">{children}</dd>
     </div>
   );
 }

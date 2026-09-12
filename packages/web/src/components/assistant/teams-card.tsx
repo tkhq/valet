@@ -31,7 +31,7 @@ function TeamRow({ team }: { team: TeamSummary }) {
   const body = (
     <>
       <Users className="h-4 w-4 shrink-0 text-muted" aria-hidden />
-      <span className="min-w-0 flex-1 truncate text-sm text-ink">{team.name}</span>
+      <span className="min-w-0 flex-1 break-words text-sm text-ink sm:truncate">{team.name}</span>
       <span className="shrink-0 text-xs text-muted">
         {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
       </span>
@@ -39,14 +39,14 @@ function TeamRow({ team }: { team: TeamSummary }) {
   );
 
   if (assistant === undefined) {
-    return <div className="flex items-center gap-3 px-4 py-2.5 opacity-70">{body}</div>;
+    return <div className="flex min-h-11 items-center gap-3 px-4 py-2.5 opacity-70">{body}</div>;
   }
 
   return (
     <Link
       to="/chat"
       search={{ assistant: assistant.id }}
-      className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-ink-wash/60 focus-visible:outline-none focus-visible:bg-ink-wash"
+      className="flex min-h-11 items-center gap-3 px-4 py-2.5 transition-colors hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
     >
       {body}
     </Link>
@@ -62,7 +62,7 @@ export function TeamsCard() {
 
   if (teamsQ.isLoading || orgQ.isLoading) {
     return (
-      <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
+      <section className="min-w-0 rounded-lg border border-line bg-paper flex flex-col min-h-0">
         <header className="px-4 py-3 border-b border-line">
           <h2 className="font-display text-base text-ink">Your teams</h2>
         </header>
@@ -78,7 +78,7 @@ export function TeamsCard() {
   if (!resolved || teams.length === 0) return null;
 
   return (
-    <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
+    <section className="min-w-0 rounded-lg border border-line bg-paper flex flex-col min-h-0">
       <header className="px-4 py-3 border-b border-line">
         <h2 className="font-display text-base text-ink">Your teams</h2>
       </header>

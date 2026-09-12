@@ -23,9 +23,9 @@ function EventDetailPage() {
   const { data, isLoading, error } = useEvent(eventId);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10">
-        <Link to="/events" className="text-xs text-muted hover:text-ink">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+        <Link to="/events" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
           ← Events
         </Link>
         {isLoading && <LoadingRow label="Loading event…" />}
@@ -54,10 +54,10 @@ export function EventDetailBody({ data }: { data: GetEventResponse }) {
       <div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="accent">{event.service}</Badge>
-          <span className="font-mono text-xs text-muted">{event.eventKey}</span>
+          <span className="break-all font-mono text-xs text-muted">{event.eventKey}</span>
           {event.actor?.login && <span className="text-xs text-muted">{event.actor.login}</span>}
         </div>
-        <h1 className="mt-2 font-display text-xl text-ink">{event.summary}</h1>
+        <h1 className="mt-2 break-words font-display text-xl text-ink">{event.summary}</h1>
         <p className="mt-1 text-xs text-muted">
           Occurred {formatWhen(event.occurredAt)} · received {formatWhen(event.receivedAt)}
         </p>

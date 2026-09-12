@@ -22,15 +22,16 @@ export const PopoverTrigger = RPopover.Trigger;
 export const PopoverContent = forwardRef<
   ElementRef<typeof RPopover.Content>,
   ComponentPropsWithoutRef<typeof RPopover.Content>
->(function PopoverContent({ className, align = "end", sideOffset = 4, ...rest }, ref) {
+>(function PopoverContent({ className, align = "end", sideOffset = 4, collisionPadding = 16, ...rest }, ref) {
   return (
     <RPopover.Portal>
       <RPopover.Content
         ref={ref}
         align={align}
         sideOffset={sideOffset}
+        collisionPadding={collisionPadding}
         className={cn(
-          "z-50 rounded-lg border border-line bg-[--bg] p-3 shadow-xl outline-none " +
+          "z-50 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto overscroll-contain rounded-lg border border-line bg-[--bg] p-3 shadow-xl outline-none " +
             "data-[state=open]:animate-in data-[state=closed]:animate-out " +
             "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
           className,

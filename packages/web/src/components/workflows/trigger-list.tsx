@@ -131,21 +131,21 @@ export function TriggerList({
         {triggers.map((t) => (
           <li
             key={`${t.kind}:${t.id}`}
-            className="flex items-center gap-3 rounded border border-line bg-paper px-4 py-3"
+            className="flex flex-wrap items-center gap-3 rounded sm:flex-nowrap border border-line bg-paper px-4 py-3"
           >
             {t.kind === "schedule" ? (
               <Clock className="h-4 w-4 shrink-0 text-muted" aria-label="schedule trigger" />
             ) : (
               <Zap className="h-4 w-4 shrink-0 text-muted" aria-label="event trigger" />
             )}
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium text-ink">{t.name}</div>
-              <div className="truncate text-xs text-muted">
+            <div className="min-w-0 basis-4/5 grow sm:basis-auto">
+              <div className="break-words text-sm sm:truncate font-medium text-ink">{t.name}</div>
+              <div className="break-words text-xs sm:truncate text-muted">
                 {triggerSummary(t)}
                 {!workflowId && t.workflowId && ` · ${nameById.get(t.workflowId) ?? t.workflowId}`}
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex max-w-full flex-wrap items-center gap-2">
               {t.kind === "schedule" && (
                 <Button
                   size="sm"

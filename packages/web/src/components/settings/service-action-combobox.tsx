@@ -281,20 +281,20 @@ export function ServiceActionCombobox({
                 }}
                 onMouseEnter={() => setHighlightedIndex(i)}
                 className={cn(
-                  "flex cursor-pointer items-center gap-2 px-3 py-2 text-sm",
+                  "flex min-h-11 cursor-pointer items-center sm:min-h-0 gap-2 px-3 py-2 text-sm",
                   i === highlightedIndex ? "bg-ink-wash" : "hover:bg-ink-wash",
                 )}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-ink truncate">{item.label}</span>
+                  <div className="flex flex-col items-start gap-1 sm:flex-row sm:items-center sm:gap-2">
+                    <span className="max-w-full break-words text-ink">{item.label}</span>
                     {item.sublabel && (
-                      <span className="shrink-0 font-mono text-[11px] text-muted truncate">
+                      <span className="max-w-full break-all font-mono text-[11px] text-muted">
                         {item.sublabel}
                       </span>
                     )}
                     {!item.sublabel && (
-                      <span className="shrink-0 font-mono text-[11px] text-muted">{item.id}</span>
+                      <span className="max-w-full break-all font-mono text-[11px] text-muted">{item.id}</span>
                     )}
                   </div>
                 </div>
@@ -312,7 +312,7 @@ export function ServiceActionCombobox({
               }}
               onMouseEnter={() => setHighlightedIndex(freeTextIndex)}
               className={cn(
-                "flex cursor-pointer items-center gap-1 border-t border-line px-3 py-2 text-sm text-muted",
+                "flex min-h-11 cursor-pointer items-center sm:min-h-0 gap-1 border-t border-line px-3 py-2 text-sm text-muted",
                 highlightedIndex === freeTextIndex ? "bg-ink-wash" : "hover:bg-ink-wash",
               )}
             >

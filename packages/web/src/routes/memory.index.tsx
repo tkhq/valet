@@ -27,7 +27,7 @@ function MemoryIndexPage() {
   return (
     // A plain `div`, not `main`: the app shell already renders the page's one
     // `main` landmark, and this route paints inside it.
-    <div className="flex flex-1 min-h-0 items-center justify-center p-8 text-center text-sm text-muted">
+    <div className="hidden md:flex flex-1 min-h-0 items-center justify-center p-8 text-center text-sm text-muted">
       {nothingRemembered ? (
         <p>Nothing remembered yet. Talk to {name}, or use Import in the left pane to load a memory bundle.</p>
       ) : (

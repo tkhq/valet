@@ -53,7 +53,7 @@ export function Dashboard() {
         <div>
           Couldn’t load your assistant.
           <div className="mt-2">
-            <button type="button" className="underline" onClick={() => info.refetch()}>
+            <button type="button" className="min-h-11 px-3 underline sm:min-h-0" onClick={() => info.refetch()}>
               Retry
             </button>
           </div>
@@ -80,13 +80,13 @@ function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
   const events = mergeActivity(notificationsQ.data?.notifications ?? [], childrenQ.data?.children ?? []);
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-8 px-6 py-8">
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-8">
         <div className="space-y-2">
           <IdentityHeader info={info} />
           {/* The one path to an assistant's editor used to be the chat
               rail's menu; the dashboard links the list page directly. */}
-          <Link to="/assistants" className="text-xs text-moss underline-offset-2 hover:underline">
+          <Link to="/assistants" className="inline-flex min-h-11 items-center text-xs text-moss underline-offset-2 hover:underline sm:min-h-0">
             Manage assistants →
           </Link>
         </div>

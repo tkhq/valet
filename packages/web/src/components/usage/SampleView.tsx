@@ -61,7 +61,7 @@ function isParsedSample(v: unknown): v is ParsedSample {
 function renderBlock(block: ContentBlock, i: number): React.ReactNode {
   if (block.type === "text") {
     return (
-      <pre key={i} className="whitespace-pre-wrap text-xs text-ink leading-relaxed overflow-auto max-h-64">
+      <pre key={i} className="whitespace-pre-wrap break-words text-xs text-ink leading-relaxed overflow-auto max-h-64">
         {block.text}
       </pre>
     );
@@ -71,7 +71,7 @@ function renderBlock(block: ContentBlock, i: number): React.ReactNode {
       <div key={i} className="mb-1">
         <span className="text-xs font-mono text-muted">tool_use: </span>
         <span className="text-xs font-mono text-ink">{block.name}</span>
-        <pre className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
+        <pre className="whitespace-pre-wrap break-words text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
           {JSON.stringify(block.input, null, 2)}
         </pre>
       </div>
@@ -84,7 +84,7 @@ function renderBlock(block: ContentBlock, i: number): React.ReactNode {
     return (
       <div key={i} className="mb-1">
         <span className="text-xs font-mono text-muted">tool_result</span>
-        <pre className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
+        <pre className="whitespace-pre-wrap break-words text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
           {contentStr}
         </pre>
       </div>
@@ -97,14 +97,14 @@ function renderBlock(block: ContentBlock, i: number): React.ReactNode {
   }
   if (block.type === "reasoning") {
     return (
-      <pre key={i} className="whitespace-pre-wrap text-xs text-muted italic leading-relaxed overflow-auto max-h-32">
+      <pre key={i} className="whitespace-pre-wrap break-words text-xs text-muted italic leading-relaxed overflow-auto max-h-32">
         {block.thinking}
       </pre>
     );
   }
   // unknown — show raw JSON
   return (
-    <pre key={i} className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
+    <pre key={i} className="whitespace-pre-wrap break-words text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
       {JSON.stringify(block.raw ?? block, null, 2)}
     </pre>
   );
@@ -114,7 +114,7 @@ function SystemBlock({ system }: { system: string }) {
   return (
     <div className="mb-4">
       <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">System</div>
-      <pre className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-3 border border-line overflow-auto max-h-48">
+      <pre className="whitespace-pre-wrap break-words text-xs text-ink bg-paper-muted rounded p-3 border border-line overflow-auto max-h-48">
         {system}
       </pre>
     </div>
@@ -132,7 +132,7 @@ function ToolsBlock({ tools }: { tools: SampleTool[] }) {
           <span
             key={t.name}
             title={t.description}
-            className="inline-block rounded px-2 py-0.5 text-xs bg-paper-muted border border-line text-muted"
+            className="inline-block max-w-full break-all rounded px-2 py-0.5 text-xs bg-paper-muted border border-line text-muted"
           >
             {t.name}
           </span>
@@ -189,13 +189,13 @@ export function SampleView({ id, onClose }: SampleViewProps) {
   return (
     <div className="border border-line rounded bg-paper flex flex-col overflow-hidden" style={{ maxHeight: "70vh" }}>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-line shrink-0">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-line shrink-0">
         <span className="text-sm font-medium text-ink">Request detail</span>
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => setShowRaw((v) => !v)}
-            className="text-xs text-muted hover:text-ink rounded px-2 py-0.5 border border-line hover:border-ink"
+            className="min-h-11 text-xs text-muted hover:text-ink rounded sm:min-h-0 px-2 py-0.5 border border-line hover:border-ink"
           >
             {showRaw ? "View parsed" : "View raw"}
           </button>
@@ -203,7 +203,7 @@ export function SampleView({ id, onClose }: SampleViewProps) {
             type="button"
             onClick={onClose}
             aria-label="Close detail"
-            className="text-muted hover:text-ink text-sm px-1"
+            className="min-h-11 min-w-11 text-muted hover:text-ink text-sm px-1 sm:min-h-0 sm:min-w-0"
           >
             ✕
           </button>
@@ -217,7 +217,7 @@ export function SampleView({ id, onClose }: SampleViewProps) {
         {data && (
           <>
             {/* Metadata strip */}
-            <div className="flex flex-wrap gap-3 text-xs text-muted mb-4">
+            <div className="flex flex-wrap break-all gap-3 text-xs text-muted mb-4">
               <span>Provider: <span className="text-ink">{data.providerKind}</span></span>
               <span>Model: <span className="text-ink">{data.model ?? "—"}</span></span>
               <span>Harness: <span className="text-ink">{data.harness ?? "—"}</span></span>
@@ -234,13 +234,13 @@ export function SampleView({ id, onClose }: SampleViewProps) {
             {showRaw || !data.parsed ? (
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">Request body</div>
-                <pre className="whitespace-pre-wrap text-xs bg-paper-muted rounded p-3 border border-line overflow-auto max-h-64 mb-4">
+                <pre className="whitespace-pre-wrap break-words text-xs bg-paper-muted rounded p-3 border border-line overflow-auto max-h-64 mb-4">
                   {data.requestBody}
                 </pre>
                 {data.responseBody && (
                   <>
                     <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">Response body</div>
-                    <pre className="whitespace-pre-wrap text-xs bg-paper-muted rounded p-3 border border-line overflow-auto max-h-64">
+                    <pre className="whitespace-pre-wrap break-words text-xs bg-paper-muted rounded p-3 border border-line overflow-auto max-h-64">
                       {data.responseBody}
                     </pre>
                   </>
@@ -252,7 +252,7 @@ export function SampleView({ id, onClose }: SampleViewProps) {
             ) : isParsedSample(data.parsed) ? (
               <StructuredView parsed={data.parsed} />
             ) : (
-              <pre className="whitespace-pre-wrap text-xs bg-paper-muted rounded p-3 border border-line overflow-auto max-h-96">
+              <pre className="whitespace-pre-wrap break-words text-xs bg-paper-muted rounded p-3 border border-line overflow-auto max-h-96">
                 {JSON.stringify(data.parsed, null, 2)}
               </pre>
             )}

@@ -66,13 +66,13 @@ export function StepsPanel({
 
   return (
     <div className="shrink-0">
-      <div className="flex items-center gap-2 border-b border-line px-4 pb-2 pt-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 pb-2 pt-3">
         <button
           type="button"
           onClick={toggle}
           aria-expanded={expanded}
           aria-label={expanded ? "Collapse steps" : "Expand steps"}
-          className="flex shrink-0 items-center gap-2 rounded hover:text-ink"
+          className="flex min-h-11 shrink-0 items-center gap-2 rounded md:min-h-0 hover:text-ink"
         >
           {expanded ? (
             <ChevronDown className="h-3.5 w-3.5 text-muted" aria-hidden />
@@ -94,13 +94,13 @@ export function StepsPanel({
               ))}
             </div>
             {running && (
-              <span className="shrink-0 truncate font-mono text-[11px] text-muted">{running.dir}</span>
+              <span className="min-w-0 truncate font-mono text-[11px] text-muted">{running.dir}</span>
             )}
           </>
         )}
       </div>
       {expanded && (
-        <div className="max-h-80 overflow-y-auto">
+        <div className="md:max-h-80 md:overflow-y-auto">
           <CellRail cells={cells} onOpenChild={onOpenChild} />
         </div>
       )}
@@ -160,7 +160,7 @@ function StepDot({
           type="button"
           onClick={() => onOpenChild?.(child)}
           aria-label={`${cell.dir}: ${STATUS_LABEL[cell.status]} — open child session`}
-          className="flex items-center rounded-full p-0.5 hover:bg-ink-wash focus:outline-none focus-visible:ring-1 focus-visible:ring-moss"
+          className="flex min-h-11 min-w-11 items-center justify-center rounded-full p-0.5 md:min-h-0 md:min-w-0 hover:bg-ink-wash focus:outline-none focus-visible:ring-1 focus-visible:ring-moss"
         >
           {dot}
         </button>
@@ -168,7 +168,7 @@ function StepDot({
         <span
           tabIndex={0}
           aria-label={`${cell.dir}: ${STATUS_LABEL[cell.status]}`}
-          className="flex items-center p-0.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-moss"
+          className="flex min-h-11 min-w-11 items-center justify-center p-0.5 md:min-h-0 md:min-w-0 focus:outline-none focus-visible:ring-1 focus-visible:ring-moss"
         >
           {dot}
         </span>
