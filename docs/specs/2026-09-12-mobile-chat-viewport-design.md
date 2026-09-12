@@ -58,3 +58,23 @@ Scroll follow-up validation: 18 targeted tests passed, including initial message
 Chromium touch swipes and WebKit wheel input at a phone viewport passed. The transcript height and composer position stayed constant during the slide.
 Full-profile sandbox tabs, keyboard focus, rotation, desktop pinning, and reduced-motion behavior passed browser checks.
 The complete web suite passed 2,977 tests. The final production build passed. Tab switching retains keyboard focus in both directions.
+
+## Compact composer follow-up
+
+An empty, unfocused composer uses one input row on phones and desktops. Existing queue and working hints remain above that row. Selecting the message field expands the input above its action row.
+The composer stays expanded while it contains text, attachments, errors, or a pending submission. An empty composer collapses when focus leaves it.
+Focus movement between the input and its actions keeps the expanded layout stable. Attachment and Stop buttons remain usable from the compact row.
+Preserve accessible action names, 44-pixel touch targets, 16-pixel input text, draft persistence, and bounded multiline scrolling.
+
+Validation plan: test focus and draft transitions, submission focus, and attachment actions. Check compact and expanded geometry in Chromium and WebKit.
+Run the web tests, typecheck, production build, full make e2e scorecard, and independent review before updating the PR.
+
+Compact composer validation: all 2,984 web tests passed. The production build and typecheck passed.
+Chromium and WebKit passed at 320, 375, 390, 768, and 1440 pixels. The idle composer measured 78 pixels tall.
+Mouse clicks and touch taps opened attachments from both layouts. Drafts, attachment removal, disappearing actions, and short viewports passed.
+The focus handler prevents Safari's default mouse focus change while preserving touch clicks. Independent reviews found no remaining issues.
+The full unit scorecard row passed on rerun after an unrelated API redirect test failed during concurrent validation.
+Physical iPhone keyboard testing remains outstanding.
+
+The compact composer full make e2e run reported 29 passed, 2 failed, and 4 optional skips.
+The unit row passed on rerun. The remaining engine archive failure requires `/bin/tar`, which is absent on this Mac.

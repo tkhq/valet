@@ -113,6 +113,7 @@ export function Composer({
   const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [selected, setSelected] = useState(false);
   useAutosizeTextarea(inputRef, text);
 
   // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
@@ -708,9 +709,38 @@ export function Composer({
     return () => dropChannel.publish(null);
   }, [dropChannel, addFiles, intakeBlocked]);
 
+  // Removing a focused attachment action does not emit blur in every browser.
+  // Reconcile selection after DOM updates and the submission focus restoration.
+  useEffect(() => {
+    if (selected && !send.isPending && !formRef.current?.contains(document.activeElement)) {
+      setSelected(false);
+    }
+  });
+
+  const expanded = selected || text.length > 0 || images.length > 0 || files.length > 0
+    || imageErrors.length > 0 || fileErrors.length > 0 || Boolean(submitError)
+    || dragActive || send.isPending;
+
   return (
     <form
       ref={formRef}
+      data-expanded={expanded}
+      onMouseDownCapture={(event) => {
+        // Safari does not focus buttons on pointer activation. Focus them before
+        // the textarea blurs, so its action row cannot move during the click.
+        const button = event.target instanceof Element ? event.target.closest("button") : null;
+        if (button && !button.disabled && event.button === 0) {
+          event.preventDefault();
+          button.focus({ preventScroll: true });
+        }
+      }}
+      onBlurCapture={(event) => {
+        // Keep action targets in place while focus moves within the composer.
+        // Submission temporarily disables the input before restoring its focus.
+        if (!event.currentTarget.contains(event.relatedTarget) && !send.isPending) {
+          setSelected(false);
+        }
+      }}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
@@ -724,7 +754,10 @@ export function Composer({
         dragActive && "ring-2 ring-inset ring-moss",
       )}
     >
-      <div className="flex min-h-0 flex-col rounded-2xl border border-line bg-paper p-2 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none">
+      <div className={cn(
+        "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
+        expanded ? "p-2" : "p-1",
+      )}>
         <QueueIndicator queueState={queueState} />
         {dragActive && (
           <p className="mb-2 text-xs text-muted">
@@ -748,7 +781,7 @@ export function Composer({
         {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
         {/* `relative` anchors the command popup to the input row, so the hint
             above it never moves the popup. */}
-        <div className="relative flex min-h-0 flex-col">
+        <div className={cn("relative flex min-h-0", expanded ? "flex-col" : "items-end")}>
           {(popupOpen || noticeOpen) && (
             <CommandPopup
               items={popupOpen ? popupItems : []}
@@ -767,15 +800,21 @@ export function Composer({
             ref={inputRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onFocus={() => setSelected(true)}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
             aria-label="Message"
             rows={1}
-            className="block min-h-14 w-full min-w-0 max-h-[min(14rem,35dvh)] resize-none overflow-y-auto overscroll-contain rounded-none border-0 bg-transparent px-3 py-3 text-base leading-6 shadow-none caret-moss focus-visible:border-transparent focus-visible:ring-0 max-sm:rounded-none max-sm:px-3 max-sm:py-3 max-sm:shadow-none max-sm:focus-visible:ring-0"
+            className={cn(
+              "block w-full min-w-0 resize-none overflow-y-auto overscroll-contain rounded-none border-0 bg-transparent px-3 text-base leading-6 shadow-none caret-moss focus-visible:border-transparent focus-visible:ring-0 max-sm:rounded-none max-sm:px-3 max-sm:shadow-none max-sm:focus-visible:ring-0",
+              expanded
+                ? "min-h-20 max-h-[min(14rem,35dvh)] py-3 max-sm:py-3"
+                : "min-h-11 max-h-11 flex-1 py-2.5 max-sm:py-2.5",
+            )}
             disabled={send.isPending || !threadId}
           />
-          <div className="flex shrink-0 items-center gap-2 px-1 pb-1 pt-1">
+          <div className={cn("flex shrink-0 items-center gap-2", expanded && "px-1 pb-1 pt-1")}>
             {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
               <>
                 <input
@@ -803,7 +842,7 @@ export function Composer({
                 </Button>
               </>
             )}
-            <span className="min-w-0 flex-1 text-xs text-muted">
+            <span className={cn("min-w-0 flex-1 text-xs text-muted", !expanded && "hidden")}>
               <span className="hidden sm:inline">
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
               </span>
@@ -813,14 +852,17 @@ export function Composer({
                 type="button"
                 variant="secondary"
                 size="lg"
-                className="h-11 shrink-0 rounded-full px-3 text-danger-600 hover:text-danger-500 dark:text-danger-500"
+                className={cn(
+                  "h-11 shrink-0 rounded-full text-danger-600 hover:text-danger-500 dark:text-danger-500",
+                  expanded ? "px-3" : "w-11 p-0",
+                )}
                 onClick={() => void stop()}
                 disabled={!threadId || abort.isPending}
                 aria-label="Stop"
                 title="Stop (Esc)"
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
-                <span>Stop</span>
+                <span className={cn(!expanded && "sr-only")}>Stop</span>
               </Button>
             )}
             <Button
@@ -829,12 +871,13 @@ export function Composer({
               size="lg"
               title={sendTitle}
               className={cn(
-                "h-11 shrink-0 rounded-full px-4 transition-colors motion-reduce:transition-none",
+                "h-11 shrink-0 rounded-full transition-colors motion-reduce:transition-none",
+                expanded ? "px-4" : "w-11 p-0",
                 !canSend && "bg-ink-wash text-muted disabled:opacity-100",
               )}
             >
               <ArrowUp className="h-4 w-4" aria-hidden />
-              <span>{ACTION_LABEL[action]}</span>
+              <span className={cn(!expanded && "sr-only")}>{ACTION_LABEL[action]}</span>
             </Button>
           </div>
         </div>
