@@ -219,6 +219,48 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  {
+    describe: "authorization decisions table",
+    probe: { kind: "table", table: "authorization_decisions" },
+    sql: `CREATE TABLE IF NOT EXISTS "authorization_decisions" (
+      "decision_id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL,
+      "request_id" text NOT NULL, "idempotency_key" text NOT NULL,
+      "request_subject_digest" text NOT NULL, "input_digest" text NOT NULL,
+      "policy_digest" text NOT NULL, "compiled_bundle_digest" text NOT NULL,
+      "evaluator_kind" text NOT NULL, "evaluator_engine_digest" text NOT NULL,
+      "effect" text NOT NULL, "reason_code" text NOT NULL,
+      "matched_rule_ids" jsonb NOT NULL, "obligations" jsonb NOT NULL,
+      "redactions" jsonb NOT NULL, "approval_requirement" jsonb, "proof" jsonb,
+      "proof_verification_status" text NOT NULL, "proof_verified_at" bigint,
+      "proof_verification_error" text, "identity_fact_provenance" jsonb NOT NULL,
+      "policy_fact_provenance" jsonb NOT NULL, "evaluated_at" bigint NOT NULL,
+      "created_at" bigint NOT NULL,
+      CONSTRAINT "authorization_decisions_evaluator_kind" CHECK ("evaluator_kind" IN ('local_valet', 'tvc_attested')),
+      CONSTRAINT "authorization_decisions_effect" CHECK ("effect" IN ('allow', 'deny', 'require_approval')),
+      CONSTRAINT "authorization_decisions_proof_verification_status" CHECK ("proof_verification_status" IN ('not_required', 'verified', 'failed')),
+      CONSTRAINT "authorization_decisions_proof_kind" CHECK (("evaluator_kind" = 'tvc_attested' AND "proof" IS NOT NULL AND "proof_verification_status" IN ('verified', 'failed')) OR ("evaluator_kind" = 'local_valet' AND "proof" IS NULL AND "proof_verification_status" = 'not_required'))
+    )`,
+  },
+  { describe: "authorization_decisions_org_created index", probe: { kind: "index", index: "authorization_decisions_org_created" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_org_created" ON "authorization_decisions" ("org_id","created_at")' },
+  { describe: "authorization_decisions_idempotency_key index", probe: { kind: "index", index: "authorization_decisions_idempotency_key" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_idempotency_key" ON "authorization_decisions" ("idempotency_key")' },
+  { describe: "authorization_decisions_request index", probe: { kind: "index", index: "authorization_decisions_request" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_request" ON "authorization_decisions" ("request_id")' },
+  { describe: "authorization_decisions_subject index", probe: { kind: "index", index: "authorization_decisions_subject" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_subject" ON "authorization_decisions" ("request_subject_digest")' },
+  {
+    describe: "authorization execution attempts table",
+    probe: { kind: "table", table: "authorization_execution_attempts" },
+    sql: `CREATE TABLE IF NOT EXISTS "authorization_execution_attempts" (
+      "attempt_id" text PRIMARY KEY NOT NULL, "decision_id" text NOT NULL,
+      "outcome" text NOT NULL, "target_idempotency_key" text,
+      "redacted_result" jsonb, "redacted_error" text,
+      "external_operation_ids" jsonb NOT NULL, "started_at" bigint NOT NULL,
+      "finished_at" bigint, "created_at" bigint NOT NULL,
+      CONSTRAINT "authorization_execution_attempts_outcome"
+        CHECK ("outcome" IN ('started', 'completed', 'failed', 'cancelled', 'indeterminate')),
+      CONSTRAINT "authorization_execution_attempts_decision_id_authorization_decisions_decision_id_fk"
+        FOREIGN KEY ("decision_id") REFERENCES "authorization_decisions"("decision_id")
+    )`,
+  },
+  { describe: "authorization_execution_attempts_decision_started index", probe: { kind: "index", index: "authorization_execution_attempts_decision_started" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_execution_attempts_decision_started" ON "authorization_execution_attempts" ("decision_id","started_at")' },
   { describe: "team deletion requests", probe: { kind: "table", table: "team_deletion_requests" }, sql: `CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "team_id" text NOT NULL,
   "resource_type" text NOT NULL, "resource_id" text NOT NULL, "resource_label" text NOT NULL,

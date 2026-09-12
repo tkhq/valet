@@ -896,6 +896,62 @@ CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id")
 --> statement-breakpoint
 CREATE INDEX "action_invocations_org_created" ON "action_invocations" ("org_id","created_at");
 --> statement-breakpoint
+CREATE TABLE "authorization_decisions" (
+	"decision_id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"request_id" text NOT NULL,
+	"idempotency_key" text NOT NULL,
+	"request_subject_digest" text NOT NULL,
+	"input_digest" text NOT NULL,
+	"policy_digest" text NOT NULL,
+	"compiled_bundle_digest" text NOT NULL,
+	"evaluator_kind" text NOT NULL,
+	"evaluator_engine_digest" text NOT NULL,
+	"effect" text NOT NULL,
+	"reason_code" text NOT NULL,
+	"matched_rule_ids" jsonb NOT NULL,
+	"obligations" jsonb NOT NULL,
+	"redactions" jsonb NOT NULL,
+	"approval_requirement" jsonb,
+	"proof" jsonb,
+	"proof_verification_status" text NOT NULL,
+	"proof_verified_at" bigint,
+	"proof_verification_error" text,
+	"identity_fact_provenance" jsonb NOT NULL,
+	"policy_fact_provenance" jsonb NOT NULL,
+	"evaluated_at" bigint NOT NULL,
+	"created_at" bigint NOT NULL,
+	CONSTRAINT "authorization_decisions_evaluator_kind" CHECK ("evaluator_kind" IN ('local_valet', 'tvc_attested')),
+	CONSTRAINT "authorization_decisions_effect" CHECK ("effect" IN ('allow', 'deny', 'require_approval')),
+	CONSTRAINT "authorization_decisions_proof_verification_status" CHECK ("proof_verification_status" IN ('not_required', 'verified', 'failed')),
+	CONSTRAINT "authorization_decisions_proof_kind" CHECK (("evaluator_kind" = 'tvc_attested' AND "proof" IS NOT NULL AND "proof_verification_status" IN ('verified', 'failed')) OR ("evaluator_kind" = 'local_valet' AND "proof" IS NULL AND "proof_verification_status" = 'not_required'))
+);
+--> statement-breakpoint
+CREATE INDEX "authorization_decisions_org_created" ON "authorization_decisions" ("org_id","created_at");
+--> statement-breakpoint
+CREATE INDEX "authorization_decisions_idempotency_key" ON "authorization_decisions" ("idempotency_key");
+--> statement-breakpoint
+CREATE INDEX "authorization_decisions_request" ON "authorization_decisions" ("request_id");
+--> statement-breakpoint
+CREATE INDEX "authorization_decisions_subject" ON "authorization_decisions" ("request_subject_digest");
+--> statement-breakpoint
+CREATE TABLE "authorization_execution_attempts" (
+	"attempt_id" text PRIMARY KEY NOT NULL,
+	"decision_id" text NOT NULL,
+	"outcome" text NOT NULL,
+	"target_idempotency_key" text,
+	"redacted_result" jsonb,
+	"redacted_error" text,
+	"external_operation_ids" jsonb NOT NULL,
+	"started_at" bigint NOT NULL,
+	"finished_at" bigint,
+	"created_at" bigint NOT NULL,
+	CONSTRAINT "authorization_execution_attempts_outcome" CHECK ("outcome" IN ('started', 'completed', 'failed', 'cancelled', 'indeterminate')),
+	CONSTRAINT "authorization_execution_attempts_decision_id_authorization_decisions_decision_id_fk" FOREIGN KEY ("decision_id") REFERENCES "authorization_decisions"("decision_id") ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX "authorization_execution_attempts_decision_started" ON "authorization_execution_attempts" ("decision_id","started_at");
+--> statement-breakpoint
 CREATE TABLE "llm_providers" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,

@@ -15,6 +15,13 @@ import {
 import { sql } from "drizzle-orm";
 import type { ParamMatcher } from "../policies/matchers.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
+import type {
+  ApprovalRequirement,
+  FactProvenance,
+  Obligation,
+  RedactionDirective,
+  TvcDecisionProof,
+} from "@valet/engine";
 
 // Postgres rewrite of `schema/index.ts` (docs/specs/2026-07-15-postgres-backend-design.md,
 // decision 7). Timestamps convert SELECTIVELY, not blanket:
@@ -1563,6 +1570,82 @@ export const actionInvocations = pgTable(
   ],
 );
 
+// Canonical authorization decisions and execution attempts use separate tables.
+// A policy effect cannot be stored as an execution outcome, and an execution
+// outcome cannot be stored as a policy effect.
+export const authorizationDecisions = pgTable(
+  "authorization_decisions",
+  {
+    decisionId: text("decision_id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    requestId: text("request_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestSubjectDigest: text("request_subject_digest").notNull(),
+    inputDigest: text("input_digest").notNull(),
+    policyDigest: text("policy_digest").notNull(),
+    compiledBundleDigest: text("compiled_bundle_digest").notNull(),
+    evaluatorKind: text("evaluator_kind", { enum: ["local_valet", "tvc_attested"] }).notNull(),
+    evaluatorEngineDigest: text("evaluator_engine_digest").notNull(),
+    effect: text("effect", { enum: ["allow", "deny", "require_approval"] }).notNull(),
+    reasonCode: text("reason_code").notNull(),
+    matchedRuleIds: jsonb("matched_rule_ids").$type<string[]>().notNull(),
+    obligations: jsonb("obligations").$type<Obligation[]>().notNull(),
+    redactions: jsonb("redactions").$type<RedactionDirective[]>().notNull(),
+    approvalRequirement: jsonb("approval_requirement").$type<ApprovalRequirement>(),
+    proof: jsonb("proof").$type<TvcDecisionProof>(),
+    proofVerificationStatus: text("proof_verification_status", {
+      enum: ["not_required", "verified", "failed"],
+    }).notNull(),
+    proofVerifiedAt: bigint("proof_verified_at", { mode: "number" }),
+    proofVerificationError: text("proof_verification_error"),
+    identityFactProvenance: jsonb("identity_fact_provenance").$type<FactProvenance[]>().notNull(),
+    policyFactProvenance: jsonb("policy_fact_provenance").$type<FactProvenance[]>().notNull(),
+    evaluatedAt: bigint("evaluated_at", { mode: "number" }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("authorization_decisions_org_created").on(t.orgId, t.createdAt),
+    index("authorization_decisions_idempotency_key").on(t.idempotencyKey),
+    index("authorization_decisions_request").on(t.requestId),
+    index("authorization_decisions_subject").on(t.requestSubjectDigest),
+    check("authorization_decisions_evaluator_kind", sql`${t.evaluatorKind} IN ('local_valet', 'tvc_attested')`),
+    check("authorization_decisions_effect", sql`${t.effect} IN ('allow', 'deny', 'require_approval')`),
+    check(
+      "authorization_decisions_proof_verification_status",
+      sql`${t.proofVerificationStatus} IN ('not_required', 'verified', 'failed')`,
+    ),
+    check(
+      "authorization_decisions_proof_kind",
+      sql`(${t.evaluatorKind} = 'tvc_attested' AND ${t.proof} IS NOT NULL AND ${t.proofVerificationStatus} IN ('verified', 'failed')) OR (${t.evaluatorKind} = 'local_valet' AND ${t.proof} IS NULL AND ${t.proofVerificationStatus} = 'not_required')`,
+    ),
+  ],
+);
+
+export const authorizationExecutionAttempts = pgTable(
+  "authorization_execution_attempts",
+  {
+    attemptId: text("attempt_id").primaryKey(),
+    decisionId: text("decision_id")
+      .notNull()
+      .references(() => authorizationDecisions.decisionId),
+    outcome: text("outcome", { enum: ["started", "completed", "failed", "cancelled", "indeterminate"] }).notNull(),
+    targetIdempotencyKey: text("target_idempotency_key"),
+    redactedResult: jsonb("redacted_result"),
+    redactedError: text("redacted_error"),
+    externalOperationIds: jsonb("external_operation_ids").$type<string[]>().notNull(),
+    startedAt: bigint("started_at", { mode: "number" }).notNull(),
+    finishedAt: bigint("finished_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("authorization_execution_attempts_decision_started").on(t.decisionId, t.startedAt),
+    check(
+      "authorization_execution_attempts_outcome",
+      sql`${t.outcome} IN ('started', 'completed', 'failed', 'cancelled', 'indeterminate')`,
+    ),
+  ],
+);
+
 // ─── LLM providers (org BYO keys + custom providers) ────────────────────────
 //
 // One row per org-configured LLM provider. The known kinds
@@ -2083,6 +2166,8 @@ export type ActionPolicyRow = typeof actionPolicies.$inferSelect;
 export type RuntimeGrantRow = typeof runtimeGrants.$inferSelect;
 export type ActionPolicyOverrideRow = typeof actionPolicyOverrides.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
+export type AuthorizationDecisionRow = typeof authorizationDecisions.$inferSelect;
+export type AuthorizationExecutionAttemptRow = typeof authorizationExecutionAttempts.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
 export type ModelRegistryCacheRow = typeof modelRegistryCache.$inferSelect;
 export type SessionRepoRow = typeof sessionRepos.$inferSelect;

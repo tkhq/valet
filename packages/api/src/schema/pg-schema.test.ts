@@ -73,6 +73,8 @@ const APP_TABLES = [
   "workflow_signals",
   "credentials",
   "action_invocations",
+  "authorization_decisions",
+  "authorization_execution_attempts",
   "llm_providers",
   "session_repos",
   "github_installations",
