@@ -242,6 +242,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     )`,
   },
   { describe: "authorization_decisions_org_created index", probe: { kind: "index", index: "authorization_decisions_org_created" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_org_created" ON "authorization_decisions" ("org_id","created_at")' },
+  { describe: "authorization_decisions_idempotency_key index", probe: { kind: "index", index: "authorization_decisions_idempotency_key" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_idempotency_key" ON "authorization_decisions" ("idempotency_key")' },
   { describe: "authorization_decisions_request index", probe: { kind: "index", index: "authorization_decisions_request" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_request" ON "authorization_decisions" ("request_id")' },
   { describe: "authorization_decisions_subject index", probe: { kind: "index", index: "authorization_decisions_subject" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_subject" ON "authorization_decisions" ("request_subject_digest")' },
   {

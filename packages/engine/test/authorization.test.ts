@@ -54,6 +54,36 @@ describe("authorization identities", () => {
     expect(replay).toEqual(first);
   });
 
+  it("uses portable SHA-256 output", () => {
+    const subject = routeAuthorizationSubject({ orgId: "org-1", principal, operationId: "operation-1" });
+    const identity = authorizationIdentity({ kind: "route.access", subject, action: { id: "route.read" } });
+
+    expect(identity.requestSubjectDigest).toBe("9c041a0dc5ded60269c3256b0ad13b22889165a6ea0f5112137e276bf352ad1b");
+  });
+
+  it("omits optional undefined object properties recursively", () => {
+    const subject = routeAuthorizationSubject({ orgId: "org-1", principal, operationId: "operation-1" });
+    const withUndefined = {
+      ...subject,
+      actorUserId: undefined,
+      principal: { ...subject.principal, optional: undefined },
+    };
+    const omitted = authorizationIdentity({
+      kind: "route.access",
+      subject,
+      action: { id: "route.read" },
+      resource: { type: "repository", id: "repo-1" },
+    });
+    const explicit = authorizationIdentity({
+      kind: "route.access",
+      subject: withUndefined,
+      action: { id: "route.read", service: undefined },
+      resource: { type: "repository", id: "repo-1", ownerId: undefined },
+    });
+
+    expect(explicit).toEqual(omitted);
+  });
+
   it("uses durable workflow, route, and resource operation identities", () => {
     const workflow = workflowAuthorizationSubject({
       orgId: "org-1",
