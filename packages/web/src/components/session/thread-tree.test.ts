@@ -167,10 +167,12 @@ describe("untitledThreadLabel", () => {
     expect(untitledThreadLabel(t("a", 1_000), 0)).toBe("New thread");
   });
 
-  it("gives an older thread a label that does not change when a new one arrives", () => {
+  it("uses a deterministic nonblank label while automatic naming is pending", () => {
     const older = t("b", 1_700_000_000_000);
+    const before = untitledThreadLabel(older, 3);
     // Same thread, two different positions after another thread is created.
-    expect(untitledThreadLabel(older, 3)).toBe(untitledThreadLabel(older, 7));
+    expect(before).toBe(untitledThreadLabel(older, 7));
+    expect(before.trim()).not.toBe("");
   });
 
   it("distinguishes two untitled threads created at different times", () => {

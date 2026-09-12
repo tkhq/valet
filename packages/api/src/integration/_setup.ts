@@ -72,6 +72,7 @@ import type { Providers } from "../providers/types.js";
 import { loadAuthConfig } from "../auth/config.js";
 import { buildAuthHooks } from "../auth/provisioning.js";
 import { buildAuth } from "../auth/index.js";
+import { createAutoTitleHost } from "../sessions/auto-title-host.js";
 
 export interface TestApi {
   baseUrl: string;
@@ -389,6 +390,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     githubUrl: opts.githubApiUrl,
   };
 
+  const autoTitleHost = createAutoTitleHost({
+    db,
+    engineStore,
+    eventStream,
+    namer: async () => "Test conversation",
+  });
+  autoTitleHost.start();
+
   const prebuildService = new SourceService({
     db,
     builder: opts.imageBuilder ?? null,
@@ -563,6 +572,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     onePassword,
     engineHost,
+    autoTitleHost,
     childWatcher,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
@@ -610,6 +620,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       await server.close();
       await eventDispatcher.stop();
       await channelHost.stop();
+      autoTitleHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });

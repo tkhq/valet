@@ -131,6 +131,27 @@ describe("busEventToWire", () => {
     expect(out).toEqual([{ type: "turn_end", threadId: "t1", reason: "end_turn" }]);
   });
 
+  it("forwards title updates after persistence", () => {
+    expect(
+      busEventToWire(
+        ev({
+          type: "title_updated",
+          threadId: "t1",
+          sessionTitle: "Fix Authentication",
+          threadTitle: "Fix Authentication",
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "title.updated",
+        sessionId: "s1",
+        threadId: "t1",
+        sessionTitle: "Fix Authentication",
+        threadTitle: "Fix Authentication",
+      },
+    ]);
+  });
+
   it("drops out-of-scope event types (thread_start, ...)", () => {
     expect(busEventToWire(ev({ type: "thread_start", threadId: "t1" }))).toEqual([]);
   });

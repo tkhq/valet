@@ -699,14 +699,6 @@ export const api = {
     request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
   replaceSandbox: (id: string) =>
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
-  autoTitleSession: (id: string, threadId?: string) => {
-    const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
-    return request<{ sessionTitle: string | null; threadTitle: string | null }>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/auto-title${qs}`,
-    );
-  },
-
   // orchestrator (session ids contain colons — always encoded above too, but
   // this entry point never touches a raw id itself, only ensures one exists)
   ensureOrchestrator: () =>

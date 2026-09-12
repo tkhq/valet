@@ -26,6 +26,7 @@ import type { WorkflowScheduler } from "../workflows/scheduler.js";
 import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import type { AutoTitleHost } from "../sessions/auto-title-host.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -62,6 +63,8 @@ export interface Providers {
 
   // Per-process Engine cache. Lives only on the server, not in engine.
   engineHost: EngineHost;
+  /** Names a thread after its first completed submission, independent of origin. */
+  autoTitleHost: AutoTitleHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
   /**

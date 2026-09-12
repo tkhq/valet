@@ -1243,8 +1243,8 @@ sessionsRouter.patch("/:id", async (c) => {
 
 /**
  * Generate + persist a title for this session (and optionally a thread)
- * from the opening messages. Fires from the client after the first
- * assistant reply settles; idempotent so replaying the trigger is safe.
+ * from the opening messages. The server normally starts naming from the
+ * completed-submission event; this route remains an idempotent retry seam.
  * Returns 200 with `{ sessionTitle, threadTitle }` even in the "nothing to
  * do" cases (`already_titled`, `no_messages`) — the client just treats
  * null title fields as "leave the row alone".

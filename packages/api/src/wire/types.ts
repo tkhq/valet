@@ -1571,6 +1571,16 @@ export type WireEvent =
       seq: number;
       ts: number;
       offset?: string;
+      type: "title.updated";
+      sessionId: string;
+      threadId: string;
+      sessionTitle?: string;
+      threadTitle?: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
       type: "sandbox.status";
       state: string;
       epoch: number;
