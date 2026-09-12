@@ -41,3 +41,20 @@ The Kubernetes provider test hit a clock race between the eviction cutoff and it
 All 90 provider tests passed separately. The initial Kubernetes unit-only scorecard row also passed.
 All GitHub CI checks passed for the implementation commit.
 [PR #672](https://github.com/tkhq/valet/pull/672) records the final isolated Kubernetes suite result.
+
+## Scroll direction follow-up
+
+On phones, the full session header slides above the thread when the reader scrolls down at least 12 pixels.
+An upward scroll of 12 pixels brings it back. At the top of the thread, the header stays visible.
+Place the header and sandbox tab strip in the transcript's sticky layer. Animate its transform without changing the scroll viewport or composer position.
+Streaming, initial positioning, and the Latest action do not change header visibility. Thread switches reveal it.
+Keyboard focus reveals header controls. Editing the session title keeps the header visible. Reduced motion disables the slide animation.
+Empty threads keep their controls. Resizing reveals the header and resets direction tracking.
+Desktop, embedded panel, and non-chat headers remain visible. Menus and dialogs keep their existing action handlers.
+
+Implementation plan: add direction tracking tests, move the full chat header into the sticky layer, verify browser scrolling and controls, then update PR #672.
+
+Scroll follow-up validation: 18 targeted tests passed, including initial messages, streaming, direction thresholds, title editing, and thread switches.
+Chromium touch swipes and WebKit wheel input at a phone viewport passed. The transcript height and composer position stayed constant during the slide.
+Full-profile sandbox tabs, keyboard focus, rotation, desktop pinning, and reduced-motion behavior passed browser checks.
+The complete web suite passed 2,977 tests. The final production build passed. Tab switching retains keyboard focus in both directions.

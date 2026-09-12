@@ -7,7 +7,7 @@
  * routing decision, not their internals (covered by their own tests).
  */
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { StreamMessage } from "~/stores/stream";
 import { MessageList } from "./message-list";
 
@@ -128,5 +128,87 @@ describe("MessageList jump-to-bottom", () => {
   it("never renders on an empty thread", () => {
     render(<MessageList messages={[]} threadId="t1" />);
     expect(screen.queryByRole("button", { name: "Jump to latest message" })).toBeNull();
+  });
+});
+
+
+describe("MessageList scrolling header", () => {
+  function renderThread() {
+    const result = render(<MessageList messages={[msg()]} threadId="t1" header={<button>Session controls</button>} />);
+    const el = screen.getByTestId("message-list");
+    Object.defineProperty(el, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
+    return { ...result, el, header: screen.getByTestId("thread-header") };
+  }
+  function scroll(el: HTMLElement, top: number, user = true) {
+    if (user) fireEvent.wheel(el, { deltaY: top - el.scrollTop });
+    el.scrollTop = top;
+    fireEvent.scroll(el);
+  }
+  it("accumulates movement, ignores jitter, and reveals on reversal or at the top", () => {
+    const { el, header } = renderThread();
+    scroll(el, 100, false);
+    scroll(el, 106);
+    expect(header.dataset.hidden).toBe("false");
+    scroll(el, 113);
+    expect(header.dataset.hidden).toBe("true");
+    scroll(el, 109);
+    expect(header.dataset.hidden).toBe("true");
+    scroll(el, 100);
+    expect(header.dataset.hidden).toBe("false");
+    scroll(el, 140);
+    scroll(el, -20);
+    expect(header.dataset.hidden).toBe("false");
+  });
+  it("does not hide for programmatic positioning and resets when the thread changes", () => {
+    const { el, header, rerender } = renderThread();
+    scroll(el, 200, false);
+    expect(header.dataset.hidden).toBe("false");
+    scroll(el, 240);
+    expect(header.dataset.hidden).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Jump to latest message" }));
+    fireEvent.scroll(el);
+    expect(header.dataset.hidden).toBe("true");
+    rerender(<MessageList messages={[msg({ threadId: "t2" })]} threadId="t2" header={<button>Session controls</button>} />);
+    expect(header.dataset.hidden).toBe("false");
+  });
+  it("opens the next thread at the bottom after the reader leaves the current thread's bottom", () => {
+    const { el, rerender } = renderThread();
+    scroll(el, 200);
+    rerender(<MessageList messages={[msg({ threadId: "t2" })]} threadId="t2" header={<button>Session controls</button>} />);
+    expect(el.scrollTop).toBe(2000);
+  });
+  it("unpins the header after a focused title input is removed", () => {
+    const messages = [msg()];
+    const result = render(<MessageList messages={messages} threadId="t1" header={<input aria-label="Title" />} />);
+    const el = screen.getByTestId("message-list");
+    Object.defineProperty(el, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: 400, configurable: true });
+    act(() => screen.getByRole("textbox", { name: "Title" }).focus());
+    scroll(el, 200);
+    expect(screen.getByTestId("thread-header").dataset.hidden).toBe("false");
+    result.rerender(<MessageList messages={messages} threadId="t1" header={<button>Session controls</button>} />);
+    scroll(el, 240);
+    expect(screen.getByTestId("thread-header").dataset.hidden).toBe("true");
+  });
+  it("keeps the header visible when streaming follows the bottom", () => {
+    const { el, header, rerender } = renderThread();
+    scroll(el, 1600, false);
+    Object.defineProperty(el, "scrollHeight", { value: 4000, configurable: true });
+    rerender(<MessageList messages={[msg({ content: "More streamed text" })]} threadId="t1" header={<button>Session controls</button>} />);
+    fireEvent.scroll(el);
+    expect(el.scrollTop).toBe(4000);
+    expect(header.dataset.hidden).toBe("false");
+  });
+  it("preserves header controls when the first message arrives", () => {
+    const header = <input aria-label="Title draft" defaultValue="Draft" />;
+    const { rerender } = render(<MessageList messages={[]} threadId="t1" header={header} />);
+    const input = screen.getByRole("textbox", { name: "Title draft" });
+    rerender(<MessageList messages={[msg()]} threadId="t1" header={header} />);
+    expect(screen.getByRole("textbox", { name: "Title draft" })).toBe(input);
+  });
+  it("keeps an empty thread's controls available", () => {
+    render(<MessageList messages={[]} threadId="t1" header={<button>Session controls</button>} />);
+    expect(screen.getByRole("button", { name: "Session controls" })).toBeTruthy();
   });
 });

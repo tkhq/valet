@@ -9,8 +9,9 @@
  *
  * All data hooks are mocked so this stays a pure rendering/branching test.
  */
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   RouterProvider,
@@ -19,6 +20,9 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import { SessionView } from "./session-view";
+
+let fullProfile = false;
+beforeEach(() => { fullProfile = false; });
 
 vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined }));
 
@@ -31,7 +35,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSession: () => ({
       isLoading: false,
       error: null,
-      data: { id: "sess-1", title: "fix-auth", workspace: "/workspace" },
+      data: { id: "sess-1", title: "fix-auth", workspace: "/workspace", profile: fullProfile ? "full" : "headless" },
     }),
     useThreads: () => ({ data: { threads: [{ id: "t1", createdAt: 0 }] } }),
     useMessages: () => ({ data: undefined }),
@@ -52,11 +56,12 @@ vi.mock("~/stores/stream", async (importOriginal) => {
 });
 
 vi.mock("./session-header", () => ({
+  SandboxChip: () => null,
   SessionHeader: ({ session }: { session: { title?: string } }) => (
     <div data-testid="full-header">{session.title}</div>
   ),
 }));
-vi.mock("./message-list", () => ({ MessageList: () => <div data-testid="message-list" /> }));
+vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) => <div data-testid="message-list">{header}</div> }));
 vi.mock("./composer", () => ({ Composer: () => <div data-testid="composer" /> }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
@@ -93,6 +98,19 @@ describe("SessionView header chrome", () => {
     const closeBtn = screen.getByLabelText("Close panel");
     closeBtn.click();
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("keeps focus on the selected sandbox tab across chat transitions", async () => {
+    fullProfile = true;
+    renderInRouter("sess-1", false);
+    const terminal = await screen.findByRole("tab", { name: "Terminal" });
+    act(() => terminal.focus());
+    fireEvent.click(terminal);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Terminal" })));
+    const chat = screen.getByRole("tab", { name: "Chat" });
+    act(() => chat.focus());
+    fireEvent.click(chat);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Chat" })));
   });
 
   it("renders the transcript and composer either way", async () => {
