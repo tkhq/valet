@@ -66,6 +66,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /workspace
 WORKDIR /workspace
 
+# ─── tk (Turnkey CLI) build stage ───────────────────────────────────────
+# `valet-sign` (git's gpg.ssh.program, installed by sandbox prep) execs
+# `tk ssh git-sign`, which signs commits with a key held in Turnkey
+# (docs/specs/2026-09-12-agent-commit-signing-design.md). tkhq/tk publishes
+# no release binaries yet, so the CLI is built from a pinned commit.
+FROM rust:1-bookworm AS tk-build
+ARG TK_GIT_REV=1b893111f425
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev git \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone https://github.com/tkhq/tk.git /src/tk \
+    && git -C /src/tk checkout "${TK_GIT_REV}" \
+    && cargo build --release --manifest-path /src/tk/Cargo.toml -p tk \
+    && install -m 0755 /src/tk/target/release/tk /out-tk
+
 # ─── Gateway build stage ────────────────────────────────────────────────
 # Builds @valet/sandbox-gateway's dist/ and produces a self-contained,
 # production-only package dir (workspace deps resolved to real files, no
@@ -94,6 +108,9 @@ RUN pnpm --filter @valet/sandbox-gateway deploy --legacy --prod /out/gateway
 
 # ─── Final image ────────────────────────────────────────────────────────
 FROM base
+
+# Turnkey CLI for commit signing; see the tk-build stage above.
+COPY --from=tk-build /out-tk /usr/local/bin/tk
 
 # Package-manager shims for the SHIPPED image, not just build stages.
 # node:22 bundles corepack but leaves it disabled: without `corepack
