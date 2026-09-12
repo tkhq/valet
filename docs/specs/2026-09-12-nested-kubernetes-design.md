@@ -306,7 +306,7 @@ The launcher-only environment MUST match `k3sEnv`. The enabled sandbox-global en
 The Helper MUST clear every unlisted `K3S_*`, `CONTAINERD_*`, and `ROOTLESSKIT_*` variable before launch. [K132]
 Stop MUST terminate a canceled archive process with the K99 bounded TERM and KILL sequence. [K133]
 A cold start MUST require the `minimumFreeBytes` vector within the existing PVC quota. [K134]
-The launcher MUST receive `k3sEnv`. The sandbox manifest MUST supply `sandboxEnv`; the launcher inherits those sandbox-global variables. [K142]
+The launcher MUST receive `k3sEnv`, while the sandbox manifest supplies `sandboxEnv` for inheritance. [K142]
 The image MUST provide Debian Bookworm `slirp4netns=1.2.0-1` at `/usr/bin/slirp4netns`. [K143]
 Diagnose MUST verify that slirp4netns path and package version without downloading a tool. [K144]
 Stop cleanup MUST preserve every PVC path outside Root. [K148]
@@ -316,7 +316,7 @@ Start MUST take the same adjacent exclusive lock before it creates Root. [K149]
 
 These errata are normative for the stacked implementation. They do not rewrite the approved specification branch.
 
-1. K136, K138, and K139 require kernel vectors. Acceptance-range coverage does not satisfy them. The validator MUST require `life-live-owner-no-theft` and `life-start-commit-after-stop` by ID. Deleting either vector MUST fail validation.
+1. K136, K138, and K139 require kernel vectors. Acceptance-range coverage does not satisfy them. The validator requires `life-live-owner-no-theft` and `life-start-commit-after-stop` by ID. Deleting either vector fails validation.
 2. The lifecycle kernel is total. `recover` with no active Operation returns a no-op report. Final-commit guards apply to start, import, and stop. Concurrent import during a live import waits for the owner. The lifecycle vectors define these branches.
 3. K131 and K142 distinguish environment sources. `sandboxEnv` supplies sandbox-global variables. `k3sEnv` supplies launcher-only variables.
 4. The informative L4 rollout range is A1 through A15.
