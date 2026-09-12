@@ -100,8 +100,16 @@ vi.mock("~/api/settings", async (importOriginal) => {
   return {
     ...actual,
     useGithubApp: () => ({ data: githubAppData, isLoading: false, error: null }),
+    useMe: () => ({ data: { email: "dev@example.com" }, isLoading: false, error: null }),
   };
 });
+
+// The commit signing row has its own suite (commit-signing-section.test.tsx);
+// here it renders the not-configured copy so it adds no buttons to the page.
+vi.mock("~/api/commit-signing", () => ({
+  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [] }, isLoading: false, error: null }),
+  useEnrollCommitSigning: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
 
 import { ConnectedAccountsPage } from "./settings.connected-accounts";
 
