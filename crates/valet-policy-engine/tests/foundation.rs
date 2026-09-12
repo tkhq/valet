@@ -40,6 +40,31 @@ fn capability_profile_is_explicit_about_current_coverage() {
     assert_eq!(profile.inventory_builtin_count, 163);
     assert_eq!(profile.builtins.len(), profile.inventory_builtin_count);
 
+    let serialized = serde_json::to_value(&profile).expect("profile must serialize");
+    let enforced = &serialized["limits"]["enforced"];
+    let declared_v2 = &serialized["limits"]["declared_v2"];
+    for name in [
+        "max_rego_source_bytes",
+        "max_policy_data_bytes",
+        "max_input_bytes",
+        "max_decision_output_bytes",
+    ] {
+        assert!(enforced.get(name).is_some());
+        assert!(declared_v2.get(name).is_none());
+    }
+    for name in [
+        "max_modules",
+        "max_parsed_nodes",
+        "max_compiled_policy_bytes",
+        "max_evaluation_instructions",
+        "max_document_depth",
+        "max_comprehension_values",
+        "max_explain_events",
+    ] {
+        assert!(declared_v2.get(name).is_some());
+        assert!(enforced.get(name).is_none());
+    }
+
     let names: BTreeSet<_> = profile
         .builtins
         .iter()
@@ -118,6 +143,109 @@ fn invalid_decision_output_fails_the_valet_contract() {
         package valet.foundation
         import rego.v1
         decision := {"effect": "allow"}
+    "#;
+
+    assert!(matches!(
+        evaluate(&request(policy)),
+        Err(EngineError::DecisionContract(_))
+    ));
+}
+
+#[test]
+fn enforced_byte_limits_fail_closed() {
+    let profile = capability_profile().expect("checked-in profile must be valid");
+    let enforced = profile.limits.enforced;
+
+    let oversized_source = " ".repeat(enforced.max_rego_source_bytes + 1);
+    assert!(matches!(
+        evaluate(&request(&oversized_source)),
+        Err(EngineError::PolicySourceLimit)
+    ));
+
+    let oversized_data = " ".repeat(enforced.max_policy_data_bytes + 1);
+    let mut oversized_data_request = request(POLICY);
+    oversized_data_request.policy_data_json = &oversized_data;
+    assert!(matches!(
+        evaluate(&oversized_data_request),
+        Err(EngineError::PolicyDataLimit)
+    ));
+
+    let oversized_input = " ".repeat(enforced.max_input_bytes + 1);
+    let mut oversized_input_request = request(POLICY);
+    oversized_input_request.input_json = &oversized_input;
+    assert!(matches!(
+        evaluate(&oversized_input_request),
+        Err(EngineError::InputLimit)
+    ));
+
+    let output_policy = r#"
+        package valet.foundation
+        import rego.v1
+        decision := {
+          "effect": "deny",
+          "reasonCode": data.reason,
+          "matchedRuleIds": [],
+          "obligations": [],
+          "redactions": [],
+        }
+    "#;
+    let large_reason = "x".repeat(enforced.max_decision_output_bytes + 1);
+    let output_data = serde_json::to_string(&serde_json::json!({ "reason": large_reason }))
+        .expect("output data must serialize");
+    let mut output_request = request(output_policy);
+    output_request.policy_data_json = &output_data;
+    assert!(matches!(
+        evaluate(&output_request),
+        Err(EngineError::DecisionLimit)
+    ));
+}
+
+#[test]
+fn unknown_decision_fields_fail_the_valet_contract() {
+    let top_level = r#"
+        package valet.foundation
+        import rego.v1
+        decision := {
+          "effect": "allow",
+          "reasonCode": "unknown_field",
+          "matchedRuleIds": [],
+          "obligations": [],
+          "redactions": [],
+          "unexpected": true,
+        }
+    "#;
+    let nested = r#"
+        package valet.foundation
+        import rego.v1
+        decision := {
+          "effect": "allow",
+          "reasonCode": "unknown_nested_field",
+          "matchedRuleIds": [],
+          "obligations": [{"type": "approval_tier", "tier": "low", "unexpected": true}],
+          "redactions": [],
+        }
+    "#;
+
+    for policy in [top_level, nested] {
+        assert!(matches!(
+            evaluate(&request(policy)),
+            Err(EngineError::DecisionContract(_))
+        ));
+    }
+}
+
+#[test]
+fn target_idempotency_requires_true() {
+    let policy = r#"
+        package valet.foundation
+        import rego.v1
+        decision := {
+          "effect": "allow",
+          "reasonCode": "invalid_literal",
+          "matchedRuleIds": [],
+          "obligations": [{"type": "target_idempotency", "required": false}],
+          "redactions": [],
+        }
     "#;
 
     assert!(matches!(

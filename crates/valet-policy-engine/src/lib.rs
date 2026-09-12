@@ -46,7 +46,7 @@ pub struct CapabilityProfile {
     pub default_host_capabilities: Vec<String>,
     pub inventory_source: String,
     pub inventory_builtin_count: usize,
-    pub limits: EngineLimits,
+    pub limits: CapabilityLimits,
     pub builtins: Vec<BuiltinCapability>,
 }
 
@@ -63,18 +63,28 @@ pub enum CompatibilityStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct EngineLimits {
-    pub max_modules: usize,
+pub struct CapabilityLimits {
+    pub enforced: EnforcedLimits,
+    pub declared_v2: DeclaredV2Limits,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct EnforcedLimits {
     pub max_rego_source_bytes: usize,
     pub max_policy_data_bytes: usize,
     pub max_input_bytes: usize,
+    pub max_decision_output_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct DeclaredV2Limits {
+    pub max_modules: usize,
     pub max_parsed_nodes: usize,
     pub max_compiled_policy_bytes: usize,
     pub max_evaluation_instructions: usize,
     pub max_document_depth: usize,
     pub max_comprehension_values: usize,
     pub max_explain_events: usize,
-    pub max_decision_output_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -122,7 +132,7 @@ pub enum AuthorizationEffect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
 pub enum Obligation {
     ApprovalTier {
         tier: String,
@@ -140,6 +150,7 @@ pub enum Obligation {
         capabilities: Vec<String>,
     },
     TargetIdempotency {
+        #[serde(deserialize_with = "deserialize_required_true")]
         required: bool,
     },
 }
@@ -153,6 +164,7 @@ pub enum RedactionTarget {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedactionDirective {
     pub target: RedactionTarget,
     #[serde(rename = "jsonPaths")]
@@ -176,6 +188,7 @@ pub enum ApprovalReplay {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalRequirement {
     pub tier: String,
     #[serde(rename = "approverType")]
@@ -188,6 +201,7 @@ pub struct ApprovalRequirement {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyDecisionV1 {
     pub effect: AuthorizationEffect,
     #[serde(rename = "reasonCode")]
@@ -198,6 +212,20 @@ pub struct PolicyDecisionV1 {
     pub redactions: Vec<RedactionDirective>,
     #[serde(rename = "approvalRequirement")]
     pub approval_requirement: Option<ApprovalRequirement>,
+}
+
+fn deserialize_required_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let required = bool::deserialize(deserializer)?;
+    if required {
+        Ok(true)
+    } else {
+        Err(serde::de::Error::custom(
+            "target_idempotency.required must be true",
+        ))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -235,7 +263,7 @@ pub fn capability_profile() -> Result<CapabilityProfile, EngineError> {
 
 pub fn evaluate(request: &EvaluationRequest<'_>) -> Result<PolicyDecisionV1, EngineError> {
     let profile = capability_profile()?;
-    enforce_limits(request, &profile.limits)?;
+    enforce_limits(request, &profile.limits.enforced)?;
     validate_entrypoint(request.entrypoint)?;
     validate_source_capabilities(request.policy_source, &profile)?;
 
@@ -256,12 +284,12 @@ pub fn evaluate(request: &EvaluationRequest<'_>) -> Result<PolicyDecisionV1, Eng
     let value = engine
         .eval_rule(request.entrypoint.to_owned())
         .map_err(|error| EngineError::Evaluation(error.to_string()))?;
-    decision_from_regorus(value, &profile.limits)
+    decision_from_regorus(value, &profile.limits.enforced)
 }
 
 fn enforce_limits(
     request: &EvaluationRequest<'_>,
-    limits: &EngineLimits,
+    limits: &EnforcedLimits,
 ) -> Result<(), EngineError> {
     if request.policy_source.len() > limits.max_rego_source_bytes {
         return Err(EngineError::PolicySourceLimit);
@@ -384,7 +412,7 @@ fn called_functions(source: &str) -> BTreeSet<String> {
 
 fn decision_from_regorus(
     value: RegorusValue,
-    limits: &EngineLimits,
+    limits: &EnforcedLimits,
 ) -> Result<PolicyDecisionV1, EngineError> {
     let json = value
         .to_json_str()
