@@ -20,9 +20,11 @@ interface Instruments {
 }
 
 let instruments: Instruments | undefined;
+let instrumentProvider: ReturnType<typeof metrics.getMeterProvider> | undefined;
 
 function getInstruments(): Instruments {
-  if (instruments) return instruments;
+  const provider = metrics.getMeterProvider();
+  if (instruments && instrumentProvider === provider) return instruments;
   // Lazy creation is required because this module loads before initTelemetry
   // registers the global provider during normal API boot.
   const meter = metrics.getMeter("@valet/api-prebuilds");
@@ -60,6 +62,7 @@ function getInstruments(): Instruments {
     }
   });
   instruments = created;
+  instrumentProvider = provider;
   return created;
 }
 
