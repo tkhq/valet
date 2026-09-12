@@ -63,6 +63,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { FindingsReview, groupFindings, VERIFY_REASON } from "./findings-review";
+import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const engagement: SecurityEngagementWire = {
   id: "eng-1",
@@ -152,7 +153,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("FindingsReview list", () => {
   it.each([true, false])("moves focus only for mobile drill-in navigation (mobile=%s)", async (mobile) => {
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: mobile })));
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: mobile, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     listFindingsMock.mockResolvedValue({ findings: [finding({ id: "f-focus" })], nextCursor: null });
     renderReview();
     const [row] = await screen.findAllByRole("option");
@@ -167,6 +168,38 @@ describe("FindingsReview list", () => {
       expect(row.getAttribute("aria-selected")).toBe("true");
     }
   });
+  it("preserves filter values while the phone filter controls are collapsed", async () => {
+    renderReview();
+    const toggle = screen.getByRole("button", { name: "Filters" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByLabelText("Filter by path"), { target: { value: "src/auth" } });
+    await waitFor(() => expect(listFindingsMock).toHaveBeenCalledWith("s-1", expect.objectContaining({ path: "src/auth" })));
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(screen.getByLabelText("Filter by path")).toHaveProperty("value", "src/auth");
+  });
+
+  it("expands review details and resets them for another finding", async () => {
+    listFindingsMock.mockResolvedValue({ findings: [finding({ id: "a" }), finding({ id: "b" })], nextCursor: null });
+    renderReview();
+    await screen.findAllByRole("option");
+    const toggle = screen.getByRole("button", { name: "Review details" });
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getAllByRole("option")[1]);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps the fix handoff available in the phone action menu", async () => {
+    listFindingsMock.mockResolvedValue({ findings: [finding({ id: "f-fix" })], nextCursor: null });
+    renderReview();
+    await screen.findByRole("article");
+    fireEvent.keyDown(screen.getByRole("button", { name: "Finding actions" }), { key: "Enter" });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Start a fix" }));
+    expect(useComposerPrefillStore.getState().consume()).toBe("Spawn a fix session for finding f-fix via sec_handoff");
+  });
+
   it("renders one row per finding with severity-first default sort", async () => {
     listFindingsMock.mockResolvedValue({
       findings: [

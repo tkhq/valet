@@ -137,13 +137,13 @@ export function EngagementPanel({
     // — no empty box under it. The overview sections above keep their natural
     // height; findings absorbs the slack and scrolls internally.
     <div className="flex flex-1 flex-col min-h-0 min-w-0">
-      <div className="sticky top-0 z-10 shrink-0 border-b border-line bg-paper p-3 md:hidden">
-        <label htmlFor={`security-section-${sessionId}`} className="mb-1 block text-xs font-medium text-muted">Review section</label>
+      <div className="sticky top-0 z-10 shrink-0 border-b border-line bg-paper px-3 py-2 md:hidden">
+        <label htmlFor={`security-section-${sessionId}`} className="sr-only">Review section</label>
         <select
           id={`security-section-${sessionId}`}
           value={section}
           onChange={(event) => setSection(event.target.value)}
-          className="h-11 w-full min-w-0 rounded-md border border-line bg-paper px-3 text-base text-ink"
+          className="h-11 w-full min-w-0 border-0 bg-paper px-1 text-base font-semibold text-ink"
         >
           <option value="overview">Overview</option>
           <option value="findings">Findings</option>

@@ -5,6 +5,7 @@
  * definition, never added from the palette). Plan decision 10.
  */
 import { useRef } from "react";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { ADDABLE_NODE_TYPES, NODE_META, type AddableDagNodeType } from "../editor-model";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/primitives";
 import { NODE_ICON } from "./node-icon";
@@ -45,9 +46,10 @@ export function Palette({ onAdd, disabled = false }: PaletteProps) {
 
 /** Compact palette keeps the canvas usable on narrow screens. */
 export function CompactPalette({ onAdd, disabled = false }: PaletteProps) {
+  const menu = useResponsiveOverlay("lg");
   const pendingTypeRef = useRef<AddableDagNodeType | null>(null);
   return (
-    <DropdownMenu>
+    <DropdownMenu open={menu.open} onOpenChange={menu.setOpen}>
       <DropdownMenuTrigger asChild>
         <Button variant="secondary" size="sm" disabled={disabled}>Add node</Button>
       </DropdownMenuTrigger>

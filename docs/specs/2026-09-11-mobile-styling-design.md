@@ -109,3 +109,25 @@ The full page-pass e2e run passed 29 checks and failed two infrastructure checks
 Kubernetes reported a pod before its storage claim was available. Postgres read an extra entry from a shared test session.
 The isolated Kubernetes case passed. Both complete infrastructure scorecard steps then passed on rerun.
 All 31 enabled checks passed across the full run and reruns. Four optional integrations were skipped as listed above.
+
+## Security phone redesign
+
+The Security hub shows one selected method on phones. A native selector keeps every method available without a long card list.
+Review options expands the model, path scope, and report controls. Closing these options preserves their values.
+The Configure action and existing reviews appear below this compact form. Desktop retains its method cards and visible options.
+
+The review section selector uses a compact toolbar. The findings list shows its count, Filters, and Export.
+Filters expand on demand and retain their values when closed. Finding detail hides the list controls.
+Larger titles and evidence text lead the phone detail. Verify and Refute remain direct actions with the existing permission checks.
+A More menu holds issue creation, fix handoff, and permalink copying. The menu closes when the desktop layout takes over.
+Review details expands provenance and the fingerprint. Selecting another finding resets this disclosure.
+Desktop retains visible filters, secondary actions, and provenance. List and detail navigation retains its keyboard focus behavior.
+
+## Final review
+
+The branch includes current dev-v2 navigation, team settings, policy labels, source controls, and workflow permissions.
+Independent standards and spec reviews found two workflow issues. The compact Add node menu now closes at the large breakpoint.
+The JSON editor fills its available height, keeping Apply reachable on short phone screens.
+Browser checks confirm menu lock release and a visible Apply control at 390 by 568 pixels.
+Security review also corrected primary button interaction colors and reduced-motion handling.
+The final web suite passes 2,966 tests across 265 files.

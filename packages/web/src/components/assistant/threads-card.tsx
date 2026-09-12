@@ -131,7 +131,7 @@ export function ThreadsCard() {
                     // `bg-muted-wash`, not `bg-muted/40` — the slash modifier
                     // on a `var()` token emits no rule (theme.css trap note),
                     // so the idle dot rendered invisible. Same trap killed the
-                    // row hover above: `hover:bg-ink-wash` emitted nothing;
+                    // row hover above: `hover:bg-ink-wash/60` emitted nothing;
                     // the wash token carries its own alpha, so it is used bare.
                     running > 0 ? "bg-moss animate-pulse motion-reduce:animate-none" : "bg-muted-wash",
                   )}

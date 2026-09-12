@@ -12,6 +12,8 @@ import {
   FileWarning,
   Hammer,
   MessageSquare,
+  MoreHorizontal,
+  SlidersHorizontal,
   Wrench,
   X,
 } from "lucide-react";
@@ -37,6 +39,10 @@ import {
   Dialog,
   DialogContent,
   DialogFooter,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
   Input,
   SelectMenu,
   Spinner,
@@ -44,6 +50,7 @@ import {
 } from "~/components/primitives";
 import { ServiceIcon } from "~/components/service-icon";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { cn } from "~/lib/cn";
 import { relativeTime } from "~/lib/relative-time";
@@ -193,6 +200,7 @@ export function FindingsReview({
   const [pathInput, setPathInput] = useState("");
   const path = useDebouncedValue(pathInput, 250);
   const [sort, setSort] = useState<SortKey>("severity");
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const filters: SecurityFindingsFilters = useMemo(
     () => ({
@@ -370,42 +378,57 @@ export function FindingsReview({
       {/* Keep phone detail focused; Back restores the filter state. */}
       <div className={cn(mobileDetail && selected && "hidden md:block")}>
         {/* Filters + export header */}
-        <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-line">
-          <SelectMenu
-            value={severity}
-            options={SEVERITY_OPTIONS}
-            onChange={setSeverity}
-            triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
-          />
-          <SelectMenu
-            value={status}
-            options={STATUS_OPTIONS}
-            onChange={setStatus}
-            triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
-          />
-          <SelectMenu
-            value={cellId}
-            options={cellOptions}
-            onChange={setCellId}
-            triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
-          />
-          <Input
-            value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-            placeholder="Filter by path"
-            aria-label="Filter by path"
-            className="h-11 w-full text-base md:h-7 md:w-36 md:text-xs"
-          />
-          <SelectMenu
-            value={sort}
-            options={[
-              { value: "severity", label: "By severity" },
-              { value: "recency", label: "By recency" },
-            ]}
-            onChange={setSort}
-            triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
-          />
-          <span className="flex-1" />
+        <div className="flex flex-wrap items-center gap-1.5 px-4 py-2 border-b border-line md:px-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2 md:hidden">
+            <span className="text-sm tabular-nums text-muted">{rows.length} {rows.length === 1 ? "finding" : "findings"}</span>
+          </div>
+          <Button
+            variant="ghost"
+            className="md:hidden"
+            aria-expanded={filtersOpen}
+            aria-controls={`finding-filters-${sessionId}`}
+            onClick={() => setFiltersOpen((open) => !open)}
+          >
+            <SlidersHorizontal className="h-4 w-4" aria-hidden />
+            Filters{filterActive ? " •" : ""}
+          </Button>
+          <div id={`finding-filters-${sessionId}`} className={cn("order-last w-full flex-wrap gap-2 border-t border-line py-3 md:contents", filtersOpen ? "flex" : "hidden")}>
+            <SelectMenu
+              value={severity}
+              options={SEVERITY_OPTIONS}
+              onChange={setSeverity}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+            <SelectMenu
+              value={status}
+              options={STATUS_OPTIONS}
+              onChange={setStatus}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+            <SelectMenu
+              value={cellId}
+              options={cellOptions}
+              onChange={setCellId}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+            <Input
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+              placeholder="Filter by path"
+              aria-label="Filter by path"
+              className="h-11 w-full text-base md:h-7 md:w-36 md:text-xs"
+            />
+            <SelectMenu
+              value={sort}
+              options={[
+                { value: "severity", label: "By severity" },
+                { value: "recency", label: "By recency" },
+              ]}
+              onChange={setSort}
+              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+            />
+          </div>
+          <span className="hidden md:flex-1 md:block" />
           {filterActive && findings.length > 0 && (
             <Button
               variant="ghost"
@@ -499,7 +522,7 @@ export function FindingsReview({
 
         {/* Detail */}
         <div className={cn("flex-1 min-w-0 md:overflow-y-auto", !(mobileDetail && selected) && "hidden md:block")}>
-          <Button ref={backRef} variant="ghost" className="m-2 min-h-11 md:hidden" onClick={() => {
+          <Button ref={backRef} variant="ghost" className="mx-2 mt-1 min-h-11 text-muted md:hidden" onClick={() => {
             pendingFocus.current = "list";
             setMobileDetail(false);
           }}>← Back to findings</Button>
@@ -661,7 +684,7 @@ function FindingRowLine({
       aria-selected={selected}
       onClick={() => onSelect(finding.id)}
       className={cn(
-        "min-h-11 px-3 py-3 md:py-2 cursor-pointer text-xs min-w-0",
+        "min-h-11 px-4 py-4 md:px-3 md:py-2 cursor-pointer text-sm md:text-xs min-w-0",
         selected ? "bg-moss-wash" : "hover:bg-ink-wash",
       )}
     >
@@ -682,7 +705,7 @@ function FindingRowLine({
             </Badge>
           </span>
         )}
-        <span className="font-medium text-ink min-w-0 flex-1 line-clamp-2">{finding.title}</span>
+        <span className="font-semibold leading-5 text-ink min-w-0 flex-1 line-clamp-2 md:font-medium md:leading-normal">{finding.title}</span>
         {trailing && <span className="shrink-0">{trailing}</span>}
       </div>
       {/* Line 2: the metadata that used to crowd the title off the row. */}
@@ -761,16 +784,25 @@ function FindingDetail({
   onOpenChild?: (childId: string) => void;
 }) {
   const url = blobUrl(engagement, finding.file, finding.line);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const actions = useResponsiveOverlay("md");
+  useEffect(() => setMetadataOpen(false), [finding.id]);
+  function copyPermalink() {
+    const permalink = new URL(window.location.href);
+    permalink.searchParams.set("finding", finding.id);
+    void navigator.clipboard.writeText(permalink.toString());
+    onNotice("Permalink copied.");
+  }
   return (
-    <article className="min-w-0 break-words px-4 py-3 space-y-3 text-xs" aria-label={finding.title}>
-      <header className="space-y-1">
+    <article className="min-w-0 break-words px-4 pb-5 pt-2 space-y-5 text-sm leading-6 md:py-3 md:space-y-3 md:text-xs md:leading-normal" aria-label={finding.title}>
+      <header className="space-y-2 md:space-y-1">
         <div className="flex items-center gap-2 flex-wrap">
           <SeverityBadge severity={finding.severity} />
           <FindingStatusChip status={finding.status} />
-          <h3 className="text-sm font-semibold text-ink">{finding.title}</h3>
+          <h3 className="w-full text-xl font-semibold leading-7 tracking-tight text-ink md:w-auto md:text-sm md:leading-normal md:tracking-normal">{finding.title}</h3>
         </div>
         {finding.file && (
-          <div className="min-w-0 break-all font-mono">
+          <div className="min-w-0 break-all font-mono text-xs leading-5 md:leading-normal">
             {url ? (
               <a
                 href={url}
@@ -801,6 +833,7 @@ function FindingDetail({
               variant="secondary"
               disabled={reviewPending || finding.status === "verified"}
               onClick={onVerify}
+              className="max-md:flex-1 max-md:bg-moss max-md:text-white max-md:hover:bg-moss max-md:hover:opacity-90 max-md:active:opacity-95 max-md:focus-visible:ring-moss max-md:dark:bg-moss max-md:dark:text-paper max-md:dark:hover:bg-moss"
             >
               <Check className="h-3.5 w-3.5 mr-1" aria-hidden />
               Verify
@@ -810,62 +843,84 @@ function FindingDetail({
               variant="secondary"
               disabled={reviewPending || finding.status === "refuted"}
               onClick={onRefute}
+              className="max-md:flex-1"
             >
               <X className="h-3.5 w-3.5 mr-1" aria-hidden />
               Refute
             </Button>
           </>
         )}
-        <Button size="sm" variant="secondary" onClick={onFileIssue}>
-          File issue
-        </Button>
-        <Button size="sm" variant="secondary" onClick={onFix}>
-          <Hammer className="h-3.5 w-3.5 mr-1" aria-hidden />
-          Fix
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            const permalink = new URL(window.location.href);
-            permalink.searchParams.set("finding", finding.id);
-            void navigator.clipboard.writeText(permalink.toString());
-            onNotice("Permalink copied.");
-          }}
-        >
-          <Copy className="h-3.5 w-3.5 mr-1" aria-hidden />
-          Copy permalink
-        </Button>
+        <div className="hidden md:contents">
+          <Button size="sm" variant="secondary" onClick={onFileIssue}>
+            File issue
+          </Button>
+          <Button size="sm" variant="secondary" onClick={onFix}>
+            <Hammer className="h-3.5 w-3.5 mr-1" aria-hidden />
+            Fix
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={copyPermalink}
+          >
+            <Copy className="h-3.5 w-3.5 mr-1" aria-hidden />
+            Copy permalink
+          </Button>
+        </div>
+        <div className="md:hidden">
+          <DropdownMenu open={actions.open} onOpenChange={actions.setOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="secondary" aria-label="Finding actions"><MoreHorizontal className="h-4 w-4" aria-hidden />More</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={onFileIssue}><FileWarning className="h-4 w-4" aria-hidden />File issue</DropdownMenuItem>
+              <DropdownMenuItem onSelect={onFix}><Hammer className="h-4 w-4" aria-hidden />Start a fix</DropdownMenuItem>
+              <DropdownMenuItem onSelect={copyPermalink}><Copy className="h-4 w-4" aria-hidden />Copy permalink</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       {/* Evidence — hostile data; escaped markdown only (see module note). */}
-      <div className="min-w-0 overflow-x-auto border border-line rounded-md px-3 py-2">
+      <div className="min-w-0 overflow-x-auto md:rounded-md md:border md:border-line md:px-3 md:py-2">
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted md:hidden">Evidence</h4>
         <Markdown>{finding.body}</Markdown>
       </div>
 
-      {/* Provenance */}
-      <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-0.5">
-        <dt className="text-muted">Cell</dt>
-        <dd className="min-w-0 break-all font-mono">
-          {cell ? `${cell.dir} (${cell.persona})` : finding.cellId}
-        </dd>
-        <dt className="text-muted">Reported</dt>
-        <dd>{new Date(finding.createdAt).toLocaleString()}</dd>
-        <dt className="text-muted">Fingerprint</dt>
-        <dd className="min-w-0 break-all font-mono">{finding.fingerprint}</dd>
-        {finding.statusActor && (
-          <>
-            <dt className="text-muted">Reviewed by</dt>
-            <dd className="min-w-0 break-all font-mono">{finding.statusActor}</dd>
-          </>
-        )}
-        {finding.statusReason && (
-          <>
-            <dt className="text-muted">Reason</dt>
-            <dd>{finding.statusReason}</dd>
-          </>
-        )}
-      </dl>
+      {/* Provenance stays available without crowding the phone evidence. */}
+      <div className="border-y border-line md:border-0">
+        <Button
+          variant="ghost"
+          className="w-full justify-between px-0 text-muted md:hidden"
+          aria-expanded={metadataOpen}
+          aria-controls={`finding-metadata-${finding.id}`}
+          onClick={() => setMetadataOpen((open) => !open)}
+        >
+          Review details<ChevronDown className={cn("h-4 w-4", metadataOpen && "rotate-180")} aria-hidden />
+        </Button>
+        <dl id={`finding-metadata-${finding.id}`} className={cn("grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 pb-3 text-xs md:grid md:gap-y-0.5 md:pb-0", metadataOpen ? "grid" : "hidden")}>
+          <dt className="text-muted">Cell</dt>
+          <dd className="min-w-0 break-all font-mono">
+            {cell ? `${cell.dir} (${cell.persona})` : finding.cellId}
+          </dd>
+          <dt className="text-muted">Reported</dt>
+          <dd>{new Date(finding.createdAt).toLocaleString()}</dd>
+          <dt className="text-muted">Fingerprint</dt>
+          <dd className="min-w-0 break-all font-mono">{finding.fingerprint}</dd>
+          {finding.statusActor && (
+            <>
+              <dt className="text-muted">Reviewed by</dt>
+              <dd className="min-w-0 break-all font-mono">{finding.statusActor}</dd>
+            </>
+          )}
+          {finding.statusReason && (
+            <>
+              <dt className="text-muted">Reason</dt>
+              <dd>{finding.statusReason}</dd>
+            </>
+          )}
+        </dl>
+      </div>
 
       {/* Filed issues */}
       {(finding.links ?? []).length > 0 && (
