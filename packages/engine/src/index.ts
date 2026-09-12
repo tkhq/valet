@@ -275,3 +275,4 @@ export {
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 export { formatTranscriptText } from "./transcript-formatter.js";
+export * from "./authorization/index.js";
