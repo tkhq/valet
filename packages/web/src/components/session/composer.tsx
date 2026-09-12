@@ -8,7 +8,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { Paperclip, Send, Square } from "lucide-react";
+import { ArrowUp, Paperclip, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
@@ -17,6 +17,7 @@ import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { draftKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
+import { useAutosizeTextarea } from "~/hooks/use-autosize-textarea";
 import {
   readCommandRecency,
   recordCommandUse,
@@ -82,9 +83,9 @@ const ACTION_HINT: Record<SubmitAction, string> = {
 };
 
 const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
-  send: "Send a message — Enter to send, Shift+Enter for a new line",
-  steer: "Press Enter to interrupt the current turn, or type a new queued message",
-  queue: "Queue a message for after this turn — Enter to queue, Shift+Enter for a new line",
+  send: "Send a message…",
+  steer: "Add another message…",
+  queue: "Add a follow-up…",
 };
 
 export function Composer({
@@ -112,6 +113,7 @@ export function Composer({
   const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  useAutosizeTextarea(inputRef, text);
 
   // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
   // update this" sets this store then navigates to `/chat`; the next
@@ -718,111 +720,123 @@ export function Composer({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       className={cn(
-        "shrink-0 border-t border-[--border] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-[--bg]",
+        "flex min-h-0 flex-col p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-paper",
         dragActive && "ring-2 ring-inset ring-moss",
       )}
     >
-      <QueueIndicator queueState={queueState} />
-      {dragActive && (
-        <p className="mb-2 text-xs text-muted">
-          {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
-        </p>
-      )}
-      <ComposerImageErrors
-        messages={imageErrors}
-        onDismiss={() => useComposerDraftStore.getState().setImageErrors(key, [])}
-      />
-      <ComposerImageStrip images={images} onRemove={removeImage} />
-      <ComposerFileErrors
-        messages={fileErrors}
-        onDismiss={() => useComposerDraftStore.getState().setFileErrors(key, [])}
-      />
-      <ComposerFileErrors
-        messages={submitError ? [submitError] : []}
-        onDismiss={() => setSubmitError(null)}
-      />
-      <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
-      {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
-      {/* `relative` anchors the command popup to the input row, so the hint
-          above it never moves the popup. */}
-      <div className="relative flex flex-wrap gap-2 items-end sm:flex-nowrap">
-        {(popupOpen || noticeOpen) && (
-          <CommandPopup
-            items={popupOpen ? popupItems : []}
-            notice={argNotice}
-            ariaLabel={
-              commandQuery !== null
-                ? `Slash command suggestions for /${commandQuery}`
-                : `Argument suggestions for /${argCommand?.name ?? ""}`
-            }
-            selectedIndex={selectedIndex}
-            onSelect={insertSelection}
-            onHover={setSelectedIndex}
-          />
+      <div className="flex min-h-0 flex-col rounded-2xl border border-line bg-paper p-2 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none">
+        <QueueIndicator queueState={queueState} />
+        {dragActive && (
+          <p className="mb-2 text-xs text-muted">
+            {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
+          </p>
         )}
-        <Textarea
-          ref={inputRef}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          onPaste={onPaste}
-          placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
-          rows={2}
-          className="min-w-0 basis-full sm:basis-auto sm:flex-1 max-h-[30dvh]"
-          disabled={send.isPending || !threadId}
+        <ComposerImageErrors
+          messages={imageErrors}
+          onDismiss={() => useComposerDraftStore.getState().setImageErrors(key, [])}
         />
-        <div className="flex w-full items-end justify-end gap-2 sm:w-auto">
-          {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                // With file uploads on, the picker accepts anything; images
-                // still route to the inline image path in `addFiles`.
-                accept={FILE_UPLOADS_ENABLED ? undefined : IMAGE_ACCEPT_ATTRIBUTE}
-                multiple
-                className="hidden"
-                onChange={onPickFiles}
-                data-testid="composer-image-input"
-              />
+        <ComposerImageStrip images={images} onRemove={removeImage} />
+        <ComposerFileErrors
+          messages={fileErrors}
+          onDismiss={() => useComposerDraftStore.getState().setFileErrors(key, [])}
+        />
+        <ComposerFileErrors
+          messages={submitError ? [submitError] : []}
+          onDismiss={() => setSubmitError(null)}
+        />
+        <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
+        {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
+        {/* `relative` anchors the command popup to the input row, so the hint
+            above it never moves the popup. */}
+        <div className="relative flex min-h-0 flex-col">
+          {(popupOpen || noticeOpen) && (
+            <CommandPopup
+              items={popupOpen ? popupItems : []}
+              notice={argNotice}
+              ariaLabel={
+                commandQuery !== null
+                  ? `Slash command suggestions for /${commandQuery}`
+                  : `Argument suggestions for /${argCommand?.name ?? ""}`
+              }
+              selectedIndex={selectedIndex}
+              onSelect={insertSelection}
+              onHover={setSelectedIndex}
+            />
+          )}
+          <Textarea
+            ref={inputRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKeyDown}
+            onPaste={onPaste}
+            placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
+            aria-label="Message"
+            rows={1}
+            className="block min-h-14 w-full min-w-0 max-h-[min(14rem,35dvh)] resize-none overflow-y-auto overscroll-contain rounded-none border-0 bg-transparent px-3 py-3 text-base leading-6 shadow-none caret-moss focus-visible:border-transparent focus-visible:ring-0 max-sm:rounded-none max-sm:px-3 max-sm:py-3 max-sm:shadow-none max-sm:focus-visible:ring-0"
+            disabled={send.isPending || !threadId}
+          />
+          <div className="flex shrink-0 items-center gap-2 px-1 pb-1 pt-1">
+            {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  // With file uploads on, the picker accepts anything; images
+                  // still route to the inline image path in `addFiles`.
+                  accept={FILE_UPLOADS_ENABLED ? undefined : IMAGE_ACCEPT_ATTRIBUTE}
+                  multiple
+                  className="hidden"
+                  onChange={onPickFiles}
+                  data-testid="composer-image-input"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="lg"
+                  className="h-11 w-11 shrink-0 rounded-xl p-0 text-muted hover:text-ink"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={intakeBlocked}
+                  aria-label={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+                  title={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+              </>
+            )}
+            <span className="min-w-0 flex-1 text-xs text-muted">
+              <span className="hidden sm:inline">
+                Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
+              </span>
+            </span>
+            {working && (
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="lg"
-                className="mr-auto sm:mr-0"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={intakeBlocked}
-                aria-label={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
-                title={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+                className="h-11 shrink-0 rounded-full px-3 text-danger-600 hover:text-danger-500 dark:text-danger-500"
+                onClick={() => void stop()}
+                disabled={!threadId || abort.isPending}
+                aria-label="Stop"
+                title="Stop (Esc)"
               >
-                <Paperclip className="h-4 w-4" />
+                <Square className="h-3.5 w-3.5 fill-current" />
+                <span>Stop</span>
               </Button>
-            </>
-          )}
-          {working && (
+            )}
             <Button
-              type="button"
-              variant="secondary"
+              type="submit"
+              disabled={!canSend}
               size="lg"
-              className="text-danger-600 hover:text-danger-500 dark:text-danger-500"
-              onClick={() => void stop()}
-              disabled={!threadId || abort.isPending}
-              aria-label="Stop"
-              title="Stop (Esc)"
+              title={sendTitle}
+              className={cn(
+                "h-11 shrink-0 rounded-full px-4 transition-colors motion-reduce:transition-none",
+                !canSend && "bg-ink-wash text-muted disabled:opacity-100",
+              )}
             >
-              <Square className="h-3.5 w-3.5 fill-current" />
-              <span>Stop</span>
+              <ArrowUp className="h-4 w-4" aria-hidden />
+              <span>{ACTION_LABEL[action]}</span>
             </Button>
-          )}
-          <Button
-            type="submit"
-            disabled={!canSend}
-            size="lg"
-            title={sendTitle}
-          >
-            <Send className="h-4 w-4" />
-            <span>{ACTION_LABEL[action]}</span>
-          </Button>
+          </div>
         </div>
       </div>
     </form>

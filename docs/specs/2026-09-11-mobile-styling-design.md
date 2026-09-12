@@ -44,3 +44,26 @@ The initial web build found duplicate props, which this pass corrected. The API 
 All 31 enabled checks passed across the full run and targeted reruns. Four optional integrations were skipped:
 Kubernetes full stack, Telegram, live GitHub App, and 1Password.
 Final targeted tests also pass for assistant/thread navigation, model controls, and drawer focus.
+
+## Text entry polish
+
+The composer uses one rounded surface for the draft, attachments, and actions. Its focus border and ring use theme tokens.
+The textarea grows with the draft, shrinks when cleared, and measures again when its container width changes.
+Long drafts scroll within a cap of 14 rem or 35 percent of the dynamic viewport height, whichever is smaller.
+The writing area also shrinks when the surrounding layout has less room. The action row keeps its height.
+Send, Queue, and Steer retain explicit labels and existing submission behavior. Desktop shows the keyboard shortcuts below the draft.
+
+Shared phone inputs use 48-pixel minimum heights, 16-pixel text, rounded corners, and more padding.
+Focus, caret, and text selection use the active palette. Desktop field sizing remains unchanged.
+Motion-reduction preferences disable the added transitions.
+
+Browser checks cover long-draft growth, height limits, internal scrolling, clearing, and typing at the end of a draft.
+The send control stays inside the viewport at 320 by 568, 390 by 400, 640 by 844, and 1440 by 900 pixels.
+These are Chromium viewport checks; they do not certify native iOS keyboard behavior.
+
+Text entry validation passes: 2,850 web tests, including 97 composer and autosize checks, plus web typecheck and production build.
+Light and dark screenshots confirm the mobile composer and shared form field styling. Existing drafts reflow without losing text.
+The second full e2e run passed 30 checks. The engine step failed on two child-process startup timeouts.
+Both tests passed in isolation, and the complete engine step then passed in the e2e runner.
+All 31 enabled checks passed across the full run and rerun. The same four optional integrations were skipped.
+The final flex sizing change passed browser checks, targeted tests, typecheck, production build, and independent code review.
