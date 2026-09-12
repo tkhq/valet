@@ -166,7 +166,7 @@ function withLock(shared, fn) {
     if (fstatSync(fd).uid !== 1500) throw Object.assign(new Error("The Kubernetes lock has unsafe ownership. Recreate the sandbox before retrying."), { exitCode: 21 });
     chmodSync(LOCK, 0o600); assertOwnedFile(LOCK, 0o600);
     const stdio = Array(fd + 1).fill("ignore"); stdio[fd] = fd;
-    const holder = spawn("/usr/bin/flock", ["--no-fork", shared ? "-s" : "-x", "-w", "30", String(fd), "/bin/sh", "-c", "kill -STOP $$; exec sleep 2147483647"], { stdio });
+    const holder = spawn("/usr/bin/flock", ["--no-fork", shared ? "-s" : "-x", "-w", "30", `/proc/self/fd/${fd}`, "/bin/sh", "-c", "kill -STOP $$; exec sleep 2147483647"], { stdio });
     const deadline = Date.now() + 31_000;
     while (Date.now() < deadline) {
       let state = "";
