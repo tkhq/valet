@@ -125,8 +125,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test cgroup delegation
-        run: bash docker/cgroup-delegation_test.sh
+      - name: Test cgroup delegation and user namespace preflight
+        run: |
+          bash docker/cgroup-delegation_test.sh
+          bash docker/userns-preflight_test.sh
 
   # The same thresholded STE lint the e2e "docs-lint" suite runs, promoted to
   # a blocking check. The runner's system python3 is enough; no setup step.

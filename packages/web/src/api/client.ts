@@ -25,6 +25,7 @@ import type {
   CreateSourceResponse,
   ListBakesResponse,
   ListSourcesResponse,
+  ListBakeQueueResponse,
   PatchSourceResponse,
   TriggerBakeResponse,
   CreateOrgPolicyRequest,
@@ -304,6 +305,26 @@ class ApiError extends Error {
   }
 }
 
+
+export interface MemoryCopyRequest {
+  from: string;
+  to: string;
+  teamId: string;
+  replacement?: { expectedVersion: string };
+}
+
+/** Only a structured destination conflict can authorize a replacement choice. */
+export function memoryCopyConflict(error: unknown): { version: string | null; changed: boolean } | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const payload = error.payload;
+  if (typeof payload !== "object" || payload === null || !("code" in payload) ||
+      !("destinationVersion" in payload)) return null;
+  const changed = payload.code === "MEMORY_DESTINATION_CHANGED";
+  if (!changed && payload.code !== "MEMORY_DESTINATION_EXISTS") return null;
+  const version = payload.destinationVersion;
+  if (changed && version === null) return { version, changed };
+  return typeof version === "string" && version.length > 0 ? { version, changed } : null;
+}
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
 // server restart — fetched once and cached, shared by `useAuthConfig`
@@ -679,14 +700,6 @@ export const api = {
     request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
   replaceSandbox: (id: string) =>
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
-  autoTitleSession: (id: string, threadId?: string) => {
-    const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : "";
-    return request<{ sessionTitle: string | null; threadTitle: string | null }>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/auto-title${qs}`,
-    );
-  },
-
   // orchestrator (session ids contain colons — always encoded above too, but
   // this entry point never touches a raw id itself, only ensures one exists)
   ensureOrchestrator: () =>
@@ -803,7 +816,7 @@ export const api = {
   // without rewriting it.
   writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }, owner?: OwnerFilter) =>
     request<unknown>("PUT", `/memory${ownerQuery(owner)}`, body),
-  copyMemoryFile: (direction: "push" | "pull", body: { from: string; to: string; teamId: string }) =>
+  copyMemoryFile: (direction: "push" | "pull", body: MemoryCopyRequest) =>
     request<{ file: { path: string; ownerType: string; ownerId: string } }>(
       "POST", `/memory/copy-${direction === "push" ? "to" : "from"}-team`, body,
     ),
@@ -1344,6 +1357,8 @@ export const api = {
 
   // sandbox image sources (sandbox-reconciliation plan, Task 18): org-admin
   // CRUD for all source kinds (external/base/repo) and bake history.
+  listBakeQueue: () => request<ListBakeQueueResponse>("GET", "/org/sources/queue"),
+  reorderBakeQueue: (bakeIds: string[]) => request<{ ok: true }>("PATCH", "/org/sources/queue", { bakeIds }),
   listSources: () => request<ListSourcesResponse>("GET", "/org/sources"),
   createSource: (body: Record<string, unknown>) => request<CreateSourceResponse>("POST", "/org/sources", body),
   patchSource: (id: string, body: Record<string, unknown>) =>
@@ -1404,8 +1419,15 @@ export const api = {
   deleteIdentityLink: (provider: string) =>
     request<{ ok: true }>("DELETE", `/me/identity-links/${encodeURIComponent(provider)}`),
 
-  // org action policies (action-policies plan, Task 4/5): admin CRUD +
-  // preview, keyset-paginated action log.
+  // Team policies reuse the org wire shapes, with no preview endpoint.
+  listTeamPolicies: (teamId: string) => request<ListOrgPoliciesResponse>("GET", `/teams/${encodeURIComponent(teamId)}/policies`),
+  createTeamPolicy: (teamId: string, body: CreateOrgPolicyRequest) =>
+    request<CreateOrgPolicyResponse>("POST", `/teams/${encodeURIComponent(teamId)}/policies`, body),
+  patchTeamPolicy: (teamId: string, id: string, body: PatchOrgPolicyRequest) =>
+    request<PatchOrgPolicyResponse>("PATCH", `/teams/${encodeURIComponent(teamId)}/policies/${encodeURIComponent(id)}`, body),
+  deleteTeamPolicy: (teamId: string, id: string) =>
+    request<DeleteOrgPolicyResponse>("DELETE", `/teams/${encodeURIComponent(teamId)}/policies/${encodeURIComponent(id)}`),
+  // Org policy CRUD and preview; action log below.
   listOrgPolicies: () => request<ListOrgPoliciesResponse>("GET", "/org/policies"),
   createOrgPolicy: (body: CreateOrgPolicyRequest) =>
     request<CreateOrgPolicyResponse>("POST", "/org/policies", body),
@@ -1444,6 +1466,10 @@ export const api = {
     request<PutPolicyOverrideResponse>("PUT", "/me/policy-overrides", body),
   deleteMyPolicyOverride: (body: DeletePolicyOverrideRequest) =>
     request<DeletePolicyOverrideResponse>("DELETE", "/me/policy-overrides", body),
+  putTeamPolicyOverride: (teamId: string, body: PutPolicyOverrideRequest) =>
+    request<CreateOrgPolicyResponse>("PUT", `/teams/${encodeURIComponent(teamId)}/policy-overrides`, body),
+  listTeamGrants: (teamId: string) => request<ListGrantsResponse>("GET", `/teams/${encodeURIComponent(teamId)}/grants`),
+  deleteTeamGrant: (teamId: string, id: string) => request<DeleteGrantResponse>("DELETE", `/teams/${encodeURIComponent(teamId)}/grants/${encodeURIComponent(id)}`),
   listMyGrants: () => request<ListGrantsResponse>("GET", "/me/grants"),
   deleteMyGrant: (body: DeleteGrantRequest) =>
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),

@@ -422,3 +422,28 @@ describe("resolvePolicyDecision — principalType: user rows in action_policies 
     expect(decision.provenance.source).toBe("risk_default");
   });
 });
+
+describe("team action policies", () => {
+  const teamPolicy = (mode: ActionPolicyRow["mode"]) => orgPolicy({ id: "team-rule", principalType: "team", service: "gmail", mode });
+  it("keeps org deny above team allow and runtime approval", () => {
+    const result = resolvePolicyDecision(rows({ policies: [orgPolicy({ service: "gmail", mode: "deny" }), teamPolicy("allow")], grants: [grant()] }), baseInput(), undefined);
+    expect(result).toMatchObject({ mode: "deny", provenance: { source: "org_policy" } });
+  });
+  it("keeps team deny above org allow and runtime approval", () => {
+    const result = resolvePolicyDecision(rows({ policies: [orgPolicy({ service: "gmail", mode: "allow" }), teamPolicy("deny")], grants: [grant()] }), baseInput(), undefined);
+    expect(result).toMatchObject({ mode: "deny", provenance: { source: "team_policy" } });
+  });
+  it("does not let team allow loosen org approval", () => {
+    const result = resolvePolicyDecision(rows({ policies: [orgPolicy({ service: "gmail", mode: "require_approval" }), teamPolicy("allow")] }), baseInput(), undefined);
+    expect(result).toMatchObject({ mode: "require_approval", provenance: { source: "org_policy" } });
+  });
+  it("lets team approval tighten an org allow and allows a scoped grant", () => {
+    const policies = [orgPolicy({ service: "gmail", mode: "allow" }), teamPolicy("require_approval")];
+    expect(resolvePolicyDecision(rows({ policies }), baseInput(), undefined)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
+    expect(resolvePolicyDecision(rows({ policies, grants: [grant()] }), baseInput(), undefined).mode).toBe("allow");
+  });
+  it("honors expiry and session-only applicability on team rules", () => {
+    const policies = [{ ...teamPolicy("deny"), appliesIn: "session" as const }, { ...teamPolicy("deny"), expiresAt: NOW }];
+    expect(resolvePolicyDecision(rows({ policies }), baseInput({ appliesIn: "workflow" }), "allow").mode).toBe("allow");
+  });
+});

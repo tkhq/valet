@@ -1,3 +1,4 @@
+import { orchestratorName } from "~/lib/assistant-name";
 import { Link } from "@tanstack/react-router";
 import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import { Spinner } from "~/components/primitives";
@@ -78,7 +79,7 @@ function OriginPill({ thread }: { thread: Pick<ThreadSummary, "key"> }) {
 export function ThreadsCard() {
   const info = useOrchestratorInfo();
   const sessionId = info.data?.sessionId;
-  const name = info.data?.name ?? "your assistant";
+  const name = orchestratorName(info.data?.name);
 
   const threadsQ = useThreads(sessionId ?? "");
   const childrenQ = useOrchestratorChildren();

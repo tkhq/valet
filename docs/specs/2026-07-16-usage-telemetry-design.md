@@ -84,3 +84,20 @@ The average divides session-days by all calendar days in the selected window: 1,
 Team ownership comes from `cost_entries`, never the actor's memberships. Member activity uses the recorded queue prompt author, then the child's spawning actor. Ordinary sessions without either stamp use the existing session user. Shared assistants without an actor and team workflows without an actor appear under **Team / shared**. Activity can differ from billing attribution in the adjacent spend columns. A shared session used by two members counts once for each member that day; summing member averages is not a unique team total.
 
 This adapts PR635's retained-usage session counting without adding another UI query, telemetry writes, or agent metric labels. Deleted usage and ownership rows remove history. Removing queue or child metadata can change attribution. These are retained-data observations, not permanent audit records.
+
+
+## Active agents headline (2026-09-11)
+
+The usage breakdown includes `activeAgents` for personal, team, and org scope.
+It counts distinct engine session IDs with positive-token cost entries from
+`now - windowMs` through `now`, including both boundaries. Unpriced usage counts.
+Assistants, orchestrators, children, and workflow agent sessions use the same rule.
+Repeated turns, threads, actors, and days do not increase a session's count.
+Sessions without token usage in the window, zero-token entries, and proxy requests do not count.
+
+The query uses the existing cost view and usage scope predicates. Team members
+can see the aggregate count without per-member rows or session identifiers.
+The headline uses the selected rolling window. The By member daily average
+keeps its calendar-day definition; its values are not summed for this headline.
+The five headline cards wrap from one to two to five columns as width permits.
+Retained usage and ownership determine the count; this does not add permanent history.

@@ -4,7 +4,7 @@
  * the cap, attribution, tone mapping) and the header's assistant line, which
  * must name an assistant exactly as the rail, the chat header and the
  * assistants list do. One name for one thing: the header calls the shared
- * `assistantLabel`, so an unnamed default reads "Default assistant" on every
+ * `assistantLabel`, so an unnamed default reads "Default Orchestrator" on every
  * surface instead of "Untitled assistant" on this one.
  */
 import type { ReactNode } from "react";
@@ -24,7 +24,9 @@ let teamsData: ListTeamsResponse = { teams: [] };
 // The header and cards render bare Links, which need a router — stub them to
 // anchors, same as every other test of a routed surface.
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
+  Link: ({ children, to, params }: { children: ReactNode; to: string; params?: Record<string, string> }) => (
+    <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a>
+  ),
   useNavigate: () => vi.fn(),
   useSearch: () => ({}),
 }));
@@ -150,6 +152,14 @@ describe("TeamDashboard header", () => {
     teamsData = { teams: [] };
   });
 
+  it("opens the full assistants list from the team action and individual editors from names", () => {
+    assistantsData = { assistants: [teamAssistant({ name: "Sentinel" }), teamAssistant({ id: "asst_second", name: "Scout", isDefault: false })] };
+    render(<TeamDashboard teamId="team-1" />);
+    expect(screen.getByRole("link", { name: "Edit assistant" }).getAttribute("href")).toBe("/assistants");
+    expect(screen.getByRole("link", { name: "Sentinel" }).getAttribute("href")).toBe("/assistants/asst_team");
+    expect(screen.getByRole("link", { name: "Scout" }).getAttribute("href")).toBe("/assistants/asst_second");
+  });
+
   it("names an unnamed team default the way every other surface does", () => {
     const assistant = teamAssistant();
     assistantsData = { assistants: [assistant] };
@@ -167,6 +177,6 @@ describe("TeamDashboard header", () => {
     render(<TeamDashboard teamId="team-1" />);
 
     expect(screen.getByText("Sentinel")).toBeDefined();
-    expect(screen.queryByText("Default assistant")).toBeNull();
+    expect(screen.queryByText("Default Orchestrator")).toBeNull();
   });
 });

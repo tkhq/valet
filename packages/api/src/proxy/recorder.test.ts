@@ -43,6 +43,22 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
 `;
 
 describe("recordProxyCall", () => {
+  it("records team ownership and metrics without attributing the creator", async () => {
+    const insert = vi.fn(async (_row: Record<string, unknown>) => {});
+    const metric = vi.fn();
+    await recordProxyCall(
+      { insert, metric, unpriced: vi.fn(), now: () => 1000, id: () => "team-request" },
+      {
+        principal: { userId: null, teamId: "team-1", orgId: "org-1", keyId: "key-1" },
+        kind: "anthropic", endpoint: "/v1/messages", harness: "claude-code",
+        requestBody: '{"model":"claude-sonnet-4-5"}',
+        stream: streamOf(anthropicResp), statusCode: 200, startMs: 900,
+      },
+    );
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ userId: null, teamId: "team-1", orgId: "org-1", apiKeyId: "key-1" }));
+    expect(metric).toHaveBeenCalledWith(expect.any(Number), expect.objectContaining({ teamId: "team-1" }));
+    expect(metric.mock.calls[0][1]).not.toHaveProperty("userId");
+  });
   it("inserts one row with usage, cost, bodies, and parsed sample", async () => {
     const inserted: Record<string, unknown>[] = [];
     await recordProxyCall(

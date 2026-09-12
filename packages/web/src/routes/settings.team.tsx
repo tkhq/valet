@@ -1,4 +1,4 @@
-import { createFileRoute, Navigate } from "@tanstack/react-router";
+import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { useOrgDirectory } from "~/api/settings";
 import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
@@ -21,6 +21,11 @@ function SelectedTeamSettings({ teamId }: { teamId: string }) {
 
   return (
     <Section title="Team" description="Settings for the selected team workspace.">
+      <div className="py-3">
+        <Link to="/assistants" className="text-sm text-moss underline-offset-2 hover:underline">
+          Edit assistant
+        </Link>
+      </div>
       {directory.isLoading ? (
         <LoadingRow label="Loading team settings…" />
       ) : directory.error != null ? (

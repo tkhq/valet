@@ -503,6 +503,7 @@ async function enforceWorkflowPolicy(
   try {
     decision = await resolveActionPolicy(opts.db, {
       orgId: ctx.orgId,
+      teamId: ctx.owner.type === "team" ? ctx.owner.id : undefined,
       userId: ctx.userId,
       service: req.service,
       actionId: policyActionId,
@@ -515,7 +516,8 @@ async function enforceWorkflowPolicy(
     });
   } catch (err) {
     console.error("action-invoker: policy resolution failed:", err);
-    if (req.approval) {
+    if (req.approval && ctx.owner.type !== "team") {
+      // Team actions must re-check team denies even after approval.
       // Human approval is the authorization — proceed even though the
       // resolver could not be consulted. The signal is the authority.
       // Write a best-effort audit row so the approved execution is
@@ -581,7 +583,7 @@ async function enforceWorkflowPolicy(
       params: req.params,
       createdAt: now,
     });
-    return { ok: false, error: `${req.service}.${req.action} is blocked by org policy` };
+    return { ok: false, error: `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy` };
   }
 
   // decision.mode === "require_approval"

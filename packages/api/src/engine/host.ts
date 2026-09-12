@@ -3347,6 +3347,21 @@ export class EngineHost {
     };
   }
 
+  /** Resolve an existing startup image before child creation mutates state. */
+  async resolveChildStartupImage(meta: SessionMeta): Promise<string | null> {
+    const snapshot = await resolveSnapshot({
+      db: this.opts.db,
+      provider: this.opts.sandboxProvider,
+      meta,
+      apiUrl: this.opts.sandboxApiUrl ?? "http://localhost:8788",
+      stockImage: this.opts.defaultImages?.full ?? this.opts.defaultImage ?? "",
+      preflight: this.opts.prebuildPreflight,
+    });
+    // Use startup's repo -> base -> stock fallback, including its pull preflight.
+    // A missing image cannot bypass a failed registry-capacity check.
+    return computeSpec(snapshot).image || null;
+  }
+
   /**
    * Resolve (or lazily create) a child session (Phase 4 decision 10/11).
    * Purpose 'child', linked to its parent via `parentSessionId`/

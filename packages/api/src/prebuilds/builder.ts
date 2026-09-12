@@ -18,6 +18,12 @@ export interface ImageBuilder {
    * started), not once it finishes — poll `status(buildId)` for progress. */
   build(spec: PrebuildSpec): Promise<{ buildId: string }>;
 
+  /** Process-local dispatch state. Running includes work submitted to the backend. */
+  queueSnapshot?(): { running: string[]; queued: string[] };
+
+  /** Atomically permute exactly the caller's waiting builds, preserving other slots. */
+  reorderQueue?(expectedBuildIds: string[], buildIds: string[]): boolean;
+
   /** Current state of a previously-`build()`-ed image. */
   status(buildId: string): Promise<BuildStatus>;
 
@@ -75,4 +81,15 @@ export interface BuildStatus {
   state: "queued" | "building" | "pushed" | "failed";
   logTail?: string;
   error?: string;
+}
+
+/** Validate the whole permutation before changing the builder-owned waiting array. */
+export function reorderWaitingBuilds(queue: string[], expected: string[], order: string[]): boolean {
+  const owned = new Set(expected);
+  if (owned.size !== expected.length || order.length !== expected.length || new Set(order).size !== order.length) return false;
+  if (order.some((id) => !owned.has(id))) return false;
+  const slots = queue.flatMap((id, index) => owned.has(id) ? [index] : []);
+  if (slots.length !== expected.length) return false;
+  slots.forEach((slot, index) => { queue[slot] = order[index]!; });
+  return true;
 }

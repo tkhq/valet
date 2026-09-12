@@ -58,6 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     curl \
     procps \
+    tini=0.19.0-1+b3 \
     bash \
     openssh-client \
   && rm -rf /var/lib/apt/lists/*
@@ -246,25 +247,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # up. The docker group is what lets non-privileged workload execs reach
 # the rootful-in-userns daemon's socket (start-docker.sh
 # VALET_DOCKER_USERNS=1 branch: root:docker, mode 660).
-# The sub-id range MUST fit inside a kubernetes pod user namespace
-# (hostUsers: false maps exactly 65536 ids, 0..65535 — kubelet default).
-# A range starting at 200000 has no mapping there, so newuidmap fails and
-# rootless dockerd cannot start. 2000..65535 stays clear of the dockerd
-# uid (1500) and the system ids; the cost is that container images with
-# file uids >= 63536 lose those mappings (rare). (The rootless path only
-# matters on the docker local-dev backend now — the k8s branch runs
-# rootful inside the pod userns and never touches sub-ids.)
+# RootlessKit maps nested IDs 1..65535 to these subordinate IDs. They must
+# stay outside the pod's low/system identities while preserving every 16-bit
+# container identity. Kubernetes userns pods require idsPerPod: 131072;
+# /userns-preflight.sh fails closed on smaller outer maps.
 RUN (getent group docker >/dev/null || groupadd docker) \
     && useradd -m -u 1500 -G docker dockerd \
     && grep -v '^dockerd:' /etc/subuid > /tmp/subuid.tmp && mv /tmp/subuid.tmp /etc/subuid \
     && grep -v '^dockerd:' /etc/subgid > /tmp/subgid.tmp && mv /tmp/subgid.tmp /etc/subgid \
-    && echo "dockerd:2000:63536" >> /etc/subuid \
-    && echo "dockerd:2000:63536" >> /etc/subgid
+    && echo "dockerd:65536:65535" >> /etc/subuid \
+    && echo "dockerd:65536:65535" >> /etc/subgid
 
 COPY docker/cgroup-delegation.sh /cgroup-delegation.sh
+COPY docker/userns-preflight.sh /userns-preflight.sh
 COPY docker/start-docker.sh /start-docker.sh
 COPY docker/start-headless.sh /start-headless.sh
-RUN chmod +x /cgroup-delegation.sh /start-docker.sh /start-headless.sh
+RUN chmod +x /cgroup-delegation.sh /userns-preflight.sh /start-docker.sh /start-headless.sh
 
 COPY docker/start-full.sh /start-full.sh
 RUN chmod +x /start-full.sh

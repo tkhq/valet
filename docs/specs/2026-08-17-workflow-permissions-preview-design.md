@@ -20,7 +20,7 @@ nodes — including a `foreach` node whose body is a tool node, which gates
 at run time exactly like a top-level one — and resolves each `(service,
 qualified actionId)` with the same precedence core the run-time invoker
 uses (`resolvePolicyDecision` over one `loadPolicyRows` snapshot,
-`appliesIn: "workflow"`, the caller's `userId`, no execution id). A
+`appliesIn: "workflow"`, the stored workflow's team scope or the caller's personal scope, no execution id). A
 foreach-body action is attributed to the foreach node's id, the card the
 editor draws. The prediction must be server-side: org policies are readable
 only by org admins, so a member's client cannot compute it.
@@ -55,6 +55,8 @@ action may run without asking me" is the per-user policy override
 `POST /api/workflows/:id/permissions/allow` writes one `allow` override per
 gating action. Rules:
 
+- Team workflows return HTTP 400 without writing overrides. The error directs the caller to a team admin and Settings → Policies.
+- Team previews include that team's policies and exclude personal overrides. The stored workflow supplies the team ID after authorization.
 - The `(service, actionId)` set is derived server-side from the stored
   definition. The optional `actionIds` body field can only narrow it; an id
   outside the gating set is a 400. This is the same server-derivation rule
@@ -111,6 +113,3 @@ cross-owner access 404s.
   after the save (the detail invalidation refetches it).
 - `unknown` actions are excluded from both the badge and the bulk allow; a
   run that reaches one can still gate on its resolved risk level.
-- Team-owned workflows: the prediction and the overrides are for the
-  CALLING user. A run started by a teammate resolves against that
-  teammate's overrides.

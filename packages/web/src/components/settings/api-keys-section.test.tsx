@@ -135,8 +135,8 @@ describe("ApiKeysSection — team workspace", () => {
         <ApiKeysSection />
       </Wrapper>,
     );
-    expect(screen.getByText(/belongs to/)).toBeTruthy();
-    expect(screen.getByText("Platform")).toBeTruthy();
+    expect(screen.getByText(/Team members can see key names/)).toBeTruthy();
+    expect(screen.getByText("Secrets are shown once. Share only with intended users.")).toBeTruthy();
     expect(screen.queryByRole("combobox")).toBeNull();
     expect(screen.queryByLabelText(/owner/i)).toBeNull();
     expect(screen.getByText(/No API keys in Platform yet/)).toBeTruthy();

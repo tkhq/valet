@@ -395,7 +395,7 @@ describe("buildSandboxManifest", () => {
       expect(container?.command?.slice(4)).toEqual([
         "sh",
         "-c",
-        "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+        "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
       ]);
     });
   });
@@ -552,7 +552,7 @@ describe("docker flag (rootless DinD)", () => {
     expect(cr.spec.podTemplate.spec.containers[0]!.command?.slice(4)).toEqual([
       "sh",
       "-c",
-      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+      "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
     ]);
   });
 

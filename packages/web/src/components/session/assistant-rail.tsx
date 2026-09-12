@@ -29,6 +29,7 @@ import {
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { cn } from "~/lib/cn";
+import { assistantLabel } from "~/lib/assistant-name";
 import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
 import { ThreadTree, ThreadTreeWaiting } from "./thread-tree";
 
@@ -317,11 +318,7 @@ export function chooseChatAssistant(
 
 /** What the row is called. An assistant nobody has named says so, rather
  * than borrowing a name the user never chose. */
-export function assistantLabel(assistant: AssistantSummary): string {
-  const name = assistant.name?.trim();
-  if (name) return name;
-  return assistant.isDefault ? "Default assistant" : "Untitled assistant";
-}
+export { assistantLabel } from "~/lib/assistant-name";
 
 /** Creating, renaming and archiving follow the same rule as administering a
  * session: your own for a user assistant, team admin (or org admin) for a

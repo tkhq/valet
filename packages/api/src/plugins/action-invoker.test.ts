@@ -1890,6 +1890,34 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     expect(fixture.calls()).toBe(0);
   });
 
+  it("cannot approve past a team deny", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    await db.insert(actionPolicies).values({ id: "team-block", orgId: ORG, principalType: "team", principalId: "team-a", service: "demo", mode: "deny", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const result = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "team-deny", approval: { resolvedBy: "u1" } }, { ...wfCtx, owner: { type: "team", id: "team-a" } });
+    expect(result).toEqual({ ok: false, error: "demo.deploy is blocked by team policy" });
+    expect(fixture.calls()).toBe(0);
+  });
+
+  it("rechecks team policy even when an approved action's policy read fails", async () => {
+    const db = await makeDb();
+    const fixture = highRiskAction();
+    const originalSelect = db.select.bind(db);
+    let selects = 0;
+    const failingDb = new Proxy(db, { get(target, prop, receiver) {
+      if (prop !== "select") return Reflect.get(target, prop, receiver);
+      return (...args: Parameters<typeof db.select>) => {
+        if (++selects === 2) throw new Error("policy store unavailable");
+        return originalSelect(...args);
+      };
+    } });
+    const invoke = buildActionInvoker({ db: failingDb, credentials: new FakeCredentialStore(), actionPluginByService: highRiskPlugin(fixture.action) });
+    const result = await invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "team-outage", approval: { resolvedBy: "u1" } }, { ...wfCtx, owner: { type: "team", id: "team-a" } });
+    expect(result).toEqual({ ok: false, requiresApproval: true, provenance: "resolver_error" });
+    expect(fixture.calls()).toBe(0);
+  });
+
   it("resolver_error + approval field executes on the signal's authority", async () => {
     const db = await makeDb();
     const fixture = highRiskAction();

@@ -1,3 +1,4 @@
+import { orchestratorName } from "~/lib/assistant-name";
 import { WorkflowAgentApprovals } from "~/components/workflows/agent-approvals";
 import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
@@ -96,7 +97,7 @@ function AppSessionPage() {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {child && <ChildBreadcrumb name={info.data?.name ?? "your assistant"} />}
+      {child && <ChildBreadcrumb name={orchestratorName(info.data?.name)} />}
       {/* Standalone page (decision 14): no thread sidebar, full header —
           the root layout hides the sidebar for this route (see
           `__root.tsx`). Children opened full-page render the same way, with

@@ -291,6 +291,15 @@ registry:
   # eviction fires. Per ORG: a multi-org instance needs (orgs x budget)
   # < storageSize, or a bigger volume.
   cacheBudgetGb: 6
+  # The API blocks new bakes below the greater of these free-space reserves.
+  # Use zero or a positive value. Lower this reserve for small volumes.
+  minFreeGb: 5
+  # Must be above 0 and below 100, even when the absolute reserve is zero.
+  minFreePercent: 10
+  health:
+    image:
+      repository: python
+      tag: "3.13-alpine"
   # NodePort the bundled registry Service is exposed on. This is the PULL
   # endpoint: sandbox pod image refs use `localhost:<nodePort>`, which kubelet
   # resolves per-node (a ClusterIP-only Service name is NOT resolvable by the
@@ -320,6 +329,9 @@ externalRegistry:
   # `imagePullSecrets` on sandbox pods that pull a prebuilt image from this
   # registry. Ignored when `url` is unset.
   pullSecret: ""
+  # Optional endpoint with the bundled probe's filesystem-byte JSON contract.
+  # An unavailable configured endpoint blocks new bakes. Empty means capacity is unknown.
+  healthUrl: ""
 
 podJanitor:
   # Nightly CronJob that deletes Failed pods in the release and sandbox

@@ -62,7 +62,7 @@ function toOverrideWire(row: ActionPolicyOverrideRow): ActionPolicyOverrideWire 
   };
 }
 
-function toGrantWire(row: RuntimeGrantRow): RuntimeGrantWire {
+export function toGrantWire(row: RuntimeGrantRow): RuntimeGrantWire {
   return {
     id: row.id,
     sessionId: row.sessionId,

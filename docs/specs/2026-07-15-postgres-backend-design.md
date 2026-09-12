@@ -70,7 +70,7 @@ Boot: `buildNodeProviders` constructs ONE connection source (Pool or PGlite), ru
 - New credential-store contract test (extracted from the existing ad-hoc suite so PG and any future impl share it).
 - Memory contract test (decision 9) green on pg.
 - Full existing fleet: every `packages/api`, `packages/engine`, `packages/web` test green on PGlite with no environment variables required (the ~21 sqlite-constructing test files are rewritten onto the shared PGlite helper — decision 12). The known `messages.abort.test.ts` pair remains allowed.
-- `make test-pg`: conformance + api integration against dockerized postgres:17.
+- `make test-pg`: conformance + api integration against dockerized postgres:17. Store test factories clear session data on every setup, including the first call: migrations preserve rows from earlier test files in the shared database.
 - E2E: the auth e2e and workflow kill/restart e2e re-run unchanged (they exercise the stores through real boots).
 
 ## Non-goals

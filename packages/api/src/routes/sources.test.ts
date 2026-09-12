@@ -7,13 +7,16 @@
  * preserved; new tests cover: base one-per-org 409, kind='repo' POST 400,
  * newline setup command 400, PATCH kind-scoped field 400s.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { RegistryCapacityError } from "../bakes/registry-health.js";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
+import { reorderWaitingBuilds } from "../prebuilds/builder.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { MAX_SANDBOX_CPU } from "@valet/shared";
 import { bakes } from "../schema/index.js";
+import type { ListBakeQueueResponse, ListSourcesResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -50,6 +53,17 @@ class FakeImageBuilder implements ImageBuilder {
   async status(): Promise<BuildStatus> {
     return { state: "building" };
   }
+}
+
+class QueueImageBuilder extends FakeImageBuilder {
+  queued: string[] = [];
+  override async build(spec: PrebuildSpec) {
+    const result = await super.build(spec);
+    this.queued.push(result.buildId);
+    return result;
+  }
+  queueSnapshot() { return { running: [], queued: [...this.queued] }; }
+  reorderQueue(expected: string[], order: string[]) { return reorderWaitingBuilds(this.queued, expected, order); }
 }
 
 let api: TestApi | undefined;
@@ -141,6 +155,24 @@ describe("GET /api/org/sources", () => {
     const res = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
     const body = (await res.json()) as { sources: SourceJson[]; builderAvailable: boolean };
     expect(body.builderAvailable).toBe(true);
+  });
+
+  it("includes only the latest build summary and null for an unbuilt source", async () => {
+    api = await bootTestApi();
+    const source = await seedRepoSource(api);
+    const unbuilt = await createExternal(api.baseUrl);
+    await api.providers.db.insert(bakes).values([
+      { id: `pb_${randomUUID()}`, sourceId: source.id, identityHash: "old", imageRef: "registry/old", status: "pushed", recipe: [], createdAt: 1000 },
+      { id: `pb_${randomUUID()}`, sourceId: source.id, identityHash: "new", imageRef: "registry/new", status: "building", recipe: [], createdAt: 2000, logTail: "build log" },
+    ]);
+    const res = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListSourcesResponse;
+    expect(body.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: source.id, latestBake: { status: "building", createdAt: 2000 } }),
+      expect.objectContaining({ id: unbuilt.id, latestBake: null }),
+    ]));
+    expect(JSON.stringify(body)).not.toContain("build log");
   });
 
   it("lists all kinds for the caller's org", async () => {
@@ -804,5 +836,62 @@ describe("GET /api/sources/for-repo", () => {
     expect(body).toEqual({ prebuild: { commitSha: "newestc2", finishedAt: 4_000 } });
     expect(JSON.stringify(body)).not.toContain("imageRef");
     expect(JSON.stringify(body)).not.toContain("registry.local");
+  });
+});
+
+describe("bake queue routes", () => {
+  it("reads the real waiting order and accepts only a full valid permutation", async () => {
+    api = await bootTestApi({ imageBuilder: new QueueImageBuilder() });
+    const source = await createBase(api.baseUrl);
+    const first = await api.providers.prebuildService.startBuild(source.id);
+    const second = await api.providers.prebuildService.startBuild(source.id);
+    const endpoint = `${api.baseUrl}/api/org/sources/queue`;
+    const initial = await fetch(endpoint, { headers: HEADERS });
+    const queue = await initial.json() as ListBakeQueueResponse;
+    expect(queue.reorderAvailable).toBe(true);
+    expect(queue.queued.map((bake) => bake.id)).toEqual([first.id, second.id]);
+    const reordered = await fetch(endpoint, { method: "PATCH", headers: HEADERS, body: JSON.stringify({ bakeIds: [second.id, first.id] }) });
+    expect(reordered.status).toBe(200);
+    expect(await reordered.json()).toEqual({ ok: true });
+    const updated = await (await fetch(endpoint, { headers: HEADERS })).json() as ListBakeQueueResponse;
+    expect(updated.queued.map((bake) => bake.id)).toEqual([second.id, first.id]);
+    const invalid = await fetch(endpoint, { method: "PATCH", headers: HEADERS, body: JSON.stringify({ bakeIds: [first.id] }) });
+    expect(invalid.status).toBe(409);
+    const malformed = await fetch(endpoint, { method: "PATCH", headers: HEADERS, body: JSON.stringify({ bakeIds: [3] }) });
+    expect(malformed.status).toBe(400);
+  });
+
+  it("requires an admin and handles a disabled builder", async () => {
+    api = await bootTestApi();
+    for (const method of ["GET", "PATCH"]) {
+      const response = await fetch(`${api.baseUrl}/api/org/sources/queue`, { method, headers: MEMBER_HEADERS,
+        ...(method === "PATCH" ? { body: JSON.stringify({ bakeIds: [] }) } : {}) });
+      expect(response.status).toBe(403);
+    }
+    const response = await fetch(`${api.baseUrl}/api/org/sources/queue`, { headers: HEADERS });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ builderAvailable: false, reorderAvailable: false, running: [], queued: [], recent: [], blocked: [] });
+    const reorder = await fetch(`${api.baseUrl}/api/org/sources/queue`, { method: "PATCH", headers: HEADERS, body: JSON.stringify({ bakeIds: [] }) });
+    expect(reorder.status).toBe(409);
+    expect(await reorder.json()).toMatchObject({ error: expect.stringContaining("Refresh") });
+  });
+});
+
+describe("registry health API", () => {
+  it("exposes health to org admins and rejects members", async () => {
+    api = await bootTestApi();
+    const response = await fetch(`${api.baseUrl}/api/org/sources/health`, { headers: HEADERS });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({ cache: { bytesUsed: 0 }, registry: { status: "unconfigured", availableBytes: null } });
+    expect((await fetch(`${api.baseUrl}/api/org/sources/health`, { headers: MEMBER_HEADERS })).status).toBe(403);
+  });
+  it("maps capacity rejection to actionable 503 with a stable code", async () => {
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder() });
+    const source = await createBase(api.baseUrl);
+    vi.spyOn(api.providers.prebuildService, "assertRegistryCapacity").mockRejectedValue(new RegistryCapacityError("full"));
+    const response = await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bake`, { method: "POST", headers: HEADERS });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "registry_full", error: expect.stringContaining("Free registry space") });
   });
 });

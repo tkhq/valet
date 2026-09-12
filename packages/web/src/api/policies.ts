@@ -1,6 +1,6 @@
 /**
  * TanStack Query hooks for the action-policies web surfaces (Task 5):
- * org-admin policy CRUD + action log, and the per-user policy-overrides /
+ * org/team-admin policy CRUD + action log, and the per-user policy-overrides /
  * runtime-grants surfaces. Mirrors the factory idiom in `src/api/
  * settings.ts` — query-key factory object, one hook per read, mutations
  * invalidate the keys they affect. No `usePreviewOrgPolicy` hook: no web
@@ -36,6 +36,7 @@ import { api, ApiError } from "./client";
 // ── Query key factory ────────────────────────────────────────────────────
 
 export const qkPolicies = {
+  teamPolicies: (teamId: string) => ["policies", "team", teamId] as const,
   orgPolicies: () => ["policies", "org"] as const,
   actionLog: (filters: ActionLogFilterState) => ["policies", "action-log", filters] as const,
   myOverrides: () => ["policies", "me", "overrides"] as const,
@@ -64,42 +65,46 @@ export function apiErrorMessage(err: unknown): string {
   return "Something went wrong";
 }
 
-// ── Org policies (admin) ────────────────────────────────────────────────
+function policyKey(teamId: string | undefined) {
+  return teamId === undefined ? qkPolicies.orgPolicies() : qkPolicies.teamPolicies(teamId);
+}
 
-export function useOrgPolicies(opts?: UseQueryOptions<ListOrgPoliciesResponse>) {
+// ── Org and team policies (admin) ────────────────────────────────────────────────
+
+export function usePolicies(teamId?: string, opts?: UseQueryOptions<ListOrgPoliciesResponse>) {
   return useQuery<ListOrgPoliciesResponse>({
-    queryKey: qkPolicies.orgPolicies(),
-    queryFn: () => api.listOrgPolicies(),
+    queryKey: policyKey(teamId),
+    queryFn: () => teamId === undefined ? api.listOrgPolicies() : api.listTeamPolicies(teamId),
     ...opts,
   });
 }
 
-export function useCreateOrgPolicy() {
+export function useCreatePolicy(teamId?: string) {
   const qc = useQueryClient();
   return useMutation<CreateOrgPolicyResponse, Error, CreateOrgPolicyRequest>({
-    mutationFn: (body) => api.createOrgPolicy(body),
+    mutationFn: (body) => teamId === undefined ? api.createOrgPolicy(body) : api.createTeamPolicy(teamId, body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkPolicies.orgPolicies() });
+      qc.invalidateQueries({ queryKey: policyKey(teamId) });
     },
   });
 }
 
-export function usePatchOrgPolicy() {
+export function usePatchPolicy(teamId?: string) {
   const qc = useQueryClient();
   return useMutation<PatchOrgPolicyResponse, Error, { id: string; body: PatchOrgPolicyRequest }>({
-    mutationFn: ({ id, body }) => api.patchOrgPolicy(id, body),
+    mutationFn: ({ id, body }) => teamId === undefined ? api.patchOrgPolicy(id, body) : api.patchTeamPolicy(teamId, id, body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkPolicies.orgPolicies() });
+      qc.invalidateQueries({ queryKey: policyKey(teamId) });
     },
   });
 }
 
-export function useDeleteOrgPolicy() {
+export function useDeletePolicy(teamId?: string) {
   const qc = useQueryClient();
   return useMutation<DeleteOrgPolicyResponse, Error, string>({
-    mutationFn: (id) => api.deleteOrgPolicy(id),
+    mutationFn: (id) => teamId === undefined ? api.deleteOrgPolicy(id) : api.deleteTeamPolicy(teamId, id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkPolicies.orgPolicies() });
+      qc.invalidateQueries({ queryKey: policyKey(teamId) });
     },
   });
 }
@@ -166,4 +171,18 @@ export function useDeleteMyGrant() {
       qc.invalidateQueries({ queryKey: qkPolicies.myGrants() });
     },
   });
+}
+
+export function usePutTeamPolicyOverride(teamId: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (body: PutPolicyOverrideRequest) => api.putTeamPolicyOverride(teamId, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: qkPolicies.teamPolicies(teamId) }); } });
+}
+export function useTeamGrants(teamId: string) {
+  return useQuery({ queryKey: ["policies", "team", teamId, "grants"], queryFn: () => api.listTeamGrants(teamId) });
+}
+export function useDeleteTeamGrant(teamId: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (id: string) => api.deleteTeamGrant(teamId, id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["policies", "team", teamId, "grants"] }); } });
 }

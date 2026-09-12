@@ -1571,6 +1571,16 @@ export type WireEvent =
       seq: number;
       ts: number;
       offset?: string;
+      type: "title.updated";
+      sessionId: string;
+      threadId: string;
+      sessionTitle?: string;
+      threadTitle?: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
       type: "sandbox.status";
       state: string;
       epoch: number;
@@ -3546,6 +3556,8 @@ export interface SkillUsageBreakdown {
  * scope, and for a team scope when the caller ADMINISTERS the team — a plain
  * member reads the team's aggregate without colleagues' individual spend. */
 export interface UsageBreakdownResponse {
+  /** Distinct engine sessions with positive tokens in the rolling window, through now. Excludes proxy calls. */
+  activeAgents: number;
   windowMs: number;
   scope: UsageScopeName;
   totalCostUsd: number;
@@ -4215,6 +4227,8 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 
 /** Mirrors the `image_sources` row for all kinds (external/base/repo). */
 export interface SourceSummary {
+  /** Latest build summary on list responses. Older servers omit this field. */
+  latestBake?: Pick<BakeSummary, "status" | "createdAt"> | null;
   id: string;
   orgId: string;
   kind: "external" | "base" | "repo";
@@ -4944,7 +4958,8 @@ export interface ProxyUsageBucket {
 }
 
 export interface ProxyUserBucket extends ProxyUsageBucket {
-  userId: string;
+  userId: string | null;
+  teamId?: string | null;
 }
 
 export interface ProxyModelBucket extends ProxyUsageBucket {
@@ -5000,7 +5015,8 @@ export interface ProxyRequestListItem {
   id: string;
   createdAt: number;
   orgId: string;
-  userId: string;
+  userId: string | null;
+  teamId?: string | null;
   apiKeyId: string;
   providerKind: "anthropic" | "openai";
   model: string | null;
@@ -5127,3 +5143,27 @@ export interface ListTeamDeletionRequestsResponse { requests: TeamDeletionReques
 export interface TeamDeletionTarget { resourceType: TeamDeletionResourceType; resourceId: string; label: string }
 export interface ListTeamDeletionTargetsResponse { targets: TeamDeletionTarget[] }
 export interface SubmitTeamDeletionRequest { resourceType: TeamDeletionResourceType; resourceId: string; reason?: string }
+
+export interface BakeQueueItem extends BakeSummary {
+  /** The builder finished; the next status poll persists its result. */
+  phase?: "finalizing";
+  sourceName: string;
+  sourceKind: SourceSummary["kind"];
+  repoFullName: string | null;
+}
+
+export interface BakeQueueBlockedSource {
+  sourceId: string;
+  name: string;
+  repoFullName: string | null;
+  parentName: string;
+}
+
+export interface ListBakeQueueResponse {
+  builderAvailable: boolean;
+  reorderAvailable: boolean;
+  running: BakeQueueItem[];
+  queued: BakeQueueItem[];
+  recent: BakeQueueItem[];
+  blocked: BakeQueueBlockedSource[];
+}

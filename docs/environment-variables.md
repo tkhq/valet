@@ -319,3 +319,17 @@ semantics.
 set in dev targets or `.env`), `VALET_SKIP_DOCKER_TESTS`, `TEST_DATABASE_URL`,
 `TELEGRAM_TEST_BOT_TOKEN` / `TELEGRAM_TEST_CHAT_ID`, and the
 `VALET_GITHUB_LIVE_*` live-App test variables.
+
+
+## Registry capacity
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VALET_REGISTRY_HEALTH_URL` | unset | Filesystem probe URL. The bundled Helm registry sets this automatically. |
+| `VALET_REGISTRY_MIN_FREE_GB` | `5` | Minimum available registry bytes, in decimal GB. Zero disables only the absolute reserve. |
+| `VALET_REGISTRY_MIN_FREE_PERCENT` | `10` | Minimum available registry capacity percentage. Must be greater than 0 and less than 100. |
+
+The API uses the larger reserve. At or below the reserve, new bakes fail before creation.
+Sandbox-backed children can use an existing startup image with a warning. Children with no startup image fail before creation.
+A configured probe that fails uses the same policy. An unset probe reports unknown capacity without blocking admission.
+See [registry capacity and cache health](specs/2026-08-02-sandbox-reconcile-design.md#registry-capacity-and-cache-health-2026-09-11) for the API response and operational limits.

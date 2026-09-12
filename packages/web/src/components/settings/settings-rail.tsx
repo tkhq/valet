@@ -1,4 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
+import { useEffect, useRef } from "react";
 import { useOrg } from "~/api/settings";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { cn } from "~/lib/cn";
@@ -24,6 +25,8 @@ export const TEAM_SETTINGS_PATH = "/settings/team";
 const TEAM_ITEMS = [
   { to: TEAM_SETTINGS_PATH, label: "General" },
   { to: "/settings/api-keys", label: "API keys" },
+  { to: "/settings/proxy", label: "Proxy" },
+  { to: "/settings/policies", label: "Policies" },
 ];
 
 /** Keep the team rail and the layout's route allowlist in agreement. */
@@ -102,7 +105,7 @@ export function SettingsRail() {
   const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
   return (
-    <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">
+    <nav aria-label="Settings" className="w-full min-w-0 shrink-0 space-y-3 text-sm sm:w-[200px] sm:space-y-6">
       <RailGroup
         label={teamId === undefined ? "You" : "Team"}
         items={teamId === undefined ? youItems : TEAM_ITEMS}
@@ -124,20 +127,29 @@ function RailGroup({
   items: ReadonlyArray<{ to: string; label: string }>;
   pathname: string;
 }) {
+  const list = useRef<HTMLUListElement>(null);
+  useEffect(() => {
+    const rail = list.current;
+    const active = rail?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (rail && active && rail.scrollWidth > rail.clientWidth) {
+      rail.scrollLeft += active.getBoundingClientRect().left - rail.getBoundingClientRect().left;
+    }
+  }, [pathname, items]);
   return (
     <div>
       <div className="mb-1.5 px-2 text-xs font-medium uppercase tracking-wider text-muted">
         {label}
       </div>
-      <ul className="space-y-0.5">
+      <ul ref={list} className="flex gap-1 overflow-x-auto pb-1 sm:block sm:space-y-0.5 sm:pb-0">
         {items.map((item) => {
           const active = pathname === item.to;
           return (
-            <li key={item.to}>
+            <li key={item.to} className="shrink-0">
               <Link
                 to={item.to}
+                aria-current={active ? "page" : undefined}
                 className={cn(
-                  "block rounded px-2 py-1.5 transition-colors",
+                  "block whitespace-nowrap rounded px-2 py-1.5 transition-colors",
                   active
                     ? "bg-moss-wash text-moss"
                     : "text-muted hover:bg-ink-wash hover:text-ink",

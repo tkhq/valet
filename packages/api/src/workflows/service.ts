@@ -5,6 +5,7 @@
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
 import { lockTeamDeletionAccess, TeamAdminRequiredError } from "../services/team-deletion-access.js";
+import { checkAssistantForOwner, resolveDefaultAssistant } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
@@ -89,7 +90,7 @@ export interface WorkflowOwner {
   orgId: string;
   /** Set on every HTTP request. A team `vlt_` key pins reach to that team
    * and skips the creating admin's membership — the key survives them
-   * leaving. Agent-facing callers omit it and keep the user-only rule. */
+   * leaving. Team assistant tools carry the same trusted team principal. */
   principal?: RequestPrincipal;
 }
 
@@ -564,29 +565,57 @@ export async function createWorkflowDefinition(
     // `db.transaction` alone isn't enough here).
     await deps.db.transaction(async (tx) => {
       await lockTeamForOwnership(tx, teamId);
+      if (!(await getTeamInOrg(tx, owner.orgId, teamId))) throw new NotFoundError("team", teamId);
       // Non-member and unknown-team look identical here (both a plain
       // `false`) — same "cross-owner access 404s, never 403s" convention
       // as the rest of this file, so a team's existence is never leaked
       // to a non-member's probe. A team principal skips membership but
       // still needs the team row, or a delete that commits under this
       // lock would insert a workflow for a gone team.
-      if (input.skipMembershipCheck) {
-        if (!(await getTeamInOrg(tx, owner.orgId, teamId))) {
-          throw new NotFoundError("team", teamId);
-        }
-      } else if (!(await isTeamMember(tx, teamId, owner.userId))) {
+      if (!input.skipMembershipCheck && !(await isTeamMember(tx, teamId, owner.userId))) {
         throw new NotFoundError("team", teamId);
       }
+      await validateWorkflowAssistant(tx, owner.orgId, { type: "team", id: teamId }, input.definition);
       await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
     });
     ownerType = "team";
     ownerId = teamId;
   } else {
+    await validateWorkflowAssistant(deps.db, owner.orgId, { type: "user", id: owner.userId }, input.definition);
     await deps.db.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
   }
 
   await snapshotVersion(deps, id, 1, input.name, input.definition, now);
   return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
+}
+
+/** Read routing from the definition so each run uses its immutable snapshot. */
+export function workflowAssistantId(definition: unknown): string | undefined {
+  if (!definition || typeof definition !== "object" || !("assistantId" in definition)) return undefined;
+  if (typeof definition.assistantId !== "string" || !definition.assistantId.trim()) {
+    throw new ValidationError("Select a valid orchestrator for this workflow.");
+  }
+  return definition.assistantId;
+}
+
+async function validateWorkflowAssistant(
+  db: AppQueryable, orgId: string, owner: { type: WorkflowOwnerType; id: string }, definition: unknown,
+) {
+  const assistantId = workflowAssistantId(definition);
+  if (assistantId && await checkAssistantForOwner(db, orgId, owner, assistantId)) {
+    throw new NotFoundError("assistant", assistantId);
+  }
+}
+
+/** Cross-workspace copies must not retain routing into the source workspace. */
+async function copiedDefinitionForOwner(
+  db: AppDb, orgId: string, definition: unknown, owner: { type: "user" | "team"; id: string },
+): Promise<unknown> {
+  const assistantId = workflowAssistantId(definition);
+  if (!assistantId || !definition || typeof definition !== "object") return definition;
+  if (!(await checkAssistantForOwner(db, orgId, owner, assistantId))) return definition;
+  const assistant = await resolveDefaultAssistant(db, orgId, owner);
+  return { ...definition, assistantId: assistant.id };
 }
 
 /** Immutable per-save snapshot backing the UI's version history. */
@@ -679,6 +708,13 @@ export async function updateWorkflowDefinition(
   await refuseRepoOwned(deps.db, row);
 
   const now = Date.now();
+  if (input.definition !== undefined) {
+    const assistantId = workflowAssistantId(row.definition);
+    if (assistantId && workflowAssistantId(input.definition) === undefined && input.definition && typeof input.definition === "object") {
+      input = { ...input, definition: { ...input.definition, assistantId } };
+    }
+    await validateWorkflowAssistant(deps.db, owner.orgId, { type: row.ownerType, id: row.ownerId }, input.definition);
+  }
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
   // definition at run-start time (plan decision 17), so updating the
   // definitions row here never reaches back into a running/parked run.
@@ -987,13 +1023,15 @@ export async function copyWorkflowDefinition(
         eq(workflowDefinitions.ownerId, destination.teamId), eq(workflowDefinitions.name, name),
       )).limit(1);
       if (existing) throw new ValidationError("A workflow with that name already exists in the team. Choose another name.");
-      return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition: row.definition, teamId: destination.teamId });
+      const definition = await copiedDefinitionForOwner(tx, owner.orgId, row.definition, { type: "team", id: destination.teamId });
+      return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition, teamId: destination.teamId });
     });
   }
 
   const now = Date.now();
   const copyId = newWorkflowId("wf");
   const name = `${row.name} (copy)`;
+  const definition = await copiedDefinitionForOwner(deps.db, owner.orgId, row.definition, { type: "user", id: owner.userId });
   // Personal, whatever the original's owner was. A team-owned mirror copied
   // into the team would be a second team workflow every member sees; the
   // person who wants to change the graph gets it in their own workspace,
@@ -1004,16 +1042,16 @@ export async function copyWorkflowDefinition(
     ownerType: "user",
     ownerId: owner.userId,
     name,
-    definition: row.definition,
+    definition,
     origin: "local",
     createdAt: now,
     updatedAt: now,
   });
-  await snapshotVersion(deps, copyId, 1, name, row.definition, now);
+  await snapshotVersion(deps, copyId, 1, name, definition, now);
   return {
     id: copyId,
     name,
-    definition: row.definition,
+    definition,
     createdAt: now,
     updatedAt: now,
     ownerType: "user",

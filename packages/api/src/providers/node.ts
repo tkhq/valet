@@ -90,6 +90,7 @@ import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { InstanceConfigError } from "../config/instance-config.js";
+import { createAutoTitleHost } from "../sessions/auto-title-host.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -478,6 +479,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   gateHostRef.current = engineHost;
   evictRef.current = (sessionId) => engineHost.evictCache(sessionId);
 
+  // Naming listens to the engine's origin-neutral settlement event. Start it
+  // in main before boot restore, because restored work can settle there.
+  const autoTitleHost = createAutoTitleHost({ db, engineStore, eventStream });
+
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
   // in this file builds (`{ db, credentials: engineCredentials, key }`).
@@ -490,6 +495,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   });
 
   const childrenDeps = {
+    sandboxBacked: sandboxProvider.capabilities().isolated === true,
     db,
     engineHost,
     engineStore,
@@ -810,6 +816,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     onePassword,
     engineHost,
+    autoTitleHost,
     childWatcher,
     childSpawner: (req, ctx) => {
       // Same one-slot indirection as the EngineHost wiring above; by the

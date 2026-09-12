@@ -9,6 +9,9 @@ import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionPolicies, actionPolicyOverrides, workflowDefinitions, workflowVersions } from "../schema/index.js";
+import { createTeam } from "../services/teams.js";
+import { resolveActionPolicy } from "../policies/service.js";
+import { isRiskLevel } from "../policies/admin.js";
 import type {
   AllowWorkflowPermissionsResponse,
   GetWorkflowPermissionsResponse,
@@ -78,7 +81,7 @@ const DEFINITION = {
 
 async function insertWorkflow(
   localApi: TestApi,
-  opts: { ownerId?: string } = {},
+  opts: { ownerId?: string; ownerType?: "user" | "team" } = {},
 ): Promise<string> {
   const now = Date.now();
   const id = `wf_perm_${now}_${Math.random().toString(36).slice(2, 8)}`;
@@ -87,7 +90,7 @@ async function insertWorkflow(
     orgId: "local-org",
     name: "perm-test-wf",
     definition: DEFINITION,
-    ownerType: "user",
+    ownerType: opts.ownerType ?? "user",
     ownerId: opts.ownerId ?? "local-user",
     createdAt: now,
     updatedAt: now,
@@ -171,6 +174,73 @@ describe("GET /api/workflows/:id/permissions", () => {
     const wfId = await insertWorkflow(api, { ownerId: "someone-else" });
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("team workflow permissions", () => {
+  it("matches runtime team decisions and ignores personal overrides", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Permissions team", creatorUserId: "local-user" });
+    const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id });
+    await api.providers.db.insert(actionPolicies).values([
+      { id: "team-deny", orgId: "local-org", principalType: "team", principalId: team.id,
+        actionId: "widgets.deploy", mode: "deny", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1 },
+      { id: "team-approval", orgId: "local-org", principalType: "team", principalId: team.id,
+        actionId: "widgets.list", mode: "require_approval", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1 },
+    ]);
+    await api.providers.db.insert(actionPolicyOverrides).values({
+      id: "personal-allow", orgId: "local-org", userId: "local-user", service: "widgets",
+      mode: "allow", paramMatchers: [], createdAt: 1, updatedAt: 1,
+    });
+
+    const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
+    expect(response.status).toBe(200);
+    const preview = (await response.json()) as GetWorkflowPermissionsResponse;
+    const nodes = byNodeId(preview);
+    expect(nodes.get("ship")).toMatchObject({ mode: "deny", provenance: "team_policy" });
+    expect(nodes.get("inventory")).toMatchObject({ mode: "require_approval", provenance: "team_policy" });
+    expect(nodes.get("fanout")).toMatchObject({ mode: "require_approval", provenance: "risk_default" });
+    for (const node of preview.nodes) {
+      if (!node.actionId) continue;
+      if (!isRiskLevel(node.riskLevel)) throw new Error(`Invalid risk level for ${node.actionId}`);
+      const runtime = await resolveActionPolicy(api.providers.db, {
+        orgId: "local-org", teamId: team.id, userId: "local-user", service: node.service,
+        actionId: node.actionId, riskLevel: node.riskLevel, params: {}, appliesIn: "workflow",
+        workflowExecutionId: "team-preview-run", pluginDefault: undefined, now: Date.now(),
+      });
+      expect({ mode: node.mode, source: node.provenance }).toEqual({ mode: runtime.mode, source: runtime.provenance.source });
+    }
+    const personalId = await insertWorkflow(api);
+    const personalResponse = await fetch(`${api.baseUrl}/api/workflows/${personalId}/permissions`);
+    const personal = (await personalResponse.json()) as GetWorkflowPermissionsResponse;
+    expect(byNodeId(personal).get("ship")).toMatchObject({ mode: "allow", provenance: "override" });
+  });
+
+  it("rejects team bulk approval without creating or changing personal overrides", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "No personal writes", creatorUserId: "local-user" });
+    const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id });
+    await api.providers.db.insert(actionPolicyOverrides).values({
+      id: "keep-personal", orgId: "local-org", userId: "local-user", actionId: "widgets.deploy",
+      mode: "require_approval", paramMatchers: [], createdAt: 1, updatedAt: 1,
+    });
+    const before = await api.providers.db.select().from(actionPolicyOverrides);
+    for (const body of [undefined, { actionIds: ["widgets.deploy"] }, { actionIds: [] }]) {
+      const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "Personal pre-approval does not apply to team workflows. Ask a team admin to select this team's workspace and open Settings → Policies.",
+      });
+      expect(await api.providers.db.select().from(actionPolicyOverrides)).toEqual(before);
+    }
+    for (const endpoint of ["permissions", "permissions/allow"]) {
+      const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/${endpoint}`, {
+        method: endpoint.endsWith("allow") ? "POST" : "GET", headers: { "x-valet-test-user-id": "test-member" },
+      });
+      expect(response.status).toBe(404);
+    }
   });
 });
 

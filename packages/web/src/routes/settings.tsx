@@ -27,8 +27,8 @@ export function SettingsLayout() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-6 py-10">
-        <h1 className="mb-8 font-display text-2xl text-ink">Settings</h1>
+      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10">
+        <h1 className="mb-5 font-display text-2xl text-ink sm:mb-8">Settings</h1>
         <div className="flex flex-col gap-8 sm:flex-row sm:gap-12">
           <SettingsRail />
           <div className="min-w-0 max-w-2xl flex-1">

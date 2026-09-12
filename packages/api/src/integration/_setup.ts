@@ -72,6 +72,7 @@ import type { Providers } from "../providers/types.js";
 import { loadAuthConfig } from "../auth/config.js";
 import { buildAuthHooks } from "../auth/provisioning.js";
 import { buildAuth } from "../auth/index.js";
+import { createAutoTitleHost } from "../sessions/auto-title-host.js";
 
 export interface TestApi {
   baseUrl: string;
@@ -96,6 +97,8 @@ export interface BootTestApiOpts {
   /** Forwarded to `EngineHostOpts.defaultImages` — tests that pin
    * per-profile stock-image fallback behavior. */
   defaultImages?: Partial<Record<"headless" | "full", string>>;
+  /** Inject registry manifest checks without network access. */
+  prebuildPreflight?: EngineHostOpts["prebuildPreflight"];
   /**
    * Override the default real `LocalRunHost` — route-level tests that only
    * need to observe `start`/`wake`/`terminate` calls (never actually drive a
@@ -342,6 +345,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     blobs,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
+    prebuildPreflight: opts.prebuildPreflight,
     ...(opts.defaultImages ? { defaultImages: opts.defaultImages } : {}),
     idleMinutes: opts.idleMinutes,
     onHibernate: opts.onHibernate ?? defaultHibernationHooks.onHibernate,
@@ -385,6 +389,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     apiUrl: opts.githubApiUrl,
     githubUrl: opts.githubApiUrl,
   };
+
+  const autoTitleHost = createAutoTitleHost({
+    db,
+    engineStore,
+    eventStream,
+    namer: async () => "Test conversation",
+  });
+  autoTitleHost.start();
 
   const prebuildService = new SourceService({
     db,
@@ -560,6 +572,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     onePassword,
     engineHost,
+    autoTitleHost,
     childWatcher,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
@@ -607,6 +620,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       await server.close();
       await eventDispatcher.stop();
       await channelHost.stop();
+      autoTitleHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });

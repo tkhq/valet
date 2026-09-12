@@ -12,6 +12,7 @@
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { errorText } from "~/lib/error-text";
 import { useCreateApiKey, type CreatedApiKey } from "~/api/api-keys";
 
 function CopyButton({ text }: { text: string }) {
@@ -34,12 +35,12 @@ function CopyButton({ text }: { text: string }) {
 
 function CodeBlock({ label, code }: { label: string; code: string }) {
   return (
-    <div className="mb-4">
+    <div className="mb-4 min-w-0 max-w-full">
       <div className="flex items-center gap-2 mb-1">
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>
+        <span className="min-w-0 break-words text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>
         <CopyButton text={code} />
       </div>
-      <pre className="whitespace-pre text-xs font-mono bg-paper-muted border border-line rounded p-3 overflow-x-auto">
+      <pre tabIndex={0} aria-label={`${label} setup snippet`} className="w-full min-w-0 max-w-full whitespace-pre text-xs font-mono bg-paper-muted border border-line rounded p-3 overflow-x-auto">
         {code}
       </pre>
     </div>
@@ -95,11 +96,12 @@ function GatewayStatus({ enabled, isLoading }: GatewayStatusProps) {
 }
 
 interface ModeSnippetsProps {
-  apiKey: CreatedApiKey;
+  apiKey: Pick<CreatedApiKey, "key">;
+  team?: boolean;
   mode: "centralized" | "passthrough";
 }
 
-function ModeSnippets({ apiKey, mode }: ModeSnippetsProps) {
+export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const key = apiKey.key ?? "";
 
@@ -185,43 +187,54 @@ function ModeSnippets({ apiKey, mode }: ModeSnippetsProps) {
           `print(resp.choices[0].message.content)`,
         ].join("\n");
 
-  const baseUrlNote = `This is your Valet instance's origin — ${origin}.`;
+  function setupCode(code: string): string {
+    if (!team) return code;
+    return code
+      .replaceAll("your-own-anthropic-key", "approved-anthropic-key")
+      .replaceAll("your-own-openai-key", "approved-openai-key")
+      .replaceAll("your own key is forwarded and billed; the Valet key only identifies you", "the supplied provider key is billed; the Valet key identifies the team")
+      .replaceAll("bills you", "bills the provider account")
+      .replaceAll("your Valet", "the team's Valet")
+      .replaceAll("Your Valet", "The team's Valet");
+  }
+
+  const baseUrlNote = `Valet endpoint: ${origin}`;
 
   return (
-    <div>
+    <div className="min-w-0 max-w-full overflow-hidden">
+      <p className="mb-4 break-all text-xs text-muted">{baseUrlNote}</p>
       {/* Claude Code */}
       <h4 className="text-sm font-medium text-ink mb-1">Claude Code</h4>
-      <p className="text-xs text-muted mb-2">{baseUrlNote}</p>
-      <CodeBlock label="Shell env" code={claudeCodeSnippet} />
+      <CodeBlock label="Shell env" code={setupCode(claudeCodeSnippet)} />
 
       {/* Codex */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">Codex</h4>
-      <p className="text-xs text-muted mb-2">{baseUrlNote}</p>
-      <CodeBlock label="~/.codex/config.toml" code={codexTomlSnippet} />
-      <CodeBlock label="Shell env" code={codexEnvSnippet} />
+      <CodeBlock label="~/.codex/config.toml" code={setupCode(codexTomlSnippet)} />
+      <CodeBlock label="Shell env" code={setupCode(codexEnvSnippet)} />
 
       {/* Self-service SDK */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenAI SDK (scripts)</h4>
       <p className="text-xs text-muted mb-2">
         Point any OpenAI-SDK script at Valet — `chat.completions`, `responses`, and legacy `completions` are all recorded.
       </p>
-      <CodeBlock label="Python" code={openaiSdkSnippet} />
+      <CodeBlock label="Python" code={setupCode(openaiSdkSnippet)} />
     </div>
   );
 }
 
 interface KeyDisplayProps {
-  apiKey: CreatedApiKey;
+  apiKey: Pick<CreatedApiKey, "key">;
+  team?: boolean;
   settingsQuery: OnboardingPanelProps["settingsQuery"];
   onCreateAnother: () => void;
 }
 
-function KeyDisplay({ apiKey, settingsQuery, onCreateAnother }: KeyDisplayProps) {
+function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: KeyDisplayProps) {
   const key = apiKey.key ?? "";
   const mode = settingsQuery.data?.mode;
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 max-w-full space-y-6">
       {/* Step 1 — Gateway status */}
       <div>
         <StepHeading n={1} title="Gateway status" />
@@ -236,7 +249,7 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother }: KeyDisplayProps)
         <StepHeading n={2} title="Your proxy key" />
         <p className="text-sm text-ink mb-2">Your proxy key is shown once. Store it now.</p>
         <div className="mb-2 flex items-center gap-2">
-          <code className="text-sm font-mono bg-paper-muted border border-line rounded px-2 py-1 text-ink select-all">
+          <code tabIndex={0} aria-label="New proxy key" className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm font-mono bg-paper-muted border border-line rounded px-2 py-1 text-ink select-all">
             {key}
           </code>
           <CopyButton text={key} />
@@ -256,7 +269,7 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother }: KeyDisplayProps)
         {settingsQuery.isLoading ? (
           <p className="text-xs text-muted">Loading mode configuration…</p>
         ) : mode !== undefined ? (
-          <ModeSnippets apiKey={apiKey} mode={mode} />
+          <ModeSnippets apiKey={apiKey} mode={mode} team={team} />
         ) : null}
       </div>
 
@@ -285,23 +298,49 @@ export interface OnboardingPanelProps {
   settingsQuery: {
     data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined;
     isLoading: boolean;
+    error?: Error | null;
   };
   /** When false, the "Step 1 — Gateway status" block is omitted from the
    * pre-creation view (use when the page already shows gateway status above
    * the panel). Defaults to true. */
   showGatewayStatus?: boolean;
+  team?: boolean;
+  creation?: {
+    create: (onCreated: (key: Pick<CreatedApiKey, "key">) => void) => void;
+    isPending: boolean;
+    error: Error | null;
+    canCreate: boolean;
+  };
 }
 
-export function OnboardingPanel({ settingsQuery, showGatewayStatus = true }: OnboardingPanelProps) {
-  const [createdKey, setCreatedKey] = useState<CreatedApiKey | null>(null);
+export function OnboardingPanel(props: OnboardingPanelProps) {
+  if (props.settingsQuery.error) {
+    return <p role="alert">Could not load proxy settings. Reload this page to try again.</p>;
+  }
+  if (!props.settingsQuery.data) return <p role="status">Loading proxy settings…</p>;
+  return props.creation
+    ? <ProxyOnboardingFlow key={String(props.creation.canCreate)} {...props} creation={props.creation} />
+    : <PersonalOnboardingFlow {...props} />;
+}
+
+function PersonalOnboardingFlow(props: OnboardingPanelProps) {
   const createKey = useCreateApiKey();
+  return <ProxyOnboardingFlow {...props} creation={{
+    create: (onSuccess) => createKey.mutate("proxy-key", { onSuccess }),
+    isPending: createKey.isPending, error: createKey.error, canCreate: true,
+  }} />;
+}
+
+function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = false, creation }: OnboardingPanelProps & { creation: NonNullable<OnboardingPanelProps["creation"]> }) {
+  const [createdKey, setCreatedKey] = useState<Pick<CreatedApiKey, "key"> | null>(null);
 
   if (createdKey) {
     return (
-      <div className="rounded border border-line bg-paper p-5">
+      <div className="min-w-0 max-w-full overflow-hidden rounded border border-line bg-paper p-5">
         <h2 className="text-base font-medium text-ink mb-6">Proxy key created</h2>
         <KeyDisplay
           apiKey={createdKey}
+          team={team}
           settingsQuery={settingsQuery}
           onCreateAnother={() => setCreatedKey(null)}
         />
@@ -310,8 +349,8 @@ export function OnboardingPanel({ settingsQuery, showGatewayStatus = true }: Onb
   }
 
   return (
-    <div className="rounded border border-line bg-paper p-5">
-      <div className="space-y-6">
+    <div className="min-w-0 max-w-full overflow-hidden rounded border border-line bg-paper p-5">
+      <div className="min-w-0 max-w-full space-y-6">
         {/* Step 1 — Gateway status (shown before key creation too, unless suppressed) */}
         {showGatewayStatus && (
           <div>
@@ -327,23 +366,25 @@ export function OnboardingPanel({ settingsQuery, showGatewayStatus = true }: Onb
         <div>
           <StepHeading n={2} title="Create your key" />
           <p className="text-sm text-muted mb-4">
-            Create a key to route your Claude Code or Codex requests through the
-            recording proxy. Usage is tracked per key.
+            {team
+              ? "Create a shared team key for Claude Code or Codex. Requests and spend belong to this team."
+              : "Create a key to route your Claude Code or Codex requests through the recording proxy. Usage is tracked per key."}
           </p>
-          {createKey.error && (
-            <p className="mb-3 text-sm text-danger-600">{createKey.error.message}</p>
+          {!creation.canCreate && (
+            <p className="mb-4 text-sm text-muted">A team or organization admin must create a shared key for you. Manage key names in <Link to="/settings/api-keys" className="underline">Settings → API keys</Link>. Existing secrets cannot be retrieved.</p>
+          )}
+          {creation.error && (
+            <p role="alert" className="mb-3 text-sm text-danger-600">{errorText(creation.error)}</p>
           )}
           <button
             type="button"
-            onClick={() =>
-              createKey.mutate("proxy-key", {
-                onSuccess: (key) => setCreatedKey(key),
-              })
-            }
-            disabled={createKey.isPending}
+            onClick={() => {
+              if (creation.canCreate && !creation.isPending) creation.create(setCreatedKey);
+            }}
+            disabled={!creation.canCreate || creation.isPending}
             className="rounded px-4 py-2 text-sm bg-moss text-white hover:bg-moss/90 disabled:opacity-50"
           >
-            {createKey.isPending ? "Creating…" : "Create proxy key"}
+            {creation.isPending ? "Creating…" : "Create proxy key"}
           </button>
         </div>
       </div>

@@ -132,6 +132,13 @@ vi.mock("~/api/assistants", async (importOriginal) => {
       data: {
         assistants: [
           {
+            id: "asst_personal",
+            owner: { type: "user" as const, id: "u-1" },
+            sessionId: "assistant:asst_personal",
+            isDefault: true,
+            createdAt: 1,
+          },
+          {
             id: "asst_team_1",
             owner: { type: "team" as const, id: "team_1" },
             sessionId: "assistant:asst_team_1",
@@ -202,6 +209,7 @@ beforeEach(() => {
   workflowsData.workflows = [...populated];
   searchState = {};
   navigate.mockClear();
+  createMutateAsync.mockClear();
   deleteMutateAsync.mockClear();
 });
 
@@ -404,8 +412,9 @@ describe("WorkflowsIndexPage — team ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
-    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string };
+    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string; definition: { assistantId: string } };
     expect(call.teamId).toBe("team_1");
+    expect(call.definition.assistantId).toBe("asst_team_1");
   });
 
   it("sends no teamId in your own workspace", async () => {
@@ -414,8 +423,9 @@ describe("WorkflowsIndexPage — team ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
-    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string };
+    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string; definition: { assistantId: string } };
     expect(call.teamId).toBeUndefined();
+    expect(call.definition.assistantId).toBe("asst_personal");
   });
 });
 

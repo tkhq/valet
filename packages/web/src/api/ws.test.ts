@@ -6,6 +6,8 @@
  * matters is unmount: `onclose` deliberately ignores a cancelled socket, so
  * the cleanup itself must mark the slice closed or it reads "open" forever.
  */
+import { createElement, type PropsWithChildren } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useSessionWebSocket } from "./ws";
@@ -45,9 +47,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function renderSocketHook(sessionId: string) {
+  const queryClient = new QueryClient();
+  const wrapper = ({ children }: PropsWithChildren) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+  return { queryClient, ...renderHook(() => useSessionWebSocket(sessionId), { wrapper }) };
+}
+
 describe("useSessionWebSocket", () => {
   it("marks the slice open on connect and closed on unmount", () => {
-    const { unmount } = renderHook(() => useSessionWebSocket("s1"));
+    const { unmount } = renderSocketHook("s1");
     const socket = FakeWebSocket.instances[0];
     expect(socket).toBeDefined();
 
@@ -62,7 +71,7 @@ describe("useSessionWebSocket", () => {
 
   it("backs off handshake failures until init confirms the connection", () => {
     vi.useFakeTimers();
-    const { unmount } = renderHook(() => useSessionWebSocket("s1"));
+    const { unmount } = renderSocketHook("s1");
     const first = FakeWebSocket.instances[0];
 
     act(() => {
@@ -96,9 +105,62 @@ describe("useSessionWebSocket", () => {
     unmount();
   });
 
+  it("refreshes persisted title caches after reconnect init", () => {
+    vi.useFakeTimers();
+    const { queryClient, unmount } = renderSocketHook("s1");
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const first = FakeWebSocket.instances[0];
+
+    act(() => {
+      first?.onclose?.({ code: 1006 });
+      vi.advanceTimersByTime(500);
+    });
+    const reconnected = FakeWebSocket.instances[1];
+    act(() =>
+      reconnected?.onmessage?.({
+        data: JSON.stringify({ type: "init", seq: 1, ts: 1, session: { id: "s1" } }),
+      }),
+    );
+
+    expect(invalidate).toHaveBeenCalledTimes(3);
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["sessions", "s1", "threads"],
+      exact: true,
+    });
+    unmount();
+  });
+
+  it("refreshes persisted titles when the server finishes naming", () => {
+    const { queryClient, unmount } = renderSocketHook("s1");
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const socket = FakeWebSocket.instances[0];
+
+    act(() =>
+      socket?.onmessage?.({
+        data: JSON.stringify({
+          type: "title.updated",
+          seq: 1,
+          ts: 1,
+          sessionId: "s1",
+          threadId: "t1",
+          sessionTitle: "Fix Authentication",
+          threadTitle: "Fix Authentication",
+        }),
+      }),
+    );
+
+    expect(invalidate).toHaveBeenCalledTimes(3);
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["sessions", "s1", "threads"],
+      exact: true,
+    });
+    expect(useStreamStore.getState().bySession.s1).toBeDefined();
+    unmount();
+  });
+
   it("stops reconnecting when the session does not exist", () => {
     vi.useFakeTimers();
-    const { unmount } = renderHook(() => useSessionWebSocket("missing"));
+    const { unmount } = renderSocketHook("missing");
     const socket = FakeWebSocket.instances[0];
 
     act(() => socket?.onclose?.({ code: 4040 }));
@@ -110,7 +172,7 @@ describe("useSessionWebSocket", () => {
 
   it("retries application close codes that are not terminal for the session stream", () => {
     vi.useFakeTimers();
-    const { unmount } = renderHook(() => useSessionWebSocket("s1"));
+    const { unmount } = renderSocketHook("s1");
     const socket = FakeWebSocket.instances[0];
 
     act(() => {

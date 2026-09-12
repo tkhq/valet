@@ -40,6 +40,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import type { RepoBinding } from "../wire/types.js";
 import type { SourceService } from "../bakes/source-service.js";
+import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
@@ -64,6 +65,8 @@ export interface ChildrenDeps {
    * never uses it.
    */
   prebuildService: SourceService;
+  /** Whether children use an isolated sandbox provider. */
+  sandboxBacked?: boolean;
   /**
    * Directory under which per-child workspaces are created
    * (`{workspaceRoot}/{childSessionId}`, mkdir'd at spawn). Defaults to
@@ -260,6 +263,23 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
 
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
+    const warnings: string[] = [];
+    if (deps.sandboxBacked ?? deps.prebuildService.builderBackend === "kubernetes") {
+      try {
+        await deps.prebuildService.assertRegistryCapacity();
+      } catch (error) {
+        if (!(error instanceof RegistryCapacityError)) throw error;
+        const image = await deps.engineHost.resolveChildStartupImage({
+          userId: ctx.actorUserId, orgId, workspace: "", profile: req.profile, docker: req.docker,
+          repos: binding ? [{ ...binding, targetDir: computeTargetDirs([binding])[0] ?? "" }] : [],
+        });
+        if (!image) throw error;
+        const warning = `Starting sandbox with existing image ${image}. ${error.message.replace("Sandbox image can't be built:", "New image bakes are blocked:")}`;
+        warnings.push(warning);
+        console.warn("sandbox_registry_warning", { orgId, warning });
+      }
+    }
+
 
     // A pre-assigned id (the security dispatch's cell-claim seam) wins so
     // the caller's durable claim row names the session this spawn builds.
@@ -379,7 +399,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       origin: ctx.origin,
     });
 
-    return { childSessionId, queueItemId: receipt.queueItemId };
+    return { childSessionId, queueItemId: receipt.queueItemId, ...(warnings.length ? { warnings } : {}) };
   };
 }
 

@@ -86,7 +86,7 @@ describe("buildDockerRunArgs (pure)", () => {
       "alpine:3.20",
       "sh",
       "-c",
-      "[ -f /start-full.sh ] && exec /bin/bash /start-full.sh || exec tail -f /dev/null",
+      "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
     ]);
   });
 
@@ -348,7 +348,7 @@ describe("docker flag (rootless DinD)", () => {
   it("headless+docker runs the start-headless probe wrapper", () => {
     const args = buildDockerRunArgs({ ...base, docker: true });
     expect(args[args.length - 1]).toBe(
-      "[ -f /start-headless.sh ] && exec /bin/bash /start-headless.sh || exec tail -f /dev/null",
+      "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
     );
   });
 

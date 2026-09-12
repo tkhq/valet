@@ -193,6 +193,8 @@ export function DecisionGateCard({
 function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
   // Cases mirror the engine's `PolicyProvenanceSource` values exactly.
   switch (p.source) {
+    case "team_policy":
+      return "Gated by a team policy.";
     case "org_policy":
       return "Gated by an org policy.";
     case "override":

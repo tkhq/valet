@@ -59,6 +59,32 @@ existence for API groups it does not own.
   `BETTER_AUTH_SECRET` when unset.
 - **`helm test`**: a Pod hook that curls the api Service's `/api/health`.
 
+## Registry filesystem health
+
+The bundled registry includes a read-only Python probe. Each `GET /health` request reads the registry volume with `statvfs`.
+The separate ClusterIP service exposes port 5001 inside the cluster. The registry's NodePort only exposes port 5000.
+The chart sets `VALET_REGISTRY_HEALTH_URL` for the API automatically.
+Filesystem health does not control pod readiness. A probe read failure does not remove the registry's serving endpoints.
+
+The response contains integer byte counts: `capacityBytes`, `availableBytes`, and `usedBytes`.
+Available bytes exclude filesystem blocks reserved for root. Used bytes measure allocated filesystem blocks, including data outside registry manifests.
+The probe does not scan repositories or report logical image sizes. If the filesystem read fails, it returns HTTP 503 without capacity data.
+
+`registry.minFreeGb` defaults to 5. `registry.minFreePercent` defaults to 10.
+The absolute reserve must be zero or greater. The percentage reserve must be above 0 and below 100.
+For small registry volumes, lower `registry.minFreeGb` to leave usable build capacity. The percentage reserve remains active when the absolute reserve is zero.
+The API blocks new bakes below the greater reserve. These values apply to bundled and external probes.
+The reserve does not allocate space for concurrent uploads. Operators must size it for concurrent builds and other registry writers.
+Manifest deletion does not release disk blocks until registry garbage collection runs.
+
+For an external registry, set `externalRegistry.healthUrl` to an API-reachable endpoint with the same JSON contract.
+An empty URL reports unknown physical capacity. An unavailable configured endpoint blocks new bakes.
+Set `registry.health.image.repository` and `registry.health.image.tag` to override the bundled Python image.
+
+Run the chart checks with `bash deploy/chart/valet/test/golden.sh`.
+Run the HTTP probe tests with `python3 deploy/chart/valet/test/registry_health_test.py`.
+The probe tests require permission to bind an ephemeral localhost port.
+
 ## Pre-existing GitHub App (env fallback)
 
 By default, an org admin creates the deployment's GitHub App in the web UI

@@ -1082,6 +1082,24 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
+    it("repairs team proxy attribution on an already migrated database", async () => {
+      const current = await db.query("SELECT pg_get_viewdef('cost_entries'::regclass, true) AS def");
+      const definition = current.rows[0].def;
+      if (typeof definition !== "string") throw new Error("Expected cost view definition");
+      const legacy = definition.replaceAll("p.team_id", "NULL::text");
+      await db.query(`CREATE OR REPLACE VIEW cost_entries AS ${legacy}`);
+      await db.query('ALTER TABLE llm_proxy_requests DROP COLUMN team_id');
+      await db.query('ALTER TABLE llm_proxy_requests ALTER COLUMN user_id SET NOT NULL');
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      await db.query(`INSERT INTO llm_proxy_requests
+        (id, created_at, org_id, user_id, team_id, api_key_id, provider_kind, endpoint, stream, status_code, request_body, total_tokens, cost_usd)
+        VALUES ('team-proxy-repair', 1, 'org', NULL, 'team', 'key', 'openai', '/v1/responses', false, 200, '{}', 10, 0.5)`);
+      const cost = await db.query("SELECT user_id, owner_type, owner_id, cost_total FROM cost_entries WHERE entry_id = 'team-proxy-repair'");
+      expect(cost.rows).toEqual([{ user_id: null, owner_type: "team", owner_id: "team", cost_total: 0.5 }]);
+      await db.query("DELETE FROM llm_proxy_requests WHERE id = 'team-proxy-repair'");
+    });
+
     // #432 added llm_proxy_requests (+ 2 indexes) and rewrote the cost_entries
     // view (a use_case column + a proxy UNION leg). A database migrated before
     // #432 has none of these, and the edited 0000_app.sql never re-runs, so the

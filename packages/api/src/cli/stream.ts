@@ -75,6 +75,7 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   decision_gate_withdrawn: true,
   "queue.state": true,
   "submission.settled": true,
+  "title.updated": true,
   "sandbox.status": true,
   command_result: true,
   ping: true,

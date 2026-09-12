@@ -977,6 +977,8 @@ export interface SuspendedTurnState {
  * `call_tool` path; a future workflow-mode invoker (T3) passes `"workflow"`.
  */
 export interface PolicyResolveInput {
+  /** Trusted session owner; workflow agent sessions may have no app row. */
+  teamId?: string;
   service: string;
   actionId: string;
   riskLevel: RiskLevel;
@@ -999,6 +1001,7 @@ export interface PolicyResolveInput {
  */
 export type PolicyProvenanceSource =
   | "org_policy"
+  | "team_policy"
   | "runtime_grant"
   | "override"
   | "plugin_default"
@@ -1630,6 +1633,13 @@ export type EngineEvent =
       patch?: SettlePatchRef;
     }
   | {
+      /** Live cache-invalidation hint emitted after automatic title writes. */
+      type: "title_updated";
+      threadId: string;
+      sessionTitle?: string;
+      threadTitle?: string;
+    }
+  | {
       /**
        * Stuck-head attention event (spec §Reconciliation, "Stuck-head alarm").
        * Emitted once per observation pass when an unsettled submission crosses
@@ -1707,7 +1717,7 @@ export interface EventStream {
   ): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
   /** Live fan-out. Durable events are delivered AFTER their append commits, in offset order per session. */
   subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe;
-  /** Live-only fan-out for text_delta: no append, no offset. */
+  /** Live-only fan-out (for example text deltas and cache hints): no append or offset. */
   publishEphemeral(event: BusEvent): void;
   /** Delete durable events whose queueItemId is in the list. Returns deleted count. */
   prune(sessionId: string, queueItemIds: string[]): Promise<number>;
@@ -2553,6 +2563,8 @@ export interface SpawnChildRequest {
 export interface SpawnChildResult {
   childSessionId: string;
   queueItemId: string;
+  /** Non-fatal startup conditions that the parent must see. */
+  warnings?: string[];
 }
 
 /**

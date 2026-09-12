@@ -142,6 +142,16 @@ describe("task tool: spawner present", () => {
     expect(result.text).toContain("child.settled");
   });
 
+  it("includes host admission warnings in the parent-visible task result", async () => {
+    const warning = "Registry full. Starting with an existing image. New image bakes are blocked.";
+    const ctx = makeCtx({ config: { childSpawner: async () => ({
+      childSessionId: "child-1", queueItemId: "queue-1", warnings: [warning],
+    }) } });
+    const result = await taskTool.execute({ prompt: "work" }, ctx);
+    expect(result.text).toContain(warning);
+    expect(result.text).toContain("spawned child session child-1");
+  });
+
   it("forwards valid child sandbox resource overrides", async () => {
     let seenReq: SpawnChildRequest | undefined;
     const spawner = vi.fn(async (req: SpawnChildRequest) => {

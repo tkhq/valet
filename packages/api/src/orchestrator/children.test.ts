@@ -6,7 +6,8 @@
  * so the admitted `child.settled` signal stays observable in the queue.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { RegistryCapacityError } from "../bakes/registry-health.js";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, and, sql } from "drizzle-orm";
@@ -2597,5 +2598,78 @@ describe("child sandbox retention", () => {
     const tokens = await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "child-cold"));
     expect(tokens[0]?.revokedAt).not.toBeNull();
     expect((await watchRow(api, "child-cold"))?.sandboxReclaimedAt).not.toBeNull();
+  });
+});
+
+
+describe("registry capacity child admission", () => {
+  it.each(["full", "unknown"] as const)("warns and starts from an older base image when capacity is %s", async (status) => {
+    const provider = makeImageRecordingProvider();
+    const create = provider.create.bind(provider);
+    vi.spyOn(provider, "create").mockImplementation(async (opts) => {
+      const sandbox = await create(opts);
+      vi.spyOn(sandbox, "exec").mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+      return sandbox;
+    });
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedBaseSourceWithBake(api, "existing-base", "full", "registry/base:older");
+    const deps = childrenDeps(api, { sandboxBacked: true });
+    const parent = await api.providers.engineHost.sessionFor("parent-fallback", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    vi.spyOn(deps.prebuildService, "assertRegistryCapacity").mockRejectedValue(new RegistryCapacityError(status));
+    const result = await buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "work" }, {
+      parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user", owner: { type: "user", id: "local-user" },
+    });
+    expect(result.warnings).toEqual([expect.stringContaining("registry/base:older")]);
+    expect(result.warnings?.[0]).toContain("New image bakes are blocked");
+    const child = deps.engineHost.liveSession(result.childSessionId)!;
+    expect((await child.options.specProvider!()).image).toBe("registry/base:older");
+    await child.attachment.ensureReady({ timeoutMs: 5000 });
+    expect(await deps.db.select().from(childWatches)).toHaveLength(1);
+  });
+
+  it("allows the configured stock image when no baked image exists", async () => {
+    api = await bootTestApi({ sandboxProvider: makeImageRecordingProvider(), defaultImage: "stock:existing" });
+    const deps = childrenDeps(api, { sandboxBacked: true });
+    const parent = await api.providers.engineHost.sessionFor("parent-stock", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    vi.spyOn(deps.prebuildService, "assertRegistryCapacity").mockRejectedValue(new RegistryCapacityError("full"));
+    const result = await buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "work" }, {
+      parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user", owner: { type: "user", id: "local-user" },
+    });
+    expect(result.warnings?.[0]).toContain("stock:existing");
+  });
+
+  it("does not use a disabled source to bypass the capacity guard", async () => {
+    api = await bootTestApi({ sandboxProvider: makeImageRecordingProvider() });
+    await seedBaseSourceWithBake(api, "disabled-base", "full", "registry/base:disabled");
+    await api.providers.db.update(imageSources).set({ enabled: false }).where(eq(imageSources.id, "disabled-base"));
+    expect(await api.providers.engineHost.resolveChildStartupImage({
+      userId: "local-user", orgId: "local-org", workspace: "",
+    })).toBeNull();
+  });
+
+  it("rejects before child session, watch, repo, or working directory creation", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { sandboxBacked: true });
+    const parent = await api.providers.engineHost.sessionFor("parent-capacity", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    const guard = vi.spyOn(deps.prebuildService, "assertRegistryCapacity").mockRejectedValue(new RegistryCapacityError("full"));
+    const create = vi.spyOn(deps.engineHost, "childSessionFor");
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    await expect(spawner({ prompt: "work" }, {
+      parentSessionId: parent.id, parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user", owner: { type: "user", id: "local-user" },
+    })).rejects.toThrow("registry full");
+    expect(guard).toHaveBeenCalledOnce();
+    expect(create).not.toHaveBeenCalled();
+    expect(await deps.db.select().from(childWatches)).toHaveLength(0);
+    expect(await deps.db.select().from(sessionRepos)).toHaveLength(0);
+    expect(readdirSync(deps.workspaceRoot!)).toHaveLength(0);
   });
 });

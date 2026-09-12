@@ -833,9 +833,9 @@ describe("SessionHeader — team assistant", () => {
     withTeam("member");
     renderTeamHeader();
     // The same `assistantLabel` the rail uses. It used to fall back to the
-    // TEAM's name here, so one assistant was called "Default assistant" in
+    // TEAM's name here, so one assistant was called "Default Orchestrator" in
     // the rail and "Platform" in the header — two names for one thing.
-    expect(screen.getByText("Default assistant")).toBeTruthy();
+    expect(screen.getByText("Default Orchestrator")).toBeTruthy();
     // The guarantee this test has always been about: never the viewer's own
     // assistant name.
     expect(screen.queryByText("Assistant")).toBeNull();

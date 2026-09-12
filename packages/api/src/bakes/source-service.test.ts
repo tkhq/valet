@@ -14,6 +14,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, imageSources, bakes, agentSessions, sessionRepos } from "../schema/index.js";
 import { GitHubAuthError, type GitHubTokenDeps } from "../services/github-tokens.js";
+import { reorderWaitingBuilds } from "../prebuilds/builder.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import {
   DEFAULT_PREBUILD_REGISTRY_HOST,
@@ -63,6 +64,26 @@ class FakeImageBuilder implements ImageBuilder {
 
   setState(buildId: string, status: BuildStatus): void {
     this.states.set(buildId, status);
+  }
+}
+
+class QueueImageBuilder extends FakeImageBuilder {
+  running: string[] = [];
+  queued: string[] = [];
+  onSnapshot?: () => void;
+  override async build(spec: PrebuildSpec): Promise<{ buildId: string }> {
+    const result = await super.build(spec);
+    if (this.running.length === 0) this.running.push(result.buildId);
+    else this.queued.push(result.buildId);
+    return result;
+  }
+  queueSnapshot() {
+    const snapshot = { running: [...this.running], queued: [...this.queued] };
+    this.onSnapshot?.();
+    return snapshot;
+  }
+  reorderQueue(expected: string[], order: string[]) {
+    return reorderWaitingBuilds(this.queued, expected, order);
   }
 }
 
@@ -221,6 +242,87 @@ async function seedBakeSession(
 }
 
 describe("SourceService", () => {
+  it("lists recent results with source labels and treats unsupported builders as read-only", async () => {
+    const sourceId = await seedRepoSource(db);
+    await seedBake(db, sourceId, { id: "recent-queue", status: "failed", error: "failure" });
+    const queue = await service.listBakeQueue(orgId);
+    expect(queue.builderAvailable).toBe(true);
+    expect(queue.reorderAvailable).toBe(false);
+    expect(queue.recent[0]).toMatchObject({ id: "recent-queue", sourceName: "acme/widgets", error: "failure" });
+    expect(await service.reorderBakeQueue(orgId, [])).toBe(false);
+    expect((await service.listBakeQueue("other-org")).recent).toEqual([]);
+  });
+
+  it("returns builder order, isolates orgs, rejects stale orders, and shows eligible blocked repos", async () => {
+    const queueBuilder = new QueueImageBuilder();
+    service = makeService({ builder: queueBuilder });
+    await seedOrg(db, credentials, "other-org");
+    const firstSource = await seedBaseSource(db, [], { id: "queue-base", profile: null });
+    const secondSource = await seedBaseSource(db, [], { id: "queue-second", profile: null });
+    const foreignSource = await seedBaseSource(db, [], { id: "queue-foreign", orgId: "other-org", profile: null });
+    const thirdSource = await seedBaseSource(db, [], { id: "queue-third", profile: null });
+    const first = await service.startBuild(firstSource);
+    const second = await service.startBuild(secondSource);
+    const foreign = await service.startBuild(foreignSource);
+    const third = await service.startBuild(thirdSource);
+    const child = await seedRepoSource(db, { parentId: firstSource });
+    await seedRepoSource(db, { parentId: firstSource, repoFullName: "acme/disabled", enabled: false });
+    await seedRepoSource(db, { parentId: firstSource, repoFullName: "acme/off", schedule: "off" });
+    for (let index = 0; index < 10; index++) await seedBake(db, secondSource, { id: `queue-recent-${index}`, finishedAt: NOW + index });
+    let queue = await service.listBakeQueue(orgId);
+    expect(queue.running.map((bake) => bake.id)).toEqual([first.id]);
+    expect(queue.queued.map((bake) => bake.id)).toEqual([second.id, third.id]);
+    expect(queue.blocked.map((source) => source.sourceId)).toEqual([child]);
+    expect(queue.recent).toHaveLength(8);
+    expect(queue.recent[0]?.id).toBe("queue-recent-9");
+    expect(await service.reorderBakeQueue(orgId, [third.id, second.id])).toBe(true);
+    expect(queueBuilder.queued).toEqual([queueBuilder.buildIds[3], queueBuilder.buildIds[2], queueBuilder.buildIds[1]]);
+    for (const order of [[third.id], [third.id, third.id], [third.id, foreign.id], [first.id, second.id]]) {
+      expect(await service.reorderBakeQueue(orgId, order)).toBe(false);
+    }
+    queue = await service.listBakeQueue(orgId);
+    expect(queue.queued.map((bake) => bake.id)).toEqual([third.id, second.id]);
+    queueBuilder.onSnapshot = () => {
+      queueBuilder.onSnapshot = undefined;
+      const next = queueBuilder.queued.shift();
+      if (next) queueBuilder.running.push(next);
+    };
+    expect(await service.reorderBakeQueue(orgId, [second.id, third.id])).toBe(false);
+    expect((await service.listBakeQueue("other-org")).queued.map((bake) => bake.id)).toEqual([foreign.id]);
+  });
+
+  it("keeps finished builder work visible as finalizing until persistence catches up", async () => {
+    const queueBuilder = new QueueImageBuilder();
+    service = makeService({ builder: queueBuilder });
+    const sourceId = await seedBaseSource(db, []);
+    const bake = await service.startBuild(sourceId);
+    queueBuilder.running = [];
+    queueBuilder.setState(queueBuilder.buildIds[0]!, { state: "failed", error: "build failed" });
+    const queue = await service.listBakeQueue(orgId);
+    expect(queue.running).toEqual([expect.objectContaining({ id: bake.id, phase: "finalizing" })]);
+    expect(queue.queued).toEqual([]);
+    expect(queue.recent).toEqual([]);
+    expect(await service.reorderBakeQueue(orgId, [bake.id])).toBe(false);
+    await service.syncActiveBuilds();
+    const completed = await service.listBakeQueue(orgId);
+    expect(completed.running).toEqual([]);
+    expect(completed.recent[0]).toMatchObject({ id: bake.id, status: "failed" });
+  });
+
+  it("does not mark unchanged base rebuilds or indirect descendants as blocked", async () => {
+    const queueBuilder = new QueueImageBuilder();
+    service = makeService({ builder: queueBuilder });
+    const sourceId = await seedBaseSource(db, [], { profile: null });
+    const bake = await service.startBuild(sourceId);
+    const direct = await seedRepoSource(db, { parentId: sourceId });
+    const middle = await seedBaseSource(db, [], { profile: null, parentId: sourceId });
+    await seedRepoSource(db, { repoFullName: "acme/indirect", parentId: middle });
+    await seedBake(db, sourceId, { identityHash: "older-identity" });
+    expect((await service.listBakeQueue(orgId)).blocked.map((source) => source.sourceId)).toEqual([direct]);
+    await seedBake(db, sourceId, { identityHash: bake.identityHash, createdAt: NOW - 1 });
+    expect((await service.listBakeQueue(orgId)).blocked).toEqual([]);
+  });
+
   let db: AppDb;
   let credentials: PgCredentialStore;
   let fixture: GithubFixture;
@@ -269,6 +371,71 @@ describe("SourceService", () => {
       ...overrides,
     });
   }
+
+  describe("cache and registry health", () => {
+    it("reports protected over-budget logical bytes separately from registry bytes", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { sizeBytes: 440e9 });
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "200" } });
+      expect(await svc.health(orgId)).toMatchObject({
+        cache: { bytesUsed: 440e9, cacheBudgetGb: 200, over_budget_all_protected: true, unknownSizeCount: 0 },
+        registry: { status: "unconfigured", capacityBytes: null },
+        recentPushFailures: { count: 0, windowMs: 3600000 },
+      });
+    });
+
+    it("counts only recent push failures and reports unknown sizes", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "unknown-size", sizeBytes: null });
+      await seedBake(db, src, { id: "push", status: "failed", error: "failed to push: no space left on device", finishedAt: NOW });
+      await seedBake(db, src, { id: "build", status: "failed", error: "npm install failed", finishedAt: NOW });
+      await seedBake(db, src, { id: "old", status: "failed", error: "failed to push", finishedAt: NOW - 3600001 });
+      expect(await service.health(orgId)).toMatchObject({ cache: { unknownSizeCount: 1 }, recentPushFailures: { count: 1 } });
+      expect(await service.health("other-org")).toMatchObject({ cache: { bytesUsed: 0 }, recentPushFailures: { count: 0 } });
+    });
+
+    it("does not call an evictable cache all-protected", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "old", sizeBytes: 3e9, createdAt: NOW - 10 });
+      await seedBake(db, src, { id: "current", sizeBytes: 3e9, createdAt: NOW });
+      const svc = makeService({ env: { VALET_PREBUILD_CACHE_BUDGET_GB: "1" } });
+      expect(await svc.health(orgId)).toMatchObject({ cache: { overBudget: true, over_budget_all_protected: false } });
+    });
+
+    it("rejects unknown configured capacity and recovers without a restart", async () => {
+      let available = false;
+      const svc = makeService({ env: { VALET_REGISTRY_HEALTH_URL: "http://registry/health" },
+        registryFetch: (async () => available
+          ? Response.json({ capacityBytes: 100e9, usedBytes: 50e9, availableBytes: 50e9 })
+          : new Response("unavailable", { status: 503 })) as typeof fetch });
+      await expect(svc.assertRegistryCapacity()).rejects.toThrow("capacity is unknown");
+      available = true;
+      await expect(svc.assertRegistryCapacity()).resolves.toBeUndefined();
+    });
+
+    it("reports pressure without any bake completing", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { sizeBytes: 440e9 });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await service.reportHealth();
+        expect(log).toHaveBeenCalledWith("bake_storage_pressure", expect.objectContaining({
+          cache: expect.objectContaining({ over_budget_all_protected: true }),
+        }));
+      } finally { log.mockRestore(); }
+    });
+
+    it("rejects a bake before inserting a row when registry capacity is exhausted", async () => {
+      const src = await seedBaseSource(db, []);
+      const svc = makeService({
+        env: { VALET_REGISTRY_HEALTH_URL: "http://registry/health" },
+        registryFetch: (async () => Response.json({ capacityBytes: 246e9, availableBytes: 0.1e9, usedBytes: 245.9e9 })) as typeof fetch,
+      });
+      await expect(svc.startBake(src)).rejects.toThrow("registry full");
+      expect(builder.specs).toHaveLength(0);
+      expect(await db.select().from(bakes)).toHaveLength(0);
+    });
+  });
 
   beforeEach(async () => {
     const { pgdb, appDb } = await freshTestPgDb();
@@ -1335,6 +1502,16 @@ describe("SourceService", () => {
       const rows = await db.select({ id: bakes.id }).from(bakes);
       return new Set(rows.map((r) => r.id));
     }
+
+    it("per-source retention preserves an older bake used by a live session", async () => {
+      const src = await seedRepoSource(db);
+      await seedBake(db, src, { id: "live-old", imageRef: "ref/live-old", createdAt: NOW - 5000 });
+      await seedBake(db, src, { id: "middle", imageRef: "ref/middle", createdAt: NOW - 4000 });
+      await seedBake(db, src, { id: "newest", imageRef: "ref/newest", createdAt: NOW - 3000 });
+      await seedBakeSession(db, "live-old", "active");
+      await pushBakeWithSize(service, src, "new-sha", 1);
+      expect(retentionCalls.flatMap((call) => call.imageRefs)).not.toContain("ref/live-old");
+    });
 
     it("over budget → evicts oldest-first down to ≤ budget", async () => {
       // budget 3 GB. Seed a second source so the source-under-test's newest is

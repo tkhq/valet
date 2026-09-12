@@ -27,6 +27,7 @@
  * workflow kind (`EventSubscriptionTargetWire`), so a workflow-targeted event
  * rule needs no separate event-trigger endpoint.
  */
+import { Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import {
@@ -54,6 +55,7 @@ import {
 } from "~/components/events/filter-editor";
 import { useAssistants } from "~/api/assistants";
 import { assistantLabel } from "~/components/session/assistant-rail";
+import { orchestratorName } from "~/lib/assistant-name";
 import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
 import { useIdentityLinks } from "~/api/queries";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
@@ -125,18 +127,23 @@ function AssistantSelect({
   owner,
   value,
   onChange,
+  required = false,
 }: {
   /** No id for the user case: the list route returns only the CALLER's own
    * user-owned assistants, so `type === "user"` already names one person. */
   owner: { type: "user" } | { type: "team"; id: string };
   value: string | undefined;
   onChange: (assistantId: string | undefined) => void;
+  required?: boolean;
 }) {
   const assistantsQ = useAssistants();
   const owned = (assistantsQ.data?.assistants ?? []).filter((a) =>
     owner.type === "user" ? a.owner.type === "user" : a.owner.type === "team" && a.owner.id === owner.id,
   );
-  if (owned.length < 2) return null;
+  if (required && assistantsQ.error) return <ErrorRow>Could not load assistants. Close setup and try again.</ErrorRow>;
+  if (required && !assistantsQ.data) return <LoadingRow />;
+  if (required && owned.length === 0) return <p className="text-sm text-muted">Create a team assistant on the Assistants page, then return here.</p>;
+  if (!required && owned.length < 2) return null;
   return (
     <div className="ml-6 mt-1">
       <select
@@ -146,9 +153,9 @@ function AssistantSelect({
         className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
       >
         <option value="">
-          {owned.find((a) => a.isDefault)?.name?.trim()
+          {required ? "Choose an assistant" : owned.find((a) => a.isDefault)?.name?.trim()
             ? `Default (${owned.find((a) => a.isDefault)?.name})`
-            : "Default assistant"}
+            : orchestratorName(undefined)}
         </option>
         {owned.map((a) => (
           <option key={a.id} value={a.id}>
@@ -172,7 +179,11 @@ function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
 export function AutomationWizard({
   open,
   onOpenChange,
+  replyTeam,
+  onCloseAutoFocus,
 }: {
+  replyTeam?: { id: string; name: string };
+  onCloseAutoFocus?: (event: Event) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -182,10 +193,11 @@ export function AutomationWizard({
   const createSchedule = useCreateSchedule();
   const ws = useActiveWorkspace();
   const teamsQ = useTeams();
-  const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
+  const assistantsQ = useAssistants();
+  const scopedTeam = replyTeam ?? (ws?.kind === "team" ? ws.team : undefined);
   const scopedTeamId = scopedTeam?.id;
 
-  const [step, setStep] = useState<Step>(1);
+  const [step, setStep] = useState<Step>(replyTeam ? 2 : 1);
   const [outcome, setOutcome] = useState<Outcome>("reply");
   const [name, setName] = useState("");
   const [keys, setKeys] = useState<Set<string>>(new Set());
@@ -270,7 +282,10 @@ export function AutomationWizard({
   }
 
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
-  const targetReady = target.kind === "orchestrator" || workflowChosen;
+  const targetReady = replyTeam
+    ? !assistantsQ.error && target.kind === "orchestrator" && target.orchestrator === "team" && target.teamId === replyTeam.id &&
+      (assistantsQ.data?.assistants.some((a) => a.id === target.assistantId && a.owner.type === "team" && a.owner.id === replyTeam.id) ?? false)
+    : target.kind === "orchestrator" || workflowChosen;
 
   // Which step the reader is on decides whether Next is allowed. Each gate
   // matches what the step collects, so the reader cannot skip an empty field.
@@ -282,7 +297,7 @@ export function AutomationWizard({
   function canAdvance(): boolean {
     if (step === 1) return true; // An outcome always has a value.
     if (outcome === "reply") {
-      return step === 2 && replyScoped;
+      return step === 2 && replyScoped && (!replyTeam || targetReady);
     }
     if (step === 2) {
       return isSchedule ? cron.trim().length > 0 : keys.size > 0;
@@ -303,7 +318,7 @@ export function AutomationWizard({
   function back() {
     setError(null);
     setCollisions(null);
-    setStep((s) => (Math.max(s - 1, 1) as Step));
+    setStep((s) => (Math.max(s - 1, replyTeam ? 2 : 1) as Step));
   }
 
   function orchestratorTargetFrom(t: TargetChoice): OrchestratorChoice {
@@ -452,17 +467,19 @@ export function AutomationWizard({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title="New automation"
-        description="Pick what should happen, then fill in the details."
+        onCloseAutoFocus={onCloseAutoFocus}
+        title={replyTeam ? "Set up Slack replies" : "New automation"}
+        description={replyTeam ? `Choose where ${replyTeam.name} replies and which assistant answers.` : "Pick what should happen, then fill in the details."}
         className="max-w-lg"
       >
-        <StepHeader step={step} plan={plan} />
+        {replyTeam ? <p className="mb-4 text-xs text-muted">Step {step - 1} of 2 · {step === 2 ? "Reply" : "Review"}</p> : <StepHeader step={step} plan={plan} />}
 
         <div className="space-y-4">
           {step === 1 && <OutcomeStep outcome={outcome} onChange={chooseOutcome} />}
 
           {step === 2 && outcome === "reply" && (
             <ReplyStep
+              fixedTeam={!!replyTeam}
               channels={replyChannels}
               onChannelsChange={setReplyChannels}
               anyChannel={anyChannel}
@@ -538,7 +555,8 @@ export function AutomationWizard({
           {collisions !== null && (
             <CollisionNotice report={collisions.report} committed={collisions.committed} />
           )}
-          {error && <p className="text-xs text-danger-500">{error}</p>}
+          {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">A matching rule already exists. <Link to="/events" className="underline">Open Events</Link> and select Subscriptions to manage it.</p>}
+          {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
         </div>
 
         <DialogFooter>
@@ -550,7 +568,7 @@ export function AutomationWizard({
             </Button>
           ) : (
             <>
-              {step > 1 && (
+              {step > (replyTeam ? 2 : 1) && (
                 <Button type="button" variant="secondary" onClick={back} disabled={isPending}>
                   Back
                 </Button>
@@ -565,7 +583,7 @@ export function AutomationWizard({
                   {isPending ? "Creating…" : "Create automation"}
                 </Button>
               )}
-              {isLastStep && collisions !== null && collisions.report.blocking.length > 0 && (
+              {!replyTeam && isLastStep && collisions !== null && collisions.report.blocking.length > 0 && (
                 <Button
                   type="button"
                   variant="secondary"
@@ -655,6 +673,7 @@ function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Ou
  * Team assistant rules accept mentions from linked, current team members.
  */
 function ReplyStep({
+  fixedTeam = false,
   channels,
   onChannelsChange,
   anyChannel,
@@ -665,6 +684,7 @@ function ReplyStep({
   follow,
   onFollowChange,
 }: {
+  fixedTeam?: boolean;
   channels: SelectedChannel[];
   onChannelsChange: (channels: SelectedChannel[]) => void;
   anyChannel: boolean;
@@ -704,7 +724,7 @@ function ReplyStep({
             Select one or more channels. The rule replies only there.
           </p>
         )}
-        <label className="mt-2 flex items-start gap-2 text-sm text-ink">
+        {!fixedTeam && <label className="mt-2 flex items-start gap-2 text-sm text-ink">
           <input
             type="checkbox"
             className="mt-0.5"
@@ -717,13 +737,13 @@ function ReplyStep({
               Reply to eligible @-mentions in every channel the app can see.
             </span>
           </span>
-        </label>
+        </label>}
       </div>
 
       <div>
         <p className="mb-1.5 text-xs font-medium text-muted">Which assistant answers</p>
         <div className="space-y-1.5">
-          <label className="flex items-center gap-2 text-sm text-ink">
+          {!fixedTeam && <label className="flex items-center gap-2 text-sm text-ink">
             <input
               type="radio"
               name="automation-reply-target"
@@ -731,7 +751,7 @@ function ReplyStep({
               onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "user" })}
             />
             Your assistant
-          </label>
+          </label>}
           {target.orchestrator === "user" && (
             <AssistantSelect
               owner={{ type: "user" }}
@@ -744,18 +764,18 @@ function ReplyStep({
           {scopedTeam && (
             <div>
               <label className="flex items-center gap-2 text-sm text-ink">
-                <input type="radio" name="automation-reply-target"
+                <input type="radio" name="automation-reply-target" disabled={fixedTeam}
                   checked={target.orchestrator === "team"}
                   onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })} />
                 {scopedTeam.name}&apos;s assistant
               </label>
               {target.orchestrator === "team" && (
-                <AssistantSelect owner={{ type: "team", id: scopedTeam.id }} value={target.assistantId}
+                <AssistantSelect required={fixedTeam} owner={{ type: "team", id: scopedTeam.id }} value={target.assistantId}
                   onChange={(assistantId) => onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id, assistantId })} />
               )}
             </div>
           )}
-          <label className="flex items-center gap-2 text-sm text-ink">
+          {!fixedTeam && <label className="flex items-center gap-2 text-sm text-ink">
             <input
               type="radio"
               name="automation-reply-target"
@@ -763,7 +783,7 @@ function ReplyStep({
               onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "org" })}
             />
             The org assistant
-          </label>
+          </label>}
         </div>
       </div>
 

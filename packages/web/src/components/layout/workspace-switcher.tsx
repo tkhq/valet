@@ -117,7 +117,7 @@ export function WorkspaceSwitcher({
           type="button"
           variant="ghost"
           size="sm"
-          className="shrink-0 gap-1.5 max-w-[11rem]"
+          className="shrink-0 gap-1.5 max-w-[7rem] sm:max-w-[11rem]"
           aria-label={`Workspace: ${active.label}. Change workspace`}
         >
           {active.isTeam ? (
