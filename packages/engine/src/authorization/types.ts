@@ -130,7 +130,7 @@ export interface PolicyDecisionEnvelope {
   requestSubjectDigest: string;
   inputDigest: string;
   policyDigest: string;
-  compiledBundleDigest: string;
+  sourceBundleDigest: string;
   evaluator: EvaluatorIdentity;
   decision: PolicyDecisionV1;
   evaluatedAtMs: number;

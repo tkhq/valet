@@ -33,7 +33,7 @@ describe("authorization audit schema", () => {
       requestSubjectDigest: "subject-digest",
       inputDigest: "input-digest",
       policyDigest: "policy-digest",
-      compiledBundleDigest: "bundle-digest",
+      sourceBundleDigest: "bundle-digest",
       evaluatorKind: "local_valet",
       evaluatorEngineDigest: "engine-digest",
       effect: "allow",
@@ -81,7 +81,7 @@ describe("authorization audit schema", () => {
       query.query(
         `INSERT INTO authorization_decisions
           (decision_id, org_id, request_id, idempotency_key, request_subject_digest,
-           input_digest, policy_digest, compiled_bundle_digest, evaluator_kind,
+           input_digest, policy_digest, source_bundle_digest, evaluator_kind,
            evaluator_engine_digest, effect, reason_code, matched_rule_ids,
            obligations, redactions, proof_verification_status,
            identity_fact_provenance, policy_fact_provenance, evaluated_at, created_at)

@@ -1583,7 +1583,7 @@ export const authorizationDecisions = pgTable(
     requestSubjectDigest: text("request_subject_digest").notNull(),
     inputDigest: text("input_digest").notNull(),
     policyDigest: text("policy_digest").notNull(),
-    compiledBundleDigest: text("compiled_bundle_digest").notNull(),
+    sourceBundleDigest: text("source_bundle_digest").notNull(),
     evaluatorKind: text("evaluator_kind", { enum: ["local_valet", "tvc_attested"] }).notNull(),
     evaluatorEngineDigest: text("evaluator_engine_digest").notNull(),
     effect: text("effect", { enum: ["allow", "deny", "require_approval"] }).notNull(),

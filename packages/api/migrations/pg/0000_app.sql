@@ -904,7 +904,7 @@ CREATE TABLE "authorization_decisions" (
 	"request_subject_digest" text NOT NULL,
 	"input_digest" text NOT NULL,
 	"policy_digest" text NOT NULL,
-	"compiled_bundle_digest" text NOT NULL,
+	"source_bundle_digest" text NOT NULL,
 	"evaluator_kind" text NOT NULL,
 	"evaluator_engine_digest" text NOT NULL,
 	"effect" text NOT NULL,

@@ -226,7 +226,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "decision_id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL,
       "request_id" text NOT NULL, "idempotency_key" text NOT NULL,
       "request_subject_digest" text NOT NULL, "input_digest" text NOT NULL,
-      "policy_digest" text NOT NULL, "compiled_bundle_digest" text NOT NULL,
+      "policy_digest" text NOT NULL, "source_bundle_digest" text NOT NULL,
       "evaluator_kind" text NOT NULL, "evaluator_engine_digest" text NOT NULL,
       "effect" text NOT NULL, "reason_code" text NOT NULL,
       "matched_rule_ids" jsonb NOT NULL, "obligations" jsonb NOT NULL,
