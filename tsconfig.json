@@ -48,6 +48,7 @@
     { "path": "./packages/plugin-assistants" },
     { "path": "./packages/plugin-memory" },
     { "path": "./packages/plugin-security" },
+    { "path": "./packages/plugin-turnkey" },
     { "path": "./packages/sandbox-gateway" },
     { "path": "./packages/api" },
     // Deliberately LAST, after api and every plugin-*: about fifteen

@@ -1,0 +1,40 @@
+{
+  "name": "@valet/plugin-turnkey",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "valet": {
+    "plugin": "./src/plugin.ts"
+  },
+  "exports": {
+    "./plugin": "./src/plugin.ts",
+    "./config": "./src/config.ts",
+    "./store": "./src/store.ts",
+    "./turnkey-client": "./src/turnkey-client.ts",
+    "./github-keys": "./src/github-keys.ts",
+    "./ssh": "./src/ssh.ts",
+    "./gate": "./src/gate.ts",
+    "./enrollment": "./src/enrollment.ts",
+    "./p256": "./src/p256.ts",
+    "./sandbox": "./src/sandbox.ts",
+    "./test-helpers": "./src/test-helpers/fakes.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@turnkey/sdk-server": "^8.4.0",
+    "@valet/engine": "workspace:*",
+    "@valet/shared": "workspace:*",
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
+  }
+}
