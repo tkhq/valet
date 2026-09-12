@@ -158,26 +158,35 @@ TKMS and TVC have different roles:
 
 ## Rego v1 compatibility and capability profile
 
-Valet targets full Rego v1 syntax and language semantics where feasible. The target includes packages, imports, rules, functions, variables, unification, assignment, references, comprehensions, control forms, and standard value behavior. Valet also targets full coverage of pure Rego built-ins.
+Rego v1 remains the canonical authoring language. Valet targets full Rego v1 syntax, language semantics, and pure built-in coverage. The first engine profile does not claim full compatibility until it passes the required corpus and built-in gates.
 
-Valet publishes a versioned engine compatibility profile. The profile records the Rego language version, implemented syntax and semantics, pure built-ins, capability-builtins, limits, known gaps, and failure behavior. A gap is a tracked compatibility defect or declared limitation, not a silent language variation.
+Valet publishes a versioned compatibility profile. Version 1 pins Rego v1, Regorus 0.12.0, the Valet engine contract, and these built-in classes:
 
-The profile classifies each built-in as one of these types:
+- `pure`: deterministic for explicit arguments and implemented by the pinned substrate;
+- `fact_backed`: replaced by a named, schema-versioned value in canonical policy input;
+- `injected`: available only through a versioned and allowlisted Valet host capability; and
+- `rejected`: unavailable to an active policy.
 
-- pure and implemented by the Rust engine;
-- deterministic with explicit facts supplied in policy input;
-- available only through an approved Valet capability injection; or
-- rejected by the engine profile.
+The checked-in inventory lists every built-in known to the pinned substrate. Each entry records its class, implementation status, conformance evidence, and any known gap. A substrate upgrade cannot add an unclassified built-in. Full pure built-in support requires every pure built-in in the inventory to pass its required fixtures.
 
-Network, filesystem, wall clock, randomness, environment access, process access, dynamic module loading, and unapproved host callbacks are not ambiently available. A policy must use deterministic supplied facts or an explicit capability approved by the profile. Otherwise validation rejects the module before activation. This capability boundary does not create a second policy language.
+The default capability allowlist is empty. Network, filesystem, wall clock, randomness, environment, process, dynamic loading, and arbitrary host callbacks are rejected. A policy can use a deterministic fact from explicit input instead. A later injected capability requires a profile version, an input and output schema, limits, provenance, and a fail-closed rule.
 
-Valet resolves an injected capability through an allowlisted host adapter before evaluation when feasible. The canonical result becomes input covered by `inputDigest`. Each adapter has a versioned schema, limits, provenance, and failure rule. A missing, failed, or undeclared capability denies without fallback.
+Validation rejects unsupported syntax and rejected, missing, or undeclared built-ins before bundle activation. If an injected capability later fails at evaluation, the engine returns a typed denial. It does not use an approximation, ambient authority, old evaluator, approval fallback, or another policy engine.
 
-The compatibility profile defines rule conflict, undefined value, error, numeric precision, Unicode, iteration order, and canonical serialization behavior. It also defines source, AST, recursion, comprehension, instruction, memory, time, trace, and result limits.
+The versioned compatibility corpus contains Valet contract fixtures, the pinned Regorus conformance fixtures, and licensed upstream Rego v1 fixtures. Its manifest records each fixture's origin, license, feature, expected parse status, expected result, and required or informational status. A release can claim full Rego v1 compatibility only when all required fixtures pass on every supported target, every built-in is classified, and no behavior-changing gap remains open.
 
-Valet measures language compatibility with a published conformance corpus. Published OPA conformance fixtures can inform that corpus where their licenses and assumptions permit use. Valet does not require an OPA binary in production, and OPA is never the evaluator or operational compatibility contract.
+Profile version 1 sets these engine limits per compilation or evaluation:
 
-A release must reject an unsupported construct or capability-built-in at validation time. It must not ignore, approximate, or defer the failure to an authorization request. Future profile versions can close gaps only with deterministic semantics, limits, migration rules, and upgrade tests.
+- 256 modules and 1 MiB of Rego source;
+- 8 MiB of canonical policy data and 8 MiB of canonical input;
+- 250,000 parsed nodes and 16 MiB of compiled policy bytes;
+- 1,000,000 evaluation instructions;
+- 128 document-reference, call, and recursion depth;
+- 100,000 generated comprehension values;
+- 10,000 explain events; and
+- 1 MiB of decision output.
+
+The engine enforces deterministic count and size limits. The local adapter enforces a 100 ms wall-time limit and a 64 MiB engine memory limit because the engine accepts no clock or allocator authority. A limit failure returns a typed denial without fallback. A profile change requires a new engine identity and bundle recompilation.
 
 ## Valet Rust policy engine
 
@@ -200,15 +209,15 @@ The evaluator accepts no database handle, lock manager, credential resolver, net
 
 The local native and WebAssembly targets use one semantic implementation. Target-specific adapters can manage memory transfer and process isolation, but they cannot change policy behavior. Cross-target conformance tests must cover accepted source, rejected source, compiled digests, decisions, errors, limits, and explain traces.
 
-### Bootstrap posture
+### Regorus foundation and ownership
 
-Valet must evaluate implementation options before it selects a parser or evaluator substrate. [Microsoft Regorus](https://github.com/microsoft/regorus) is one evaluation and bootstrap option, not a settled dependency. Its project reports that it is mostly OPA v1.2 compliant, cross-platform, `no_std` and WebAssembly capable, and designed for confidential computing.
+Valet adopts Regorus 0.12.0 as its initial Rust Rego substrate. Cargo pins the exact crate version and the repository commits the resolved lockfile. The dependency remains subject to license review, source audit, vulnerability scanning, compatibility tests, and denial-of-service tests.
 
-Valet can adopt Regorus, vendor or fork it, or replace it with a Valet implementation. In each case, Valet owns the public engine contract and compatibility profile. Valet must pin and audit the code, measure Rego v1 compliance, close pure built-in gaps, and control capability-builtins at the host boundary.
+Valet owns the public engine contract, capability profile, compatibility corpus, limits, evaluator boundary, and release decisions. The public crate API does not expose Regorus types. Regorus does not select capabilities, load policy data, resolve facts, or define Valet authorization results.
 
-A third-party substrate adds supply-chain and semantic-drift risk. A fork adds merge and maintenance work. A replacement adds parser, compiler, optimizer, and security work. The implementation decision must compare these costs and publish the accepted gaps.
+Valet can vendor or fork Regorus if TVC, security, maintenance, or compatibility requirements need tighter control. It can replace Regorus only behind the same Valet contract and conformance gates. OPA remains excluded from runtime, compilation, sidecars, migration, shadow evaluation, fallback, and production dependencies.
 
-Owning the engine increases initial scope and long-term maintenance. Valet owns Rego compatibility, built-in coverage, conformance evidence, security review, and upgrades. The benefit is one audited Rust implementation for local and measured TVC evaluation. This removes a local network hop, reduces runtime parts, and prevents drift between different evaluator implementations. Ownership does not itself prove compatibility, determinism, or safety.
+A Regorus, Rust toolchain, profile, contract, or compiler upgrade creates a new engine identity. Before deployment, the upgrade must pass the required corpus, built-in inventory, native and supported WebAssembly parity, dependency audit, resource-limit tests, and security review. Valet then recompiles every active bundle and deploys the engine build with its compatible bundle set. Rollback restores the prior engine build and prior bundle set together. A process rejects mixed engine and bundle versions.
 
 ## Architecture
 
@@ -885,21 +894,16 @@ The active bundle is incompatible, invalid, or unavailable to the Valet engine. 
 
 ## Open questions and decision gates
 
-1. **Rego v1 compliance:** Define the corpus, scoring, release threshold, gap policy, and evidence for full language compatibility.
-2. **Regorus posture:** Decide whether Valet adopts, vendors or forks, or replaces Regorus. Record license, audit, maintenance, and gap-closure costs.
-3. **Capability-builtins:** Define which built-ins use supplied facts, explicit capability injection, or rejection. Define validation and runtime failure behavior.
-4. **Native and WebAssembly targets:** Select the first local target after packaging, isolation, performance, and cross-target compatibility tests.
-5. **Deterministic compilation:** Freeze canonical AST, IR or bytecode, numeric, Unicode, set, iteration, and source-map rules.
-6. **Performance and resource limits:** Set compile latency, evaluation latency, throughput, source, instruction, time, memory, depth, trace, and output limits.
-7. **Source compatibility:** Define Rego and profile migration, deprecation windows, unsupported-capability handling, and builder round-trip rules.
-8. **Security review:** Review parser, compiler, evaluator, unsafe Rust, dependency supply chain, host boundary, and denial-of-service controls.
-9. **Engine upgrade and rollback:** Define compatible version ranges, precompilation, release pins, rollback bundles, and rejection of mixed versions.
-10. **Bundle publication transaction:** Define the database transaction boundary for authoring rows, bundle versions, the active pointer, and audit. The write cannot report success before activation.
-11. **Policy source signatures:** Decide when local policy administration must produce signed pins, before TVC or with TVC.
-12. **Identity roots:** Select trusted issuers for user, team, workload, and service identities. Host assertions remain explicit until then.
-13. **List authorization:** Define the limited query-obligation vocabulary before route and resource cutover.
-14. **Built-in granularity:** Decide which file, process, and child operations need action rules versus capability classes.
-15. **TVC confidentiality and retention:** Confirm ingress confidentiality and set proof, bundle, and audit retention requirements.
-16. **Attested execution and TKMS:** Select attested action families and any key provider, co-signer, or consensus role for TKMS.
+1. **Native and WebAssembly targets:** Select the first local target after packaging, isolation, performance, and cross-target compatibility tests.
+2. **Deterministic compilation:** Freeze canonical AST, IR or bytecode, numeric, Unicode, set, iteration, and source-map rules.
+3. **Source compatibility:** Define Rego and profile migration, deprecation windows, unsupported-capability handling, and builder round-trip rules.
+4. **Security review:** Review parser, compiler, evaluator, unsafe Rust, Regorus, dependency supply chain, host boundary, and denial-of-service controls.
+5. **Bundle publication transaction:** Define the database transaction boundary for authoring rows, bundle versions, the active pointer, and audit. The write cannot report success before activation.
+6. **Policy source signatures:** Decide when local policy administration must produce signed pins, before TVC or with TVC.
+7. **Identity roots:** Select trusted issuers for user, team, workload, and service identities. Host assertions remain explicit until then.
+8. **List authorization:** Define the limited query-obligation vocabulary before route and resource cutover.
+9. **Built-in granularity:** Decide which file, process, and child operations need action rules versus capability classes.
+10. **TVC confidentiality and retention:** Confirm ingress confidentiality and set proof, bundle, and audit retention requirements.
+11. **Attested execution and TKMS:** Select attested action families and any key provider, co-signer, or consensus role for TKMS.
 
 The login-gated Valet artifact at `https://valet.dev.agents.turnkey.engineering/a/mfhW_E7IpUksh-W0CpMNBw` was inaccessible during research. Treat it as an internal follow-up reference. This design does not claim to incorporate its contents.

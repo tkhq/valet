@@ -18,39 +18,42 @@ PR 1  documentation
   v
 PR 2  typed contracts and audit identities
   |
+  v
+PR 3  pinned Regorus policy engine foundation
+  |
   +----------+
   v          v
-PR 3  Rust engine, Rego v1 compatibility, and compiler
+PR 4  Rust engine, Rego v1 compatibility, and compiler
   |
   v
-PR 4  local engine adapter and bundle host    PR 5  policy data compiler
+PR 5  local engine adapter and bundle host    PR 6  policy data compiler
   |                                             |
   +----------------------+----------------------+
                          v
-PR 6  policy builder and authoring APIs
+PR 7  policy builder and authoring APIs
        |
        v
-PR 7  inert surface adapters
+PR 8  inert surface adapters
        |
        v
-PR 8  atomic local Valet engine action cutover
+PR 9  atomic local Valet engine action cutover
        |
        +----------+-----------+------------+
        v          v           v            v
-PR 9 built-ins  PR 10 routes  PR 11 delegation  PR 12 entitlements
+PR 10 built-ins  PR 11 routes  PR 12 delegation  PR 13 entitlements
                  resources      sandbox, creds      and catalog
                                 and egress
        \          |             |              /
         +---------+-------------+-------------+
                             |
                             v
-                   PR 13 TVC Rust engine host
+                   PR 14 TVC Rust engine host
                             |
                             v
-                   PR 14 attested execution and optional TKMS
+                   PR 15 attested execution and optional TKMS
 ```
 
-PR 3 defines the engine before PR 4 integrates a local target. PR 5 can proceed after PR 3. PR 6 builds on PRs 4 and 5. PRs 9 through 12 can be prepared after PR 8. PRs 13 and 14 are future work.
+PR 3 pins the Rust substrate and Valet engine boundary. PR 4 completes the engine before PR 5 integrates a local target. PR 6 can proceed after PR 4. PR 7 builds on PRs 5 and 6. PRs 10 through 13 can be prepared after PR 9. PRs 14 and 15 are future work.
 
 ## Reviewability rules
 
@@ -61,8 +64,8 @@ PR 3 defines the engine before PR 4 integrates a local target. PR 5 can proceed 
 - Use fixture policy rows and static request fixtures before cutover. Do not mirror live traffic.
 - Keep generated bundle fixtures small and review their source rows beside the expected Rego or data.
 - Route a surface only when its request adapter, decision handling, audit, and failure behavior land together.
-- Make PR 8 the only pull request that changes action-policy enforcement.
-- Delete obsolete code in PR 8 rather than keeping it behind a flag.
+- Make PR 9 the only pull request that changes action-policy enforcement.
+- Delete obsolete code in PR 9 rather than keeping it behind a flag.
 - Keep builder preview on `AuthorizationService`. Do not add a browser or UI evaluator.
 
 ## PR 1: Design and implementation plan
@@ -117,9 +120,41 @@ pnpm --filter @valet/api test authorization
 pnpm typecheck
 ```
 
-## PR 3: Valet Rust engine, Rego v1 compatibility, and compiler
+## PR 3: Pinned Regorus policy engine foundation
 
 **Depends on:** PR 2
+
+**Scope**
+
+- Add the Rust workspace, pinned toolchain, and a narrowly scoped Valet policy engine crate.
+- Pin Regorus as the initial Rego substrate. Keep its API behind the Valet engine boundary.
+- Add versioned engine identity and capability-profile metadata.
+- Inventory Regorus built-ins under the Valet capability classifications.
+- Add boundary fixtures and compatibility tests that state their current coverage.
+- Keep filesystem, network, clock, randomness, process, and arbitrary host callbacks unavailable by default.
+- Add no production adapter, bundle host, authorization wiring, policy migration, or enforcement change.
+- Add no OPA runtime, compiler, sidecar, command, library, migration, shadow path, fallback, or generated artifact.
+
+**Acceptance checks**
+
+- Cargo resolves the exact Regorus version from the committed lockfile.
+- The public crate API exposes Valet types rather than Regorus types.
+- The capability profile classifies each inventoried built-in and rejects ambient authority by default.
+- Fixtures prove deterministic evaluation for explicit input and typed output at the Valet boundary.
+- Tests do not claim full Rego v1 compatibility or full pure built-in coverage.
+- The crate has no production wiring or host authority.
+
+**Validation**
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+## PR 4: Valet Rust engine, Rego v1 compatibility, and compiler
+
+**Depends on:** PR 3
 
 **Scope**
 
@@ -134,7 +169,7 @@ pnpm typecheck
 - Add bundle loading, contract validation, explain traces, and source maps.
 - Add native and Rust-to-WebAssembly build targets from one semantic implementation where toolchain tests permit them.
 - Keep the default host capability interface empty. Version and allowlist each injected capability.
-- Evaluate whether Valet adopts, vendors or forks, or replaces Regorus. Do not make it a settled dependency before the gate review.
+- Build on the pinned Regorus substrate behind the Valet boundary. Replace it only through the engine upgrade gate.
 - Use published OPA conformance fixtures where useful without adding an OPA evaluator or production dependency.
 - Add no OPA runtime, compiler, sidecar, command, library, or generated artifact.
 
@@ -160,9 +195,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## PR 4: Local Valet engine adapter and bundle host
+## PR 5: Local Valet engine adapter and bundle host
 
-**Depends on:** PR 3
+**Depends on:** PR 4
 
 **Scope**
 
@@ -190,9 +225,9 @@ pnpm typecheck
 cargo test --workspace
 ```
 
-## PR 5: Current policy data compiler
+## PR 6: Current policy data compiler
 
-**Depends on:** PR 3
+**Depends on:** PR 4
 
 **Scope**
 
@@ -201,7 +236,7 @@ cargo test --workspace
 - Convert `runtime_grants` and approval resolutions into canonical dynamic facts.
 - Encode action, service, and risk specificity.
 - Encode org deny, team deny, grant, override, strict org/team result, and default authority layers.
-- Keep `packages/api/src/policies/resolution.ts` live until PR 8.
+- Keep `packages/api/src/policies/resolution.ts` live until PR 9.
 - Use offline fixture comparisons only. Do not add runtime dual evaluation.
 
 **Acceptance checks**
@@ -222,9 +257,9 @@ pnpm --filter @valet/api test policies
 pnpm typecheck
 ```
 
-## PR 6: Policy builder and canonical authoring APIs
+## PR 7: Policy builder and canonical authoring APIs
 
-**Depends on:** PRs 4 and 5
+**Depends on:** PRs 5 and 6
 
 **Scope**
 
@@ -238,7 +273,7 @@ pnpm typecheck
 - Map current action policies, team policies, overrides, grants, entitlements, plugin defaults, risk defaults, and the bundle default into provenance-preserving views.
 - Emit Rego v1 and data under the same compatibility profile used locally and in future TVC.
 - Include Rego, capability-profile, compiler, IR, contract, engine, compiled artifact, and source-map versions in builder validation and diffs.
-- Keep publication inactive until PR 8 makes each effective-policy write validate, publish, and activate a canonical draft in one transaction.
+- Keep publication inactive until PR 9 makes each effective-policy write validate, publish, and activate a canonical draft in one transaction.
 - Add no client evaluator, UI-only semantics, shadow mode, dual evaluation, or runtime fallback.
 
 **Acceptance checks**
@@ -266,9 +301,9 @@ pnpm --filter @valet/web test policy-builder policies
 pnpm typecheck
 ```
 
-## PR 7: Inert adapters for current action paths
+## PR 8: Inert adapters for current action paths
 
-**Depends on:** PR 6
+**Depends on:** PR 7
 
 **Scope**
 
@@ -294,9 +329,9 @@ pnpm --filter @valet/api test action-invoker authorization
 pnpm typecheck
 ```
 
-## PR 8: Atomic local Valet engine action cutover
+## PR 9: Atomic local Valet engine action cutover
 
-**Depends on:** PR 7
+**Depends on:** PR 8
 
 **Scope**
 
@@ -348,9 +383,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 9: Built-in tools
+## PR 10: Built-in tools
 
-**Depends on:** PR 8
+**Depends on:** PR 9
 
 **Scope**
 
@@ -365,7 +400,7 @@ make e2e
 - A denied built-in never calls its implementation.
 - An approval decision binds exact arguments and re-evaluates after approval.
 - Unknown obligations deny.
-- Child tools also satisfy PR 11 policy when that pull request lands.
+- Child tools also satisfy PR 12 policy when that pull request lands.
 
 **Validation**
 
@@ -375,9 +410,9 @@ pnpm typecheck
 make e2e E2E_ARGS="--only cli,typecheck"
 ```
 
-## PR 10: Route and resource authorization
+## PR 11: Route and resource authorization
 
-**Depends on:** PR 8. Coordinate with TKAI-53 and TKAI-370.
+**Depends on:** PR 9. Coordinate with TKAI-53 and TKAI-370.
 
 **Scope**
 
@@ -403,9 +438,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 11: Delegation, sandbox capabilities, credentials, and egress
+## PR 12: Delegation, sandbox capabilities, credentials, and egress
 
-**Depends on:** PRs 8 and 9. Coordinate inter-agent work with TKAI-433.
+**Depends on:** PRs 9 and 10. Coordinate inter-agent work with TKAI-433.
 
 **Scope**
 
@@ -434,9 +469,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 12: Entitlements and plugin catalog
+## PR 13: Entitlements and plugin catalog
 
-**Depends on:** PR 8
+**Depends on:** PR 9
 
 **Scope**
 
@@ -461,9 +496,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 13: Future TVC Rust engine host
+## PR 14: Future TVC Rust engine host
 
-**Depends on:** PRs 8 through 12 as needed. This is future work.
+**Depends on:** PRs 9 through 13 as needed. This is future work.
 
 **Scope**
 
@@ -498,9 +533,9 @@ pnpm typecheck
 make e2e
 ```
 
-## PR 14: Future attested execution and optional TKMS roles
+## PR 15: Future attested execution and optional TKMS roles
 
-**Depends on:** PR 13. This is future work.
+**Depends on:** PR 14. This is future work.
 
 **Scope**
 
@@ -527,20 +562,21 @@ make e2e
 
 ## Migration strategy
 
-1. Freeze semantic changes to the old TypeScript evaluator while PRs 2 through 7 are in review.
-2. Freeze the first Rego v1 compatibility profile and Rust engine contract in PR 3.
-3. Validate the selected local engine target and bundle host in PR 4.
-4. Export representative, redacted policy row snapshots from development data.
-5. Compile those snapshots to supported Rego and deterministic engine bundles with PR 5.
-6. Import the snapshots into provenance-preserving builder documents with PR 6.
-7. Compare offline Valet engine results for every current precedence case. Fix the compiler or record a migration issue before cutover.
-8. Precompile engine-compatible bundles for every active organization before PR 8 deploys.
-9. Block PR 8 if an organization lacks a valid bundle or has unsupported source.
-10. Deploy PR 8 once. The local Valet Rust engine becomes the only action evaluator at process start.
-11. Move every effective-policy write to transactional canonical draft validation, publication, and activation.
-12. Verify that failed activation rejects the write and keeps the old active bundle.
-13. Remove old evaluator metrics, alerts, forms, write routes, and code in the same pull request.
-14. Route later domains through their own atomic surface pull requests.
+1. Freeze semantic changes to the old TypeScript evaluator while PRs 2 through 8 are in review.
+2. Pin the Rust toolchain, Regorus substrate, Valet engine boundary, and capability profile in PR 3.
+3. Freeze the first Rego v1 compatibility profile and Rust engine contract in PR 4.
+4. Validate the selected local engine target and bundle host in PR 5.
+5. Export representative, redacted policy row snapshots from development data.
+6. Compile those snapshots to supported Rego and deterministic engine bundles with PR 6.
+7. Import the snapshots into provenance-preserving builder documents with PR 7.
+8. Compare offline Valet engine results for every current precedence case. Fix the compiler or record a migration issue before cutover.
+9. Precompile engine-compatible bundles for every active organization before PR 9 deploys.
+10. Block PR 9 if an organization lacks a valid bundle or has unsupported source.
+11. Deploy PR 9 once. The local Valet Rust engine becomes the only action evaluator at process start.
+12. Move every effective-policy write to transactional canonical draft validation, publication, and activation.
+13. Verify that failed activation rejects the write and keeps the old active bundle.
+14. Remove old evaluator metrics, alerts, forms, write routes, and code in the same pull request.
+15. Route later domains through their own atomic surface pull requests.
 
 Offline comparison is migration validation. It does not evaluate live requests or retain two production decisions.
 
@@ -553,7 +589,7 @@ Rollback uses an application, engine, and policy bundle release set:
 3. Restore the active bundle pointers to snapshots compiled for that engine.
 4. Resume traffic after health, engine, and bundle compatibility checks pass.
 
-For PR 8, the previous release contains the old implementation because it predates cutover. The new release has no switch to it. Rollback is a deployment event, not a live fallback path.
+For PR 9, the previous release contains the old implementation because it predates cutover. The new release has no switch to it. Rollback is a deployment event, not a live fallback path.
 
 Later rollback targets the most recent compatible Valet Rust engine release and its bundle set. Database migrations must remain additive until the rollback window closes. Destructive cleanup waits for a later pull request.
 
