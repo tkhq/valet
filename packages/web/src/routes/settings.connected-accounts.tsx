@@ -17,6 +17,7 @@ import { Badge, Button, ConfirmDialog, Spinner, Switch } from "~/components/prim
 import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { displayName } from "~/components/integrations/display-name";
+import { CommitSigningSection } from "~/components/settings/commit-signing-section";
 
 /**
  * `/settings/connected-accounts` — You · Connected accounts. Renders one
@@ -172,6 +173,7 @@ export function ConnectedAccountsPage() {
       ))}
 
       <GithubRow />
+      <CommitSigningSection />
     </Section>
 
     <CredentialsListSection />

@@ -24,6 +24,7 @@
     "@tanstack/react-query": "^5.60.0",
     "@tanstack/react-router": "^1.151.0",
     "@toon-format/toon": "^2.1.0",
+    "@turnkey/sdk-browser": "^8.4.0",
     "@valet/api": "workspace:*",
     "@valet/shared": "workspace:*",
     "@valet/workflow": "workspace:*",
