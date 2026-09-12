@@ -12,7 +12,7 @@
  * Kept in a dedicated module so the route handler stays HTTP-only and the
  * naming logic is unit-testable without spinning up Hono.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
@@ -23,6 +23,7 @@ const NAMING_MODEL = "claude-haiku-4-5";
 const MAX_MESSAGES_FOR_TITLE = 4;
 const MAX_CHARS_PER_MESSAGE = 800;
 const MAX_TITLE_CHARS = 60;
+const NAMER_TIMEOUT_MS = 30_000;
 
 const NAMING_SYSTEM = [
   "You produce very short, human-readable titles for chat conversations.",
@@ -95,10 +96,22 @@ export interface Namer {
   (prompt: string): Promise<string>;
 }
 
+export async function withNamerTimeout<T>(work: Promise<T>): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`auto-title: naming timed out after ${NAMER_TIMEOUT_MS}ms`)),
+      NAMER_TIMEOUT_MS,
+    );
+    timeoutId.unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
 export const defaultNamer: Namer = async (prompt) => {
   const model = getModel("anthropic", NAMING_MODEL);
   if (!model) throw new Error(`auto-title: unknown model "${NAMING_MODEL}"`);
-  const result = await completeSimple(
+  const completion = completeSimple(
     model,
     {
       systemPrompt: NAMING_SYSTEM,
@@ -108,6 +121,7 @@ export const defaultNamer: Namer = async (prompt) => {
     },
     { temperature: 0.4, maxTokens: 40 },
   );
+  const result = await withNamerTimeout(completion);
   return result.content
     .filter((b): b is { type: "text"; text: string } => b.type === "text")
     .map((b) => b.text)
@@ -150,7 +164,21 @@ export async function autoTitle(
   // string. "" / null / "Untitled session" all count as un-titled.
   const existing = session.title?.trim();
   const alreadyTitled = !!existing && existing !== "Untitled session";
-  if (alreadyTitled && !input.threadId) {
+  let threadAlreadyTitled = false;
+  if (input.threadId) {
+    const [thread] = await deps.db
+      .select({ title: sessionThreads.title })
+      .from(sessionThreads)
+      .where(
+        and(
+          eq(sessionThreads.id, input.threadId),
+          eq(sessionThreads.sessionId, input.sessionId),
+        ),
+      )
+      .limit(1);
+    threadAlreadyTitled = Boolean(thread?.title?.trim());
+  }
+  if (alreadyTitled && (!input.threadId || threadAlreadyTitled)) {
     return { ok: false, reason: "already_titled" };
   }
 
@@ -169,40 +197,55 @@ export async function autoTitle(
 
   let wroteSession: string | null = null;
   if (!alreadyTitled) {
-    await deps.db
+    const rows = await deps.db
       .update(agentSessions)
       .set({ title, updatedAt: ts })
-      .where(eq(agentSessions.id, input.sessionId));
-    wroteSession = title;
+      .where(
+        and(
+          eq(agentSessions.id, input.sessionId),
+          or(
+            isNull(agentSessions.title),
+            sql`btrim(${agentSessions.title}) = ''`,
+            eq(agentSessions.title, "Untitled session"),
+          ),
+        ),
+      )
+      .returning({ title: agentSessions.title });
+    if (rows.length > 0) wroteSession = title;
   }
 
   let wroteThread: string | null = null;
-  if (input.threadId) {
-    // Only overwrite when the thread's own title is empty. The engine
-    // owns the thread's existence; `session_threads` is our app-side
-    // mirror that carries the title. Upsert here so the mirror row is
-    // created on first titling, and skip the write when a stored title
-    // is already set (respect a user-picked name).
-    const [existing] = await deps.db
-      .select({ title: sessionThreads.title })
-      .from(sessionThreads)
-      .where(eq(sessionThreads.id, input.threadId))
-      .limit(1);
-    const currentTitle = existing?.title?.trim();
-    if (!currentTitle) {
-      await deps.db
-        .insert(sessionThreads)
-        .values({
-          id: input.threadId,
-          sessionId: input.sessionId,
-          title,
-          createdAt: ts,
-        })
-        .onConflictDoUpdate({
-          target: sessionThreads.id,
-          set: { title },
-        });
+  if (input.threadId && !threadAlreadyTitled) {
+    // Insert a missing mirror row, or fill an empty row. The conditional
+    // update preserves a title that a person saves while naming is in flight.
+    const inserted = await deps.db
+      .insert(sessionThreads)
+      .values({
+        id: input.threadId,
+        sessionId: input.sessionId,
+        title,
+        createdAt: ts,
+      })
+      .onConflictDoNothing()
+      .returning({ id: sessionThreads.id });
+    if (inserted.length > 0) {
       wroteThread = title;
+    } else {
+      const updated = await deps.db
+        .update(sessionThreads)
+        .set({ title })
+        .where(
+          and(
+            eq(sessionThreads.id, input.threadId),
+            eq(sessionThreads.sessionId, input.sessionId),
+            or(
+              isNull(sessionThreads.title),
+              sql`btrim(${sessionThreads.title}) = ''`,
+            ),
+          ),
+        )
+        .returning({ id: sessionThreads.id });
+      if (updated.length > 0) wroteThread = title;
     }
   }
 

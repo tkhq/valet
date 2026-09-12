@@ -410,6 +410,17 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "title_updated":
+      return [
+        {
+          type: "title.updated",
+          sessionId: ev.sessionId,
+          threadId: e.threadId,
+          sessionTitle: e.sessionTitle,
+          threadTitle: e.threadTitle,
+        },
+      ];
+
     case "command_result":
       return [
         {

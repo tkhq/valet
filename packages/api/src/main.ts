@@ -324,6 +324,9 @@ wireAttentionRouter({
   eventStream: providers.eventStream,
   channels: [providers.channelHost.attentionDeliverer()],
 });
+// A restored submission can settle during the first boot-chain step. Subscribe
+// before that work starts so automatic naming does not miss the completion.
+providers.autoTitleHost.start();
 
 // `authConfig` was loaded above (before `buildNodeProviders`, which needs
 // it); wire up the real auth instance now that `providers` exists.
@@ -735,6 +738,11 @@ async function close(): Promise<void> {
     await providers.channelHost.stop();
   } catch (err) {
     console.error("channelHost.stop failed:", err);
+  }
+  try {
+    providers.autoTitleHost.stop();
+  } catch (err) {
+    console.error("autoTitleHost.stop failed:", err);
   }
   try {
     // Evict, never destroy: Session.destroy() deletes the session's durable

@@ -1633,6 +1633,13 @@ export type EngineEvent =
       patch?: SettlePatchRef;
     }
   | {
+      /** Live cache-invalidation hint emitted after automatic title writes. */
+      type: "title_updated";
+      threadId: string;
+      sessionTitle?: string;
+      threadTitle?: string;
+    }
+  | {
       /**
        * Stuck-head attention event (spec §Reconciliation, "Stuck-head alarm").
        * Emitted once per observation pass when an unsettled submission crosses
@@ -1710,7 +1717,7 @@ export interface EventStream {
   ): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
   /** Live fan-out. Durable events are delivered AFTER their append commits, in offset order per session. */
   subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe;
-  /** Live-only fan-out for text_delta: no append, no offset. */
+  /** Live-only fan-out (for example text deltas and cache hints): no append or offset. */
   publishEphemeral(event: BusEvent): void;
   /** Delete durable events whose queueItemId is in the list. Returns deleted count. */
   prune(sessionId: string, queueItemIds: string[]): Promise<number>;

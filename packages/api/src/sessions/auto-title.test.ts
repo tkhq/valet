@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
-import { autoTitle, sanitizeTitle } from "./auto-title.js";
+import { autoTitle, sanitizeTitle, withNamerTimeout } from "./auto-title.js";
 
 describe("sanitizeTitle", () => {
   it("strips wrapping quotes, backticks, and asterisks", () => {
@@ -25,6 +25,22 @@ describe("sanitizeTitle", () => {
     expect(out).not.toBeNull();
     expect(out!.length).toBeLessThanOrEqual(60);
     expect(out!.endsWith("…")).toBe(true);
+  });
+});
+
+describe("withNamerTimeout", () => {
+  it("times out a hung model completion after 30 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const result = expect(withNamerTimeout(new Promise(() => undefined))).rejects.toThrow(
+        "auto-title: naming timed out after 30000ms",
+      );
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await result;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -99,8 +115,8 @@ describe("autoTitle", () => {
     expect(namer).not.toHaveBeenCalled();
   });
 
-  it("treats null / '' / 'Untitled session' as un-titled", async () => {
-    for (const title of [null, "", "Untitled session"]) {
+  it("treats null, blank, and placeholder session titles as untitled", async () => {
+    for (const title of [null, "", "   ", "Untitled session"]) {
       ({ appDb: db } = await freshTestPgDb());
       await seedSession(title);
       const result = await autoTitle(
