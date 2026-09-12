@@ -7,6 +7,7 @@
  * isolate-from-the-network pattern the other web suites use: `~/api/*` is
  * mocked to record what its mutations receive.
  */
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import type {
@@ -14,6 +15,11 @@ import type {
   CreateEventSubscriptionRequest,
   CreateWorkflowScheduleRequest,
 } from "@valet/api/wire";
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tanstack/react-router")>(),
+  Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
+}));
 
 const createSubscription = vi.fn();
 const createSchedule = vi.fn();
@@ -137,6 +143,31 @@ describe("AutomationWizard", () => {
     fireEvent.change(screen.getByLabelText("Channel id"), { target: { value: id } });
     fireEvent.click(screen.getByRole("button", { name: /^Add channel$/ }));
   }
+
+  it("homepage setup requires channels and an explicit team assistant, then saves that target", () => {
+    assistantsData = { assistants: [
+      { id: "a-team", name: "Reviewer", isDefault: true, owner: { type: "team", id: "t_platform" } },
+      { id: "a-other", name: "Other", isDefault: true, owner: { type: "team", id: "t_other" } },
+    ] };
+    render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
+    expect(screen.getByRole("heading", { name: "Set up Slack replies" })).toBeTruthy();
+    expect(screen.queryByText("What should happen?")).toBeNull();
+    expect(screen.queryByLabelText("Your assistant")).toBeNull();
+    expect(screen.queryByText("Other")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Any channel/ })).toBeNull();
+    addReplyChannel("C123");
+    expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-team" } });
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(createSubscription.mock.calls[0][0]).toMatchObject({
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "t_platform", assistantId: "a-team", follow: true },
+    });
+  });
 
   it("reply outcome posts slack.app_mention with the picked channel and follow ON", () => {
     // The team workspace seeds the team assistant.
@@ -436,6 +467,23 @@ describe("AutomationWizard", () => {
     fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: name } });
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
   }
+
+  it("homepage setup never offers to override a colliding responder", () => {
+    assistantsData = { assistants: [{ id: "a-team", name: "Reviewer", isDefault: true, owner: { type: "team", id: "t_platform" } }] };
+    createSubscription.mockImplementation((_body: unknown, handlers: { onError: (err: Error) => void }) => {
+      handlers.onError(new ApiError(409, "collision", { error: "collides", collisions: collisionPayload("blocking") }));
+    });
+    render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
+    addReplyChannel("C123");
+    fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-team" } });
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(screen.getByText("Eng channel replies")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create anyway" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Open Events" }).getAttribute("href")).toBe("/events");
+    expect(createSubscription).toHaveBeenCalledTimes(1);
+  });
 
   it("a 409 collision renders the colliding rule and Create anyway resubmits with allowCollision", () => {
     const onOpenChange = vi.fn();

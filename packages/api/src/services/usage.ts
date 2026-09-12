@@ -330,7 +330,11 @@ export async function getUsageBreakdown(
     // the `${DAY_MS}` parameter as integer or float (a plain `bigint / param`
     // could do float division on real Postgres → one bucket per row).
     db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
-    db.execute(sql`SELECT ${BUCKET_COLS} FROM cost_entries WHERE ${where}`) as Promise<{ rows: BucketRow[] }>,
+    // Only the engine branch of cost_entries carries session_id. Count across
+    // the whole rolling window, not member/day buckets; unpriced usage counts.
+    db.execute(sql`SELECT ${BUCKET_COLS}, COUNT(DISTINCT session_id) FILTER (
+      WHERE session_id IS NOT NULL AND total_tokens > 0 AND created_at <= ${now}
+    ) AS active_agents FROM cost_entries WHERE ${where}`) as Promise<{ rows: (BucketRow & { active_agents: unknown })[] }>,
     opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)
       ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
         // workflow runs) so the per-member sum reconciles with the total —
@@ -363,6 +367,7 @@ export async function getUsageBreakdown(
   return {
     windowMs: opts.windowMs,
     scope: opts.scope.scope,
+    activeAgents: toNum(totals.rows[0]?.active_agents),
     totalCostUsd: total.costUsd,
     totalTokens: total.totalTokens,
     totalInputTokens: total.inputTokens,

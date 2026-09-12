@@ -117,3 +117,24 @@ No full e2e or live provider sends ran. The consolidated checkout was not change
 The full `routes/events.test.ts` run passed 99 tests after its authorized replay fixture gained explicit organization membership.
 The replay route regression checks both team removal and organization removal, retaining a stale team row for the latter.
 Membership in a different organization does not restore replay access. No broader suites ran for this fixture follow-up.
+
+
+## Team homepage setup (TKAI-363, 2026-09-11)
+
+The team homepage has a prominent **Set up Slack replies** button. It opens a
+modal that reuses the automation wizard's reply and review steps. The team is
+fixed to the selected workspace. The reader selects channels and an explicit
+team orchestrator; personal targets and the all-channels option stay in Events.
+The existing subscription API, membership checks, and collision detection apply.
+
+A missing organization bot links to Organization Settings → Slack. Existing
+team reply rules are shown before the reader can add another rule. The shortcut
+does not offer collision override; the reader manages conflicts in Events.
+Changing teams discards the open draft. Closing returns focus to the homepage
+button. The card and dialog fit narrow screens.
+
+Local tests cover member access, missing setup, loading and errors, existing
+rules, explicit assistant selection, and the saved channel and team target.
+Live acceptance still requires the organization bot: a linked member mentions
+Valet in a selected channel, gets one reply from the selected orchestrator, and
+continues the same thread. Nonmembers and removed members must not invoke it.
