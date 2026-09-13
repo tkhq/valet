@@ -69,6 +69,7 @@ import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { profilePicturesPublicRouter, profilePicturesRouter } from "./routes/profile-pictures.js";
 import { teamPoliciesRouter } from "./routes/team-policies.js";
+import { policyAuthoringRouter } from "./routes/policy-authoring.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
 import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
@@ -358,6 +359,7 @@ export function createApp(
   app.route("/api/org/reasoning", orgReasoningRouter);
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
+  app.route("/api", policyAuthoringRouter);
   app.route("/api/org/policies", policiesRouter);
   app.route("/api/teams", teamPoliciesRouter);
   app.route("/api/org/action-log", actionLogRouter);

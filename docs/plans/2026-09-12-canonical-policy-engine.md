@@ -30,7 +30,10 @@ PR 5  local adapter and source bundle host     PR 6  policy source builder
   |                                             |
   +----------------------+----------------------+
                          v
-PR 7  policy builder and authoring APIs
+PR 7a inert policy builder UI
+  |
+  v
+PR 7b transactional authoring APIs
        |
        v
 PR 8  inert surface adapters
@@ -257,16 +260,20 @@ pnpm --filter @valet/api test policies
 pnpm typecheck
 ```
 
-## PR 7: Policy builder and canonical authoring APIs
+## PR 7a: Inert policy builder UI
 
-**Depends on:** PRs 5 and 6
+PR 7a adds the reviewed in-memory builder and fixture preview provider. It adds no persistence or network route.
+
+## PR 7b: Canonical authoring lifecycle APIs
+
+**Depends on:** PR 7a, which depends on PRs 5 and 6
 
 **Scope**
 
 - Add versioned builder types, context descriptors, condition operators, decisions, obligations, validation issues, diffs, explain traces, and publish requests.
 - Add the API context registry, operator registry, validation service, draft and review lifecycle, source-builder integration, provenance maps, and audit events.
 - Add organization and team draft APIs with optimistic version checks and separate edit, review, publish, and rollback authorization points.
-- Add the policy overview, context picker, rule editor, condition builder, decision and obligation editor, advanced-source view, effective-policy explanation, conflict preview, impact preview, generated diff, review, publish, and rollback surfaces.
+- Add API-first draft, immutable revision, review, preview, diff, restore, and publication-candidate operations. Keep save and review UI controls out of this slice.
 - Make the advanced editor show Rego v1 coverage, pure built-ins, capability-builtins, known gaps, and engine compatibility.
 - Build the web surface under `packages/web/src/routes/settings.organization.policies.tsx`, `packages/web/src/routes/settings.team.tsx`, and `packages/web/src/components/settings/policy-builder/`.
 - Extend `packages/web/src/api/policies.ts` with typed builder requests.

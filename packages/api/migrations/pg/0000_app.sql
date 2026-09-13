@@ -1536,3 +1536,55 @@ CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
 CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_authoring_documents" (
+  "id" text NOT NULL, "org_id" text NOT NULL, "scope_key" text NOT NULL, "team_id" text,
+  "status" text NOT NULL DEFAULT 'draft', "revision" integer NOT NULL, "state_version" integer NOT NULL, "review_cycle" integer,
+  "normalized_identity" text NOT NULL, "source_bundle_digest" text, "policy_digest" text, "engine_digest" text,
+  "validation_summary" jsonb NOT NULL, "created_by" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
+  PRIMARY KEY ("id"), CONSTRAINT "policy_authoring_documents_tenant_id" UNIQUE ("org_id","scope_key","id"),
+  CONSTRAINT "policy_authoring_documents_scope" CHECK (("team_id" IS NULL AND "scope_key"='org') OR "scope_key"='team:'||"team_id"),
+  CONSTRAINT "policy_authoring_documents_status" CHECK ("status" IN ('draft','in_review','approved_for_publication')),
+  CONSTRAINT "policy_authoring_documents_revision" CHECK ("revision">0 AND "state_version">0)
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "policy_authoring_documents_list" ON "policy_authoring_documents" ("org_id","scope_key","id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_authoring_revisions" (
+  "org_id" text NOT NULL, "scope_key" text NOT NULL, "document_id" text NOT NULL, "revision" integer NOT NULL,
+  "draft" jsonb NOT NULL, "normalized_identity" text NOT NULL, "bundle" jsonb, "source_bundle_digest" text,
+  "policy_digest" text, "engine_digest" text, "validation_summary" jsonb NOT NULL, "created_by" text NOT NULL, "created_at" bigint NOT NULL,
+  PRIMARY KEY("org_id","scope_key","document_id","revision"),
+  FOREIGN KEY ("org_id","scope_key","document_id") REFERENCES "policy_authoring_documents"("org_id","scope_key","id")
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_authoring_reviews" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "scope_key" text NOT NULL, "document_id" text NOT NULL,
+  "revision" integer NOT NULL, "review_cycle" integer NOT NULL, "normalized_identity" text NOT NULL,
+  "source_bundle_digest" text NOT NULL, "policy_digest" text NOT NULL, "engine_digest" text NOT NULL,
+  "reviewer_id" text NOT NULL, "verdict" text NOT NULL, "request_id" text NOT NULL, "created_at" bigint NOT NULL,
+  CONSTRAINT "policy_authoring_reviews_verdict" CHECK ("verdict" IN ('approve','reject')),
+  FOREIGN KEY ("org_id","scope_key","document_id","revision") REFERENCES "policy_authoring_revisions"("org_id","scope_key","document_id","revision")
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "policy_authoring_reviews_cycle" ON "policy_authoring_reviews" ("org_id","scope_key","document_id","revision","review_cycle","reviewer_id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_authoring_operations" (
+  "org_id" text NOT NULL, "scope_key" text NOT NULL, "actor_id" text NOT NULL, "operation" text NOT NULL,
+  "document_key" text NOT NULL, "document_id" text, "idempotency_key" text NOT NULL, "payload_digest" text NOT NULL, "response" jsonb,
+  "created_at" bigint NOT NULL, PRIMARY KEY("org_id","scope_key","actor_id","operation","document_key","idempotency_key"),
+  CONSTRAINT "policy_authoring_operations_document" CHECK (("operation"='create' AND "document_key"='create' AND "document_id" IS NULL) OR ("operation"<>'create' AND "document_key"="document_id")),
+  FOREIGN KEY ("org_id","scope_key","document_id") REFERENCES "policy_authoring_documents"("org_id","scope_key","id")
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_authoring_audit" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "scope_key" text NOT NULL, "team_id" text, "document_id" text NOT NULL,
+  "revision" integer NOT NULL, "state_version" integer NOT NULL, "review_cycle" integer, "actor_id" text NOT NULL,
+  "operation" text NOT NULL, "idempotency_key" text NOT NULL, "prior_state" text, "new_state" text NOT NULL,
+  "source_bundle_digest" text, "policy_digest" text, "engine_digest" text, "created_at" bigint NOT NULL,
+  FOREIGN KEY ("org_id","scope_key","document_id","revision") REFERENCES "policy_authoring_revisions"("org_id","scope_key","document_id","revision")
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "policy_authoring_audit_idempotency" ON "policy_authoring_audit" ("org_id","scope_key","actor_id","operation","document_id","idempotency_key");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "policy_authoring_audit_document" ON "policy_authoring_audit" ("org_id","scope_key","document_id","created_at");
