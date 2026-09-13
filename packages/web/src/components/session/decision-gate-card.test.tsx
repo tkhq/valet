@@ -73,6 +73,30 @@ describe("DecisionGateCard — action rendering", () => {
   });
 });
 
+describe("DecisionGateCard — reviewable tool requests", () => {
+  it("bounds long parameters and keeps decisions outside the payload", () => {
+    const longUrl = `https://example.test/${"path".repeat(300)}`;
+    renderCard(gate({
+      approval: {
+        toolId: "github.create_issue",
+        service: "github",
+        riskLevel: "high",
+        summary: "Create an issue in the external repository.",
+        args: { callbackUrl: longUrl, source: "x".repeat(2000) },
+      },
+    }));
+
+    expect(screen.getByText("Create an issue in the external repository.")).toBeTruthy();
+    expect(screen.getByText("github.create_issue")).toBeTruthy();
+    expect(screen.getByText("high")).toBeTruthy();
+    const details = screen.getByTestId("approval-details");
+    expect(details.querySelector("pre")?.className).toContain("max-h-52");
+    expect(details.querySelector("pre")?.className).toContain("break-all");
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+});
+
 describe("DecisionGateCard — policy provenance", () => {
   it("renders the why-gated line when the gate carries provenance", () => {
     renderCard(gate({ provenance: { baseMode: "require_approval", source: "org_policy", matchedPolicyId: "apol_1" } }));

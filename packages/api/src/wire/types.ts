@@ -1345,6 +1345,15 @@ export interface DecisionGateProvenance {
   matchedOverrideId?: string;
 }
 
+/** Typed, reviewable facts for a tool approval. Raw gate context stays private. */
+export interface DecisionGateApprovalDetails {
+  toolId: string;
+  riskLevel?: string;
+  service?: string;
+  args?: Record<string, unknown>;
+  summary?: string;
+}
+
 export interface DecisionGate {
   id: string;
   sessionId: string;
@@ -1358,6 +1367,8 @@ export interface DecisionGate {
   createdAt: number;
   updatedAt: number;
   provenance?: DecisionGateProvenance;
+  /** Present for approval gates created from a plugin tool request. */
+  approval?: DecisionGateApprovalDetails;
 }
 
 export interface DecisionResolution {

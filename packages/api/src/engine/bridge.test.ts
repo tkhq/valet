@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BusEvent, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
-import { busEventToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
+import { busEventToWire, engineGateToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
 
 function ev(event: BusEvent["event"], threadId = "t1"): BusEvent {
   return { sessionId: "s1", threadId, userId: "u1", event, timestamp: 100 };
@@ -73,6 +73,24 @@ describe("engineToWireParts", () => {
 
   it("returns [] for missing parts", () => {
     expect(engineToWireParts(undefined)).toEqual([]);
+  });
+});
+
+describe("engineGateToWire", () => {
+  it("projects typed tool approval details without exposing raw context", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: {
+        tool_id: "github.create_issue", service: "github", riskLevel: "high",
+        summary: "Create an issue in the public repository.", args: { title: "Fix the bug" }, private: "omit",
+      },
+    });
+    expect(wire.approval).toEqual({
+      toolId: "github.create_issue", service: "github", riskLevel: "high",
+      summary: "Create an issue in the public repository.", args: { title: "Fix the bug" },
+    });
+    expect(Object.keys(wire)).not.toContain("context");
   });
 });
 

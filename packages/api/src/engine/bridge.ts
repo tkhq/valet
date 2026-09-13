@@ -1,3 +1,4 @@
+import { toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -20,13 +21,13 @@ import type {
 /**
  * Project an engine DecisionGate to its wire shape. Drops engine-only fields
  * (origin/refs, and `context` as a whole — surfacing the raw bag would
- * commit us to a contract before we know what we want). The ONE typed
- * extraction is `context.provenance` (policy gates, action-policies spec
- * decision 4): the wire carries a validated `DecisionGateProvenance` so gate
- * surfaces can render WHY the gate opened.
+ * commit us to a contract before we know what we want). Typed extraction keeps
+ * the review facts stable: provenance explains why the gate opened and tool
+ * details give the approver the requested action and full parameters.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
+  const approval = g.type === "approval" ? toolApprovalGateContext(g.context) : null;
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -40,6 +41,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     ...(provenance ? { provenance } : {}),
+    ...(approval ? { approval } : {}),
   };
 }
 

@@ -1,29 +1,11 @@
-/**
- * Renders a pending DecisionGate as an inline card above the Composer.
- *
- * The agent is paused on `blocked_on_decision_gate` while this is showing —
- * the user must choose an action (approval / credential_request) or supply
- * a value (question) for the engine to resume the suspended turn.
- *
- * Scoping: the parent passes the gate that belongs to the *active* thread.
- * If the user switches threads, this component unmounts; the gate keeps
- * pending in the store and the agent stays blocked until the user comes
- * back and answers — matching the engine's per-thread suspend model.
- */
 import { useState } from "react";
-import { AlertTriangle, HelpCircle, KeyRound, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, HelpCircle, KeyRound, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
 import { Button, Spinner, Textarea, Tooltip } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
 import { useMe } from "~/api/settings";
 import { cn } from "~/lib/cn";
 
-// The gate action id the policy resolver offers on a `require_approval`
-// decision that grants an org-wide `allow` policy going forward — the API
-// 403s it for non-admins at resolve (`org admin required for
-// always_allow`, `routes/messages.ts`). Hardcoded here (not imported) since
-// it's a server-internal constant (`policies/service.ts`'s
-// `GATE_ACTION_ALWAYS_ALLOW`), not part of the wire contract.
 const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
@@ -39,8 +21,10 @@ export function DecisionGateCard({
   const meQ = useMe();
   const isAdmin = meQ.data?.orgRole === "admin";
   const [value, setValue] = useState("");
-
   const busy = resolve.isPending || withdraw.isPending;
+  const Icon = ICON_FOR_TYPE[gate.type];
+  const tone = TONE_FOR_TYPE[gate.type];
+  const approval = gate.approval;
 
   async function pickAction(actionId: string) {
     if (busy) return;
@@ -52,13 +36,13 @@ export function DecisionGateCard({
   }
 
   async function submitValue() {
-    const v = value.trim();
-    if (!v || busy) return;
+    const nextValue = value.trim();
+    if (!nextValue || busy) return;
     try {
-      await resolve.mutateAsync({ gateId: gate.id, body: { value: v } });
+      await resolve.mutateAsync({ gateId: gate.id, body: { value: nextValue } });
       setValue("");
     } catch (err) {
-      console.error("resolve gate (value) failed:", err);
+      console.error("resolve gate failed:", err);
     }
   }
 
@@ -71,37 +55,30 @@ export function DecisionGateCard({
     }
   }
 
-  const Icon = ICON_FOR_TYPE[gate.type];
-  const tone = TONE_FOR_TYPE[gate.type];
-
   return (
-    <div
+    <section
       className={cn(
-        "border-t border-x mx-3 mt-3 rounded-md",
-        "border-amber-300 dark:border-amber-700/60",
-        "bg-amber-50/70 dark:bg-amber-950/40",
+        "mx-3 mt-3 flex min-h-0 flex-col overflow-hidden rounded-md border",
+        "border-amber-300 bg-amber-50/70 dark:border-amber-700/60 dark:bg-amber-950/40",
       )}
-      role="dialog"
-      aria-live="polite"
       aria-labelledby={`gate-${gate.id}-title`}
+      aria-live="polite"
     >
-      <header className="flex items-start gap-2.5 px-3.5 pt-3 pb-1.5">
+      <header className="flex shrink-0 items-start gap-2.5 border-b border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
         <span
           className={cn(
-            "mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full",
+            "mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
             tone.iconBg,
           )}
+          aria-hidden="true"
         >
           <Icon className={cn("h-3.5 w-3.5", tone.iconFg)} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className={cn("text-[10px] font-semibold uppercase tracking-wider", tone.label)}>
-            {LABEL_FOR_TYPE[gate.type]} • agent paused
-          </div>
-          <h3
-            id={`gate-${gate.id}-title`}
-            className="text-sm font-semibold text-[--fg] mt-0.5"
-          >
+          <p className={cn("text-[10px] font-semibold uppercase tracking-wider", tone.label)}>
+            {LABEL_FOR_TYPE[gate.type]} · agent paused
+          </p>
+          <h3 id={`gate-${gate.id}-title`} className="mt-0.5 break-words text-sm font-semibold text-[--fg]">
             {gate.title}
           </h3>
         </div>
@@ -109,27 +86,23 @@ export function DecisionGateCard({
           type="button"
           onClick={cancel}
           disabled={busy}
-          aria-label="Cancel and dismiss"
-          className="text-muted hover:text-[--fg] disabled:opacity-50 -mr-1 mt-0.5"
+          aria-label="Cancel and dismiss approval"
+          className="-mr-1 mt-0.5 shrink-0 text-muted hover:text-[--fg] disabled:opacity-50"
         >
-          <X className="h-4 w-4" />
+          <X className="h-4 w-4" aria-hidden="true" />
         </button>
       </header>
 
-      {gate.body && (
-        <div className="px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap">
-          {gate.body}
-        </div>
-      )}
-
-      {gate.provenance && (
-        <div className="px-3.5 pb-2 text-[11px] text-muted" data-testid="gate-provenance">
-          {provenanceLine(gate.provenance)}
-        </div>
-      )}
+      <div className="min-h-0 max-h-[min(22rem,45dvh)] overflow-y-auto overscroll-contain px-3.5 py-3">
+        {approval ? (
+          <ApprovalReview approval={approval} provenance={gate.provenance} />
+        ) : (
+          <GenericGateReview body={gate.body} provenance={gate.provenance} />
+        )}
+      </div>
 
       {gate.type === "question" ? (
-        <div className="px-3.5 pb-3 flex items-end gap-2">
+        <div className="flex shrink-0 items-end gap-2 border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
           <Textarea
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -138,109 +111,112 @@ export function DecisionGateCard({
             className="flex-1 bg-white/70 dark:bg-neutral-900/40"
             disabled={busy}
           />
-          <Button
-            onClick={submitValue}
-            disabled={busy || value.trim().length === 0}
-          >
+          <Button onClick={submitValue} disabled={busy || value.trim().length === 0}>
             {busy ? <Spinner size={14} /> : "Submit"}
           </Button>
         </div>
       ) : (
-        <div className="px-3.5 pb-3 flex flex-wrap gap-2">
-          {gate.actions.map((a) => {
-            const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
+        <div className="flex shrink-0 flex-wrap gap-2 border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
+          {gate.actions.map((action) => {
+            const isAlwaysAllow = action.id === GATE_ACTION_ALWAYS_ALLOW;
             const disabled = busy || (isAlwaysAllow && !isAdmin);
             const button = (
               <Button
-                key={a.id}
-                onClick={() => pickAction(a.id)}
+                key={action.id}
+                onClick={() => pickAction(action.id)}
                 disabled={disabled}
-                variant={
-                  a.style === "primary"
-                    ? "primary"
-                    : a.style === "danger"
-                      ? "danger"
-                      : "secondary"
-                }
+                variant={action.style === "primary" ? "primary" : action.style === "danger" ? "danger" : "secondary"}
               >
-                {busy && resolve.variables?.gateId === gate.id ? (
-                  <Spinner size={14} />
-                ) : null}
-                <span>{a.label}</span>
+                {busy && resolve.variables?.gateId === gate.id ? <Spinner size={14} /> : null}
+                <span>{action.label}</span>
               </Button>
             );
-            // `isAdmin` reads `false` while `useMe()` is still loading —
-            // fail-closed (disabled + tooltip) rather than briefly offering
-            // a button the API will 403.
             if (isAlwaysAllow && !isAdmin) {
-              return (
-                <Tooltip key={a.id} content={ALWAYS_ALLOW_TOOLTIP}>
-                  <span>{button}</span>
-                </Tooltip>
-              );
+              return <Tooltip key={action.id} content={ALWAYS_ALLOW_TOOLTIP}><span>{button}</span></Tooltip>;
             }
             return button;
           })}
         </div>
       )}
+    </section>
+  );
+}
+
+function ApprovalReview({
+  approval,
+  provenance,
+}: {
+  approval: NonNullable<DecisionGate["approval"]>;
+  provenance?: DecisionGate["provenance"];
+}) {
+  const facts = [
+    ["Tool", approval.toolId],
+    ["Service", approval.service],
+    ["Risk", approval.riskLevel],
+  ].filter((fact): fact is [string, string] => typeof fact[1] === "string" && fact[1] !== "");
+
+  return (
+    <div className="space-y-3">
+      <p className="break-words text-sm text-[--fg]">{approval.summary ?? `Run ${approval.toolId}.`}</p>
+      <dl className="grid gap-2 sm:grid-cols-3">
+        {facts.map(([label, detail]) => (
+          <div key={label} className="min-w-0 rounded border border-amber-300/70 bg-white/50 px-2.5 py-2 dark:border-amber-700/50 dark:bg-neutral-950/20">
+            <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</dt>
+            <dd className="mt-0.5 break-all font-mono text-xs text-[--fg]">{detail}</dd>
+          </div>
+        ))}
+      </dl>
+      {provenance && <p className="text-xs text-muted" data-testid="gate-provenance">{provenanceLine(provenance)}</p>}
+      <details className="group rounded border border-amber-300/70 bg-white/40 dark:border-amber-700/50 dark:bg-neutral-950/20" data-testid="approval-details">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs font-medium text-[--fg] marker:hidden">
+          Review request details
+          <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180 motion-reduce:transition-none" aria-hidden="true" />
+        </summary>
+        <div className="border-t border-amber-300/70 p-3 dark:border-amber-700/50">
+          <p className="mb-2 text-xs text-muted">Parameters</p>
+          <pre className="max-h-52 overflow-auto overscroll-contain whitespace-pre-wrap break-all rounded bg-ink-wash p-2 text-xs text-[--fg]" tabIndex={0} aria-label="Approval request parameters">
+            {formatApprovalArgs(approval.args)}
+          </pre>
+        </div>
+      </details>
     </div>
   );
 }
 
-/** One line naming the precedence rung that gated this call. Policy/override
- * rungs link nowhere from here (the Action Log carries the row links); this
- * is the live "why" the spec's decision 4 promised. */
-function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
-  // Cases mirror the engine's `PolicyProvenanceSource` values exactly.
-  switch (p.source) {
-    case "team_policy":
-      return "Gated by a team policy.";
-    case "org_policy":
-      return "Gated by an org policy.";
-    case "override":
-      return "Gated by your personal policy override.";
-    case "runtime_grant":
-      return "Gated by a session grant.";
-    case "plugin_default":
-      return "Gated by the plugin's default approval mode.";
-    case "risk_default":
-      return "Gated by the action's risk level.";
-    case "resolver_error":
-      return "Policy check failed — approval requested as a safe fallback.";
-    default:
-      return `Gated by policy (${p.source}).`;
+function GenericGateReview({ body, provenance }: Pick<DecisionGate, "body" | "provenance">) {
+  return (
+    <div className="space-y-2">
+      {body && <p className="whitespace-pre-wrap break-all text-sm text-muted">{body}</p>}
+      {provenance && <p className="text-xs text-muted" data-testid="gate-provenance">{provenanceLine(provenance)}</p>}
+    </div>
+  );
+}
+
+function formatApprovalArgs(args: Record<string, unknown> | undefined): string {
+  try {
+    return JSON.stringify(args ?? {}, null, 2);
+  } catch {
+    return "The request parameters cannot be displayed.";
   }
 }
 
-const ICON_FOR_TYPE = {
-  approval: AlertTriangle,
-  question: HelpCircle,
-  credential_request: KeyRound,
-} as const;
+function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
+  switch (p.source) {
+    case "team_policy": return "Gated by a team policy.";
+    case "org_policy": return "Gated by an org policy.";
+    case "override": return "Gated by your personal policy override.";
+    case "runtime_grant": return "Gated by a session grant.";
+    case "plugin_default": return "Gated by the plugin's default approval mode.";
+    case "risk_default": return "Gated by the action's risk level.";
+    case "resolver_error": return "Policy check failed. Approval was requested as a safe fallback.";
+    default: return `Gated by policy (${p.source}).`;
+  }
+}
 
-const LABEL_FOR_TYPE: Record<DecisionGate["type"], string> = {
-  approval: "Approval needed",
-  question: "Question",
-  credential_request: "Credential needed",
-};
-
-const TONE_FOR_TYPE: Record<
-  DecisionGate["type"],
-  { iconBg: string; iconFg: string; label: string }
-> = {
-  approval: {
-    iconBg: "bg-amber-200 dark:bg-amber-900/60",
-    iconFg: "text-amber-800 dark:text-amber-300",
-    label: "text-amber-800 dark:text-amber-300",
-  },
-  question: {
-    iconBg: "bg-blue-200 dark:bg-blue-900/60",
-    iconFg: "text-blue-800 dark:text-blue-300",
-    label: "text-blue-800 dark:text-blue-300",
-  },
-  credential_request: {
-    iconBg: "bg-violet-200 dark:bg-violet-900/60",
-    iconFg: "text-violet-800 dark:text-violet-300",
-    label: "text-violet-800 dark:text-violet-300",
-  },
+const ICON_FOR_TYPE = { approval: AlertTriangle, question: HelpCircle, credential_request: KeyRound } as const;
+const LABEL_FOR_TYPE: Record<DecisionGate["type"], string> = { approval: "Approval needed", question: "Question", credential_request: "Credential needed" };
+const TONE_FOR_TYPE: Record<DecisionGate["type"], { iconBg: string; iconFg: string; label: string }> = {
+  approval: { iconBg: "bg-amber-200 dark:bg-amber-900/60", iconFg: "text-amber-800 dark:text-amber-300", label: "text-amber-800 dark:text-amber-300" },
+  question: { iconBg: "bg-blue-200 dark:bg-blue-900/60", iconFg: "text-blue-800 dark:text-blue-300", label: "text-blue-800 dark:text-blue-300" },
+  credential_request: { iconBg: "bg-violet-200 dark:bg-violet-900/60", iconFg: "text-violet-800 dark:text-violet-300", label: "text-violet-800 dark:text-violet-300" },
 };

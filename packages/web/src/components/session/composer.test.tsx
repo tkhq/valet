@@ -108,6 +108,7 @@ function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
 }
 
 beforeEach(() => {
+  vi.unstubAllGlobals();
   queueStateRef.current = undefined;
   sendState.pending = false;
   useComposerPrefillStore.setState({ text: null });
@@ -547,6 +548,40 @@ describe("composer focus request", () => {
       useComposerPrefillStore.getState().requestFocus();
     });
     await waitFor(() => expect(document.activeElement).toBe(textarea));
+  });
+});
+
+describe("Composer — Enter behavior", () => {
+  it("sends on desktop Enter", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+    const textarea = screen.getByRole("textbox", { name: "Message" });
+    await userEvent.type(textarea, "Send this");
+    await userEvent.keyboard("{Enter}");
+    expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "Send this", threadId: "thread-1" }));
+  });
+
+  it("inserts a newline on desktop Shift+Enter", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+    const textarea = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "First");
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    await userEvent.type(textarea, "Second");
+    expect(textarea.value).toBe("First\nSecond");
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("inserts a newline and does not send on the mobile layout", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+    const textarea = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "First");
+    await userEvent.keyboard("{Enter}");
+    await userEvent.type(textarea, "Second");
+    expect(textarea.value).toBe("First\nSecond");
+    expect(sendMutateAsync).not.toHaveBeenCalled();
   });
 });
 

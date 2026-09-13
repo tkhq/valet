@@ -171,6 +171,12 @@ Fix (`plugin-catalog.ts`): when the args JSON exceeds 256 characters, the key's 
 
 The hash is 64-bit, not cryptographic. A collision only matters when two different large-args calls to the same tool collide within one (session, queue item) scope; with the length prefix the probability is negligible. The gate `body` still carries the full args JSON for display — `body` is an unindexed text column.
 
+## Approval review and composer input (2026-09-13)
+
+The live decision-gate wire carries a typed `approval` projection for a tool request. It includes the tool id, service, risk level, summary, and parameters. The raw engine context remains private. The web approval card shows the summary and risk facts first. It puts the full parameter payload in a collapsed, independently scrolling review area. Long URLs, code, and other unbroken values wrap. The action controls stay below the bounded review area, so an approver can reach Approve or Reject on a phone or desktop without first scrolling through a payload. Native buttons, a labelled region, and a keyboard-focusable payload preserve keyboard and screen-reader review.
+
+The composer uses the same 767-pixel breakpoint as the mobile layout. On that layout, Return inserts a line break. On wider layouts, Enter sends and Shift+Enter inserts a line break. This avoids user-agent checks and keeps hardware keyboards aligned with the visible layout.
+
 ## Team policies (2026-09-11)
 
 Team workspaces expose Policies beside General, API keys, and Proxy. Members
