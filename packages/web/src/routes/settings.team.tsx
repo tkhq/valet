@@ -31,7 +31,7 @@ function SelectedTeamSettings({ teamId }: { teamId: string }) {
       ) : directory.error != null ? (
         <ErrorRow>Failed to load the member directory. Reload the page to try again.</ErrorRow>
       ) : directory.data ? (
-        <TeamsPanel orgMembers={directory.data.users} teamId={teamId} />
+        <TeamsPanel orgMembers={directory.data.users} teamId={teamId} showAssistantLink />
       ) : (
         <ErrorRow>Team settings are unavailable. Select another workspace or reload the page.</ErrorRow>
       )}

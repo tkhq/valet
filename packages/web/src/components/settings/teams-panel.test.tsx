@@ -88,30 +88,6 @@ const teamsData = () => ({
 let teamDefaultModel: string | null = null;
 let teamDefaultReasoning: string | null = null;
 
-// The Assistant link points at the team's DEFAULT assistant, whose id only
-// the assistants list carries.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({
-      data: {
-        assistants: [
-          {
-            id: "asst_team_1",
-            owner: { type: "team" as const, id: "team_1" },
-            sessionId: "assistant:asst_team_1",
-            isDefault: true,
-            createdAt: 1,
-          },
-        ],
-      },
-      isLoading: false,
-      error: null,
-    }),
-  };
-});
-
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: selectedTeamsOverride ? { teams: selectedTeamsOverride } : teamsData(), isLoading: selectedTeamsLoading, error: selectedTeamsError }),
   useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
@@ -621,13 +597,6 @@ describe("TeamsPanel — add-member picker", () => {
   });
 });
 
-/**
- * The Assistant control is a plain cross-link into `/chat`, which owns the
- * get-or-create. Settings is no longer the door to a team's assistant — it
- * is one entrance among several (the chat rail, the dashboard card, the
- * owner badges), so this row creates nothing and needs no pending or error
- * state of its own.
- */
 describe("TeamsPanel — team credentials", () => {
   beforeEach(() => {
     callerRole = "admin";
@@ -847,17 +816,15 @@ describe("TeamsPanel — team assistant link", () => {
     orgRole = "member";
   });
 
-  it("shows the Assistant link to a plain member, not just admins", () => {
-    render(<TeamsPanel orgMembers={orgMembers} />);
+  it("shows the Assistant link to a plain member in the active team", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
     expect(screen.getByRole("link", { name: /Assistant/ })).toBeTruthy();
   });
 
-  it("points at the team's default assistant on /chat", () => {
-    // A team owns several assistants now, so the link names one: the
-    // default. The rail is where the others are chosen.
-    render(<TeamsPanel orgMembers={orgMembers} />);
+  it("opens the active team's assistants list", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
     const link = screen.getByRole("link", { name: /Assistant/ });
-    expect(link.getAttribute("href")).toBe("/chat?assistant=asst_team_1");
+    expect(link.getAttribute("href")).toBe("/assistants");
   });
 });
 
