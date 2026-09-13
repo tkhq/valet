@@ -82,6 +82,13 @@ describe("busEventToWire", () => {
     expect(out).toEqual([{ type: "message_start", threadId: "t1", messageId: "m1", role: "assistant" }]);
   });
 
+  it("forwards the tool-use message_end reason", () => {
+    const out = busEventToWire(
+      ev({ type: "message_end", threadId: "t1", messageId: "m1", reason: "tool_use" }),
+    );
+    expect(out).toEqual([{ type: "message_end", threadId: "t1", messageId: "m1", reason: "tool_use" }]);
+  });
+
   it("forwards text_delta with empty messageId placeholder", () => {
     const out = busEventToWire(ev({ type: "text_delta", threadId: "t1", text: "hello" }));
     expect(out).toEqual([{ type: "text_delta", threadId: "t1", messageId: "", delta: "hello" }]);

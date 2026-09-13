@@ -13,6 +13,7 @@ import type {
   DecisionGate,
   Message,
   MessagePart,
+  MessageReplyReference,
   PromptImageAttachment,
   WireEvent,
   WireQueueState,
@@ -202,6 +203,7 @@ export interface StreamStore {
     text: string,
     threadId: string,
     attachments?: PromptImageAttachment[],
+    replyTo?: MessageReplyReference,
   ): string;
   /**
    * Stamp the queue item id onto an existing message (typically the
@@ -324,6 +326,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         content: "",
         parts: [],
         createdAt: ev.ts,
+        ...(ev.role === "assistant" ? { completed: false } : {}),
         persistence: "streaming",
       };
       next.messages = [...next.messages, newMsg];
@@ -354,15 +357,21 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "message_end": {
+      const idx = lastIndex(slice.messages, (m) => m.id === ev.messageId);
+      if (idx >= 0) {
+        next.messages = replaceAt(slice.messages, idx, {
+          ...slice.messages[idx],
+          completed: ev.reason !== "tool_use",
+        });
+      }
       // On abort/error, sweep parts still in `streaming` status: their tool
       // call never reached toolcall_end, so the engine never persisted them —
       // keeping them would show a phantom card that vanishes on reload. The
       // sweep is thread-wide (not by messageId) so a client that attached
       // the part to an older message (mid-turn connect) still cleans up.
-      // On end_turn the streaming parts are about to execute — tool_start
-      // upgrades them in place.
-      if (ev.reason === "end_turn") return next;
-      sweepStreamingParts(next, ev.threadId);
+      // On end_turn or tool_use, the streaming parts are about to execute —
+      // tool_start upgrades them in place.
+      if (ev.reason === "error" || ev.reason === "abort") sweepStreamingParts(next, ev.threadId);
       return next;
     }
 
@@ -775,7 +784,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
       return { bySession: { ...state.bySession, [sessionId]: updated } };
     }),
 
-  addUserMessage: (sessionId, text, threadId, attachments) => {
+  addUserMessage: (sessionId, text, threadId, attachments, replyTo) => {
     // Synthetic id; the next REST snapshot replaces this row with the
     // persisted message. A short collision window with content-based
     // dedupe is acceptable for v1.
@@ -794,6 +803,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
         // Optimistic mirror of the wire projection: the REST refetch will
         // overwrite this row with the server's canonical attachments field.
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...(replyTo ? { replyTo } : {}),
       };
       // A fresh prompt supersedes this thread's lingering error banner from
       // the previous failed turn (see the `turn_end` reducer note). Other

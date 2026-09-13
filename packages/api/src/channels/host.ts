@@ -593,7 +593,7 @@ export class ChannelHost {
     trigger: {
       messageId?: string;
       queueItemId?: string;
-      reason?: "end_turn" | "error" | "abort";
+      reason?: "end_turn" | "tool_use" | "error" | "abort";
     },
   ): Promise<void> {
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
@@ -608,7 +608,7 @@ export class ChannelHost {
     const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
     if (!queueItemId) return;
     const dedupeKey = `${sessionId}:first-reply:${queueItemId}`;
-    if (trigger.reason !== undefined && trigger.reason !== "end_turn") {
+    if (trigger.reason === "error" || trigger.reason === "abort") {
       if (trigger.reason === "abort") this.markDelivered(dedupeKey);
       return;
     }

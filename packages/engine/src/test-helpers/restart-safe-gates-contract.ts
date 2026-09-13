@@ -62,6 +62,8 @@ export function runRestartSafeGatesContract(
       ]);
 
       const bus1 = new InMemoryEventStream();
+      const events1: BusEvent[] = [];
+      bus1.subscribe({}, (event) => events1.push(event));
       const engine1 = new Engine({ providers: { store, stream: bus1, sandboxProvider } });
       const SESSION_ID = `sess-restart-${name}`;
       const session1 = await engine1.createSession({
@@ -87,6 +89,10 @@ export function runRestartSafeGatesContract(
       });
 
       expect(gate.status).toBe("pending");
+      expect(events1.find((event) => event.event.type === "message_end")?.event).toMatchObject({
+        type: "message_end",
+        reason: "tool_use",
+      });
       // First gate for this (queueItem, resumeKey) is ordinal 0.
       expect(gate.ordinal).toBe(0);
       expect(gate.id.endsWith(":0")).toBe(true);

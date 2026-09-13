@@ -1563,7 +1563,7 @@ export type EngineEvent =
       type: "message_end";
       threadId: string;
       messageId: string;
-      reason: "end_turn" | "error" | "abort";
+      reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
   | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
