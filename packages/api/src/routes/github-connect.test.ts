@@ -284,6 +284,65 @@ describe("GET /api/me/github/callback", () => {
     expect(stored?.expiresAt).toBeLessThan(beforeMs + 28800 * 1000 + 60_000);
   });
 
+  it("returns an Integrations GitHub reconnect to Integrations after replacing an unhealthy token", async () => {
+    api = await bootTestApi();
+    useFixture({
+      oauthAccessToken: () => ({ body: { access_token: "replacement-token", token_type: "bearer" } }),
+      getUser: () => ({ body: { login: "octouser", id: 99 } }),
+    });
+    await configureOrgApp(api.baseUrl);
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2",
+      accessToken: "expired-token",
+      refreshToken: "failed-refresh-token",
+      expiresAt: Date.now() - 1,
+      metadata: { login: "octouser", refreshFailedAt: Date.now() },
+    });
+
+    const connectRes = await fetch(`${api.baseUrl}/api/me/github/connect`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ postAuthDestination: "integrations" }),
+    });
+    const { url } = (await connectRes.json()) as PostGithubConnectResponse;
+    const state = new URL(url).searchParams.get("state");
+
+    const callbackRes = await fetch(
+      `${api.baseUrl}/api/me/github/callback?code=abc&state=${encodeURIComponent(state ?? "")}`,
+      { headers: HEADERS, redirect: "manual" },
+    );
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.get("location")).toBe("/integrations?github=connected");
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    expect(stored?.accessToken).toBe("replacement-token");
+    expect(stored?.metadata?.refreshFailedAt).toBeUndefined();
+  });
+
+  it("ignores an unsafe GitHub connect post-auth destination", async () => {
+    api = await bootTestApi();
+    useFixture({
+      oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
+      getUser: () => ({ body: { login: "octouser", id: 99 } }),
+    });
+    await configureOrgApp(api.baseUrl);
+
+    const connectRes = await fetch(`${api.baseUrl}/api/me/github/connect`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ postAuthDestination: "https://evil.example/steal" }),
+    });
+    const { url } = (await connectRes.json()) as PostGithubConnectResponse;
+    const state = new URL(url).searchParams.get("state");
+
+    const callbackRes = await fetch(
+      `${api.baseUrl}/api/me/github/callback?code=abc&state=${encodeURIComponent(state ?? "")}`,
+      { headers: HEADERS, redirect: "manual" },
+    );
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.get("location")).toBe("/settings/connected-accounts?github=connected");
+  });
+
   it("overwrites a prior identity-only social-login credential (repo-capable after connect)", async () => {
     api = await bootTestApi();
     useFixture({

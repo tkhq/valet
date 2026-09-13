@@ -14,6 +14,7 @@ import type {
   GetGithubOrgStatusResponse,
   GetPrebuildForRepoResponse,
   GetReposResponse,
+  PostGithubConnectRequest,
   PostGithubConnectResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
@@ -59,8 +60,8 @@ export function useGithubOrgStatus(enabled = true) {
  * completed connect affects consistent if the redirect returns quickly. */
 export function useConnectGithub() {
   const qc = useQueryClient();
-  return useMutation<PostGithubConnectResponse, Error, void>({
-    mutationFn: () => api.connectGithub(),
+  return useMutation<PostGithubConnectResponse, Error, PostGithubConnectRequest | undefined>({
+    mutationFn: (body) => api.connectGithub(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkIntegrations.credentials() });

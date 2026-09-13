@@ -56,24 +56,40 @@ interface ConnectState {
    * same-origin, which is the deployed shape — there the api serves the
    * client and a relative redirect already lands in the right place. */
   returnTo?: string;
+  /** The validated post-auth destination for an Integrations reconnect. */
+  postAuthDestination?: "integrations";
 }
 
 function verifyConnectState(state: string, key: Buffer, nowMs: number): ConnectState | null {
   return verifyState<ConnectState>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, orgId, nonce, exp, returnTo } = payload;
+    const { userId, orgId, nonce, exp, returnTo, postAuthDestination } = payload;
     if (typeof userId !== "string" || typeof orgId !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (exp < nowMs) return null;
     // Allow-listed before signing, so trusting it here trusts our own
     // signature rather than anything GitHub sent back.
-    return { userId, orgId, nonce, exp, returnTo: typeof returnTo === "string" ? returnTo : "" };
+    return {
+      userId,
+      orgId,
+      nonce,
+      exp,
+      returnTo: typeof returnTo === "string" ? returnTo : "",
+      ...(postAuthDestination === "integrations" ? { postAuthDestination } : {}),
+    };
   });
 }
 
 function appDeps(c: Context<AppEnv>): GithubAppDeps {
   const { db, engineCredentials, encryptionKey } = c.var.providers;
   return { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+}
+
+/** Only the Integrations reconnect may override the long-standing settings
+ * destination. A fixed value prevents OAuth state from carrying an external
+ * redirect destination. */
+function integrationPostAuthDestination(value: unknown): "integrations" | undefined {
+  return value === "integrations" ? value : undefined;
 }
 
 interface ParsedAccessTokenResponse {
@@ -105,6 +121,15 @@ githubConnectRouter.post("/connect", async (c) => {
   }
 
   const key = deriveSecretKey(encryptionKey);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    body = undefined;
+  }
+  const postAuthDestination = isRecord(body)
+    ? integrationPostAuthDestination(body.postAuthDestination)
+    : undefined;
   const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
   const statePayload: ConnectState = {
     userId: user.id,
@@ -112,6 +137,7 @@ githubConnectRouter.post("/connect", async (c) => {
     nonce: randomBytes(16).toString("hex"),
     exp: Date.now() + STATE_TTL_MS,
     ...(returnTo ? { returnTo } : {}),
+    ...(postAuthDestination ? { postAuthDestination } : {}),
   };
   const state = signState(statePayload, key);
 
@@ -268,7 +294,9 @@ githubConnectRouter.get("/callback", async (c) => {
     console.error("github connect callback: post-save relink failed:", err);
   }
 
-  return c.redirect(`${verified.returnTo ?? ""}/settings/connected-accounts?github=connected`, 302);
+  const destination =
+    verified.postAuthDestination === "integrations" ? "/integrations" : "/settings/connected-accounts";
+  return c.redirect(`${verified.returnTo ?? ""}${destination}?github=connected`, 302);
 });
 
 githubConnectRouter.delete("/", async (c) => {
