@@ -5,6 +5,7 @@ import type { TObject } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   pluginCatalogTools,
+  toolApprovalGateContext,
   pinnedToolName,
   prepareActionArgs,
   MAX_PINNED_ACTIONS,
@@ -1764,5 +1765,13 @@ describe("pinned tool: the model's summary", () => {
       "Add a Slack notify step",
       "Drop the approval gate",
     ]);
+  });
+});
+
+describe("toolApprovalGateContext malformed persistence", () => {
+  it("fails closed without throwing for scalar, null, and array contexts", () => {
+    for (const context of [null, "bad", 1, []]) {
+      expect(toolApprovalGateContext(context)).toEqual({ reviewIncomplete: true });
+    }
   });
 });
