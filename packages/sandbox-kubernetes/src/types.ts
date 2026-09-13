@@ -160,6 +160,7 @@ export interface SandboxContainer {
   image: string;
   command?: string[];
   args?: string[];
+  terminationMessagePolicy?: "File" | "FallbackToLogsOnError";
   env?: EnvVar[];
   resources?: ResourceRequirements;
   volumeMounts?: VolumeMount[];

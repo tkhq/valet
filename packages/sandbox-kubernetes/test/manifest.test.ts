@@ -95,6 +95,12 @@ describe("sandboxCrName", () => {
 });
 
 describe("buildSandboxManifest", () => {
+  it("uses container logs for failed startup diagnostics", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-errors", {});
+    expect(manifest.spec.podTemplate.spec.containers[0].terminationMessagePolicy)
+      .toBe("FallbackToLogsOnError");
+  });
+
   const opts: SandboxCreateOpts = {
     env: { VALET_SANDBOX_TOKEN: "tok-123", VALET_API_URL: "http://valet-api.valet.svc.cluster.local" },
     resources: { cpu: 2, memory: "4Gi" },

@@ -268,7 +268,7 @@ describe("init container startup classification", () => {
   it.each([
     ["ErrImagePull", "image pull failed (ErrImagePull): init:missing"],
     ["ImagePullBackOff", "image pull failed (ImagePullBackOff): init:missing"],
-    ["CrashLoopBackOff", "container crash-looping (CrashLoopBackOff)"],
+    ["CrashLoopBackOff", "container crash-looping (CrashLoopBackOff); startup error: Error: Correct the RuntimeClass, then recreate the sandbox."],
     ["ContainerCreating", null],
   ])("classifies init status %s through the pod adapter", async (reason, expected) => {
     const adapter = podStatusApiAdapter({
@@ -280,7 +280,10 @@ describe("init container startup classification", () => {
         status: {
           phase: "Pending",
           initContainerStatuses: [{ name: "valet-home-init", image: "", imageID: "", ready: false,
-            restartCount: 0, state: { waiting: { reason: reason ?? undefined } } }],
+            restartCount: 0, state: { waiting: { reason: reason ?? undefined } },
+            ...(reason === "CrashLoopBackOff" ? { lastState: { terminated: { containerID: "", exitCode: 20,
+              finishedAt: new Date(), message: "Error: Correct the RuntimeClass, then recreate the sandbox.",
+              reason: "Error", signal: 0, startedAt: new Date() } } } : {}) }],
           containerStatuses: [{ name: "sandbox", image: "sandbox:v1", imageID: "", ready: false,
             restartCount: 0, state: { waiting: { reason: "PodInitializing" } } }],
         },
@@ -340,6 +343,25 @@ describe("classifyPodFailure (pure)", () => {
       phase: "Running",
       containerStatuses: [{ name: "sandbox", waitingReason: "CrashLoopBackOff" }],
     };
+    expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff)");
+  });
+
+  it("bounds and sanitizes an actionable last termination message", () => {
+    const pod: PodStatusInfo = { phase: "Running", containerStatuses: [{
+      name: "sandbox", waitingReason: "CrashLoopBackOff",
+      lastTerminationMessage: "Error: token=top-secret \u0000 Correct the RuntimeClass, then recreate the sandbox." + "x".repeat(500),
+    }] };
+    const reason = classifyPodFailure(pod) ?? "";
+    expect(reason).toContain("Correct the RuntimeClass");
+    expect(reason).toContain("token=[redacted]");
+    expect(reason).not.toContain("top-secret");
+    expect(reason.length).toBeLessThanOrEqual(384);
+  });
+
+  it("does not expose arbitrary termination logs", () => {
+    const pod: PodStatusInfo = { phase: "Running", containerStatuses: [{
+      name: "sandbox", waitingReason: "CrashLoopBackOff", lastTerminationMessage: "command output with secret",
+    }] };
     expect(classifyPodFailure(pod)).toBe("container crash-looping (CrashLoopBackOff)");
   });
 
