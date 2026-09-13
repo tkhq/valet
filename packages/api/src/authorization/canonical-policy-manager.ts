@@ -88,8 +88,34 @@ export class CanonicalPolicyBundleManager {
 }
 
 export async function ensureCanonicalPolicyReadiness(manager: CanonicalPolicyBundleManager): Promise<void> {
-  const rows = await manager.db.select({ id: orgs.id }).from(orgs);
-  for (const row of rows.sort((a, b) => a.id.localeCompare(b.id))) await manager.ensureOrganizationReady(row.id);
+  const rows = (await manager.db.select({ id: orgs.id }).from(orgs)).sort((a, b) => a.id.localeCompare(b.id));
+  const missing: { organizationId: string; digest: string; bundle: CanonicalSourceBundle }[] = [];
+
+  // Validate every tenant before changing any tenant. Startup readiness is one
+  // fail-closed cutover, not a sequence that may leave a partially ready fleet.
+  for (const row of rows) {
+    const expected = await manager.buildCurrent(row.id);
+    const pointer = await manager.host.activePointer(row.id);
+    if (!pointer) {
+      missing.push({ organizationId: row.id, digest: expected.identity.sourceBundleDigest, bundle: expected.built.bundle });
+      continue;
+    }
+    const loaded = await manager.host.load(pointer.sourceBundleDigest);
+    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest) {
+      throw new Error(`Canonical policy pointer for ${row.id} is stale. Publish the exact current policy before startup.`);
+    }
+  }
+
+  if (missing.length === 0) return;
+  const now = Date.now();
+  await manager.db.transaction(async (tx) => {
+    for (const item of missing) {
+      await putBundle(tx, item.digest, item.bundle, now);
+      const inserted = await tx.insert(policyActiveBundles).values({ orgId: item.organizationId, digest: item.digest, generation: 1, activatedAt: now }).onConflictDoNothing().returning({ orgId: policyActiveBundles.orgId });
+      if (!inserted[0]) throw new Error(`Canonical policy pointer for ${item.organizationId} changed during startup readiness.`);
+    }
+  });
+  for (const item of missing) await manager.host.load(item.digest);
 }
 
 async function putBundle(db: AppQueryable, digest: string, bundle: CanonicalSourceBundle, now: number): Promise<void> {

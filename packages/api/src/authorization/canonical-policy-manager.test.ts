@@ -50,8 +50,10 @@ describe("canonical policy readiness", () => {
     await db.insert(policySourceBundles).values({ digest: "bad", bundle: bundle("{}"), createdAt: 1 });
     await db.insert(policyActiveBundles).values({ orgId: "org-b", digest: "bad", generation: 1, activatedAt: 1 });
     const manager = new CanonicalPolicyBundleManager(db, new Map());
-    try { await expect(ensureCanonicalPolicyReadiness(manager)).rejects.toThrow(); }
-    finally { await manager.close(); }
+    try {
+      await expect(ensureCanonicalPolicyReadiness(manager)).rejects.toThrow();
+      expect(await manager.host.activePointer("org-a")).toBeUndefined();
+    } finally { await manager.close(); }
   }, 120_000);
 
   it("creates an organization with immutable content and generation one", async () => {
