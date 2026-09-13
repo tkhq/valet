@@ -12,3 +12,4 @@ export {
 } from "./evaluators/wasm-runtime.js";
 
 export * from "./canonical-policy-manager.js";
+export * from "./canonical-facts.js";

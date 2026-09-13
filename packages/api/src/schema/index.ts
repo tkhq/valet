@@ -1482,6 +1482,11 @@ export const runtimeGrants = pgTable(
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
     policyKey: text("policy_key").notNull(),
+    service: text("service"),
+    actionId: text("action_id"),
+    riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
+    sourceApprovalId: text("source_approval_id"),
+    expiresAt: bigint("expires_at", { mode: "number" }),
     mode: text("mode", { enum: ["allow"] }).notNull().default("allow"),
     grantedBy: text("granted_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -1746,12 +1751,13 @@ export const authorizationDecisions = pgTable(
     proofVerificationError: text("proof_verification_error"),
     identityFactProvenance: jsonb("identity_fact_provenance").$type<FactProvenance[]>().notNull(),
     policyFactProvenance: jsonb("policy_fact_provenance").$type<FactProvenance[]>().notNull(),
+    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string }>(),
     evaluatedAt: bigint("evaluated_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [
     index("authorization_decisions_org_created").on(t.orgId, t.createdAt),
-    index("authorization_decisions_idempotency_key").on(t.idempotencyKey),
+    uniqueIndex("authorization_decisions_org_idempotency").on(t.orgId, t.idempotencyKey),
     index("authorization_decisions_request").on(t.requestId),
     index("authorization_decisions_subject").on(t.requestSubjectDigest),
     check("authorization_decisions_evaluator_kind", sql`${t.evaluatorKind} IN ('local_valet', 'tvc_attested')`),
@@ -1764,6 +1770,34 @@ export const authorizationDecisions = pgTable(
       "authorization_decisions_proof_kind",
       sql`(${t.evaluatorKind} = 'tvc_attested' AND ${t.proof} IS NOT NULL AND ${t.proofVerificationStatus} IN ('verified', 'failed')) OR (${t.evaluatorKind} = 'local_valet' AND ${t.proof} IS NULL AND ${t.proofVerificationStatus} = 'not_required')`,
     ),
+  ],
+);
+
+export const canonicalApprovalResolutions = pgTable(
+  "canonical_approval_resolutions",
+  {
+    resolutionId: text("resolution_id").primaryKey(),
+    approvalId: text("approval_id").notNull(),
+    gateId: text("gate_id").notNull(),
+    orgId: text("org_id").notNull(),
+    requestSubjectDigest: text("request_subject_digest").notNull(),
+    originalDecisionDigest: text("original_decision_digest").notNull(),
+    approverId: text("approver_id").notNull(),
+    verdict: text("verdict", { enum: ["approved", "rejected"] }).notNull(),
+    appliesIn: text("applies_in", { enum: ["session", "workflow"] }).notNull(),
+    sessionId: text("session_id"),
+    workflowExecutionId: text("workflow_execution_id"),
+    resolvedAt: bigint("resolved_at", { mode: "number" }).notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+    resolutionVersion: integer("resolution_version").notNull(),
+    revokedAt: bigint("revoked_at", { mode: "number" }),
+  },
+  (t) => [
+    uniqueIndex("canonical_approval_gate_version").on(t.orgId, t.gateId, t.resolutionVersion),
+    index("canonical_approval_subject").on(t.orgId, t.requestSubjectDigest, t.expiresAt),
+    check("canonical_approval_scope", sql`(${t.sessionId} IS NOT NULL)::int + (${t.workflowExecutionId} IS NOT NULL)::int = 1`),
+    check("canonical_approval_version", sql`${t.resolutionVersion} = 1`),
+    check("canonical_approval_expiry", sql`${t.expiresAt} > ${t.resolvedAt}`),
   ],
 );
 
@@ -2313,6 +2347,7 @@ export type RuntimeGrantRow = typeof runtimeGrants.$inferSelect;
 export type ActionPolicyOverrideRow = typeof actionPolicyOverrides.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type AuthorizationDecisionRow = typeof authorizationDecisions.$inferSelect;
+export type CanonicalApprovalResolutionRow = typeof canonicalApprovalResolutions.$inferSelect;
 export type AuthorizationExecutionAttemptRow = typeof authorizationExecutionAttempts.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
 export type ModelRegistryCacheRow = typeof modelRegistryCache.$inferSelect;

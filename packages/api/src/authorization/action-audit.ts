@@ -69,6 +69,7 @@ export function buildDecisionAuditPlan(input: {
     proofVerificationStatus: verification?.status ?? "not_required", proofVerifiedAt: verification?.atMs ?? null,
     proofVerificationError: verification?.errorCode ? safeCode(verification.errorCode) : null,
     identityFactProvenance: identityFactProvenance.map(copy), policyFactProvenance: policyFactProvenance.map(copy),
+    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest },
     evaluatedAt: envelope.evaluatedAtMs, createdAt: input.createdAtMs,
   };
   return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest } });
