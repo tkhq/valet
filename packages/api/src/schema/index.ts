@@ -9,6 +9,8 @@ import {
   index,
   primaryKey,
   uniqueIndex,
+  unique,
+  foreignKey,
   check,
   doublePrecision,
 } from "drizzle-orm/pg-core";
@@ -1575,41 +1577,127 @@ export const actionInvocations = pgTable(
 
 
 // Inert canonical policy authoring. These rows never select an active bundle.
-export const policyAuthoringDocuments = pgTable("policy_authoring_documents", {
-  id: text("id").primaryKey(), orgId: text("org_id").notNull(), teamId: text("team_id"),
-  status: text("status", { enum: ["draft", "in_review", "approved_for_publication"] }).notNull(),
-  revision: integer("revision").notNull(), stateVersion: integer("state_version").notNull(),
-  normalizedIdentity: text("normalized_identity").notNull(), sourceBundleDigest: text("source_bundle_digest"),
-  policyDigest: text("policy_digest"), validationSummary: jsonb("validation_summary").$type<PolicyValidationSummary>().notNull(),
-  createdBy: text("created_by").notNull(), createdAt: bigint("created_at", { mode: "number" }).notNull(),
-  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-}, (t) => [index("policy_authoring_documents_scope").on(t.orgId, t.teamId, t.updatedAt)]);
-export const policyAuthoringRevisions = pgTable("policy_authoring_revisions", {
-  documentId: text("document_id").notNull(), revision: integer("revision").notNull(),
-  draft: jsonb("draft").$type<NormalizedPolicyDraftV1>().notNull(), normalizedIdentity: text("normalized_identity").notNull(),
-  bundle: jsonb("bundle").$type<CanonicalSourceBundle>(), sourceBundleDigest: text("source_bundle_digest"),
-  policyDigest: text("policy_digest"), validationSummary: jsonb("validation_summary").$type<PolicyValidationSummary>().notNull(),
-  createdBy: text("created_by").notNull(), createdAt: bigint("created_at", { mode: "number" }).notNull(),
-}, (t) => [primaryKey({ columns: [t.documentId, t.revision] })]);
-export const policyAuthoringReviews = pgTable("policy_authoring_reviews", {
-  id: text("id").primaryKey(), documentId: text("document_id").notNull(), revision: integer("revision").notNull(),
-  normalizedIdentity: text("normalized_identity").notNull(), sourceBundleDigest: text("source_bundle_digest").notNull(),
-  policyDigest: text("policy_digest").notNull(), reviewerId: text("reviewer_id").notNull(),
-  verdict: text("verdict", { enum: ["approve", "reject"] }).notNull(), requestId: text("request_id").notNull(),
-  createdAt: bigint("created_at", { mode: "number" }).notNull(),
-}, (t) => [uniqueIndex("policy_authoring_reviews_identity").on(t.documentId, t.revision, t.reviewerId)]);
-export const policyAuthoringOperations = pgTable("policy_authoring_operations", {
-  orgId: text("org_id").notNull(), idempotencyKey: text("idempotency_key").notNull(), operation: text("operation").notNull(),
-  payloadDigest: text("payload_digest").notNull(), response: jsonb("response").$type<PolicyAuthoringDocument>(),
-  createdAt: bigint("created_at", { mode: "number" }).notNull(),
-}, (t) => [primaryKey({ columns: [t.orgId, t.idempotencyKey] })]);
-export const policyAuthoringAudit = pgTable("policy_authoring_audit", {
-  id: text("id").primaryKey(), orgId: text("org_id").notNull(), teamId: text("team_id"), documentId: text("document_id").notNull(),
-  revision: integer("revision").notNull(), stateVersion: integer("state_version").notNull(), actorId: text("actor_id").notNull(),
-  operation: text("operation").notNull(), idempotencyKey: text("idempotency_key").notNull(), priorState: text("prior_state"),
-  newState: text("new_state").notNull(), sourceBundleDigest: text("source_bundle_digest"), policyDigest: text("policy_digest"),
-  createdAt: bigint("created_at", { mode: "number" }).notNull(),
-}, (t) => [uniqueIndex("policy_authoring_audit_idempotency").on(t.orgId, t.idempotencyKey), index("policy_authoring_audit_document").on(t.orgId, t.teamId, t.documentId, t.createdAt)]);
+export const policyAuthoringDocuments = pgTable(
+  "policy_authoring_documents",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    teamId: text("team_id"),
+    status: text("status", { enum: ["draft", "in_review", "approved_for_publication"] })
+      .notNull()
+      .default("draft"),
+    revision: integer("revision").notNull(),
+    stateVersion: integer("state_version").notNull(),
+    reviewCycle: integer("review_cycle"),
+    normalizedIdentity: text("normalized_identity").notNull(),
+    sourceBundleDigest: text("source_bundle_digest"),
+    policyDigest: text("policy_digest"),
+    engineDigest: text("engine_digest"),
+    validationSummary: jsonb("validation_summary").$type<PolicyValidationSummary>().notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [unique("policy_authoring_documents_tenant_id").on(t.orgId, t.scopeKey, t.id),
+    check("policy_authoring_documents_scope", sql`(${t.teamId} IS NULL AND ${t.scopeKey}='org') OR ${t.scopeKey}='team:'||${t.teamId}`),
+    check("policy_authoring_documents_status", sql`${t.status} IN ('draft','in_review','approved_for_publication')`),
+    check("policy_authoring_documents_revision", sql`${t.revision}>0 AND ${t.stateVersion}>0`), index("policy_authoring_documents_list").on(t.orgId, t.scopeKey, t.id)],
+);
+export const policyAuthoringRevisions = pgTable(
+  "policy_authoring_revisions",
+  {
+    orgId: text("org_id").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    documentId: text("document_id").notNull(),
+    revision: integer("revision").notNull(),
+    draft: jsonb("draft").$type<NormalizedPolicyDraftV1>().notNull(),
+    normalizedIdentity: text("normalized_identity").notNull(),
+    bundle: jsonb("bundle").$type<CanonicalSourceBundle>(),
+    sourceBundleDigest: text("source_bundle_digest"),
+    policyDigest: text("policy_digest"),
+    engineDigest: text("engine_digest"),
+    validationSummary: jsonb("validation_summary").$type<PolicyValidationSummary>().notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.orgId, t.scopeKey, t.documentId, t.revision] }),
+    foreignKey({ columns: [t.orgId, t.scopeKey, t.documentId], foreignColumns: [policyAuthoringDocuments.orgId, policyAuthoringDocuments.scopeKey, policyAuthoringDocuments.id] }),
+  ],
+);
+export const policyAuthoringReviews = pgTable(
+  "policy_authoring_reviews",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    documentId: text("document_id").notNull(),
+    revision: integer("revision").notNull(),
+    reviewCycle: integer("review_cycle").notNull(),
+    normalizedIdentity: text("normalized_identity").notNull(),
+    sourceBundleDigest: text("source_bundle_digest").notNull(),
+    policyDigest: text("policy_digest").notNull(),
+    engineDigest: text("engine_digest").notNull(),
+    reviewerId: text("reviewer_id").notNull(),
+    verdict: text("verdict", { enum: ["approve", "reject"] }).notNull(),
+    requestId: text("request_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("policy_authoring_reviews_cycle").on(t.orgId, t.scopeKey, t.documentId, t.revision, t.reviewCycle, t.reviewerId),
+    foreignKey({
+      columns: [t.orgId, t.scopeKey, t.documentId, t.revision],
+      foreignColumns: [policyAuthoringRevisions.orgId, policyAuthoringRevisions.scopeKey, policyAuthoringRevisions.documentId, policyAuthoringRevisions.revision],
+    }),
+  ],
+);
+export const policyAuthoringOperations = pgTable(
+  "policy_authoring_operations",
+  {
+    orgId: text("org_id").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    actorId: text("actor_id").notNull(),
+    operation: text("operation").notNull(),
+    documentKey: text("document_key").notNull(),
+    documentId: text("document_id"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payloadDigest: text("payload_digest").notNull(),
+    response: jsonb("response").$type<PolicyAuthoringDocument>(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.scopeKey, t.actorId, t.operation, t.documentKey, t.idempotencyKey] }), check("policy_authoring_operations_document", sql`(${t.operation}='create' AND ${t.documentKey}='create' AND ${t.documentId} IS NULL) OR (${t.operation}<>'create' AND ${t.documentKey}=${t.documentId})`), foreignKey({ columns: [t.orgId, t.scopeKey, t.documentId], foreignColumns: [policyAuthoringDocuments.orgId, policyAuthoringDocuments.scopeKey, policyAuthoringDocuments.id] })],
+);
+export const policyAuthoringAudit = pgTable(
+  "policy_authoring_audit",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    teamId: text("team_id"),
+    documentId: text("document_id").notNull(),
+    revision: integer("revision").notNull(),
+    stateVersion: integer("state_version").notNull(),
+    reviewCycle: integer("review_cycle"),
+    actorId: text("actor_id").notNull(),
+    operation: text("operation").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    priorState: text("prior_state"),
+    newState: text("new_state").notNull(),
+    sourceBundleDigest: text("source_bundle_digest"),
+    policyDigest: text("policy_digest"),
+    engineDigest: text("engine_digest"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("policy_authoring_audit_idempotency").on(t.orgId, t.scopeKey, t.actorId, t.operation, t.documentId, t.idempotencyKey),
+    index("policy_authoring_audit_document").on(t.orgId, t.scopeKey, t.documentId, t.createdAt),
+    foreignKey({
+      columns: [t.orgId, t.scopeKey, t.documentId, t.revision],
+      foreignColumns: [policyAuthoringRevisions.orgId, policyAuthoringRevisions.scopeKey, policyAuthoringRevisions.documentId, policyAuthoringRevisions.revision],
+    }),
+  ],
+);
 
 // Canonical authorization decisions and execution attempts use separate tables.
 // A policy effect cannot be stored as an execution outcome, and an execution

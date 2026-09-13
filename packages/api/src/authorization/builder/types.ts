@@ -111,18 +111,67 @@ export interface PolicyPreviewProvider {
 export type { AuthorizationKind, JsonValue } from "@valet/engine/authorization";
 
 export type PolicyAuthoringStatus = "draft" | "in_review" | "approved_for_publication";
-export type PolicyAuthoringOperation = "view" | "edit" | "submit_review" | "review" | "prepare_publication" | "restore_draft";
-export interface PolicyAuthoringScope { readonly organizationId: string; readonly teamId?: string }
-export interface PolicyValidationSummary { readonly valid: boolean; readonly publishable: boolean; readonly issues: readonly DraftValidationIssue[] }
-export interface PolicyAuthoringDocument {
-  readonly schemaVersion: 1; readonly documentId: string; readonly scope: PolicyAuthoringScope;
-  readonly status: PolicyAuthoringStatus; readonly revision: number; readonly stateVersion: number;
-  readonly normalizedIdentity: string; readonly sourceBundleDigest?: string; readonly policyDigest?: string;
-  readonly validation: PolicyValidationSummary; readonly createdBy: string; readonly createdAtMs: number; readonly updatedAtMs: number;
+export type PolicyAuthoringOperation = "view" | "create" | "edit" | "submit_review" | "review" | "prepare_publication" | "restore_draft";
+export interface PolicyAuthoringScope {
+  readonly organizationId: string;
+  readonly teamId?: string;
 }
-export interface PolicyMutationBase { readonly schemaVersion: 1; readonly expectedRevision: number; readonly expectedStateVersion: number; readonly idempotencyKey: string }
-export interface CreatePolicyDraftRequest extends PolicyMutationBase { readonly draft: PolicyDraftV1 }
-export interface EditPolicyDraftRequest extends PolicyMutationBase { readonly draft: PolicyDraftV1 }
-export interface ReviewPolicyDraftRequest extends PolicyMutationBase { readonly verdict: "approve" | "reject"; readonly requestId: string }
-export interface PolicyPreviewServerRequest { readonly schemaVersion: 1; readonly draft: PolicyDraftV1; readonly sampleFacts: Readonly<Record<string, JsonValue>>; readonly clientNormalizedIdentity?: string }
-export interface PolicyRevisionDiffV1 { readonly schemaVersion: 1; readonly fromRevision: number; readonly toRevision: number; readonly addedRuleIds: readonly string[]; readonly removedRuleIds: readonly string[]; readonly changedRuleIds: readonly string[]; readonly regoChanged: boolean; readonly dataChanged: boolean; readonly provenanceChanged: boolean; readonly fromIdentity: string; readonly toIdentity: string; readonly fromSourceBundleDigest?: string; readonly toSourceBundleDigest?: string }
+export interface PolicyValidationSummary {
+  readonly valid: boolean;
+  readonly publishable: boolean;
+  readonly issues: readonly DraftValidationIssue[];
+}
+export interface PolicyAuthoringDocument {
+  readonly schemaVersion: 1;
+  readonly documentId: string;
+  readonly scope: PolicyAuthoringScope;
+  readonly status: PolicyAuthoringStatus;
+  readonly revision: number;
+  readonly stateVersion: number;
+  readonly reviewCycle?: number;
+  readonly normalizedIdentity: string;
+  readonly sourceBundleDigest?: string;
+  readonly policyDigest?: string;
+  readonly engineDigest?: string;
+  readonly validation: PolicyValidationSummary;
+  readonly createdBy: string;
+  readonly createdAtMs: number;
+  readonly updatedAtMs: number;
+}
+export interface PolicyMutationBase {
+  readonly schemaVersion: 1;
+  readonly expectedRevision: number;
+  readonly expectedStateVersion: number;
+  readonly idempotencyKey: string;
+}
+export interface CreatePolicyDraftRequest extends PolicyMutationBase {
+  readonly draft: PolicyDraftV1;
+}
+export interface EditPolicyDraftRequest extends PolicyMutationBase {
+  readonly draft: PolicyDraftV1;
+}
+export interface ReviewPolicyDraftRequest extends PolicyMutationBase {
+  readonly verdict: "approve" | "reject";
+  readonly requestId: string;
+}
+export interface PolicyPreviewServerRequest {
+  readonly schemaVersion: 1;
+  readonly draft: PolicyDraftV1;
+  readonly sampleFacts: Readonly<Record<string, JsonValue>>;
+  readonly clientNormalizedIdentity?: string;
+}
+export interface PolicyRevisionDiffV1 {
+  readonly schemaVersion: 1;
+  readonly fromRevision: number;
+  readonly toRevision: number;
+  readonly addedRuleIds: readonly string[];
+  readonly removedRuleIds: readonly string[];
+  readonly changedRuleIds: readonly string[];
+  readonly regoChanged: boolean;
+  readonly dataChanged: boolean;
+  readonly provenanceChanged: boolean;
+  readonly fromIdentity: string;
+  readonly toIdentity: string;
+  readonly fromSourceBundleDigest?: string;
+  readonly toSourceBundleDigest?: string;
+}

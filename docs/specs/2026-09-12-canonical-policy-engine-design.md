@@ -933,9 +933,9 @@ The source builder exports its action target grammar and complete matcher path, 
 
 ### PR 7b authoring boundary
 
-PR 7b stores immutable `PolicyDraftV1` revisions in `draft`, `in_review`, and `approved_for_publication` states. An edit or restore creates a new draft revision. Submit freezes one validated revision. A review binds that revision and its server-owned identity and digests. The revision author cannot review their own revision. This separation-of-duty rule resolves the earlier open review gate conservatively.
+PR 7b stores immutable `PolicyDraftV1` revisions in `draft`, `in_review`, and `approved_for_publication` states. An edit or restore creates a new draft revision. Submit creates an explicit review cycle for one validated revision. A review binds that cycle, revision, normalized identity, source digest, policy digest, and engine digest. The revision author cannot review their own revision. This separation-of-duty rule resolves the earlier open review gate conservatively.
 
-Every mutation uses database compare-and-swap and a durable idempotency record. Its audit event commits in the same transaction. Preview sample facts are bounded, sanitized, and never stored or audited. Conflicts and denied reads do not create success audit events.
+Every mutation uses database compare-and-swap and a tenant, scope, actor, operation, document, and key idempotency record. These records remain durable for the document lifetime so an old key cannot repeat a mutation. Its audit event commits in the same transaction. Lists use bounded cursor pagination. Each scope has 1,000 documents, and each document has 100 revisions. Preview sample facts are bounded, sanitized, and never stored or audited. Conflicts and denied reads do not create success audit events.
 
 `approved_for_publication` has no enforcement effect. Prepare-publication only revalidates and returns the immutable candidate. PR 7b does not write a bundle host, active pointer, current policy row, or live resolver. PR 9 owns publication, activation, and active rollback. The API is intentionally ahead of the UI. PR 7a keeps its fixture provider until a later UI slice can add complete save and review controls.
 

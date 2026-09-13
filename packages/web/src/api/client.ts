@@ -1,4 +1,4 @@
-import type { CreatePolicyDraftRequest, EditPolicyDraftRequest, PolicyAuthoringDocument, PolicyMutationBase, PolicyPreviewServerRequest, PolicyRevisionDiffV1, ReviewPolicyDraftRequest } from "@valet/api/policy-builder";
+import type { CreatePolicyDraftRequest, EditPolicyDraftRequest, PolicyAuthoringDocument, PolicyMutationBase, NormalizedPolicyDraftV1, PolicyPreviewServerRequest, PolicyRevisionDiffV1, ReviewPolicyDraftRequest } from "@valet/api/policy-builder";
 import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
@@ -1421,13 +1421,13 @@ export const api = {
     request<{ ok: true }>("DELETE", `/me/identity-links/${encodeURIComponent(provider)}`),
 
   // Canonical authoring candidates are inert until PR 9.
-  listPolicyDrafts: (teamId?: string) => request<{ documents: PolicyAuthoringDocument[] }>("GET", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts` : "/org/policy-drafts"),
+  listPolicyDrafts: (teamId?: string, cursor?: string, limit?: number) => request<{ documents: PolicyAuthoringDocument[]; nextCursor?: string }>("GET", `${teamId ? `/teams/${encodeURIComponent(teamId)}` : "/org"}/policy-drafts?${new URLSearchParams({ ...(cursor ? { cursor } : {}), ...(limit ? { limit: String(limit) } : {}) })}`),
   createPolicyDraft: (body: CreatePolicyDraftRequest, teamId?: string) => request<PolicyAuthoringDocument>("POST", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts` : "/org/policy-drafts", body),
   editPolicyDraft: (id: string, body: EditPolicyDraftRequest, teamId?: string) => request<PolicyAuthoringDocument>("PATCH", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/${encodeURIComponent(id)}` : `/org/policy-drafts/${encodeURIComponent(id)}`, body),
   submitPolicyDraft: (id: string, body: PolicyMutationBase, teamId?: string) => request<PolicyAuthoringDocument>("POST", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/${encodeURIComponent(id)}/submit-review` : `/org/policy-drafts/${encodeURIComponent(id)}/submit-review`, body),
   reviewPolicyDraft: (id: string, body: ReviewPolicyDraftRequest, teamId?: string) => request<PolicyAuthoringDocument>("POST", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/${encodeURIComponent(id)}/reviews` : `/org/policy-drafts/${encodeURIComponent(id)}/reviews`, body),
   previewPolicyDraft: (body: PolicyPreviewServerRequest, teamId?: string) => request<Record<string, unknown>>("POST", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/preview` : "/org/policy-drafts/preview", body),
-  getPolicyDraft: (id: string, teamId?: string) => request<{ document: PolicyAuthoringDocument }>("GET", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/${encodeURIComponent(id)}` : `/org/policy-drafts/${encodeURIComponent(id)}`),
+  getPolicyDraft: (id: string, teamId?: string) => request<{ document: PolicyAuthoringDocument; draft: NormalizedPolicyDraftV1 }>("GET", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/${encodeURIComponent(id)}` : `/org/policy-drafts/${encodeURIComponent(id)}`),
   restorePolicyDraft: (id: string, revision: number, body: PolicyMutationBase, teamId?: string) => request<PolicyAuthoringDocument>("POST", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/${encodeURIComponent(id)}/restore/${revision}` : `/org/policy-drafts/${encodeURIComponent(id)}/restore/${revision}`, body),
   diffPolicyDraft: (id: string, from: number, to: number, teamId?: string) => request<PolicyRevisionDiffV1>("GET", `${teamId ? `/teams/${encodeURIComponent(teamId)}` : "/org"}/policy-drafts/${encodeURIComponent(id)}/diff?from=${from}&to=${to}`),
   preparePolicyDraft: (id: string, body: Pick<PolicyMutationBase, "schemaVersion" | "expectedRevision" | "expectedStateVersion">, teamId?: string) => request<Record<string, unknown>>("POST", `${teamId ? `/teams/${encodeURIComponent(teamId)}` : "/org"}/policy-drafts/${encodeURIComponent(id)}/prepare-publication`, body),

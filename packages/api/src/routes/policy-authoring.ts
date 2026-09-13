@@ -56,7 +56,8 @@ function ints(c: RouteContext, ...names: string[]) {
 function routes(prefix: "/org/policy-drafts" | "/teams/:teamId/policy-drafts") {
   policyAuthoringRouter.get(prefix, async (c) => {
     const s = session(c);
-    return c.json({ documents: await s.service.list(s.actor, s.scope) });
+    const limit = c.req.query("limit") === undefined ? undefined : Number(c.req.query("limit"));
+    return c.json(await s.service.list(s.actor, s.scope, c.req.query("cursor"), limit));
   });
   policyAuthoringRouter.get(`${prefix}/:documentId`, async (c) => {
     const s = session(c);
@@ -109,5 +110,11 @@ function routes(prefix: "/org/policy-drafts" | "/teams/:teamId/policy-drafts") {
     );
   });
 }
+policyAuthoringRouter.onError((error, c) => {
+  if (error instanceof PolicyAuthoringError) return c.json({ error: error.message, code: error.code }, error.statusCode);
+  console.error(`policy authoring route failed: ${c.req.method} ${c.req.path}`);
+  return c.json({ error: "Policy authoring failed. Retry the request. If it fails again, contact support.", code: "internal" }, 500);
+});
+
 routes("/org/policy-drafts");
 routes("/teams/:teamId/policy-drafts");

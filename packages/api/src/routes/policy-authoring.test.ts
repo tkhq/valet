@@ -88,6 +88,8 @@ describe("canonical policy authoring routes", () => {
       status: string;
       sourceBundleDigest: string;
       normalizedIdentity: string;
+      documentId: string;
+      engineDigest: string;
     };
     expect(first).toMatchObject({
       revision: 1,
@@ -108,14 +110,14 @@ describe("canonical policy authoring routes", () => {
       ).status,
     ).toBe(409);
     const [winner, loser] = await Promise.all([
-      post(`/org/policy-drafts/${draft.draftId}/submit-review`, mutation("submit-key-001", 1, 1)),
-      post(`/org/policy-drafts/${draft.draftId}/submit-review`, mutation("submit-key-002", 1, 1)),
+      post(`/org/policy-drafts/${first.documentId}/submit-review`, mutation("submit-key-001", 1, 1)),
+      post(`/org/policy-drafts/${first.documentId}/submit-review`, mutation("submit-key-002", 1, 1)),
     ]);
     expect([winner.status, loser.status].sort()).toEqual([200, 409]);
     const submitted = (await (winner.status === 200 ? winner : loser).json()) as { stateVersion: number };
     expect(
       (
-        await post(`/org/policy-drafts/${draft.draftId}/reviews`, {
+        await post(`/org/policy-drafts/${first.documentId}/reviews`, {
           ...mutation("review-key-self", 1, submitted.stateVersion),
           verdict: "approve",
           requestId: "request-self",
@@ -127,7 +129,7 @@ describe("canonical policy authoring routes", () => {
       .set({ role: "admin" })
       .where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
     const approved = await post(
-      `/org/policy-drafts/${draft.draftId}/reviews`,
+      `/org/policy-drafts/${first.documentId}/reviews`,
       {
         ...mutation("review-key-001", 1, submitted.stateVersion),
         verdict: "approve",
@@ -142,7 +144,7 @@ describe("canonical policy authoring routes", () => {
     };
     expect(candidate.status).toBe("approved_for_publication");
     const prepared = await post(
-      `/org/policy-drafts/${draft.draftId}/prepare-publication`,
+      `/org/policy-drafts/${first.documentId}/prepare-publication`,
       {
         schemaVersion: 1,
         expectedRevision: 1,
@@ -161,7 +163,7 @@ describe("canonical policy authoring routes", () => {
       ...draft,
       rules: [{ ...draft.rules[0], effect: "allow" as const }],
     };
-    const edited = await fetch(`${app.baseUrl}/api/org/policy-drafts/${draft.draftId}`, {
+    const edited = await fetch(`${app.baseUrl}/api/org/policy-drafts/${first.documentId}`, {
       method: "PATCH",
       headers,
       body: JSON.stringify({
@@ -176,14 +178,14 @@ describe("canonical policy authoring routes", () => {
       status: string;
     };
     expect(second).toMatchObject({ revision: 2, status: "draft" });
-    const difference = await fetch(`${app.baseUrl}/api/org/policy-drafts/${draft.draftId}/diff?from=1&to=2`, { headers });
+    const difference = await fetch(`${app.baseUrl}/api/org/policy-drafts/${first.documentId}/diff?from=1&to=2`, { headers });
     expect(await difference.json()).toMatchObject({
       changedRuleIds: ["rule-1"],
       regoChanged: true,
       dataChanged: true,
       provenanceChanged: false,
     });
-    const restored = await post(`/org/policy-drafts/${draft.draftId}/restore/1`, mutation("restore-key-001", 2, second.stateVersion));
+    const restored = await post(`/org/policy-drafts/${first.documentId}/restore/1`, mutation("restore-key-001", 2, second.stateVersion));
     expect(await restored.json()).toMatchObject({
       revision: 3,
       status: "draft",
@@ -297,10 +299,11 @@ describe("canonical policy authoring routes", () => {
       same = { ...mutation("concurrent-create-key", 0, 0), draft: concurrent };
     const [a, b] = await Promise.all([post("/org/policy-drafts", same), post("/org/policy-drafts", same)]);
     expect([a.status, b.status].sort()).toEqual([201, 201]);
-    expect(await a.json()).toEqual(await b.json());
+    const created = (await a.json()) as { documentId: string };
+    expect(created).toEqual(await b.json());
     const [x, y] = await Promise.all([
-      post("/org/policy-drafts/concurrent-draft/submit-review", mutation("concurrent-cas-one", 1, 1)),
-      post("/org/policy-drafts/concurrent-draft/submit-review", mutation("concurrent-cas-two", 1, 1)),
+      post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation("concurrent-cas-one", 1, 1)),
+      post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation("concurrent-cas-two", 1, 1)),
     ]);
     expect([x.status, y.status].sort()).toEqual([200, 409]);
   }, 120_000);
@@ -464,7 +467,7 @@ describe("canonical policy authoring routes", () => {
       );
     const rejectsWithoutChange = async (action: () => Promise<unknown>) => {
       const before = await snapshot();
-      await expect(action()).rejects.toThrow("audit unavailable");
+      await expect(action()).rejects.toMatchObject({ code: "internal", statusCode: 500 });
       expect(await snapshot()).toBe(before);
     };
     await rejectsWithoutChange(() =>
@@ -478,20 +481,192 @@ describe("canonical policy authoring routes", () => {
       draft,
     });
     await rejectsWithoutChange(() =>
-      failing.edit("author", scope, draft.draftId, {
+      failing.edit("author", scope, created.documentId, {
         ...mutation("audit-edit-fail", created.revision, created.stateVersion),
         draft,
       }),
     );
-    await rejectsWithoutChange(() => failing.submit("author", scope, draft.draftId, mutation("audit-submit-fail", 1, 1)));
-    const submitted = await normal.submit("author", scope, draft.draftId, mutation("audit-submit-ok", 1, 1));
+    await rejectsWithoutChange(() => failing.submit("author", scope, created.documentId, mutation("audit-submit-fail", 1, 1)));
+    const submitted = await normal.submit("author", scope, created.documentId, mutation("audit-submit-ok", 1, 1));
     await rejectsWithoutChange(() =>
-      failing.review("reviewer", scope, draft.draftId, {
+      failing.review("reviewer", scope, created.documentId, {
         ...mutation("audit-review-fail", 1, submitted.stateVersion),
         verdict: "approve",
         requestId: "audit-review",
       }),
     );
-    await rejectsWithoutChange(() => failing.restore("author", scope, draft.draftId, 1, mutation("audit-restore-fail", 1, submitted.stateVersion)));
+    await rejectsWithoutChange(() => failing.restore("author", scope, created.documentId, 1, mutation("audit-restore-fail", 1, submitted.stateVersion)));
   });
+
+  it("isolates idempotency and replays across exact team scopes", async () => {
+    const app = await setup();
+    await app.providers.db.insert(teams).values([
+      { id: "team-a", orgId: "local-org", name: "A", createdAt: 1 },
+      { id: "team-b", orgId: "local-org", name: "B", createdAt: 1 },
+    ]);
+    await app.providers.db.insert(teamMembers).values([
+      { teamId: "team-a", userId: "test-member", role: "admin" },
+      { teamId: "team-b", userId: "test-member", role: "admin" },
+      { teamId: "team-a", userId: "local-user", role: "admin" },
+      { teamId: "team-b", userId: "local-user", role: "admin" },
+    ]);
+    const teamDraft = (teamId: string) => ({
+      ...draft,
+      draftId: "same-content-id",
+      rules: [{ ...draft.rules[0], authority: "team" as const, owner: { kind: "team" as const, id: teamId }, subjects: ["team" as const] }],
+    });
+    const create = async (teamId: string) => post(`/teams/${teamId}/policy-drafts`, { ...mutation("shared-create-key", 0, 0), draft: teamDraft(teamId) }, reviewer);
+    const [aResponse, bResponse] = await Promise.all([create("team-a"), create("team-b")]);
+    expect([aResponse.status, bResponse.status]).toEqual([201, 201]);
+    const a = (await aResponse.json()) as { documentId: string; revision: number; stateVersion: number },
+      b = (await bResponse.json()) as typeof a;
+    expect(a.documentId).not.toBe(b.documentId);
+    expect(await create("team-a").then((r) => r.json())).toEqual(a);
+    expect(await app.providers.db.select().from(policyAuthoringOperations)).toHaveLength(2);
+    const changed = { ...teamDraft("team-a"), rules: [{ ...teamDraft("team-a").rules[0], effect: "allow" as const }] };
+    const cases: [string, string, unknown, string][] = [
+      ["POST", "submit-review", mutation("shared-op-key-01", 1, 1), "submit-review"],
+      ["PATCH", "", { ...mutation("shared-op-key-02", 1, 1), draft: changed }, "edit"],
+      ["POST", "reviews", { ...mutation("shared-op-key-03", 1, 2), verdict: "approve", requestId: "cross-review" }, "review"],
+      ["POST", "restore/1", mutation("shared-op-key-04", 1, 1), "restore"],
+      ["POST", "prepare-publication", { schemaVersion: 1, expectedRevision: 1, expectedStateVersion: 1 }, "prepare"],
+    ];
+    for (const [method, suffix, value] of cases) {
+      const response = await fetch(`${app.baseUrl}/api/teams/team-b/policy-drafts/${a.documentId}${suffix ? `/${suffix}` : ""}`, {
+        method,
+        headers: reviewer,
+        body: JSON.stringify(value),
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Policy draft not found.", code: "not_found" });
+    }
+    const submitted = await post(`/teams/team-a/policy-drafts/${a.documentId}/submit-review`, mutation("same-submit-key", 1, 1), reviewer),
+      first = await submitted.json();
+    expect(submitted.status).toBe(200);
+    expect(await post(`/teams/team-a/policy-drafts/${a.documentId}/submit-review`, mutation("same-submit-key", 1, 1), reviewer).then((r) => r.json())).toEqual(first);
+    expect((await post(`/teams/team-a/policy-drafts/${a.documentId}/submit-review`, mutation("same-submit-key", 1, 9), reviewer)).status).toBe(409);
+    expect((await post(`/teams/team-b/policy-drafts/${a.documentId}/submit-review`, mutation("same-submit-key", 1, 1), reviewer)).status).toBe(404);
+    const approved = (await post(
+      `/teams/team-a/policy-drafts/${a.documentId}/reviews`,
+      { ...mutation("same-review-key", 1, 2), verdict: "approve", requestId: "same-review" },
+      headers,
+    ).then((r) => r.json())) as { stateVersion: number };
+    expect(
+      (await post(`/teams/team-b/policy-drafts/${a.documentId}/reviews`, { ...mutation("same-review-key", 1, 2), verdict: "approve", requestId: "same-review" }, headers)).status,
+    ).toBe(404);
+    expect(
+      (
+        await post(
+          `/teams/team-b/policy-drafts/${a.documentId}/prepare-publication`,
+          { schemaVersion: 1, expectedRevision: 1, expectedStateVersion: approved.stateVersion },
+          headers,
+        )
+      ).status,
+    ).toBe(404);
+    const edited = (await fetch(`${app.baseUrl}/api/teams/team-a/policy-drafts/${a.documentId}`, {
+      method: "PATCH",
+      headers: reviewer,
+      body: JSON.stringify({ ...mutation("same-edit-key-01", 1, approved.stateVersion), draft: changed }),
+    }).then((r) => r.json())) as { revision: number; stateVersion: number };
+    expect(
+      (
+        await fetch(`${app.baseUrl}/api/teams/team-b/policy-drafts/${a.documentId}`, {
+          method: "PATCH",
+          headers: reviewer,
+          body: JSON.stringify({ ...mutation("same-edit-key-01", 1, approved.stateVersion), draft: teamDraft("team-b") }),
+        })
+      ).status,
+    ).toBe(404);
+    await post(`/teams/team-a/policy-drafts/${a.documentId}/restore/1`, mutation("same-restore-key", edited.revision, edited.stateVersion), reviewer);
+    expect((await post(`/teams/team-b/policy-drafts/${a.documentId}/restore/1`, mutation("same-restore-key", edited.revision, edited.stateVersion), reviewer)).status).toBe(404);
+    expect(await app.providers.db.select().from(policyAuthoringAudit).where(eq(policyAuthoringAudit.documentId, a.documentId))).toHaveLength(5);
+  }, 120_000);
+
+  it("permits reject and resubmit cycles and rejects stale reviews", async () => {
+    const app = await setup();
+    await app.providers.db
+      .update(orgMembers)
+      .set({ role: "admin" })
+      .where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
+    const created = (await post("/org/policy-drafts", { ...mutation("cycle-create-key", 0, 0), draft }).then((r) => r.json())) as { documentId: string };
+    const first = (await post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation("cycle-submit-one", 1, 1)).then((r) => r.json())) as {
+      stateVersion: number;
+      reviewCycle: number;
+    };
+    const rejected = (await post(
+      `/org/policy-drafts/${created.documentId}/reviews`,
+      { ...mutation("cycle-reject-key", 1, first.stateVersion), verdict: "reject", requestId: "cycle-reject" },
+      reviewer,
+    ).then((r) => r.json())) as { stateVersion: number };
+    const second = (await post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation("cycle-submit-two", 1, rejected.stateVersion)).then((r) => r.json())) as {
+      stateVersion: number;
+      reviewCycle: number;
+    };
+    expect(second.reviewCycle).not.toBe(first.reviewCycle);
+    const stale = await post(
+      `/org/policy-drafts/${created.documentId}/reviews`,
+      { ...mutation("cycle-stale-key", 1, first.stateVersion), verdict: "approve", requestId: "cycle-stale" },
+      reviewer,
+    );
+    expect(stale.status).toBe(409);
+    expect(JSON.stringify(await stale.json())).not.toContain("cycle-stale");
+    const request = (key: string) =>
+      post(`/org/policy-drafts/${created.documentId}/reviews`, { ...mutation(key, 1, second.stateVersion), verdict: "approve", requestId: "cycle-approve" }, reviewer);
+    const results = await Promise.all([request("cycle-review-one"), request("cycle-review-two")]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+    const reviews = await app.providers.db.select().from(policyAuthoringReviews).where(eq(policyAuthoringReviews.documentId, created.documentId));
+    expect(reviews.map((r) => [r.reviewCycle, r.verdict])).toEqual([
+      [first.reviewCycle, "reject"],
+      [second.reviewCycle, "approve"],
+    ]);
+    expect(reviews.every((r) => Boolean(r.engineDigest))).toBe(true);
+  }, 120_000);
+
+  it("authorizes before compilation and binds preparation to the engine", async () => {
+    const app = await setup(),
+      scope = { organizationId: "local-org" },
+      real = new PolicyAuthoringService({ db: app.providers.db, authorizer: { authorize: async () => true } });
+    const created = await real.create("author", scope, { ...mutation("engine-create-key", 0, 0), draft });
+    let calls = 0,
+      allowed = false,
+      engine = created.engineDigest!;
+    const compiler = {
+      compile: async (...args: Parameters<NonNullable<ConstructorParameters<typeof PolicyAuthoringService>[0]["compiler"]>["compile"]>) => {
+        calls++;
+        const result = await (await import("../authorization/builder/service.js")).policyAuthoringCompiler.compile(...args);
+        return result.identity ? { ...result, identity: { ...result.identity, engineDigest: engine } } : result;
+      },
+      evaluate: async () => ({}),
+    };
+    const guarded = new PolicyAuthoringService({ db: app.providers.db, authorizer: { authorize: async () => allowed }, compiler });
+    await expect(guarded.create("denied", scope, { ...mutation("denied-create-key", 0, 0), draft })).rejects.toMatchObject({ statusCode: 403 });
+    await expect(guarded.edit("denied", scope, created.documentId, { ...mutation("denied-edit-key", 1, 1), draft })).rejects.toMatchObject({ statusCode: 403 });
+    expect(calls).toBe(0);
+    allowed = true;
+    const made = await guarded.create("allowed", scope, { ...mutation("retry-create-key", 0, 0), draft });
+    expect(calls).toBe(1);
+    expect(await guarded.create("allowed", scope, { ...mutation("retry-create-key", 0, 0), draft })).toEqual(made);
+    expect(calls).toBe(1);
+    const page = await guarded.list("allowed", scope, undefined, 1);
+    expect(page.documents).toHaveLength(1);
+    expect(page.nextCursor).toBeDefined();
+    await app.providers.db.update(policyAuthoringDocuments).set({ revision: 100 }).where(eq(policyAuthoringDocuments.id, made.documentId));
+    await expect(guarded.edit("allowed", scope, made.documentId, { ...mutation("revision-cap-key", 100, 1), draft })).rejects.toMatchObject({ code: "conflict", statusCode: 409 });
+    const submitted = await real.submit("author", scope, created.documentId, mutation("engine-submit-key", 1, 1));
+    const approved = await real.review("reviewer", scope, created.documentId, {
+      ...mutation("engine-review-key", 1, submitted.stateVersion),
+      verdict: "approve",
+      requestId: "engine-review",
+    });
+    engine = "f".repeat(64);
+    await expect(guarded.prepare("reviewer", scope, created.documentId, { expectedRevision: 1, expectedStateVersion: approved.stateVersion })).rejects.toMatchObject({
+      code: "conflict",
+      statusCode: 409,
+    });
+    expect(
+      (await app.providers.db.select().from(policyAuthoringAudit).where(eq(policyAuthoringAudit.documentId, created.documentId))).every(
+        (r) => r.engineDigest === created.engineDigest,
+      ),
+    ).toBe(true);
+  }, 120_000);
 });
