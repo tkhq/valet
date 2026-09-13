@@ -508,8 +508,21 @@ export async function invokeAction(
 
   // Gate review and execution must use one defaulted, validated object.
   const prepared = prepareActionArgs(entry.action.parameters, args);
-  if (!prepared.ok) return { kind: "invalid-args", error: prepared.error };
-  const reviewedArgs = prepared.args;
+  if (!prepared.ok) {
+    if (ctx.policyResolver?.onInvocation) {
+      emitInvocation(ctx.policyResolver, {
+        service: entry.service, actionId: qualifiedId(entry), toolId: actionId, riskLevel: entry.action.riskLevel,
+        sessionId: ctx.sessionId, threadId: ctx.threadId, userId: ctx.userId, orgId: ctx.orgId,
+        appliesIn: "session", summary: truncateApprovalText(summary, 4_000).text,
+        resumeKey: `${qualifiedId(entry)}:${boundedArgsKey(stableJson(args ?? {}))}`,
+        queueItemId: ctx.queueItemId, params: args, status: "error", resolvedMode: "allow",
+        provenance: { baseMode: "allow", source: "risk_default" }, error: `invalid params: ${prepared.error}`,
+      });
+    }
+    return { kind: "invalid-args", error: prepared.error };
+  }
+  const executionArgs = prepared.args;
+  const reviewedArgs = structuredClone(executionArgs);
 
   // One bound applies to the gate body, gate context, plugin context, and audit.
   const boundedSummary = truncateApprovalText(summary, 4_000).text;
@@ -543,7 +556,7 @@ export async function invokeAction(
       if (resolution.actionId === "approve" && approvalArgsPreview(reviewedArgs).incomplete) return { kind: "denied-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
     }
-    return executeAction(entry, actionId, reviewedArgs, boundedSummary, ctx);
+    return executeAction(entry, actionId, executionArgs, boundedSummary, ctx);
   }
 
   // Present resolver: consult the host policy port. The policy-facing
@@ -558,7 +571,7 @@ export async function invokeAction(
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
-    params: reviewedArgs,
+    params: structuredClone(reviewedArgs),
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId: ctx.sessionId,
@@ -578,7 +591,7 @@ export async function invokeAction(
     summary: boundedSummary,
     resumeKey,
     queueItemId: ctx.queueItemId,
-    params: reviewedArgs,
+    params: structuredClone(reviewedArgs),
   };
 
   let decision: PolicyDecision;
@@ -696,7 +709,7 @@ export async function invokeAction(
   }
 
   // allow, or an approved require_approval → execute with audit.
-  return executeAction(entry, actionId, reviewedArgs, boundedSummary, ctx, {
+  return executeAction(entry, actionId, executionArgs, boundedSummary, ctx, {
     resolver,
     record: {
       ...baseRecord,
@@ -1454,7 +1467,6 @@ function stableJson(value: unknown): string {
 // Args JSON at or under this length passes through raw, so small keys stay
 // human-readable and byte-identical to the pre-bound format. The threshold
 // keeps the worst-case UTF-8 gate id well under the ~2704-byte btree cap.
-const RESUME_KEY_ARGS_MAX_CHARS = 256;
 
 /**
  * Returns the args portion of a resumeKey, bounded in length. JSON longer
@@ -1464,7 +1476,6 @@ const RESUME_KEY_ARGS_MAX_CHARS = 256;
  * node:crypto): the engine stays portable.
  */
 function boundedArgsKey(json: string): string {
-  if (json.length <= RESUME_KEY_ARGS_MAX_CHARS) return json;
   const bytes = new TextEncoder().encode(json);
   return `fnv1a64:${bytes.length}:${fnv1a64Hex(bytes)}`;
 }

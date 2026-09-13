@@ -179,6 +179,17 @@ describe("policyResolver seam: absent resolver", () => {
     expect(executed).toEqual({ eventId: "evt_1", sendUpdates: "all" });
   });
 
+  it("isolates reviewed arguments from resolver mutation", async () => {
+    let executed: Record<string, unknown> | undefined;
+    const { resolver } = makeResolver({ resolve: async (input) => {
+      (input.params as Record<string, unknown>).eventId = "mutated";
+      return { mode: "allow", provenance: { baseMode: "allow", source: "test" } };
+    } });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ execute: async (params) => { executed = params as Record<string, unknown>; return { success: true, data: {} }; } }))] });
+    await callTool.execute({ tool_id: "github.get_issue", params: { n: 7 }, summary: "s" }, makeCtx({ policyResolver: resolver }));
+    expect(executed).toEqual({ n: 7 });
+  });
+
   it("fails closed when a direct resolver approves an incomplete review", async () => {
     let executed = false;
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ riskLevel: "critical", parameters: Type.Object({ content: Type.String() }), execute: async () => { executed = true; return { success: true, data: {} }; } }))] });
@@ -482,7 +493,8 @@ describe("policyResolver seam: fail-closed + audit edges", () => {
     );
     expect(executed).toBe(false);
     expect(result.text).toContain("invalid params");
-    expect(invocations).toHaveLength(0);
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0].status).toBe("error");
   });
 
   it("onInvocation throwing never breaks call_tool", async () => {
@@ -528,7 +540,7 @@ describe("policyResolver seam: invocation record discriminators", () => {
       makeCtx({ policyResolver: resolver }),
     );
     expect(invocations).toHaveLength(2);
-    expect(invocations[0].resumeKey).toBe("github.get_issue:{\n  \"n\": 1\n}");
+    expect(invocations[0].resumeKey).toMatch(/^github\.get_issue:fnv1a64:/);
     expect(invocations[0].resumeKey).toBe(invocations[1].resumeKey);
     expect(invocations[0].gateOrdinal).toBeUndefined();
   });
@@ -543,7 +555,7 @@ describe("policyResolver seam: invocation record discriminators", () => {
       makeCtx({ policyResolver: resolver }),
     );
     expect(invocations).toHaveLength(1);
-    expect(invocations[0].resumeKey).toBe("github.get_issue:{\n  \"n\": 1\n}");
+    expect(invocations[0].resumeKey).toMatch(/^github\.get_issue:fnv1a64:/);
     expect(invocations[0].gateOrdinal).toBeUndefined();
   });
 
@@ -567,7 +579,7 @@ describe("policyResolver seam: invocation record discriminators", () => {
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("completed");
     expect(invocations[0].gateOrdinal).toBe(0);
-    expect(invocations[0].resumeKey).toBe("github.get_issue:{\n  \"n\": 1\n}");
+    expect(invocations[0].resumeKey).toMatch(/^github\.get_issue:fnv1a64:/);
   });
 
   it("require_approval: gateOrdinal is threaded onto a rejected record too", async () => {

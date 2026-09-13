@@ -101,6 +101,16 @@ describe("runGates resolve", () => {
     expect(stdout()).toContain("resolved gate g1");
   });
 
+  it("does not send an approving action for incomplete parameters", async () => {
+    const incomplete = gate("g1");
+    incomplete.actions = [{ id: "approve", label: "Approve", approves: true }];
+    incomplete.approval = { toolId: "payments.send", reviewIncomplete: true };
+    const { client, resolves } = stubClient([incomplete]);
+    const code = await runGates(client, parseGlobalFlags(["resolve", "g1", "approve", "--session", "s"]));
+    expect(code).toBe(ExitCode.Usage);
+    expect(resolves).toHaveLength(0);
+  });
+
   it("resolves a question gate with --value", async () => {
     const { client, resolves } = stubClient([gate("g1")]);
     const code = await runGates(

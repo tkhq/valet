@@ -52,6 +52,8 @@ const PROMPT = "you › ";
 export function renderGatePrompt(gate: DecisionGate): string {
   const lines = [`decision required: ${gate.title} [${gate.type}]`];
   if (gate.body) lines.push(gate.body);
+  if (gate.approval?.argsPreview) lines.push(`parameters: ${gate.approval.argsPreview}`);
+  if (gate.approval && (gate.approval.argsPreview === undefined || gate.approval.reviewIncomplete)) lines.push("parameter review is incomplete; approval actions are unavailable");
   if (gate.type === "question") {
     lines.push("(type your answer)");
   } else {
@@ -93,13 +95,20 @@ export function parseGateSelection(gate: DecisionGate, raw: string | null): Gate
   if (/^\d+$/.test(input)) {
     const n = Number.parseInt(input, 10);
     if (n >= 1 && n <= gate.actions.length) {
-      return { kind: "resolve", resolution: { actionId: gate.actions[n - 1].id } };
+      const action = gate.actions[n - 1];
+      if (gate.approval && (gate.approval.argsPreview === undefined || gate.approval.reviewIncomplete) && action.approves) {
+        return { kind: "invalid", message: "parameter review is incomplete; reject this request and ask the agent to retry" };
+      }
+      return { kind: "resolve", resolution: { actionId: action.id } };
     }
     return { kind: "invalid", message: `no option ${n} (choose 1-${gate.actions.length})` };
   }
 
   // Otherwise match a literal action id.
   const byId = gate.actions.find((a) => a.id === input);
+  if (byId && gate.approval && (gate.approval.argsPreview === undefined || gate.approval.reviewIncomplete) && byId.approves) {
+    return { kind: "invalid", message: "parameter review is incomplete; reject this request and ask the agent to retry" };
+  }
   if (byId) return { kind: "resolve", resolution: { actionId: byId.id } };
   return { kind: "invalid", message: `no such option: ${input}` };
 }

@@ -77,6 +77,12 @@ async function gatesResolve(client: GatesClient, flags: ParsedFlags): Promise<nu
   if (value !== undefined) body.value = value;
 
   const id = await targetSession(client, flags);
+  const gate = (await client.listDecisions(id)).gates.find((candidate) => candidate.id === gateId);
+  const action = gate?.actions.find((candidate) => candidate.id === actionId);
+  if (gate?.approval && (gate.approval.argsPreview === undefined || gate.approval.reviewIncomplete) && action?.approves) {
+    printErr("valet gates resolve: parameter review is incomplete; reject this request and ask the agent to retry");
+    return ExitCode.Usage;
+  }
   await client.resolveDecision(id, gateId, body);
 
   if (flags.json) printJson({ ok: true, gateId });
