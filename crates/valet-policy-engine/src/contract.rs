@@ -87,7 +87,10 @@ pub struct PolicyDecisionV1 {
     pub matched_rule_ids: Vec<String>,
     pub obligations: Vec<Obligation>,
     pub redactions: Vec<RedactionDirective>,
-    #[serde(rename = "approvalRequirement")]
+    #[serde(
+        rename = "approvalRequirement",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub approval_requirement: Option<ApprovalRequirement>,
 }
 
