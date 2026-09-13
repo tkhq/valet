@@ -179,7 +179,8 @@ cargo fmt --all -- --check
 - A language gap or rejected capability built-in fails validation before activation.
 - Missing, failed, or undeclared capabilities deny without fallback.
 - Network, filesystem, wall clock, randomness, process access, and dynamic loading remain unavailable by default.
-- Instruction, time, memory, depth, recursion, comprehension, trace, and result limits fail closed.
+- Deterministic work-unit, source, module, data, input, document, explain, and result limits fail closed in the engine.
+- The PR 5 adapter owns the 100 ms wall-time and 64 MiB engine memory limits. Separately unobservable recursion and intermediate-comprehension limits remain named gaps bounded by work units.
 - Native and WebAssembly targets return equal decisions, errors, and limit behavior before both can ship.
 - One release selects one semantic path. It never runs interpreter and RVM paths together or falls back between them.
 - The engine crate contains no authentication, proof verification, database, lock, sandbox, network enforcement, or durable audit code.

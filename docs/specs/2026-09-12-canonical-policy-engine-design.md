@@ -179,10 +179,10 @@ Profile version 1 sets these engine limits per compilation or evaluation:
 
 - 256 modules and 1 MiB of Rego source;
 - 8 MiB of canonical policy data and 8 MiB of canonical input;
-- 250,000 parsed nodes and 16 MiB of source bundle bytes;
+- 250,000 source tokens and 16 MiB of source bundle bytes;
 - 1,000,000 deterministic evaluation work units;
-- 128 document-reference, call, and recursion depth;
-- 100,000 generated comprehension values;
+- 128 source nesting, document, and document-reference depth;
+- 100,000 input, data, and decision values;
 - 10,000 explain events; and
 - 1 MiB of decision output.
 
@@ -197,7 +197,7 @@ The Rust engine owns these design-level modules:
 - `evaluator`: bounded execution over immutable Rego source, canonical data, and explicit input;
 - `bundle`: source manifest validation, digest checks, version pinning, loading, and compatibility checks;
 - `contract`: language-neutral input validation and `PolicyDecisionV1` output validation;
-- `explain`: matched rule IDs, rejected branches, source spans, values, and redacted trace events; and
+- `explain`: bounded, redacted evaluation summaries; detailed semantic traces remain unsupported until Regorus exposes a safe stable event API; and
 - `host`: an allowlisted capability interface that is empty for normal policy evaluation.
 
 Source bundles contain Rego v1 modules, canonical data, a manifest, and source digests. They do not require Regorus Virtual Machine (RVM) bytecode. The policy digest binds the source modules, canonical data, manifest, engine identity, and capability profile.
@@ -824,7 +824,7 @@ Operational metrics include evaluation count and latency by kind and effect, act
 | Native and WebAssembly targets drift | Both targets share one Rust implementation and conformance corpus. A target cannot ship until its decisions and limits agree. |
 | Engine upgrade changes decisions | Releases pin engine and bundle versions. Offline migration checks and paired rollback artifacts gate upgrades. |
 | Source bundle output is nondeterministic | Canonical inputs, sorted encoding, repeated-build tests, and digests block unstable bundles. |
-| Policy exhausts CPU or memory | Source, instruction, time, memory, depth, and result limits fail closed. Exact limits remain a gate. |
+| Policy exhausts CPU or memory | Engine source, work-unit, depth, and result limits fail closed. The local adapter owns wall-time and memory limits. Exact limits remain a gate. |
 | The owned engine misses latency targets | Native and WebAssembly benchmarks cover load latency, evaluation latency, throughput, and memory before target selection. |
 | Rust substrate drifts or is compromised | Valet pins and audits dependencies and tests them against its published compatibility profile. Owning the contract does not remove supply-chain risk. |
 | Database operator drops audit rows | Valet monitoring can detect sequence gaps and missing outcomes. Future signed or chained records improve external verification. |
