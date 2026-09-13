@@ -74,6 +74,7 @@ export interface CanonicalApprovalPlanV1 {
 
 export function buildCanonicalApprovalPlan(request: AuthorizationRequest, envelope: PolicyDecisionEnvelope): CanonicalApprovalPlanV1 {
   assertEnvelope(request, envelope);
+  buildActionObligationPlan(envelope.decision);
   const requirement = envelope.decision.approvalRequirement;
   if (envelope.decision.effect !== "require_approval" || !requirement) fail("invalid_decision");
   const decisionDigest = decisionDigestOf(envelope.decision);

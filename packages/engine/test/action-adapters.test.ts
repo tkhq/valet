@@ -98,8 +98,21 @@ describe("obligation, approval, and compatibility helpers", () => {
   it("binds approvals to request, input, policy, decision, scope, replay, and expiry", () => {
     const request = interactive().request, approval = buildCanonicalApprovalPlan(request, envelope(request, "require_approval"));
     expect(approval.binding).toMatchObject({ actionId: "github.create_issue", sessionId: "session-1", replay: "once", expiresAtMs: 2000 });
+    expect(canonicalAuthorizationJson(approval)).not.toContain("SECRET-CANARY");
     expect(() => assertApprovalBinding(approval.binding, { ...approval.binding, inputDigest: "b".repeat(64) }, 1500)).toThrowError(expect.objectContaining({ code: "invalid_binding" }));
     expect(() => assertApprovalBinding(approval.binding, approval.binding, 2000)).toThrowError(expect.objectContaining({ code: "expired_approval" }));
+  });
+
+  it.each([
+    { tier: "Human", approverType: "org", replay: "once" },
+    { tier: "human", approverType: "anyone", replay: "once" },
+    { tier: "human", approverType: "org", replay: "forever" },
+    { tier: "human", approverType: "org", replay: "once", expiresAtMs: -1 },
+    { tier: "human", approverType: "org", replay: "once", unknown: true },
+  ])("rejects malformed approval requirement %#", (approvalRequirement) => {
+    const request = interactive().request;
+    const malformed = { ...envelope(request, "require_approval"), decision: { ...envelope(request, "require_approval").decision, approvalRequirement } } as unknown as PolicyDecisionEnvelope;
+    expect(() => buildCanonicalApprovalPlan(request, malformed)).toThrowError(expect.objectContaining({ code: "invalid_decision" }));
   });
 
   it.each(["allow", "deny", "require_approval"] as const)("maps canonical %s without a legacy evaluator", async (effect) => {
@@ -107,6 +120,13 @@ describe("obligation, approval, and compatibility helpers", () => {
     const resolver = authorizationServicePolicyResolver({ authorize }, () => request);
     const result = await resolver.resolve({ service: "github", actionId: "github.create_issue", riskLevel: "high", params: {}, sessionId: "session-1", threadId: "thread-1", appliesIn: "session" });
     expect(result.mode).toBe(effect); expect(result.canonical?.decisionDigest).toBe(decisionDigestOf(envelope(request, effect).decision)); expect(authorize).toHaveBeenCalledOnce();
+  });
+
+  it.each(["bundle_not_found", "unsupported_context"])("maps %s service failures to typed deny", async (code) => {
+    const request = interactive().request;
+    const result = await authorizationServicePolicyResolver({ authorize: async () => { throw Object.assign(new Error("SECRET-CANARY"), { code }); } }, () => request).resolve({ service: "github", actionId: "github.create_issue", riskLevel: "high", params: {}, sessionId: "session-1", threadId: "thread-1", appliesIn: "session" });
+    expect(result).toMatchObject({ mode: "deny", canonical: { reasonCode: `fail_closed.${code}` } });
+    expect(canonicalAuthorizationJson(result)).not.toContain("SECRET-CANARY");
   });
 
   it("maps service errors, malformed decisions, and unsupported obligations to deny", async () => {
