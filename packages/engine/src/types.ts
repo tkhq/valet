@@ -988,6 +988,10 @@ export interface PolicyResolveInput {
   sessionId: string;
   threadId: string;
   appliesIn: "session" | "workflow";
+  owner?: Principal;
+  queueItemId?: string;
+  resumeKey?: string;
+  gateOrdinal?: number;
 }
 
 /**
@@ -1045,6 +1049,8 @@ export interface PolicyDecision {
     evaluatorKind: import("./authorization/types.js").EvaluatorIdentity["kind"];
     engineDigest: string;
     decisionDigest: string;
+    decisionId?: string;
+    executionAttemptId?: string;
   };
 }
 
@@ -1114,6 +1120,7 @@ export interface PolicyInvocationRecord {
    */
   params?: Record<string, unknown>;
   result?: unknown;
+  canonicalExecutionAttemptId?: string;
 }
 
 /**

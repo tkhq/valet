@@ -14,6 +14,7 @@ export function adaptPluginCatalogAction(input: {
   readonly gateOrdinal: number;
   readonly evaluationTimeMs: number;
   readonly dynamicFacts: { readonly currentPolicy?: CurrentPolicyDynamicFactsV2 };
+  readonly approvalBindingContext?: { readonly requestSubjectDigest: string; readonly originalDecisionDigest: string };
 }) {
   if (typeof input.context.queueItemId !== "string" || input.context.queueItemId.length === 0) throw new TypeError("Canonical interactive action identity requires queueItemId.");
   const actionId = input.action.id.includes(".") ? input.action.id : `${input.plugin.service}.${input.action.id}`;
@@ -24,7 +25,7 @@ export function adaptPluginCatalogAction(input: {
     sessionId: input.context.sessionId, threadId: input.context.threadId, queueItemId: input.context.queueItemId,
     resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal,
     action: { service: input.plugin.service, actionId, catalogActionId: actionId, sourcePluginService: input.plugin.service, sourceActionId: actionId, sourceToolId: "call_tool", riskLevel: input.action.riskLevel, parameters: input.params, parameterProjection: input.projection },
-    evaluationTimeMs: input.evaluationTimeMs, dynamicFacts: input.dynamicFacts,
+    evaluationTimeMs: input.evaluationTimeMs, dynamicFacts: input.dynamicFacts, ...(input.approvalBindingContext ? { approvalBindingContext: input.approvalBindingContext } : {}),
   };
   return adaptInteractiveAction(adapterInput);
 }

@@ -1,4 +1,6 @@
 import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import { validateActionProjectionInventory } from "../authorization/action-projections.js";
 import { configureCanonicalOrganizationProvisioner } from "../services/org.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
@@ -377,7 +379,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         [workflowsActions, skillsActions, assistantsActions],
       ]);
 
+  validateActionProjectionInventory(actionPluginByService);
   const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+  const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
   configureCanonicalOrganizationProvisioner((id, name) => canonicalPolicyManager.provisionOrganization(id, name));
 
   // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
@@ -458,6 +462,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
     actionPluginByService,
+    canonicalAuthorizationService,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
@@ -607,6 +612,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
     onePassword,
+    canonicalAuthorizationService,
   });
 
   // Approval attention (decision 12): the FIRST park on an approval node
@@ -814,6 +820,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   return {
     db,
     canonicalPolicyManager,
+    canonicalAuthorizationService,
     blobs,
     encryptionKey: opts.encryptionKey,
     engineStore,

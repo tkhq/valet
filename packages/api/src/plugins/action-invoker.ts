@@ -22,7 +22,7 @@
  * `PluginActionContext` since there is no live session/thread/turn behind a
  * workflow tool-node dispatch.
  */
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
   prepareActionArgs,
   type ActionPlugin,
@@ -41,13 +41,18 @@ import {
   credentialSecret,
 } from "@valet/engine";
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
+import { adaptWorkflowAction, authorizationSha256Hex, buildActionObligationPlan, canonicalAuthorizationJson, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { qualifiedActionId } from "./action-id.js";
 import { assistantSenderIdentity, findDefaultAssistant } from "../assistants/service.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
-import { actionInvocations } from "../schema/index.js";
+import { actionInvocations, authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions } from "../schema/index.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
+import { actionProjection } from "../authorization/action-projections.js";
+import { loadCanonicalDynamicFacts } from "../authorization/canonical-facts.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   isUsableGithubUserRow,
@@ -103,6 +108,9 @@ export interface ActionInvocationContext {
    * context), so the action executes as before.
    */
   workflowExecutionId?: string;
+  workflowDefinitionId?: string;
+  workflowVersion?: string;
+  workflowNodeId?: string;
 }
 
 export interface ActionInvokerOpts {
@@ -145,6 +153,7 @@ export interface ActionInvokerOpts {
    * through raw, byte-identical to before this task.
    */
   onePassword?: OnePasswordService;
+  canonicalAuthorizationService?: CanonicalAuthorizationService;
 }
 
 export type ActionInvoker = (
@@ -236,6 +245,16 @@ async function computeResult(
 ): Promise<WorkflowInvokeActionResult> {
   const entry = opts.actionPluginByService.get(req.service);
   if (!entry) return unknownAction(req);
+
+  // Canonical authorization is complete before any credential provider is built or read.
+  const staticAction = findAction(entry.actionPlugin.actions, req.service, req.action);
+  let canonicalEnvelope: PolicyDecisionEnvelope | undefined;
+  if (opts.canonicalAuthorizationService) {
+    if (!staticAction) return unknownAction(req);
+    const authorization = await enforceCanonicalWorkflowPolicy(opts, req, ctx, staticAction);
+    if ("ok" in authorization) return authorization;
+    canonicalEnvelope = authorization;
+  }
 
   const owner = credentialOwnerFor(ctx.owner);
   if (!owner) {
@@ -374,7 +393,7 @@ async function computeResult(
   // Set only when enforceWorkflowPolicy wrote a decision row (org + run
   // context present); also the org scope for the outcome-stamp UPDATE.
   const auditOrgId = ctx.orgId && ctx.workflowExecutionId ? ctx.orgId : undefined;
-  const denial = await enforceWorkflowPolicy(
+  const denial = opts.canonicalAuthorizationService ? null : await enforceWorkflowPolicy(
     opts,
     req,
     ctx,
@@ -395,6 +414,15 @@ async function computeResult(
     return { ok: false, error: prepared.error };
   }
 
+  const canonicalAttemptId = opts.canonicalAuthorizationService ? `attempt:${req.invocationId}` : undefined;
+  if (canonicalAttemptId) {
+    const originalInvocationId = req.invocationId;
+    const invocationId = req.approval ? authorizationSha256Hex(canonicalAuthorizationJson({ original: originalInvocationId, resolutionId: canonicalApprovalResolutionId(req, req.approval.resolvedBy) })) : originalInvocationId;
+    const idempotencyKey = `workflow:${invocationId}`;
+    const reserved = await opts.db.insert(authorizationExecutionAttempts).values({ attemptId: canonicalAttemptId, decisionId: canonicalDecisionId(ctx.orgId, idempotencyKey), outcome: "started", targetIdempotencyKey: req.invocationId, externalOperationIds: [], startedAt: (opts.clock ?? Date.now)(), createdAt: (opts.clock ?? Date.now)() }).onConflictDoNothing().returning({ attemptId: authorizationExecutionAttempts.attemptId });
+    if (!reserved[0]) return { ok: false, error: "Canonical execution attempt is already reserved." };
+  }
+
   const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);
 
   const startedAt = (opts.clock ?? Date.now)();
@@ -407,6 +435,7 @@ async function computeResult(
     result = await action.execute(prepared.args as Static<typeof action.parameters>, actionCtx);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: "failed", redactedError: "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
     if (auditOrgId) {
       await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
         status: "error",
@@ -431,12 +460,15 @@ async function computeResult(
     });
   }
 
+  if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: result.success ? "completed" : "failed", redactedResult: result.success ? { completed: true } : null, redactedError: result.success ? null : "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
+
   if (!result.success) {
     return { ok: false, error: result.error ?? `${req.service}.${req.action} failed with no error detail` };
   }
   // V2-GAP: attachments dropped — workflow results are JSON-only; revisit
   // once workflow runs have a place to store binary artifacts.
-  return { ok: true, result: result.data };
+  const redactions = canonicalEnvelope?.decision.redactions.filter((item) => item.target === "user_output") ?? [];
+  return { ok: true, result: redactCanonicalResult(result.data, redactions) };
 }
 
 function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionResult {
@@ -488,6 +520,49 @@ function teamRefusalMessage(service: string): string {
  * (deterministic PK `pol:wf:{invocationId}` → dedups a byte-identical replay).
  * A no-op when the caller supplied no run/org context.
  */
+async function enforceCanonicalWorkflowPolicy(
+  opts: ActionInvokerOpts, req: WorkflowInvokeActionRequest, ctx: ActionInvocationContext, action: PluginAction,
+): Promise<WorkflowInvokeActionResult | PolicyDecisionEnvelope> {
+  const service = opts.canonicalAuthorizationService;
+  if (!service || !ctx.workflowExecutionId || !ctx.workflowDefinitionId || !ctx.workflowVersion || !ctx.workflowNodeId)
+    return { ok: false, error: "Canonical workflow authorization context is incomplete." };
+  const now = (opts.clock ?? Date.now)();
+  const actionId = qualifiedActionId(req.service, action);
+  const common = {
+    schemaVersion: 1 as const, organizationId: ctx.orgId, actor: { type: "user" as const, id: ctx.userId }, owner: ctx.owner,
+    ...(ctx.owner.type === "team" ? { teamId: ctx.owner.id } : {}), requestId: req.invocationId,
+    workflowDefinitionId: ctx.workflowDefinitionId, workflowVersion: ctx.workflowVersion, workflowExecutionId: ctx.workflowExecutionId,
+    nodeId: ctx.workflowNodeId, invocationId: req.invocationId, evaluationTimeMs: now,
+    action: { service: req.service, actionId, catalogActionId: actionId, sourcePluginService: req.service, sourceActionId: actionId, sourceToolId: ctx.workflowNodeId, riskLevel: action.riskLevel, parameters: req.params, parameterProjection: actionProjection(actionId) },
+  };
+  const initial = adaptWorkflowAction({ ...common, dynamicFacts: {} });
+  let adapted = initial;
+  if (req.approval) {
+    const original = (await opts.db.select().from(authorizationDecisions).where(and(eq(authorizationDecisions.orgId, ctx.orgId), eq(authorizationDecisions.idempotencyKey, initial.request.idempotencyKey))).limit(1))[0];
+    if (!original || original.effect !== "require_approval" || !original.evidence || !original.approvalRequirement) return { ok: false, error: "Canonical approval has no matching original decision." };
+    const resolutionId = canonicalApprovalResolutionId(req, req.approval.resolvedBy);
+    await opts.db.insert(canonicalApprovalResolutions).values({ resolutionId, approvalId: original.decisionId, gateId: original.decisionId, orgId: ctx.orgId, requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest, approverId: req.approval.resolvedBy, verdict: "approved", appliesIn: "workflow", workflowExecutionId: ctx.workflowExecutionId, resolvedAt: now, expiresAt: original.approvalRequirement.expiresAtMs ?? now + 72 * 60 * 60 * 1000, resolutionVersion: 1 }).onConflictDoNothing();
+    const facts = await loadCanonicalDynamicFacts(opts.db, { organizationId: ctx.orgId, service: req.service, actionId, riskLevel: action.riskLevel, appliesIn: "workflow", scopeId: ctx.workflowExecutionId, evaluationTimeMs: now, requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest });
+    const post = adaptWorkflowAction({ ...common, dynamicFacts: { currentPolicy: facts }, approvalBindingContext: { requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest } });
+    const invocationId = authorizationSha256Hex(canonicalAuthorizationJson({ original: post.request.subject.invocation.id, resolutionId }));
+    adapted = { ...post, request: { ...post.request, subject: { ...post.request.subject, invocation: { ...post.request.subject.invocation, id: invocationId } }, idempotencyKey: `${post.request.subject.invocation.type}:${invocationId}` } };
+  }
+  const envelope = await service.authorize(adapted.request);
+  buildActionObligationPlan(envelope.decision);
+  redactCanonicalResult({}, envelope.decision.redactions);
+  if (envelope.decision.effect === "deny") return { ok: false, error: "Action denied by canonical policy." };
+  if (envelope.decision.effect === "require_approval") return { ok: false, requiresApproval: true, riskLevel: action.riskLevel, provenance: envelope.decision.reasonCode };
+  for (const obligation of envelope.decision.obligations) {
+    if (obligation.type === "credential_owner" && (obligation.ownerType !== ctx.owner.type || obligation.ownerId !== ctx.owner.id)) return { ok: false, error: "Canonical credential-owner obligation was not satisfied." };
+    if (obligation.type === "target_idempotency" && !req.invocationId) return { ok: false, error: "Canonical target-idempotency obligation was not satisfied." };
+  }
+  return envelope;
+}
+
+function canonicalApprovalResolutionId(req: WorkflowInvokeActionRequest, approverId: string): string {
+  return `resolution:${Buffer.from(`${req.invocationId}\0${approverId}`).toString("base64url").slice(0, 96)}`;
+}
+
 async function enforceWorkflowPolicy(
   opts: ActionInvokerOpts,
   req: WorkflowInvokeActionRequest,
@@ -946,4 +1021,16 @@ function throwingSandbox(id: string): Sandbox {
     rm: () => unavailable(),
     exec: () => unavailable(),
   };
+}
+
+function redactCanonicalResult<T>(value: T, directives: PolicyDecisionEnvelope["decision"]["redactions"]): T {
+  if (directives.length === 0) return value;
+  const copy = JSON.parse(JSON.stringify(value)) as T;
+  for (const directive of directives) for (const path of directive.jsonPaths) {
+    if (!/^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(path)) throw new Error("Unsupported canonical redaction path.");
+    const parts = path.slice(2).split("."); let parent: any = copy;
+    for (const part of parts.slice(0, -1)) { if (!parent || typeof parent !== "object") break; parent = parent[part]; }
+    if (parent && typeof parent === "object") delete parent[parts.at(-1)!];
+  }
+  return copy;
 }

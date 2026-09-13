@@ -1,4 +1,5 @@
 import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 /**
  * Shared boot harness for API integration tests.
  *
@@ -563,9 +564,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   });
 
   const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+  const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
   const providers: Providers = {
     db,
     canonicalPolicyManager,
+    canonicalAuthorizationService,
     blobs,
     encryptionKey: "test-key",
     engineStore,

@@ -27,6 +27,7 @@ import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import type { AutoTitleHost } from "../sessions/auto-title-host.js";
 
 /**
@@ -38,6 +39,7 @@ import type { AutoTitleHost } from "../sessions/auto-title-host.js";
 export interface Providers {
   db: AppDb;
   canonicalPolicyManager: CanonicalPolicyBundleManager;
+  canonicalAuthorizationService: CanonicalAuthorizationService;
   blobs: BlobStore;
   encryptionKey: string;
 

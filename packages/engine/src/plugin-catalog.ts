@@ -498,6 +498,10 @@ export async function invokeAction(
     sessionId: ctx.sessionId,
     threadId: ctx.threadId,
     appliesIn: "session",
+    owner: ctx.owner,
+    queueItemId: ctx.queueItemId,
+    resumeKey,
+    gateOrdinal: ctx.suspendedDecision?.ordinal ?? 0,
   };
   const baseRecord: BaseInvocationRecord = {
     service: entry.service,
@@ -529,6 +533,14 @@ export async function invokeAction(
       mode: "require_approval",
       provenance: { baseMode: "require_approval", source: "resolver_error" },
     };
+  }
+
+  if (decision.canonical) {
+    const owner = ctx.owner ?? { type: "user" as const, id: ctx.userId };
+    for (const obligation of decision.canonical.obligations) {
+      if (obligation.type === "credential_owner" && (obligation.ownerType !== owner.type || obligation.ownerId !== owner.id)) return { kind: "denied-policy" };
+      if (obligation.type === "target_idempotency" && resumeKey.length === 0) return { kind: "denied-policy" };
+    }
   }
 
   if (decision.mode === "deny") {
@@ -609,6 +621,15 @@ export async function invokeAction(
     }
     const approved =
       !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
+    if (approved) {
+      try {
+        const resumed = await resolver.resolve(input);
+        if (resumed.mode !== "allow") return { kind: "denied-approval", reason: "approval-processing-failed" };
+        decision = resumed;
+      } catch {
+        return { kind: "denied-approval", reason: "approval-processing-failed" };
+      }
+    }
     if (!approved) {
       emitInvocation(resolver, {
         ...baseRecord,
@@ -626,10 +647,12 @@ export async function invokeAction(
   // allow, or an approved require_approval → execute with audit.
   return executeAction(entry, actionId, args, summary, ctx, {
     resolver,
+    redactions: decision.canonical?.redactions,
     record: {
       ...baseRecord,
       resolvedMode: decision.mode,
       provenance: decision.provenance,
+      ...(decision.canonical?.executionAttemptId ? { canonicalExecutionAttemptId: decision.canonical.executionAttemptId } : {}),
       gateOrdinal,
     },
   });
@@ -1208,7 +1231,7 @@ async function executeAction(
   args: Record<string, unknown> | undefined,
   summary: string,
   ctx: ToolContext,
-  audit?: { resolver: PolicyResolver; record: BaseAuditedRecord },
+  audit?: { resolver: PolicyResolver; record: BaseAuditedRecord; redactions?: import("./authorization/types.js").RedactionDirective[] },
 ): Promise<InvokeActionResult> {
   // Validate (and apply schema defaults to) LLM-supplied params before they
   // reach the plugin action's execute body — closes the gap where unvalidated
@@ -1248,15 +1271,17 @@ async function executeAction(
       prepared.args as Static<typeof entry.action.parameters>,
       actionCtx,
     );
+    const userResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "user_output") ?? []) : result;
+    const auditResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "audit") ?? []) : result;
     if (audit) {
       emitInvocation(audit.resolver, {
         ...audit.record,
         status: "completed",
         durationMs: Date.now() - startedAt,
-        result,
+        result: auditResult,
       });
     }
-    return { kind: "ok", result };
+    return { kind: "ok", result: userResult };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (audit) {
@@ -1420,4 +1445,16 @@ function fnv1a64Hex(bytes: Uint8Array): string {
     hash = (hash * 0x100000001b3n) & mask;
   }
   return hash.toString(16).padStart(16, "0");
+}
+
+function redactResult<T>(value: T, directives: import("./authorization/types.js").RedactionDirective[]): T {
+  if (directives.length === 0) return value;
+  const copy = JSON.parse(JSON.stringify(value)) as T;
+  for (const directive of directives) for (const path of directive.jsonPaths) {
+    if (!/^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(path)) throw new Error("Unsupported canonical redaction path.");
+    const parts = path.slice(2).split("."); let parent: any = copy;
+    for (const part of parts.slice(0, -1)) { if (!parent || typeof parent !== "object") break; parent = parent[part]; }
+    if (parent && typeof parent === "object") delete parent[parts.at(-1)!];
+  }
+  return copy;
 }

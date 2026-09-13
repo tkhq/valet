@@ -44,7 +44,7 @@ export class CanonicalAuthorizationService implements AuthorizationService {
       policyFactProvenance: [{ source: "host_asserted" }],
       createdAtMs: this.now(),
     });
-    await this.db.insert(authorizationDecisions).values(plan.row).onConflictDoNothing();
+    await this.db.insert(authorizationDecisions).values(JSON.parse(canonicalAuthorizationJson(plan.row)) as AuthorizationDecisionRow).onConflictDoNothing();
     const stored = await this.find(request.subject.orgId, request.idempotencyKey);
     if (!stored) throw new Error("Canonical authorization decision reservation failed.");
     return this.replay(stored, subjectDigest);
