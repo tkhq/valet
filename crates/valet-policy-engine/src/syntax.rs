@@ -83,9 +83,9 @@ pub(crate) fn analyze(
                     continue;
                 }
 
-                let followed_by_paren = matches!(tokens.get(next), Some(Token::LeftParen));
-                let declaration =
-                    nesting_depth == 0 && line_start && !path.contains('.') && followed_by_paren;
+                let call_end = skip_newlines(&tokens, next);
+                let followed_by_paren = matches!(tokens.get(call_end), Some(Token::LeftParen));
+                let declaration = nesting_depth == 0 && line_start && followed_by_paren;
                 if declaration {
                     declared_functions.insert(path);
                 } else if followed_by_paren {
@@ -130,25 +130,44 @@ pub(crate) fn analyze(
     })
 }
 
+/// Validates calls without allowing user functions to shadow inventoried built-ins.
 pub(crate) fn validate_calls(
     analyses: &[SourceAnalysis],
     profile: &CapabilityProfile,
 ) -> Result<(), EngineError> {
-    let mut declared = BTreeSet::new();
+    let builtin_names: BTreeSet<_> = profile
+        .builtins
+        .iter()
+        .map(|builtin| builtin.name.as_str())
+        .collect();
+    let mut declarations_by_package: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut qualified_declarations = BTreeSet::new();
     for analysis in analyses {
+        let package = analysis.package.as_deref().unwrap_or_default();
         for function in &analysis.declared_functions {
-            declared.insert(function.clone());
-            if let Some(package) = &analysis.package {
-                declared.insert(format!("{package}.{function}"));
-                declared.insert(format!("data.{package}.{function}"));
+            if builtin_names.contains(function.as_str()) {
+                return Err(EngineError::BuiltinDeclarationCollision(function.clone()));
             }
+            declarations_by_package
+                .entry(package)
+                .or_default()
+                .insert(function);
+            qualified_declarations.insert(format!("{package}.{function}"));
+            qualified_declarations.insert(format!("data.{package}.{function}"));
         }
     }
 
     for analysis in analyses {
+        let local = analysis
+            .package
+            .as_deref()
+            .and_then(|package| declarations_by_package.get(package));
         for call in &analysis.calls {
             let expanded = expand_alias(call, &analysis.import_aliases);
-            if declared.contains(call) || declared.contains(&expanded) {
+            let declared = local.is_some_and(|functions| functions.contains(call.as_str()))
+                || qualified_declarations.contains(call)
+                || qualified_declarations.contains(&expanded);
+            if declared {
                 continue;
             }
             let builtin = profile.builtins.iter().find(|item| item.name == *call);
@@ -172,6 +191,13 @@ pub(crate) fn validate_calls(
 
 fn at_line_start(tokens: &[Token], index: usize) -> bool {
     index == 0 || matches!(tokens.get(index.saturating_sub(1)), Some(Token::Newline))
+}
+
+fn skip_newlines(tokens: &[Token], mut index: usize) -> usize {
+    while matches!(tokens.get(index), Some(Token::Newline)) {
+        index = index.saturating_add(1);
+    }
+    index
 }
 
 fn import_alias(tokens: &[Token], index: usize, default_alias: String) -> (String, usize) {
