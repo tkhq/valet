@@ -83,6 +83,7 @@ function laidOut(definition: WorkflowDefinition): WorkflowDefinition {
 /** Apply the visible creation choice to every model-capable starter node. */
 export function withWorkflowModel(definition: WorkflowDefinition, model: string): WorkflowDefinition {
   const next = structuredClone(definition);
+  next.ui = { ...next.ui, nodes: next.ui?.nodes ?? {}, defaultModel: model };
   const apply = (node: WorkflowNode): void => {
     if (node.type === "llm" || node.type === "session") node.model = model;
     if (node.type === "foreach") apply(node.body);

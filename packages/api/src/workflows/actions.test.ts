@@ -1,5 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type WorkflowDefinition } from "@valet/workflow";
 import {
   findingKey,
@@ -14,10 +14,15 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { teams, teamMembers, eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
+import { setApprovedModels } from "../services/approved-models.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -287,6 +292,35 @@ describe("DB-backed actions", () => {
       .toMatchObject({ success: false, error: expect.stringContaining("unknown or inactive model") });
     expect(await update.execute({ workflow_id: workflowId, model: "l", node_ids: ["stop"] }, ctx()))
       .toMatchObject({ success: false, error: expect.stringContaining("not an llm or session node") });
+  });
+
+  it("rejects a concrete model that the org did not approve", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "approval-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "draft", type: "llm", model: "s", prompt: "Draft" },
+          ],
+          edges: [{ from: "trigger", to: "draft" }],
+        },
+      },
+    );
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    await setApprovedModels(db, "org1", []);
+    const update = workflowsActionPlugin(() => deps).actions.find((action) => action.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+    const result = await update.execute(
+      { workflow_id: created.id, model: "anthropic/claude-haiku-4-5" },
+      ctx(),
+    );
+    await setApprovedModels(db, "org1", null);
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining("not approved") });
   });
 
   it("copies a personal graph to a team through the agent action and rejects team assistant context", async () => {

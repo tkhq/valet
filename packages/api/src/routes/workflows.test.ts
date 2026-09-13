@@ -6,11 +6,12 @@
  * elsewhere) so these tests assert on the routes' own logic — request
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunHost, WorkflowDefinition } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
+import { setApprovedModels } from "../services/approved-models.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import {
@@ -45,6 +46,7 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
 
 const VALID_DEFINITION = {
@@ -588,6 +590,20 @@ describe("PATCH /api/workflows/:id/model", () => {
       .filter((node) => node.type === "llm" || node.type === "session")
       .map((node) => [node.id, node.model]);
     expect(models).toEqual([["draft", "l"], ["review", "m"]]);
+  });
+
+  it("rejects a concrete model that the org did not approve", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    const created = await createModelWorkflow(api.baseUrl);
+    await setApprovedModels(api.providers.db, "local-org", []);
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "anthropic/claude-haiku-4-5" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("not approved") });
   });
 
   it("rejects unknown models and non-model-capable node ids without changing the workflow", async () => {

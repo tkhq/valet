@@ -321,6 +321,17 @@ describe('addNode / removeNode / duplicateNode / updateNode', () => {
     expect(next.ui?.nodes[nodeId]).toBeDefined();
   });
 
+  it('uses the persisted creation model for new llm and session nodes', () => {
+    const definition: WorkflowDefinition = {
+      ...baseDefinition(),
+      ui: { ...baseDefinition().ui!, defaultModel: 's' },
+    };
+    const llm = addNode(definition, 'llm').definition.nodes.at(-1);
+    const session = addNode(definition, 'session').definition.nodes.at(-1);
+    expect(llm).toEqual({ id: 'llm-1', type: 'llm', model: 's', prompt: '' });
+    expect(session).toEqual({ id: 'session-1', type: 'session', mode: 'start', model: 's', prompt: '' });
+  });
+
   it('does not offer trigger as an addable type', () => {
     expect(ADDABLE_NODE_TYPES).not.toContain('trigger');
     expect(ADDABLE_NODE_TYPES).toHaveLength(11);

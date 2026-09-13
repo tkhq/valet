@@ -66,7 +66,7 @@ vi.mock("~/lib/workspace-scope", () => ({
   useWorkspaceScope: () => ({ teamId }),
 }));
 
-import { NewWorkflowDialog, WORKFLOW_PRESETS } from "./new-workflow-dialog";
+import { NewWorkflowDialog, withWorkflowModel, WORKFLOW_PRESETS } from "./new-workflow-dialog";
 
 // ─── Validation environment ──────────────────────────────────────────────
 
@@ -293,6 +293,13 @@ describe("workflow presets", () => {
     const definition = WORKFLOW_PRESETS.find((p) => p.id === "blank")!.build();
     expect(definition.nodes.map((node) => node.type).sort()).toEqual(["stop", "trigger"]);
   });
+
+  it("persists the blank preset recommendation for model-capable nodes added later", () => {
+    const blank = WORKFLOW_PRESETS.find((preset) => preset.id === "blank")!;
+    const definition = withWorkflowModel(blank.build(), blank.recommendedModel);
+    expect(definition.ui?.defaultModel).toBe("s");
+    expect(definition.nodes.map((node) => node.type).sort()).toEqual(["stop", "trigger"]);
+  });
 });
 
 // ─── The addressing rule itself ──────────────────────────────────────────
@@ -364,7 +371,11 @@ describe("NewWorkflowDialog", () => {
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const body = createMutateAsync.mock.calls[0]![0] as { name: string; definition: WorkflowDefinition };
-    expect(body.definition).toEqual({ ...WORKFLOW_PRESETS.find((p) => p.id === "parallel")!.build(), assistantId: "personal" });
+    const parallel = WORKFLOW_PRESETS.find((preset) => preset.id === "parallel")!;
+    expect(body.definition).toEqual({
+      ...withWorkflowModel(parallel.build(), parallel.recommendedModel),
+      assistantId: "personal",
+    });
   });
 
   it("shows a recommendation and keeps an explicit model override across preset changes", async () => {
