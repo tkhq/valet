@@ -75,4 +75,15 @@ await build({
   logLevel: "info",
 });
 
-console.log("build:bundle -> packages/api/dist/valet-api.mjs");
+await build({
+  entryPoints: [resolve(here, "src/authorization/build-entry.ts")],
+  outfile: resolve(here, "dist/policy-evaluator.mjs"),
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  sourcemap: "external",
+  logLevel: "info",
+});
+
+console.log("build:bundle -> packages/api/dist/valet-api.mjs + policy-evaluator.mjs");
