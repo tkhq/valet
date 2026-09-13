@@ -15,7 +15,7 @@ setTimeout(() => {
       regoVersion: 'v1',
       interpreterName: 'regorus',
       interpreterVersion: '0.12.0',
-      interpreterRevision: 'aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e',
+      interpreterRevision: 'f938ef286fdf9b229d3933b064dfd87323f397e8',
       target: 'wasm32-unknown-unknown-worker',
       maxWallTimeMs: 100,
       maxEngineMemoryBytes: 67108864,

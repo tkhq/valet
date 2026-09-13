@@ -35,7 +35,7 @@ export function testBundle(policy = POLICY, data = DATA): CanonicalSourceBundle 
     })),
     interpreter: {
       name: "regorus",
-      revision: "aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e",
+      revision: "f938ef286fdf9b229d3933b064dfd87323f397e8",
       version: "0.12.0",
     },
     mediaType: "application/vnd.valet.policy-source-bundle.v1+json",

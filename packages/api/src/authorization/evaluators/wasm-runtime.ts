@@ -20,7 +20,7 @@ export interface RuntimeIdentity {
   readonly regoVersion: "v1";
   readonly interpreterName: "regorus";
   readonly interpreterVersion: "0.12.0";
-  readonly interpreterRevision: "aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e";
+  readonly interpreterRevision: "f938ef286fdf9b229d3933b064dfd87323f397e8";
   readonly target: "wasm32-unknown-unknown-worker";
   readonly maxWallTimeMs: 100;
   readonly maxEngineMemoryBytes: 67108864;
@@ -443,7 +443,7 @@ function validateIdentity(identity: RuntimeIdentity): void {
     identity.regoVersion === "v1" &&
     identity.interpreterName === "regorus" &&
     identity.interpreterVersion === "0.12.0" &&
-    identity.interpreterRevision === "aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e" &&
+    identity.interpreterRevision === "f938ef286fdf9b229d3933b064dfd87323f397e8" &&
     identity.target === "wasm32-unknown-unknown-worker" &&
     identity.maxWallTimeMs === MAX_WALL_TIME_MS &&
     identity.maxEngineMemoryBytes === MAX_WASM_LINEAR_MEMORY_BYTES &&

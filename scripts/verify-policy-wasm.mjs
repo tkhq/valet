@@ -36,7 +36,7 @@ const engine = require(resolve(out, "valet_policy_engine_wasm.cjs"));
 const identity = JSON.parse(engine.run(JSON.stringify({ operation: "identity" })));
 if (
   identity.status !== "ok" ||
-  identity.value.interpreterRevision !== "aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e" ||
+  identity.value.interpreterRevision !== "f938ef286fdf9b229d3933b064dfd87323f397e8" ||
   identity.value.capabilityProfileVersion !== 1 ||
   identity.value.maxEngineMemoryBytes !== 67_108_864
 ) {
