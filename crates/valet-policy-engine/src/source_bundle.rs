@@ -139,7 +139,6 @@ impl LoadedSourceBundle {
         let mut analyses = Vec::with_capacity(bundle.modules.len());
         let mut has_package = false;
         let mut has_entrypoint = false;
-        let mut parser = RegorusEngine::new();
         for module in &bundle.modules {
             validate_module_id(&module.id)?;
             if !ids.insert(module.id.clone()) {
@@ -150,12 +149,6 @@ impl LoadedSourceBundle {
                 has_package = true;
                 has_entrypoint |= analysis.has_decision_rule;
             }
-            parser
-                .add_policy(module.id.clone(), module.source.clone())
-                .map_err(|error| EngineError::Policy {
-                    module_id: module.id.clone(),
-                    message: error.to_string(),
-                })?;
             analyses.push(analysis);
         }
         if !has_package {
@@ -165,6 +158,15 @@ impl LoadedSourceBundle {
             return Err(EngineError::MissingEntrypoint);
         }
         validate_calls(&analyses, &profile)?;
+        let mut parser = RegorusEngine::new();
+        for module in &bundle.modules {
+            parser
+                .add_policy(module.id.clone(), module.source.clone())
+                .map_err(|error| EngineError::Policy {
+                    module_id: module.id.clone(),
+                    message: error.to_string(),
+                })?;
+        }
         if bundle.data_json.len() > limits.max_policy_data_bytes {
             return Err(EngineError::PolicyDataLimit {
                 actual: bundle.data_json.len(),

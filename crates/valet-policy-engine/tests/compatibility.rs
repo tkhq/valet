@@ -46,6 +46,27 @@ fn enabled_inventory_matches_the_exact_pinned_registry() {
         .collect();
     assert_eq!(enabled, substrate);
     assert_eq!(profile.enabled_builtin_count, substrate.len());
+
+    let manifest: CorpusManifest = serde_json::from_str(include_str!("../corpus/manifest-v1.json"))
+        .expect("corpus manifest must parse");
+    let case_ids: BTreeSet<_> = manifest.cases.iter().map(|case| case.id.as_str()).collect();
+    assert_eq!(
+        case_ids.len(),
+        manifest.cases.len(),
+        "duplicate corpus case ID"
+    );
+    for feature in &profile.language_features {
+        let case_id = feature
+            .evidence
+            .strip_prefix("corpus.")
+            .expect("language feature evidence must reference a corpus case");
+        let case = manifest
+            .cases
+            .iter()
+            .find(|case| case.id == case_id)
+            .unwrap_or_else(|| panic!("{} references missing corpus case {case_id}", feature.name));
+        assert_eq!(case.feature, feature.name, "{case_id} feature mismatch");
+    }
 }
 
 #[test]
@@ -63,7 +84,10 @@ import data.valet.helpers as helpers
 # time.now_ns() and unknown.comment() are inert.
 note := `http.send() unknown.raw()`
 quoted := "rand.intn() unknown.string()"
-decision := {DECISION} if helpers.allowed("user-1")
+decision := {DECISION} if {{
+    helpers.allowed("user-1")
+    data.valet.helpers.allowed("user-2")
+}}
 "#
     );
     let loaded = load(vec![
@@ -78,6 +102,105 @@ decision := {DECISION} if helpers.allowed("user-1")
     )
     .expect("policy must evaluate");
     assert_eq!(result.decision.effect, AuthorizationEffect::Allow);
+}
+
+#[test]
+fn newline_and_comment_trivia_cannot_hide_rejected_calls() {
+    for trivia in ["\n", "\n\n", " # comment\n", " # comment\n\n # second\n"] {
+        let policy = format!(
+            "package valet.authz\nimport rego.v1\ndecision := {DECISION} if {{ trace{trivia}(\"m\") }}\n"
+        );
+        assert!(
+            regorus::Engine::new()
+                .add_policy("laundered.rego".to_owned(), policy.clone())
+                .is_ok(),
+            "Regorus must accept the focused repro"
+        );
+        assert!(matches!(
+            load(vec![module("laundered.rego", &policy)]),
+            Err(EngineError::RejectedBuiltin(name)) if name == "trace"
+        ));
+    }
+}
+
+#[test]
+fn declarations_are_package_scoped_and_cannot_shadow_builtins() {
+    let decision =
+        format!("package valet.authz\nimport rego.v1\ndecision := {DECISION} if trace(\"m\")\n");
+    let decoy = "package decoy\nimport rego.v1\ntrace(x) := x\n";
+    let mut parser = regorus::Engine::new();
+    parser
+        .add_policy("authz.rego".to_owned(), decision.clone())
+        .expect("Regorus must accept the builtin call");
+    parser
+        .add_policy("decoy.rego".to_owned(), decoy.to_owned())
+        .expect("Regorus must accept the decoy declaration");
+    assert!(matches!(
+        load(vec![module("authz.rego", &decision), module("decoy.rego", decoy)]),
+        Err(EngineError::BuiltinDeclarationCollision(name)) if name == "trace"
+    ));
+
+    let unqualified = format!(
+        "package valet.authz\nimport rego.v1\ndecision := {DECISION} if allowed(\"user\")\n"
+    );
+    let other_package =
+        "package valet.helpers\nimport rego.v1\nallowed(subject) if startswith(subject, \"user\")\n";
+    assert!(matches!(
+        load(vec![
+            module("authz.rego", &unqualified),
+            module("helpers.rego", other_package),
+        ]),
+        Err(EngineError::UndeclaredBuiltin(name)) if name == "allowed"
+    ));
+}
+
+#[test]
+fn same_package_and_dotted_ref_head_functions_are_accepted() {
+    let helpers = r#"
+package valet.authz
+import rego.v1
+allowed
+# declaration trivia
+(subject) if startswith(subject, "user")
+util.allowed(subject) := allowed(subject)
+"#;
+    let policy = format!(
+        r#"
+package valet.authz
+import rego.v1
+decision := {DECISION} if {{
+    allowed("user-local")
+    util.allowed("user-dotted")
+    data.valet.authz.util.allowed("user-qualified")
+}}
+"#
+    );
+    let loaded = load(vec![
+        module("authz.rego", &policy),
+        module("helpers.rego", helpers),
+    ])
+    .expect("same-package and dotted functions must validate");
+    let result = evaluate_bundle(
+        &loaded,
+        &CanonicalJson::parse("{}").unwrap(),
+        EvaluationOptions::default(),
+    )
+    .expect("same-package and dotted functions must evaluate");
+    assert_eq!(result.decision.effect, AuthorizationEffect::Allow);
+}
+
+#[test]
+fn malformed_or_unclosed_source_fails_closed() {
+    for policy in [
+        "package valet.authz\nimport rego.v1\ndecision := {\n",
+        "package valet.authz\nimport rego.v1\ndecision := \"unterminated\n",
+        "package valet.authz\nimport rego.v1\ndecision := `unterminated\n",
+    ] {
+        assert!(matches!(
+            load(vec![module("malformed.rego", policy)]),
+            Err(EngineError::Policy { .. })
+        ));
+    }
 }
 
 #[test]
@@ -213,9 +336,15 @@ fn licensed_versioned_corpus_matches_declared_results() {
         assert_eq!(case.origin, "Valet", "{} origin", case.id);
         assert_eq!(case.license, "MIT", "{} license", case.id);
         assert!(!case.feature.is_empty(), "{} feature", case.id);
-        assert_eq!(case.expected_parse, "accept", "{} parse status", case.id);
         assert!(case.required, "{} must be required", case.id);
         let source = std::fs::read_to_string(root.join(case.policy)).unwrap();
+        let parse_result = regorus::Engine::new().add_policy(case.id.clone(), source.clone());
+        assert_eq!(
+            parse_result.is_ok(),
+            case.expected_parse == "accept",
+            "{} parse status",
+            case.id
+        );
         let loaded = LoadedSourceBundle::load(SourceBundle {
             compatibility: BundleCompatibility::current(),
             modules: vec![module(&format!("{}.rego", case.id), &source)],
@@ -249,6 +378,7 @@ fn licensed_versioned_corpus_matches_declared_results() {
                 let matches = matches!(
                     (expected, &error),
                     ("decision_contract", EngineError::DecisionContract(_))
+                        | ("policy", EngineError::Policy { .. })
                         | ("rejected_builtin", EngineError::RejectedBuiltin(_))
                         | ("evaluation_budget", EngineError::EvaluationBudget { .. })
                 );

@@ -77,6 +77,8 @@ pub enum EngineError {
     MissingPackage,
     #[error("The source bundle must define `data.valet.authz.decision`")]
     MissingEntrypoint,
+    #[error("The policy declares a function that collides with built-in `{0}`")]
+    BuiltinDeclarationCollision(String),
     #[error("The policy uses rejected built-in `{0}`")]
     RejectedBuiltin(String),
     #[error("The policy uses unavailable built-in `{0}`")]
