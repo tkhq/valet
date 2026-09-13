@@ -252,7 +252,7 @@ cargo test --workspace --locked
 **Validation**
 
 ```bash
-pnpm --filter @valet/api test authorization/source-builder
+pnpm --filter @valet/api test authorization/bundles/current-policy-source
 pnpm --filter @valet/api test policies
 pnpm typecheck
 ```

@@ -3,6 +3,7 @@ export { InMemorySourceBundleStorage } from "./in-memory-storage.js";
 export {
   buildCurrentPolicyDynamicFacts,
   buildCurrentPolicySource,
+  CURRENT_POLICY_COMPLEXITY_LIMITS_V1,
   CurrentPolicySourceError,
   standardNewOrganizationPolicySnapshot,
 } from "./current-policy-source.js";

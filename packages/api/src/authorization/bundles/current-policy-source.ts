@@ -22,6 +22,18 @@ const POLICY_PATH = "policies/current-action-policy.rego";
 const DATA_PATH = "data/current-action-policy.json";
 const PROVENANCE_PATH = "provenance/current-action-policy.json";
 
+export const CURRENT_POLICY_COMPLEXITY_LIMITS_V1 = Object.freeze({
+  schemaVersion: 1 as const,
+  maxRules: 64,
+  maxMatchersPerRule: 16,
+  maxTotalMatchers: 128,
+  maxPathSegments: 8,
+  maxRegexLength: 128,
+  maxPluginDefaults: 32,
+  maxDynamicGrants: 32,
+  maxDynamicApprovals: 32,
+});
+
 export interface BuiltCurrentPolicySourceV1 {
   readonly bundle: CanonicalSourceBundle;
   readonly policySource: string;
@@ -47,7 +59,7 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
     ...snapshot.organizationPolicies.map((row) => normalizeRule(row, "organization", row.principalId)),
     ...snapshot.teamPolicies.map((row) => normalizeRule(row, "team", row.principalId)),
     ...snapshot.personalOverrides.map((row) => normalizeRule(row, "personal", row.userId)),
-  ];
+  ].filter((row) => row.revokedAtMs === null);
   const rankById = new Map<string, number>();
   const owners = new Set(rawRecords.map((row) => `${row.ownerType}\0${row.ownerId}`));
   for (const owner of owners) {
@@ -80,22 +92,20 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
       },
     },
   });
-  const policySource = CURRENT_ACTION_POLICY_REGO.replace("# GENERATED_MATCHER_RULES", buildMatcherRules(records));
-  const endLine = policySource.split("\n").length - 1;
+  const generated = buildPolicySource(records, pluginDefaults, riskDefaults, snapshot.bundleDefault);
+  const policySource = generated.source;
   const provenanceEntries = records.map((row) => ({
     module_id: POLICY_PATH,
     rule_id: row.id,
     source_id: `${row.sourceTable}:${row.ownerType}:${row.ownerId}:${row.id}:${row.sourcePath}`,
-    start_line: 1,
-    end_line: endLine,
+    ...generated.ranges.get(row.id)!,
   }));
   for (const row of [...pluginDefaults, ...riskDefaults, snapshot.bundleDefault]) {
     provenanceEntries.push({
       module_id: POLICY_PATH,
       rule_id: row.id,
       source_id: `default:${row.id}:${row.sourcePath}`,
-      start_line: 1,
-      end_line: endLine,
+      ...generated.ranges.get(row.id)!,
     });
   }
   provenanceEntries.sort((a, b) => utf8Compare(a.rule_id, b.rule_id));
@@ -180,6 +190,12 @@ export function buildCurrentPolicyDynamicFacts(input: {
   readonly approvals: readonly CurrentApprovalResolutionSourceV1[];
 }): Record<string, JsonValue> {
   nonEmpty("organizationId", input.organizationId);
+  if (input.grants.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicGrants) {
+    fail("complexity_limit", `Current policy input supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicGrants} grants.`);
+  }
+  if (input.approvals.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicApprovals) {
+    fail("complexity_limit", `Current policy input supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicApprovals} approvals.`);
+  }
   const ids = new Set<string>();
   for (const grant of input.grants) {
     validateGrant(grant, input.organizationId);
@@ -209,6 +225,10 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     teamIds.add(teamId);
   }
   const rules = [...snapshot.organizationPolicies, ...snapshot.teamPolicies, ...snapshot.personalOverrides];
+  if (rules.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules) {
+    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules} rules.`);
+  }
+  let matcherCount = 0;
   for (const row of rules) {
     unique(ids, row.id);
     if (row.organizationId !== snapshot.organizationId) fail("cross_organization", `Rule ${row.id} belongs to another organization.`);
@@ -218,6 +238,13 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     validTimestamp(`${row.id}.updatedAtMs`, row.updatedAtMs);
     if (row.updatedAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} was updated before it was created.`);
     validateMatchers(row.id, row.paramMatchers);
+    if (row.paramMatchers.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) {
+      fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} matchers.`);
+    }
+    matcherCount += row.paramMatchers.length;
+  }
+  if (matcherCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers) {
+    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers} matchers.`);
   }
   for (const row of snapshot.organizationPolicies) {
     if (row.principalType !== "org" || row.principalId !== snapshot.organizationId || row.sourceTable !== "action_policies") {
@@ -236,13 +263,16 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
       fail("invalid_ownership", `Personal override ${row.id} has invalid ownership or source.`);
     }
   }
-  const ambiguous = new Set<string>();
-  for (const row of rules) {
-    const owner = "principalId" in row ? row.principalId : row.userId;
-    const authority = "principalType" in row ? row.principalType : "personal";
-    const identity = canonicalJson([authority, owner, targetKind(row), row.mode, row.updatedAtMs]);
-    if (ambiguous.has(identity)) fail("ambiguous_identity", `Rule ${row.id} has an ambiguous equal-precedence identity.`);
-    ambiguous.add(identity);
+  const liveRules = rules.filter((row) => !("revokedAtMs" in row) || row.revokedAtMs === null);
+  for (const [index, row] of liveRules.entries()) {
+    for (const other of liveRules.slice(index + 1)) {
+      if (rulesCanTie(row, other)) {
+        fail("ambiguous_identity", `Rules ${row.id} and ${other.id} have an ambiguous co-match at equal precedence.`);
+      }
+    }
+  }
+  if (snapshot.pluginDefaults.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPluginDefaults) {
+    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPluginDefaults} plugin defaults.`);
   }
   for (const row of snapshot.pluginDefaults) {
     unique(ids, row.id);
@@ -339,14 +369,15 @@ function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[
     identities.add(identity);
     if (!MATCHER_OPS.has(matcher.op)) fail("unknown_matcher", `Rule ${id} matcher ${index} has an unknown operator.`);
     const path = parseMatcherPath(matcher.path);
-    if (path.length > 128) fail("matcher_path", `Rule ${id} matcher ${index} exceeds the path limit.`);
+    if (path.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPathSegments) fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the path segment limit.`);
     const valueBearing = !["exists", "not_exists"].includes(matcher.op);
     if (valueBearing !== Object.hasOwn(matcher, "value")) fail("matcher_value", `Rule ${id} matcher ${index} has an invalid value.`);
     if (["in", "not_in"].includes(matcher.op) && !Array.isArray(matcher.value)) fail("matcher_value", `Rule ${id} matcher ${index} requires an array value.`);
     if (["gt", "gte", "lt", "lte"].includes(matcher.op) && (typeof matcher.value !== "number" || !Number.isFinite(matcher.value))) fail("matcher_value", `Rule ${id} matcher ${index} requires a finite number.`);
     if (matcher.op === "regex") {
-      if (typeof matcher.value !== "string" || hasNonLosslessRegexFeature(matcher.value)) fail("non_lossless_regex", `Rule ${id} matcher ${index} cannot be translated losslessly to the canonical engine.`);
-      try { new RegExp(matcher.value); } catch { fail("invalid_regex", `Rule ${id} matcher ${index} has an invalid regular expression.`); }
+      if (typeof matcher.value !== "string" || !isLosslessRegexV1(matcher.value)) {
+        fail("non_lossless_regex", `Rule ${id} matcher ${index} cannot be translated losslessly by regex subset v1.`);
+      }
     }
     assertJsonValue(`${id}.paramMatchers[${index}].value`, matcher.value, !valueBearing);
   }
@@ -384,7 +415,7 @@ function normalizeRule(
 
 function parseMatcherPath(path: string): Array<string | number> {
   const result: Array<string | number> = [];
-  if (path === "") return result;
+  if (path === "") fail("non_lossless_path", "Empty matcher paths are not lossless when action parameters are absent.");
   let index = 0;
   while (index < path.length) {
     if (path[index] === ".") { index += 1; continue; }
@@ -409,31 +440,156 @@ function parseMatcherPath(path: string): Array<string | number> {
   return result;
 }
 
-function hasNonLosslessRegexFeature(pattern: string): boolean {
-  return /\(\?[=!<]|\\[1-9]|\\k<|\(\?>|\(\?\(/.test(pattern);
+// This ASCII grammar has the same match language in JavaScript and the pinned Regorus regex engine.
+function isLosslessRegexV1(pattern: string): boolean {
+  if (pattern.length === 0 || pattern.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexLength) return false;
+  if ([...pattern].some((char) => char.codePointAt(0)! < 0x20 || char.codePointAt(0)! > 0x7e)) return false;
+  let index = pattern.startsWith("^") ? 1 : 0;
+  const end = pattern.endsWith("$") && !pattern.endsWith("\\$") ? pattern.length - 1 : pattern.length;
+  let atoms = 0;
+  while (index < end) {
+    const char = pattern[index];
+    if (char === "\\") {
+      if (index + 1 >= end || !"\\.^$*+?()[]{}|-".includes(pattern[index + 1])) return false;
+      index += 2;
+    } else if (char === "[") {
+      const close = pattern.indexOf("]", index + 1);
+      if (close === -1 || close >= end || !validAsciiClass(pattern.slice(index + 1, close))) return false;
+      index = close + 1;
+    } else {
+      if (".^$*+?()[]{}|".includes(char)) return false;
+      index += 1;
+    }
+    atoms += 1;
+    if (index < end && "*+?".includes(pattern[index])) index += 1;
+  }
+  return atoms > 0 && index === end;
 }
 
-function buildMatcherRules(records: readonly ReturnType<typeof normalizeRule>[]): string {
-  return records.filter((row) => row.matchers.length > 0).map((row) => {
-    const conditions = row.matchers.map((matcher, index) => {
-      const encoded = `policy.matchersByRule[${JSON.stringify(row.id)}][${index}]`;
-      const actual = `matcher_value(${encoded})`;
-      switch (matcher.op) {
-        case "exists": return `matcher_found(${encoded})`;
-        case "not_exists": return `not matcher_found(${encoded})`;
-        case "eq": return `${actual} == ${encoded}.value`;
-        case "neq": return `not ${actual} == ${encoded}.value`;
-        case "regex": return `is_string(${actual}); regex.match(${encoded}.value, ${actual})`;
-        case "in": return `${actual} in ${encoded}.value`;
-        case "not_in": return `not ${actual} in ${encoded}.value`;
-        case "gt": return `is_number(${actual}); ${actual} > ${encoded}.value`;
-        case "gte": return `is_number(${actual}); ${actual} >= ${encoded}.value`;
-        case "lt": return `is_number(${actual}); ${actual} < ${encoded}.value`;
-        case "lte": return `is_number(${actual}); ${actual} <= ${encoded}.value`;
+function validAsciiClass(content: string): boolean {
+  const body = content.startsWith("^") ? content.slice(1) : content;
+  if (body.length === 0) return false;
+  for (let index = 0; index < body.length;) {
+    const first = body[index];
+    if (!/[A-Za-z0-9]/.test(first)) return false;
+    if (body[index + 1] !== "-") {
+      index += 1;
+      continue;
+    }
+    const last = body[index + 2];
+    if (last === undefined || !/[A-Za-z0-9]/.test(last) || first.charCodeAt(0) > last.charCodeAt(0)) return false;
+    index += 3;
+  }
+  return true;
+}
+
+type NormalizedRule = ReturnType<typeof normalizeRule> & { precedenceRank?: number };
+type PolicyDefault = { id: string; mode: string; sourcePath: string; service?: string; riskLevel?: string };
+
+function buildPolicySource(
+  records: readonly NormalizedRule[],
+  pluginDefaults: readonly PolicyDefault[],
+  riskDefaults: readonly PolicyDefault[],
+  bundleDefault: CurrentPolicySourceSnapshotV1["bundleDefault"],
+): { source: string; ranges: ReadonlyMap<string, { start_line: number; end_line: number }> } {
+  const lines = CURRENT_ACTION_POLICY_PREFIX.trimEnd().split("\n");
+  const ranges = new Map<string, { start_line: number; end_line: number }>();
+  const candidateNames = new Map<string, string>();
+  for (const [index, row] of [...records].sort(compareById).entries()) {
+    const name = `candidate_rule_${index}`;
+    candidateNames.set(row.id, name);
+    const startLine = lines.length + 1;
+    row.matchers.forEach((matcher, matcherIndex) => {
+      if (matcher.op === "exists" || matcher.op === "not_exists") {
+        lines.push(`path_${index}_${matcherIndex}_found if { _ = ${regoPath(matcher.segments)} }`);
       }
     });
-    return `matcher_rule_matches(${JSON.stringify(row.id)}) if {\n  ${conditions.length === 0 ? "true" : conditions.join("\n  ")}\n}`;
-  }).join("\n");
+    lines.push(`${name} := ${regoRow(row)} if {`);
+    for (const condition of ruleConditions(row, index)) lines.push(`  ${condition}`);
+    lines.push("}");
+    ranges.set(row.id, { start_line: startLine, end_line: lines.length });
+  }
+  emitWinner(lines, "org_winner", records.filter((row) => row.ownerType === "organization"), candidateNames);
+  emitWinner(lines, "team_winner", records.filter((row) => row.ownerType === "team"), candidateNames);
+  emitWinner(lines, "override_winner", records.filter((row) => row.ownerType === "personal"), candidateNames);
+  emitDefaultCandidates(lines, ranges, pluginDefaults, "plugin", "service", "input.action.service");
+  emitDefaultCandidates(lines, ranges, riskDefaults, "risk", "riskLevel", "input.action.riskLevel");
+  const bundleStart = lines.length + 1;
+  lines.push(`bundle_winner := ${canonicalJson({ id: bundleDefault.id, mode: bundleDefault.actionEffect, source: "bundle" })}`);
+  ranges.set(bundleDefault.id, { start_line: bundleStart, end_line: lines.length });
+  lines.push(...CURRENT_ACTION_POLICY_SUFFIX.trimStart().split("\n"));
+  return { source: `${lines.join("\n")}\n`, ranges };
+}
+
+function emitWinner(lines: string[], name: string, records: readonly NormalizedRule[], candidates: ReadonlyMap<string, string>): void {
+  const ordered = [...records].sort(compareCanonicalPrecedence);
+  if (ordered.length === 0) { lines.push(`${name} := null`); return; }
+  ordered.forEach((row, index) => {
+    const candidate = candidates.get(row.id);
+    if (candidate === undefined) fail("internal_builder", `Missing generated candidate for rule ${row.id}.`);
+    lines.push(`${index === 0 ? `${name} := value if { value := ` : "else := value if { value := "}${candidate} }`);
+  });
+  lines.push("else := null if { true }");
+}
+
+function emitDefaultCandidates(
+  lines: string[],
+  ranges: Map<string, { start_line: number; end_line: number }>,
+  defaults: readonly PolicyDefault[],
+  name: "plugin" | "risk",
+  field: "service" | "riskLevel",
+  inputRef: string,
+): void {
+  const candidates: string[] = [];
+  for (const [index, row] of [...defaults].sort(compareById).entries()) {
+    const candidate = `${name}_default_${index}`;
+    const value = row[field];
+    const startLine = lines.length + 1;
+    lines.push(`${candidate} := ${canonicalJson({ id: row.id, mode: row.mode, source: name })} if { ${inputRef} == ${canonicalJson(value)} }`);
+    ranges.set(row.id, { start_line: startLine, end_line: lines.length });
+    candidates.push(candidate);
+  }
+  if (candidates.length === 0) { lines.push(`${name}_winner := null`); return; }
+  candidates.forEach((candidate, index) => lines.push(`${index === 0 ? `${name}_winner := value if { value := ` : "else := value if { value := "}${candidate} }`));
+  lines.push("else := null if { true }");
+}
+
+function ruleConditions(row: NormalizedRule, rowIndex: number): string[] {
+  const conditions = [
+    row.ownerType === "team" ? `input.subject.principal.type == "team"` : row.ownerType === "personal" ? `input.subject.principal.type == "user"` : undefined,
+    row.ownerType === "organization" ? undefined : `input.subject.principal.id == ${canonicalJson(row.ownerId)}`,
+    row.target.kind === "action" ? `input.action.id == ${canonicalJson(row.target.value)}` : row.target.kind === "service" ? `input.action.service == ${canonicalJson(row.target.value)}` : `input.action.riskLevel == ${canonicalJson(row.target.value)}`,
+    row.appliesIn === "any" ? undefined : `applies_in == ${canonicalJson(row.appliesIn)}`,
+    row.expiresAtMs === null ? undefined : `input.context.evaluationTimeMs < ${row.expiresAtMs}`,
+    ...row.matchers.map((matcher, matcherIndex) => matcherCondition(matcher, rowIndex, matcherIndex)),
+  ];
+  return conditions.filter((condition): condition is string => condition !== undefined);
+}
+
+function matcherCondition(matcher: NormalizedRule["matchers"][number], rowIndex: number, matcherIndex: number): string {
+  const path = regoPath(matcher.segments);
+  const value = (): string => canonicalJson(matcher.value);
+  switch (matcher.op) {
+    case "exists": return `path_${rowIndex}_${matcherIndex}_found`;
+    case "not_exists": return `not path_${rowIndex}_${matcherIndex}_found`;
+    case "eq": return `${path} == ${value()}`;
+    case "neq": return `not ${path} == ${value()}`;
+    case "regex": return `is_string(${path}); regex.match(${value()}, ${path})`;
+    case "in": return `${path} in ${value()}`;
+    case "not_in": return `not ${path} in ${value()}`;
+    case "gt": return `is_number(${path}); ${path} > ${value()}`;
+    case "gte": return `is_number(${path}); ${path} >= ${value()}`;
+    case "lt": return `is_number(${path}); ${path} < ${value()}`;
+    case "lte": return `is_number(${path}); ${path} <= ${value()}`;
+  }
+}
+
+function regoPath(segments: readonly (string | number)[]): string {
+  return `params${segments.map((segment) => `[${canonicalJson(segment)}]`).join("")}`;
+}
+
+function regoRow(row: NormalizedRule): string {
+  return canonicalJson({ id: row.id, mode: row.mode, modeRank: row.modeRank, source: row.ownerType });
 }
 
 function canonicalJson(value: unknown): string {
@@ -492,6 +648,24 @@ function compareCanonicalPrecedence(a: { precedenceRank?: number; id: string }, 
 function utf8Compare(a: string, b: string): number { return Buffer.compare(Buffer.from(a), Buffer.from(b)); }
 function utf16Compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function targetKind(row: CurrentPolicyTargetV1): string { return row.actionId !== undefined ? `action:${row.actionId}` : row.service !== undefined ? `service:${row.service}` : `risk:${row.riskLevel}`; }
+function rulesCanTie(
+  left: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number] | CurrentPersonalOverrideV1,
+  right: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number] | CurrentPersonalOverrideV1,
+): boolean {
+  const leftOwner = "principalId" in left ? `${left.principalType}:${left.principalId}` : `personal:${left.userId}`;
+  const rightOwner = "principalId" in right ? `${right.principalType}:${right.principalId}` : `personal:${right.userId}`;
+  const leftScope = "appliesIn" in left ? left.appliesIn : "any";
+  const rightScope = "appliesIn" in right ? right.appliesIn : "any";
+  return leftOwner === rightOwner
+    && targetKind(left) === targetKind(right)
+    && left.mode === right.mode
+    && left.updatedAtMs === right.updatedAtMs
+    && (leftScope === "any" || rightScope === "any" || leftScope === rightScope)
+    && !matchersAreDisjoint(left.paramMatchers, right.paramMatchers);
+}
+function matchersAreDisjoint(left: readonly CurrentPolicyMatcherV1[], right: readonly CurrentPolicyMatcherV1[]): boolean {
+  return left.some((a) => a.op === "eq" && right.some((b) => b.op === "eq" && a.path === b.path && canonicalJson(a.value) !== canonicalJson(b.value)));
+}
 function validateMode(id: string, mode: string): void { if (!MODES.has(mode)) fail("unknown_mode", `Rule ${id} has an unknown mode.`); }
 function validateService(service: string): void { if (!SERVICE_ID.test(service)) fail("invalid_service", `Service ID ${JSON.stringify(service)} is malformed.`); }
 function validateAction(service: string, action: string): void { validateService(service); const prefix = `${service}.`; if (!action.startsWith(prefix) || !LOCAL_ACTION_ID.test(action.slice(prefix.length))) fail("invalid_action", `Action ID ${JSON.stringify(action)} is not qualified by service ${JSON.stringify(service)}.`); }
@@ -501,9 +675,8 @@ function nonBlank(value: string | undefined): value is string { return value !==
 function unique(seen: Set<string>, id: string): void { nonEmpty("id", id); if (seen.has(id)) fail("duplicate_id", `Source identity ${id} is duplicated.`); seen.add(id); }
 function fail(code: string, message: string): never { throw new CurrentPolicySourceError(code, message); }
 
-// This fixed kernel keeps source review separate from generated canonical data.
-// It uses only pure capability-profile v1 built-ins and explicit evaluation facts.
-export const CURRENT_ACTION_POLICY_REGO = `package valet.authz
+// The fixed kernel validates input facts. Generated candidates use direct paths.
+const CURRENT_ACTION_POLICY_PREFIX = `package valet.authz
 import rego.v1
 
 policy := data.valet.authz
@@ -521,7 +694,6 @@ input_valid if {
   is_string(input.action.service)
   is_string(input.action.id)
   startswith(input.action.id, concat("", [input.action.service, "."]))
-  is_string(input.action.riskLevel)
   input.action.riskLevel in {"low", "medium", "high", "critical"}
   is_number(input.context.evaluationTimeMs)
   supported_kind
@@ -562,82 +734,29 @@ scope_matches(fact) if {
   fact.workflowExecutionId == input.subject.workflowExecutionId
   object.get(fact, "sessionId", null) == null
 }
+`;
 
-target_matches(rule) if { rule.target.kind == "action"; rule.target.value == input.action.id }
-target_matches(rule) if { rule.target.kind == "service"; rule.target.value == input.action.service }
-target_matches(rule) if { rule.target.kind == "risk"; rule.target.value == input.action.riskLevel }
+const CURRENT_ACTION_POLICY_SUFFIX = `
+strict_winner(org, team) := team if { org != null; team != null; team.modeRank >= org.modeRank }
+else := org if { org != null }
+else := team if { team != null }
+else := null if { true }
 
-rule_live(rule) if {
-  object.get(rule, "revokedAtMs", null) == null
-  expires := object.get(rule, "expiresAtMs", null)
-  expires == null
+base_winner(strict, plugin, risk, bundle) := strict if { strict != null }
+else := plugin if { plugin != null }
+else := risk if { risk != null }
+else := bundle if { true }
+
+static_layers := layers if {
+  org := org_winner
+  team := team_winner
+  override := override_winner
+  plugin := plugin_winner
+  risk := risk_winner
+  strict := strict_winner(org, team)
+  base := base_winner(strict, plugin, risk, bundle_winner)
+  layers := {"org":org,"team":team,"override":override,"base":base}
 }
-rule_live(rule) if {
-  object.get(rule, "revokedAtMs", null) == null
-  rule.expiresAtMs > input.context.evaluationTimeMs
-}
-
-path_result(value, segments) := {"found":true,"value":value} if { count(segments) == 0 }
-path_result(value, segments) := result if {
-  count(segments) > 0
-  segment := segments[0]
-  rest := array.slice(segments, 1, count(segments))
-  is_string(segment)
-  is_object(value)
-  next := value[segment]
-  result := path_result(next, rest)
-}
-path_result(value, segments) := result if {
-  count(segments) > 0
-  segment := segments[0]
-  rest := array.slice(segments, 1, count(segments))
-  is_number(segment)
-  is_array(value)
-  segment >= 0
-  segment < count(value)
-  next := value[segment]
-  result := path_result(next, rest)
-}
-
-matcher_found(matcher) if { path_result(params, matcher.segments) }
-matcher_value(matcher) := value if { result := path_result(params, matcher.segments); value := result.value }
-
-matcher_rule_matches("__never__") if { false }
-# GENERATED_MATCHER_RULES
-
-rule_matches(rule) if {
-  target_matches(rule)
-  rule_live(rule)
-  rule.appliesIn in {"any", applies_in}
-  rule.matcherCount == 0
-}
-rule_matches(rule) if {
-  target_matches(rule)
-  rule_live(rule)
-  rule.appliesIn in {"any", applies_in}
-  rule.matcherCount > 0
-  matcher_rule_matches(rule.id)
-}
-
-org_matches := [rule | rule := policy.organizationRules[_]; rule_matches(rule)]
-team_matches := [rule | rule := policy.teamRules[_]; input.subject.principal.type == "team"; rule.ownerId == input.subject.principal.id; rule_matches(rule)]
-override_matches := [rule | rule := policy.personalOverrides[_]; input.subject.principal.type == "user"; rule.ownerId == input.subject.principal.id; rule_matches(rule)]
-
-org_winner := org_matches[0] if { count(org_matches) > 0 }
-team_winner := team_matches[0] if { count(team_matches) > 0 }
-override_winner := override_matches[0] if { count(override_matches) > 0 }
-
-strict_winner := team_winner if { not org_winner; team_winner }
-strict_winner := org_winner if { org_winner; not team_winner }
-strict_winner := team_winner if { org_winner; team_winner; team_winner.modeRank >= org_winner.modeRank }
-strict_winner := org_winner if { org_winner; team_winner; org_winner.modeRank > team_winner.modeRank }
-
-plugin_winner := row if { row := policy.pluginDefaults[_]; row.service == input.action.service }
-risk_winner := row if { row := policy.riskDefaults[_]; row.riskLevel == input.action.riskLevel }
-base_winner := strict_winner if { strict_winner }
-base_winner := plugin_winner if { not strict_winner; plugin_winner }
-base_winner := risk_winner if { not strict_winner; not plugin_winner; risk_winner }
-base_winner := {"id":policy.bundleDefault.id,"mode":policy.bundleDefault.actionEffect} if { not strict_winner; not plugin_winner; not risk_winner }
 
 grant_ids := [grant.id | grant := dynamic.grants[_]; grant.policyKey == input.action.id; grant.service == input.action.service; grant.actionId == input.action.id; grant.riskLevel == input.action.riskLevel; grant.revokedAtMs == null; grant.createdAtMs <= input.context.evaluationTimeMs; grant.expiresAtMs > input.context.evaluationTimeMs; scope_matches(grant)]
 approval_ids := [approval.resolutionId | approval := dynamic.approvals[_]; approval.verdict == "approved"; approval.resolvedAtMs <= input.context.evaluationTimeMs; approval.expiresAtMs > input.context.evaluationTimeMs; approval.requestSubjectDigest == input.context.requestSubjectDigest; approval.originalDecisionDigest == input.context.originalDecisionDigest; scope_matches(approval)]
@@ -648,18 +767,19 @@ result(effect, reason, ids) := object.union({"effect":effect,"reasonCode":reason
 approval_field(effect) := {"approvalRequirement":approval_requirement} if { effect == "require_approval" }
 approval_field(effect) := {} if { effect != "require_approval" }
 
-decision := result("deny", "unsupported_authorization_context", [policy.bundleDefault.id]) if { not action_context }
+resolve(layers, ids) := result("deny", "organization_policy", [layers.org.id]) if { layers.org.mode == "deny" }
+else := result("deny", "team_policy", [layers.team.id]) if { layers.team.mode == "deny" }
+else := result("allow", "dynamic_grant", array.concat([layers.base.id], ids)) if { count(ids) > 0 }
+else := result(layers.override.mode, "personal_override", [layers.base.id, layers.override.id]) if { layers.override != null }
+else := result(layers.base.mode, concat("", [layers.base.source, "_", "policy"]), [layers.base.id]) if { layers.base.source in {"organization", "team"} }
+else := result(layers.base.mode, concat("", [layers.base.source, "_", "default"]), [layers.base.id]) if { layers.base.source in {"plugin", "risk", "bundle"} }
+
+decision := result("deny", "unsupported_authorization_context", [bundle_winner.id]) if { not action_context }
 else := result("deny", "policy_input_invalid", []) if { not input_valid }
 else := result("deny", "malformed_dynamic_facts", []) if { not dynamic_valid }
-else := result(org_winner.mode, "organization_policy", [org_winner.id]) if { org_winner.mode == "deny" }
-else := result(team_winner.mode, "team_policy", [team_winner.id]) if { team_winner.mode == "deny" }
-else := result("allow", "dynamic_grant", array.concat([base_winner.id], dynamic_ids)) if { count(dynamic_ids) > 0 }
-else := result(override_winner.mode, "personal_override", [base_winner.id, override_winner.id]) if { override_winner }
-else := result(base_winner.mode, base_reason, [base_winner.id]) if { base_reason := base_reason_for(base_winner) }
-
-base_reason_for(row) := "team_policy" if { row.ownerType == "team" }
-base_reason_for(row) := "organization_policy" if { row.ownerType == "organization" }
-base_reason_for(row) := "plugin_default" if { row.service }
-base_reason_for(row) := "risk_default" if { row.riskLevel }
-base_reason_for(row) := "bundle_default" if { row.id == policy.bundleDefault.id }
+else := resolved if {
+  layers := static_layers
+  ids := dynamic_ids
+  resolved := resolve(layers, ids)
+}
 `;

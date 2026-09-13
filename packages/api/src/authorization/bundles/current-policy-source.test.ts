@@ -113,7 +113,7 @@ describe("current policy source builder", () => {
       matchedRuleIds: ["risk:high"],
       obligations: [],
       redactions: [],
-      approvalRequirement: { tier: "human", approverType: "org", approverId: null, replay: "once", expiresAtMs: null },
+      approvalRequirement: { tier: "human", approverType: "org", replay: "once" },
     });
     const unsupported = await evaluate(snapshot(), request({ kind: "route.access" }));
     expect(unsupported.decision).toMatchObject({ effect: "deny", reasonCode: "unsupported_authorization_context" });
