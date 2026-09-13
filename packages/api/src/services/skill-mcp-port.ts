@@ -3,7 +3,7 @@ import type { EngineHost } from "../engine/host.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { canViewAssistantOwner, assistantOwner } from "../assistants/access.js";
-import { loadAssistantBySessionId } from "../assistants/service.js";
+import { loadAssistant } from "../assistants/service.js";
 import { isOrgMember } from "./org.js";
 
 const ORCHESTRATOR_UNAVAILABLE =
@@ -43,7 +43,7 @@ export class SkillMcpPort implements McpToolPort {
 
   async call(operation: string, args: Record<string, unknown>): Promise<McpToolResult> {
     const orchestratorId = stringArg(args, "orchestratorId");
-    const assistant = await loadAssistantBySessionId(this.db, orchestratorId);
+    const assistant = await loadAssistant(this.db, orchestratorId);
     if (
       !assistant ||
       assistant.archivedAt !== null ||

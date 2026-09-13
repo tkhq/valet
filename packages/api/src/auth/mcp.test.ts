@@ -400,6 +400,7 @@ describe("MCP endpoint", () => {
   });
 });
 
+
 describe("MCP skill tools", () => {
   it("uses public assistant ids, live access, and the production skill assembly", async () => {
     api = await bootTestApi({ auth: true, plugins: [valetPlugin, gatedSkillPlugin] });

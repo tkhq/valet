@@ -10,7 +10,7 @@ export const valetMcpTools: McpToolDef[] = [
     name: "list_skills",
     description: "List the skills selected for an orchestrator that you can access.",
     inputSchema: {
-      orchestratorId: z.string().trim().min(1).max(256).describe("The orchestrator session id."),
+      orchestratorId: z.string().trim().min(1).max(256).describe("The orchestrator ID from orchestrator_list."),
     },
     readOnly: true,
     execute: viaPort("list_skills"),
@@ -19,7 +19,7 @@ export const valetMcpTools: McpToolDef[] = [
     name: "skill",
     description: "Read one skill selected for an orchestrator that you can access.",
     inputSchema: {
-      orchestratorId: z.string().trim().min(1).max(256).describe("The orchestrator session id."),
+      orchestratorId: z.string().trim().min(1).max(256).describe("The orchestrator ID from orchestrator_list."),
       name: z.string().trim().min(1).max(256).describe("The skill name from list_skills."),
     },
     readOnly: true,
