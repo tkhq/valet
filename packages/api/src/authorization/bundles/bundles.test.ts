@@ -40,6 +40,22 @@ describe("source bundle host", () => {
     expect(await storage.getActive("org-1")).toEqual(first);
   });
 
+  it("loads a maximum-size Rego module outside the evaluation deadline", async () => {
+    const prefix = `package valet.authz\nimport rego.v1\ndecision := {"effect":"allow","reasonCode":"local_valet_test","matchedRuleIds":["local.test"],"obligations":[],"redactions":[]}\n`;
+    const maxPolicy = `${prefix}${"#".repeat(1024 * 1024 - prefix.length - 1)}\n`;
+    const identity = await host.publish(testBundle(maxPolicy));
+    await host.activate("org-1", undefined, identity.sourceBundleDigest);
+    const loaded = await host.loadActive("org-1");
+    await expect(
+      runtime.run({
+        operation: "evaluate",
+        sourceBundleDigest: loaded.identity.sourceBundleDigest,
+        input: {},
+        explain: "off",
+      }),
+    ).resolves.toMatchObject({ decision: { effect: "allow" } });
+  }, 30_000);
+
   it("rejects corruption before publication", async () => {
     const bundle = testBundle();
     const corrupt = {

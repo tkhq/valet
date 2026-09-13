@@ -43,13 +43,14 @@ export class SourceBundleHost {
     if (bundle === undefined) {
       throw new LocalEvaluatorError("bundle_not_found", `Policy bundle ${sourceBundleDigest} was not found.`);
     }
-    const identity = await this.validate(bundle);
-    if (identity.sourceBundleDigest !== sourceBundleDigest) {
+    const validated = await this.validate(bundle);
+    if (validated.sourceBundleDigest !== sourceBundleDigest) {
       throw new LocalEvaluatorError(
         "invalid_bundle_or_evaluation",
-        `Stored policy bundle ${sourceBundleDigest} revalidated as ${identity.sourceBundleDigest}.`,
+        `Stored policy bundle ${sourceBundleDigest} revalidated as ${validated.sourceBundleDigest}.`,
       );
     }
+    const identity = await this.runtime.loadBundle(sourceBundleDigest, bundle);
     return { bundle, identity };
   }
 

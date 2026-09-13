@@ -15,9 +15,9 @@ decision := {
 const DATA = "{}";
 const PROVENANCE = '{"entries":[]}';
 
-export function testBundle(policy = POLICY): CanonicalSourceBundle {
+export function testBundle(policy = POLICY, data = DATA): CanonicalSourceBundle {
   const files = [
-    file("data/policy.json", "application/json", DATA),
+    file("data/policy.json", "application/json", data),
     file("policies/main.rego", "application/vnd.valet.rego.v1", policy),
     file("provenance/map.json", "application/vnd.valet.policy-provenance.v1+json", PROVENANCE),
   ];

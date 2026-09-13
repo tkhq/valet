@@ -2,14 +2,7 @@ import { requestSubjectDigest, type AuthorizationRequest, type EvaluatorIdentity
 import type { AuthorizationEvaluator } from "../contracts.js";
 import type { SourceBundleHost } from "../bundles/host.js";
 import { LocalEvaluatorError } from "./errors.js";
-import { MAX_ENGINE_MEMORY_BYTES, MAX_WALL_TIME_MS, type WasmPolicyRuntime } from "./wasm-runtime.js";
-
-interface RuntimeIdentity {
-  readonly engineDigest: string;
-  readonly target: "wasm32-unknown-unknown-worker";
-  readonly maxWallTimeMs: number;
-  readonly maxEngineMemoryBytes: number;
-}
+import { type RuntimeIdentity, type WasmPolicyRuntime } from "./wasm-runtime.js";
 
 interface RuntimeEvaluation {
   readonly sourceBundleDigest: string;
@@ -32,22 +25,14 @@ export class LocalValetEvaluator implements AuthorizationEvaluator {
   }
 
   static async create(host: SourceBundleHost, runtime: WasmPolicyRuntime): Promise<LocalValetEvaluator> {
-    const identity = await runtime.run<RuntimeIdentity>({ operation: "identity" });
-    if (
-      identity.target !== "wasm32-unknown-unknown-worker" ||
-      identity.maxWallTimeMs !== MAX_WALL_TIME_MS ||
-      identity.maxEngineMemoryBytes !== MAX_ENGINE_MEMORY_BYTES
-    ) {
-      throw new LocalEvaluatorError("worker_failure", "The local policy target does not match its containment contract.");
-    }
-    return new LocalValetEvaluator(host, runtime, identity);
+    return new LocalValetEvaluator(host, runtime, await runtime.identity());
   }
 
   async evaluate(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> {
     const loaded = await this.host.loadActive(request.subject.orgId);
     const result = await this.runtime.run<RuntimeEvaluation>({
       operation: "evaluate",
-      bundle: loaded.bundle,
+      sourceBundleDigest: loaded.identity.sourceBundleDigest,
       input: request,
       explain: "off",
     });
