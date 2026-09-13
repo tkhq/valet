@@ -155,6 +155,45 @@ fn declarations_are_package_scoped_and_cannot_shadow_builtins() {
 }
 
 #[test]
+fn package_qualified_builtin_declarations_collide() {
+    let decoy = "package time\nimport rego.v1\nnow_ns(x) := 0\n";
+    for (imports, call) in [
+        ("", "time.now_ns(1)"),
+        ("", "data.time.now_ns(1)"),
+        ("import data.time as clock\n", "clock.now_ns(1)"),
+    ] {
+        let policy = format!(
+            "package valet.authz\nimport rego.v1\n{imports}decision := {DECISION} if {call} == 0\n"
+        );
+        assert!(matches!(
+            load(vec![module("authz.rego", &policy), module("time.rego", decoy)]),
+            Err(EngineError::BuiltinDeclarationCollision(name)) if name == "time.now_ns"
+        ));
+    }
+}
+
+#[test]
+fn bracket_callable_syntax_fails_validation() {
+    for (imports, call, path) in [
+        ("", "time[\"now_ns\"](1)", "time"),
+        ("", "data.time[\"now_ns\"](1)", "data.time"),
+        (
+            "import data.time as clock\n",
+            "clock[\"now_ns\"](1)",
+            "clock",
+        ),
+    ] {
+        let policy = format!(
+            "package valet.authz\nimport rego.v1\n{imports}decision := {DECISION} if {call} == 0\n"
+        );
+        assert!(matches!(
+            load(vec![module("bracket.rego", &policy)]),
+            Err(EngineError::UnsupportedCallableSyntax(name)) if name == path
+        ));
+    }
+}
+
+#[test]
 fn same_package_and_dotted_ref_head_functions_are_accepted() {
     let helpers = r#"
 package valet.authz

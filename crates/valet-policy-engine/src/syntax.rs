@@ -11,6 +11,8 @@ enum Token {
     RightParen,
     LeftBrace,
     RightBrace,
+    LeftBracket,
+    RightBracket,
     Newline,
     Other,
 }
@@ -48,11 +50,11 @@ pub(crate) fn analyze(
 
     while index < tokens.len() {
         match &tokens[index] {
-            Token::LeftBrace | Token::LeftParen => {
+            Token::LeftBrace | Token::LeftBracket | Token::LeftParen => {
                 nesting_depth = nesting_depth.saturating_add(1);
                 max_nesting_depth = max_nesting_depth.max(nesting_depth);
             }
-            Token::RightBrace | Token::RightParen => {
+            Token::RightBrace | Token::RightBracket | Token::RightParen => {
                 nesting_depth = nesting_depth.saturating_sub(1);
             }
             Token::Name(name) => {
@@ -84,6 +86,12 @@ pub(crate) fn analyze(
                 }
 
                 let call_end = skip_newlines(&tokens, next);
+                if let Some(after_bracket) = bracket_end(&tokens, call_end) {
+                    let after_bracket = skip_newlines(&tokens, after_bracket);
+                    if matches!(tokens.get(after_bracket), Some(Token::LeftParen)) {
+                        return Err(EngineError::UnsupportedCallableSyntax(path));
+                    }
+                }
                 let followed_by_paren = matches!(tokens.get(call_end), Some(Token::LeftParen));
                 let declaration = nesting_depth == 0 && line_start && followed_by_paren;
                 if declaration {
@@ -145,14 +153,18 @@ pub(crate) fn validate_calls(
     for analysis in analyses {
         let package = analysis.package.as_deref().unwrap_or_default();
         for function in &analysis.declared_functions {
-            if builtin_names.contains(function.as_str()) {
-                return Err(EngineError::BuiltinDeclarationCollision(function.clone()));
+            let qualified = format!("{package}.{function}");
+            let collision = [function.as_str(), qualified.as_str()]
+                .into_iter()
+                .find(|name| builtin_names.contains(name));
+            if let Some(name) = collision {
+                return Err(EngineError::BuiltinDeclarationCollision(name.to_owned()));
             }
             declarations_by_package
                 .entry(package)
                 .or_default()
                 .insert(function);
-            qualified_declarations.insert(format!("{package}.{function}"));
+            qualified_declarations.insert(qualified);
             qualified_declarations.insert(format!("data.{package}.{function}"));
         }
     }
@@ -198,6 +210,26 @@ fn skip_newlines(tokens: &[Token], mut index: usize) -> usize {
         index = index.saturating_add(1);
     }
     index
+}
+
+fn bracket_end(tokens: &[Token], start: usize) -> Option<usize> {
+    if !matches!(tokens.get(start), Some(Token::LeftBracket)) {
+        return None;
+    }
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token {
+            Token::LeftBracket => depth = depth.saturating_add(1),
+            Token::RightBracket => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index.saturating_add(1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn import_alias(tokens: &[Token], index: usize, default_alias: String) -> (String, usize) {
@@ -273,12 +305,20 @@ fn tokenize(source: &str) -> Vec<Token> {
                 tokens.push(Token::RightParen);
                 index = index.saturating_add(1);
             }
-            '{' | '[' => {
+            '{' => {
                 tokens.push(Token::LeftBrace);
                 index = index.saturating_add(1);
             }
-            '}' | ']' => {
+            '}' => {
                 tokens.push(Token::RightBrace);
+                index = index.saturating_add(1);
+            }
+            '[' => {
+                tokens.push(Token::LeftBracket);
+                index = index.saturating_add(1);
+            }
+            ']' => {
+                tokens.push(Token::RightBracket);
                 index = index.saturating_add(1);
             }
             character if character == '_' || character.is_ascii_alphabetic() => {
