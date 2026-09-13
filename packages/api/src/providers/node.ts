@@ -1,3 +1,5 @@
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { configureCanonicalOrganizationProvisioner } from "../services/org.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
@@ -261,22 +263,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   const db = buildAppDb(source);
 
-  // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
-  // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
-  // `authConfig` resolves) — see `NodeProviderOpts.seedLocalIdentity`.
-  if (opts.seedLocalIdentity ?? true) {
-    const now = Date.now();
-    await db.insert(orgs).values({ id: LOCAL_ORG.id, name: LOCAL_ORG.name, createdAt: now }).onConflictDoNothing();
-    await db
-      .insert(users)
-      .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
-      .onConflictDoNothing();
-    await db
-      .insert(orgMembers)
-      .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
-      .onConflictDoNothing();
-  }
-
   // Store tracing (distributed tracing): only when the OTLP SDK will be
   // registered — the proxy is pure overhead otherwise. `store.*` spans time
   // every Postgres round trip inside the request/submission trees.
@@ -390,6 +376,26 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
         [workflowsActions, skillsActions, assistantsActions],
       ]);
+
+  const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+  configureCanonicalOrganizationProvisioner((id, name) => canonicalPolicyManager.provisionOrganization(id, name));
+
+  // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
+  // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
+  // `authConfig` resolves) — see `NodeProviderOpts.seedLocalIdentity`.
+  if (opts.seedLocalIdentity ?? true) {
+    const now = Date.now();
+    const existingOrg = await db.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, LOCAL_ORG.id)).limit(1);
+    if (!existingOrg[0]) await canonicalPolicyManager.provisionOrganization(LOCAL_ORG.id, LOCAL_ORG.name);
+    await db
+      .insert(users)
+      .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
+      .onConflictDoNothing();
+    await db
+      .insert(orgMembers)
+      .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
+      .onConflictDoNothing();
+  }
 
   // Declared plugin-store expression indexes (plugin-store design). Idempotent
   // `CREATE INDEX IF NOT EXISTS`, run once per boot after the plugin set is
@@ -807,6 +813,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   return {
     db,
+    canonicalPolicyManager,
     blobs,
     encryptionKey: opts.encryptionKey,
     engineStore,

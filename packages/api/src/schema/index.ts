@@ -1576,6 +1576,23 @@ export const actionInvocations = pgTable(
 
 
 
+// Canonical source bundles are global immutable content. Active pointers are tenant-owned.
+export const policySourceBundles = pgTable("policy_source_bundles", {
+  digest: text("digest").primaryKey(),
+  bundle: jsonb("bundle").$type<CanonicalSourceBundle>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const policyActiveBundles = pgTable(
+  "policy_active_bundles",
+  {
+    orgId: text("org_id").primaryKey().references(() => orgs.id),
+    digest: text("digest").notNull().references(() => policySourceBundles.digest),
+    generation: integer("generation").notNull(),
+    activatedAt: bigint("activated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [check("policy_active_bundles_generation", sql`${t.generation}>0`), index("policy_active_bundles_digest").on(t.digest)],
+);
+
 // Inert canonical policy authoring. These rows never select an active bundle.
 export const policyAuthoringDocuments = pgTable(
   "policy_authoring_documents",

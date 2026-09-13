@@ -13,6 +13,10 @@ export class SourceBundleHost {
     private readonly runtime: WasmPolicyRuntime,
   ) {}
 
+  activePointer(organizationId: string): Promise<ActiveBundlePointer | undefined> {
+    return this.storage.getActive(organizationId);
+  }
+
   async publish(bundle: CanonicalSourceBundle): Promise<ValidatedBundleIdentity> {
     const identity = await this.validate(bundle);
     await this.storage.putIfAbsent(identity.sourceBundleDigest, bundle);

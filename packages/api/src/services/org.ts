@@ -66,6 +66,9 @@ export const MEMBER_NOT_FOUND_ERROR = "member not found";
  * When `sourceService` is provided, seeds the default base sources for a
  * newly-created org (best-effort — never fails org creation on seed error).
  */
+let canonicalOrganizationProvisioner: ((id: string, name?: string) => Promise<{ id: string }>) | undefined;
+export function configureCanonicalOrganizationProvisioner(provisioner: (id: string, name?: string) => Promise<{ id: string }>): void { canonicalOrganizationProvisioner = provisioner; }
+
 export async function ensureOrg(
   db: AppQueryable,
   sourceService?: SourceService,
@@ -75,7 +78,8 @@ export async function ensureOrg(
   if (existing) return existing;
 
   const id = `org_${randomUUID()}`;
-  await db.insert(orgs).values({ id, name: "My organization", createdAt: Date.now() });
+  if (!canonicalOrganizationProvisioner) throw new Error("Canonical policy manager is not ready. Retry after server startup.");
+  await canonicalOrganizationProvisioner(id, "My organization");
 
   if (sourceService) {
     try {

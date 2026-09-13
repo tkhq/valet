@@ -219,6 +219,9 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "policy source bundles table", probe: { kind: "table", table: "policy_source_bundles" }, sql: 'CREATE TABLE IF NOT EXISTS "policy_source_bundles" ("digest" text PRIMARY KEY NOT NULL, "bundle" jsonb NOT NULL, "created_at" bigint NOT NULL)' },
+  { describe: "policy active bundles table", probe: { kind: "table", table: "policy_active_bundles" }, sql: 'CREATE TABLE IF NOT EXISTS "policy_active_bundles" ("org_id" text PRIMARY KEY NOT NULL REFERENCES "orgs"("id"), "digest" text NOT NULL REFERENCES "policy_source_bundles"("digest"), "generation" integer NOT NULL, "activated_at" bigint NOT NULL, CONSTRAINT "policy_active_bundles_generation" CHECK ("generation">0))' },
+  { describe: "policy active bundles digest index", probe: { kind: "index", index: "policy_active_bundles_digest" }, sql: 'CREATE INDEX IF NOT EXISTS "policy_active_bundles_digest" ON "policy_active_bundles" ("digest")' },
   {
     describe: "authorization decisions table",
     probe: { kind: "table", table: "authorization_decisions" },

@@ -1588,3 +1588,16 @@ CREATE TABLE IF NOT EXISTS "policy_authoring_audit" (
 CREATE UNIQUE INDEX IF NOT EXISTS "policy_authoring_audit_idempotency" ON "policy_authoring_audit" ("org_id","scope_key","actor_id","operation","document_id","idempotency_key");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "policy_authoring_audit_document" ON "policy_authoring_audit" ("org_id","scope_key","document_id","created_at");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_source_bundles" (
+  "digest" text PRIMARY KEY NOT NULL, "bundle" jsonb NOT NULL, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_active_bundles" (
+  "org_id" text PRIMARY KEY NOT NULL REFERENCES "orgs"("id"),
+  "digest" text NOT NULL REFERENCES "policy_source_bundles"("digest"),
+  "generation" integer NOT NULL, "activated_at" bigint NOT NULL,
+  CONSTRAINT "policy_active_bundles_generation" CHECK ("generation">0)
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "policy_active_bundles_digest" ON "policy_active_bundles" ("digest");

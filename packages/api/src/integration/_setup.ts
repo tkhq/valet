@@ -1,3 +1,4 @@
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 /**
  * Shared boot harness for API integration tests.
  *
@@ -561,8 +562,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),
   });
 
+  const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
   const providers: Providers = {
     db,
+    canonicalPolicyManager,
     blobs,
     encryptionKey: "test-key",
     engineStore,
@@ -623,6 +626,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       autoTitleHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
+      await canonicalPolicyManager.close();
       rmSync(blobsRoot, { recursive: true, force: true });
       if (opts.auth) {
         if (prevAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
