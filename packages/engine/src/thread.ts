@@ -439,12 +439,16 @@ export class Thread {
   private consecutiveCompactionFailures = 0;
   /** One owner for any manual, proactive, or reactive compaction on this thread. */
   private compactionInFlight: Promise<CompactionOutcome> | null = null;
+  /** True until owned work enters its synchronous completion section. */
+  private compactionJoinable = false;
   /** Shared lifecycle start for the current pass. Manual joiners can create it. */
   private compactionLifecycleStart: Promise<void> | null = null;
   /** Snapshot state clears before compaction_end is published. */
   private compactionSnapshotActive = false;
   /** True when the current pass owns or gained a manual command request. */
   private compactionManualRequested = false;
+  /** Errors already published for a manual join must not be published again. */
+  private readonly reportedCompactionErrors = new WeakSet<object>();
   /**
    * Content hashes from the model's file reads, backing the
    * read-before-write staleness gate (TKAI-318). In-memory only: after a
@@ -3915,10 +3919,12 @@ export class Thread {
         try {
           outcome = await this.compactThread({ mode: "reactive" });
         } catch (err) {
-          this.emitError(
-            "compaction_failed",
-            err instanceof Error ? err.message : String(err),
-          );
+          if (!this.wasCompactionFailureReported(err)) {
+            this.emitError(
+              "compaction_failed",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
           return;
         }
         if (outcome === "insufficient") {
@@ -4083,11 +4089,21 @@ export class Thread {
         this.bumpCompactionFailureBreaker();
       }
     } catch (err) {
-      this.recordProactiveCompactionFailure(
-        "compaction_failed",
-        err instanceof Error ? err.message : String(err),
-      );
+      if (this.wasCompactionFailureReported(err)) {
+        this.bumpCompactionFailureBreaker();
+      } else {
+        this.recordProactiveCompactionFailure(
+          "compaction_failed",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
+  }
+
+  private wasCompactionFailureReported(err: unknown): boolean {
+    return ((typeof err === "object" && err !== null) || typeof err === "function")
+      ? this.reportedCompactionErrors.has(err)
+      : false;
   }
 
   private shouldCompactProactive(): boolean {
@@ -4153,16 +4169,29 @@ export class Thread {
     instructions?: string;
     autoContinue?: false;
   }): Promise<{ outcome: CompactionOutcome; joined: boolean }> {
-    if (this.compactionInFlight) {
+    const existing = this.compactionInFlight;
+    if (existing) {
+      if (!this.compactionJoinable) {
+        // Owned work already captured its lifecycle for completion. Wait for
+        // stale promise cleanup, then give this request a fresh owned pass.
+        try {
+          await existing;
+        } catch {
+          // This request did not join that failure.
+        }
+        if (this.compactionInFlight === existing) this.compactionInFlight = null;
+        return this.compactThreadWithStatus(opts);
+      }
       // A nonmanual owner can exit before its normal step-3 start. A manual
       // join must still create one balanced lifecycle for optimistic clients.
       if (opts.mode === "manual") {
         this.compactionManualRequested = true;
         await this.startCompactionLifecycle();
       }
-      return { outcome: await this.compactionInFlight, joined: true };
+      return { outcome: await existing, joined: true };
     }
 
+    this.compactionJoinable = true;
     this.compactionLifecycleStart = null;
     this.compactionManualRequested = opts.mode === "manual";
     this.compactionSnapshotActive = false;
@@ -4217,9 +4246,15 @@ export class Thread {
           "compaction_failed",
           `Compaction failed: ${reason}. Retry /compact, or start a new thread if the failure continues.`,
         );
+        if ((typeof err === "object" && err !== null) || typeof err === "function") {
+          this.reportedCompactionErrors.add(err);
+        }
       }
       throw err;
     } finally {
+      // Close joining before this pass captures lifecycle state. A caller
+      // after this point starts a new pass instead of creating an orphan start.
+      this.compactionJoinable = false;
       // Report inactive before end publication. A handshake after replayed
       // compaction_end must not restore stale active state from this promise.
       this.compactionSnapshotActive = false;

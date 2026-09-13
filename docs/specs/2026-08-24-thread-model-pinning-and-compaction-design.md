@@ -118,10 +118,11 @@ assistant message.
 One per-thread promise owns manual, proactive, and reactive compaction.
 Concurrent callers join that promise. They do not start another summarizer or
 DAG rewrite. A manual join starts the shared lifecycle if the nonmanual owner
-has not started it. The owner emits one matching end event for all joiners.
-`compactThread` still accepts `instructions`; only the first owner supplies
-instructions. A joined command result states that the request did not change the existing
-pass instructions.
+has not started it. The owner closes joining before it captures completion
+state. A later manual request starts a new pass. The owner emits one matching
+end event for all joiners. `compactThread` still accepts `instructions`;
+only the first owner supplies instructions. A joined command result states
+that the request did not change the existing pass instructions.
 
 The web client sets the target thread's compacting state before it sends
 `/compact`. A failed POST clears that state. Durable `compaction_start`,
@@ -131,7 +132,11 @@ corrects reconnects whose resume offset is already past the start event. The
 engine marks the snapshot inactive before it publishes the end event. A
 snapshot after replayed completion cannot restore stale active state. Durable
 `command_result` frames append the result after the end event, so the result
-does not depend on the earlier completion refetch.
+does not depend on the earlier completion refetch. The web store marks that
+message as durable. It keeps the message until a REST snapshot confirms the
+same message id. If a manual request joins a failed automatic pass, the engine
+marks the shared error as reported. The automatic caller updates its circuit
+breaker without emitting a duplicate `compaction_failed` event.
 
 ### 7. Compaction crosses the wire
 

@@ -47,7 +47,7 @@ export type AgentStatus =
  */
 export interface StreamMessage extends Message {
   /** Client-only rows stay until REST confirms the same message or queue item. */
-  persistence?: "optimistic" | "streaming";
+  persistence?: "optimistic" | "streaming" | "durable";
   settledOutcome?: SettledOutcome;
   /**
    * Reason for a non-clean `settledOutcome`, taken from the wire event's
@@ -692,7 +692,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // The result is persisted after compaction_end. Append its durable wire
       // message directly so the earlier completion refetch cannot miss it.
       if (slice.messages.some((message) => message.id === ev.message.id)) return next;
-      next.messages = [...slice.messages, ev.message];
+      next.messages = [...slice.messages, { ...ev.message, persistence: "durable" }];
       return next;
     }
   }
