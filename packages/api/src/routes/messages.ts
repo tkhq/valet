@@ -1018,7 +1018,8 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   const gate = pending.find((g) => g.id === gateId);
   if (!gate) return c.json({ error: "gate not pending" }, 404);
   const approval = gate.type === "approval" ? toolApprovalGateContext(gate.context) : null;
-  if (approval && (approval.argsPreview === undefined || approval.reviewIncomplete) && resolutionApproves(gate, { actionId: body.actionId, resolvedBy: "", resolvedAt: 0 })) {
+  const bodyOnlyToolApproval = gate.type === "approval" && /(?:tool_id|args)=/.test(gate.body ?? "");
+  if ((approval && (approval.argsPreview === undefined || approval.reviewIncomplete) || bodyOnlyToolApproval) && resolutionApproves(gate, { actionId: body.actionId, resolvedBy: "", resolvedAt: 0 })) {
     return c.json({ error: "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request." }, 409);
   }
 

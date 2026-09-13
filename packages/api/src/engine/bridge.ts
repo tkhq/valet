@@ -27,7 +27,7 @@ import type {
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
-  const approval = g.type === "approval" ? gateApprovalDetails(g.context) : undefined;
+  const approval = g.type === "approval" ? gateApprovalDetails(g.context, g.body) : undefined;
   return {
     id: g.id,
     sessionId: g.sessionId,
