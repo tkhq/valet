@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import memoryPlugin from "@valet/plugin-memory/plugin";
 import valetPlugin from "@valet/plugin-valet/plugin";
@@ -496,5 +496,259 @@ describe("MCP skill tools", () => {
     const audit = JSON.stringify(auditRows);
     expect(audit).not.toContain("team body");
     expect(audit).not.toContain("Team description");
+  });
+});
+describe("MCP governed tool catalog", () => {
+  it("executes once across parallel calls and replays the canonical result", async () => {
+    let providerCalls = 0;
+    let throwCalls = 0;
+    const fixture = {
+      name: "fixture",
+      version: "1.0.0",
+      actions: [{
+        service: "fixture",
+        actions: [{
+          id: "fixture.increment",
+          name: "Increment",
+          description: "Increment a test counter.",
+          riskLevel: "low" as const,
+          parameters: { type: "object", properties: { amount: { type: "number" } }, required: ["amount"] },
+          execute: async (args: unknown) => {
+            providerCalls += 1;
+            const value = typeof args === "object" && args !== null && "amount" in args ? args.amount : undefined;
+            return { success: true, data: { value } };
+          },
+        }, {
+          id: "fixture.throw_after",
+          name: "Throw after effect",
+          description: "Increment and then throw.",
+          riskLevel: "low" as const,
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => {
+            throwCalls += 1;
+            throw new Error("provider failed after increment");
+          },
+        }],
+      }],
+    };
+    const gatedFixture = {
+      name: "gated-fixture", version: "1.0.0",
+      gate: { label: "Gated fixture", description: "Entitlement fixture." },
+      actions: [{ service: "gated", actions: [{ id: "gated.hidden", name: "Hidden", description: "Must be entitled.", riskLevel: "low" as const, parameters: { type: "object", properties: {} }, execute: async () => ({ success: true }) }] }],
+    };
+    const dynamicFixture = { name: "dynamic-fixture", version: "1.0.0", actions: [{ service: "dynamic", actions: [], resolveActions: async () => [{ id: "dynamic.echo", name: "Dynamic echo", description: "Resolved dynamically.", riskLevel: "low" as const, parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] }, execute: async () => ({ success: true }) }] }] };
+    const behaviorFixture = { name: "behavior-fixture", version: "1.0.0", actions: [{ service: "behavior-hidden", actions: [{ id: "behavior-hidden.action", name: "Behavior hidden", description: "Must be allowlisted.", riskLevel: "low" as const, parameters: { type: "object", properties: {} }, execute: async () => ({ success: true }) }] }] };
+    const unavailableFixture = {
+      name: "unavailable-fixture", version: "1.0.0",
+      credentials: [{ type: "oauth2" as const, configKeys: ["accessToken"], oauth: { mode: "authorization_code" as const, authorizationUrl: "https://example.test/auth", tokenUrl: "https://example.test/token", clientIdEnv: "TKAI457_MISSING_ID", clientSecretEnv: "TKAI457_MISSING_SECRET" } }],
+      actions: [{ service: "unavailable-fixture", actions: [{ id: "unavailable-fixture.hidden", name: "Unavailable", description: "Must be configured.", riskLevel: "low" as const, parameters: { type: "object", properties: {} }, execute: async () => ({ success: true }) }] }],
+    };
+    api = await bootTestApi({ auth: true, plugins: [valetPlugin, fixture, gatedFixture, dynamicFixture, behaviorFixture, unavailableFixture] });
+    const now = Date.now();
+    await api.providers.db.insert(orgs).values({ id: "tool-org", name: "Tool Org", createdAt: now });
+    await api.providers.db.insert(users).values({ id: "tool-user", name: "Tool User", email: "tool@nowhere.test", role: "member", createdAt: new Date(now), updatedAt: new Date(now) });
+    await api.providers.db.insert(orgMembers).values({ orgId: "tool-org", userId: "tool-user", role: "member", createdAt: now });
+    await api.providers.db.insert(assistants).values([
+      { id: "asst_tool", orgId: "tool-org", ownerType: "user", ownerId: "tool-user", sessionId: "assistant:asst_tool", behavior: JSON.stringify({ integrations: { mode: "allowlist", entries: [{ service: "fixture" }] } }), isDefault: true, createdAt: now, archivedAt: null },
+      { id: "asst_tool_2", orgId: "tool-org", ownerType: "user", ownerId: "tool-user", sessionId: "assistant:asst_tool_2", isDefault: false, createdAt: now, archivedAt: null },
+    ]);
+    await api.providers.db.insert(oauthAccessToken).values({ id: "tool-token-row", accessToken: "tool-token", refreshToken: "tool-refresh", accessTokenExpiresAt: new Date(now + 60_000), refreshTokenExpiresAt: new Date(now + 3_600_000), clientId: null, userId: "tool-user", scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now) });
+
+    await setPluginEntitlement(api.providers.db, "tool-org", "gated-fixture", { mode: "off", teamIds: [] });
+    const toolSession = await api.providers.engineHost.assistantSessionFor("asst_tool", { actorUserId: "tool-user", orgId: "tool-org" }, { sessionId: "assistant:asst_tool" });
+    await toolSession.createThread("thread:one");
+    const thread2 = await toolSession.createThread("thread:two");
+
+    const exposed = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 0, method: "tools/list", params: {} });
+    const exposedBody = await exposed.json() as { result?: { tools: Array<{ name: string }> } };
+    const exposedNames = exposedBody.result?.tools.map((tool) => tool.name) ?? [];
+    expect(exposedNames).toEqual(expect.arrayContaining(["list_tools", "call_tool"]));
+    expect(exposedNames).not.toContain("fixture.increment");
+    const malformed = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 15, method: "tools/call", params: { name: "call_tool", arguments: { invocationId: "malformed", orchestratorId: "asst_tool", actionId: "fixture.increment", summary: "Missing params." } } });
+    expect(((await malformed.json()) as { result?: { isError?: boolean } }).result?.isError).toBe(true);
+    expect((await api.providers.db.select().from(actionInvocations)).some((row) => row.actionId === "call_tool" && row.status === "error")).toBe(true);
+
+    const list = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_tools", arguments: { orchestratorId: "asst_tool" } } });
+    const listBody = await list.json() as { result?: { content: Array<{ text: string }> } };
+    const catalog = JSON.parse(listBody.result?.content[0]?.text ?? "{}") as { actions: Array<{ toolId: string; parameters?: unknown }> };
+    expect(catalog.actions.find((action) => action.toolId === "fixture.increment")?.parameters).toBeUndefined();
+    const filteredIds = catalog.actions.map((action) => action.toolId);
+    for (const hidden of ["gated.hidden", "behavior-hidden.action", "unavailable-fixture.hidden"]) expect(filteredIds).not.toContain(hidden);
+    const unfiltered = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "list_tools", arguments: { orchestratorId: "asst_tool_2" } } });
+    const unfilteredBody = await unfiltered.json() as { result?: { content: Array<{ text: string }> } };
+    const unfilteredCatalog = JSON.parse(unfilteredBody.result?.content[0]?.text ?? "{}") as { actions: Array<{ toolId: string; parameters?: unknown }> };
+    expect(unfilteredCatalog.actions.map((action) => action.toolId)).toEqual(expect.arrayContaining(["fixture.increment", "behavior-hidden.action"]));
+    const unfilteredIds = unfilteredCatalog.actions.map((action) => action.toolId);
+    expect(unfilteredIds).not.toContain("gated.hidden");
+    expect(unfilteredIds).not.toContain("unavailable-fixture.hidden");
+    expect(unfilteredCatalog.actions.find((action) => action.toolId === "dynamic.echo")?.parameters).toBeUndefined();
+    const dynamicSelected = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 14, method: "tools/call", params: { name: "list_tools", arguments: { orchestratorId: "asst_tool_2", actionId: "dynamic.echo" } } });
+    const dynamicBody = await dynamicSelected.json() as { result?: { content: Array<{ text: string }> } };
+    const dynamicCatalog = JSON.parse(dynamicBody.result?.content[0]?.text ?? "{}") as { actions: Array<{ toolId: string; parameters?: unknown }> };
+    expect(dynamicCatalog.actions).toEqual([expect.objectContaining({ toolId: "dynamic.echo", parameters: expect.objectContaining({ type: "object" }) })]);
+    const selected = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "list_tools", arguments: { orchestratorId: "asst_tool", actionId: "fixture.increment" } } });
+    const selectedBody = await selected.json() as { result?: { content: Array<{ text: string }> } };
+    const selectedCatalog = JSON.parse(selectedBody.result?.content[0]?.text ?? "{}") as { actions: Array<{ toolId: string; parameters?: unknown }> };
+    expect(selectedCatalog.actions).toHaveLength(1);
+    expect(selectedCatalog.actions[0]?.parameters).toEqual(expect.objectContaining({ type: "object" }));
+
+    const invalidArgs = { invocationId: "invalid", orchestratorId: "asst_tool", actionId: "fixture.increment", params: { amount: "seven" }, summary: "Reject invalid fixture arguments." };
+    const invalid = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "call_tool", arguments: invalidArgs } });
+    const invalidBody = await invalid.json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(invalidBody.result?.content[0]?.text ?? "{}").status).toBe("failed");
+    expect(providerCalls).toBe(0);
+    const reserved = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "call_tool", arguments: { ...invalidArgs, invocationId: "reserved", actionId: "memory.mem_read", params: {} } } });
+    const reservedBody = await reserved.json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(reservedBody.result?.content[0]?.text ?? "{}").status).toBe("failed");
+
+    const arguments_ = { invocationId: "once", orchestratorId: "asst_tool", actionId: "fixture.increment", params: { amount: 7 }, summary: "Increment the fixture." };
+    const calls = await Promise.all([1, 2].map((id) => mcpRequest(api!.baseUrl, "tool-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: arguments_ } }).then((response) => response.json())));
+    for (const body of calls as Array<{ result?: { content: Array<{ text: string }> } }>) {
+      const envelope = JSON.parse(body.result?.content[0]?.text ?? "{}") as { status: string };
+      expect(["completed", "in_progress_or_interrupted"]).toContain(envelope.status);
+    }
+    for (let id = 3; id < 6; id += 1) {
+      await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: arguments_ } });
+    }
+    expect(providerCalls).toBe(1);
+    const rows = (await api.providers.db.select().from(actionInvocations)).filter((row) => row.source === "mcp_call_tool");
+    expect(rows.filter((row) => row.clientInvocationId === "once")).toHaveLength(1);
+    expect(rows.find((row) => row.clientInvocationId === "once")?.status).toBe("completed");
+    expect(rows.some((row) => row.invocationId.startsWith("pol:call:"))).toBe(false);
+    const visible = (await listActionLog(api.providers.db, "tool-org", { status: "completed" }, 50, undefined)).rows
+      .find((row) => row.source === "mcp_call_tool");
+    expect(visible).toEqual(expect.objectContaining({ clientInvocationId: "once", orchestratorId: "asst_tool", actionId: "fixture.increment", status: "completed" }));
+    expect(visible?.sessionId).toBe("assistant:asst_tool");
+    expect((await api.providers.db.select().from(actionInvocations)).some((row) => row.actionId === "list_tools" && row.status === "completed")).toBe(true);
+    const mismatch = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "call_tool", arguments: { ...arguments_, params: { amount: 8 } } } });
+    const mismatchBody = await mismatch.json() as { result?: { isError?: boolean } };
+    expect(mismatchBody.result?.isError).toBe(true);
+    const afterMismatch = await api.providers.db.select().from(actionInvocations);
+    expect(afterMismatch.filter((row) => row.source === "mcp_call_tool")).toHaveLength(3);
+    expect(afterMismatch.filter((row) => row.actionId === "call_tool" && row.status === "rejected")).toHaveLength(1);
+    for (const [id, change] of [
+      [71, { actionId: "fixture.throw_after" }],
+      [72, { orchestratorId: "asst_tool_2" }],
+      [73, { threadId: thread2.id }],
+    ] as const) {
+      await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: { ...arguments_, ...change } } });
+    }
+    const mismatchRows = await api.providers.db.select().from(actionInvocations);
+    expect(mismatchRows.filter((row) => row.source === "mcp_call_tool")).toHaveLength(3);
+    expect(mismatchRows.filter((row) => row.actionId === "call_tool" && row.status === "rejected")).toHaveLength(4);
+
+    const uncertainArgs = { invocationId: "uncertain", orchestratorId: "asst_tool", actionId: "fixture.throw_after", params: {}, summary: "Run the uncertain fixture." };
+    const uncertain = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "call_tool", arguments: uncertainArgs } });
+    const uncertainBody = await uncertain.json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(uncertainBody.result?.content[0]?.text ?? "{}").status).toBe("indeterminate");
+    await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "call_tool", arguments: uncertainArgs } });
+    expect(throwCalls).toBe(1);
+
+    await api.providers.db.execute(sql.raw(`CREATE FUNCTION reject_mcp_result() RETURNS trigger AS 'BEGIN IF NEW.status IN (''completed'', ''indeterminate'') THEN RAISE EXCEPTION ''injected result outage''; END IF; RETURN NEW; END;' LANGUAGE plpgsql`));
+    await api.providers.db.execute(sql.raw(`CREATE TRIGGER reject_mcp_result BEFORE UPDATE ON action_invocations FOR EACH ROW EXECUTE FUNCTION reject_mcp_result()`));
+    const persistenceArgs = { ...arguments_, invocationId: "result-outage", params: { amount: 9 } };
+    const persistenceFailure = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 90, method: "tools/call", params: { name: "call_tool", arguments: persistenceArgs } });
+    const persistenceBody = await persistenceFailure.json() as { result?: { isError?: boolean } };
+    expect(persistenceBody.result?.isError).toBe(true);
+    expect(providerCalls).toBe(2);
+    await api.providers.db.execute(sql.raw(`DROP TRIGGER reject_mcp_result ON action_invocations`));
+    await api.providers.db.execute(sql.raw(`DROP FUNCTION reject_mcp_result()`));
+    const interrupted = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 91, method: "tools/call", params: { name: "call_tool", arguments: persistenceArgs } });
+    const interruptedBody = await interrupted.json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(interruptedBody.result?.content[0]?.text ?? "{}").status).toBe("in_progress_or_interrupted");
+    expect(providerCalls).toBe(2);
+
+    await api.providers.db.execute(sql.raw(`CREATE FUNCTION reject_mcp_start() RETURNS trigger AS 'BEGIN IF NEW.source = ''mcp_call_tool'' THEN RAISE EXCEPTION ''injected start outage''; END IF; RETURN NEW; END;' LANGUAGE plpgsql`));
+    await api.providers.db.execute(sql.raw(`CREATE TRIGGER reject_mcp_start BEFORE INSERT ON action_invocations FOR EACH ROW EXECUTE FUNCTION reject_mcp_start()`));
+    const startFailure = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 92, method: "tools/call", params: { name: "call_tool", arguments: { ...arguments_, invocationId: "start-outage" } } });
+    const startFailureBody = await startFailure.json() as { result?: { isError?: boolean } };
+    expect(startFailureBody.result?.isError).toBe(true);
+    expect(providerCalls).toBe(2);
+    await api.providers.db.execute(sql.raw(`DROP TRIGGER reject_mcp_start ON action_invocations`));
+    await api.providers.db.execute(sql.raw(`DROP FUNCTION reject_mcp_start()`));
+    expect(JSON.stringify(await api.providers.db.select().from(actionInvocations))).not.toContain("tool-token");
+  });
+
+  it("parks approval without execution and executes once after resolution", async () => {
+    let providerCalls = 0;
+    const fixture = {
+      name: "fixture-approval",
+      version: "1.0.0",
+      actions: [{ service: "fixture", actions: [{
+        id: "fixture.publish", name: "Publish", description: "Publish a fixture.", riskLevel: "high" as const,
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => { providerCalls += 1; return { success: true, data: { published: true } }; },
+      }] }],
+    };
+    api = await bootTestApi({ auth: true, plugins: [valetPlugin, fixture] });
+    const now = Date.now();
+    await api.providers.db.insert(orgs).values({ id: "approval-org", name: "Approval Org", createdAt: now });
+    await api.providers.db.insert(users).values([
+      { id: "approval-user", name: "Approval User", email: "approval@nowhere.test", role: "member", createdAt: new Date(now), updatedAt: new Date(now) },
+      { id: "approval-other", name: "Other User", email: "approval-other@nowhere.test", role: "member", createdAt: new Date(now), updatedAt: new Date(now) },
+    ]);
+    await api.providers.db.insert(orgMembers).values({ orgId: "approval-org", userId: "approval-user", role: "member", createdAt: now });
+    await api.providers.db.insert(assistants).values([
+      { id: "asst_approval", orgId: "approval-org", ownerType: "user", ownerId: "approval-user", sessionId: "assistant:asst_approval", isDefault: true, createdAt: now, archivedAt: null },
+      { id: "asst_archived", orgId: "approval-org", ownerType: "user", ownerId: "approval-user", sessionId: "assistant:asst_archived", isDefault: false, createdAt: now, archivedAt: now },
+      { id: "asst_foreign", orgId: "approval-org", ownerType: "user", ownerId: "approval-other", sessionId: "assistant:asst_foreign", isDefault: false, createdAt: now, archivedAt: null },
+    ]);
+    await api.providers.db.insert(oauthAccessToken).values({ id: "approval-token-row", accessToken: "approval-token", refreshToken: "approval-refresh", accessTokenExpiresAt: new Date(now + 60_000), refreshTokenExpiresAt: new Date(now + 3_600_000), clientId: null, userId: "approval-user", scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now) });
+    const session = await api.providers.engineHost.assistantSessionFor("asst_approval", { actorUserId: "approval-user", orgId: "approval-org" }, { sessionId: "assistant:asst_approval" });
+    const thread = await session.createThread("web:default");
+    const arguments_ = { invocationId: "approval-once", orchestratorId: "asst_approval", threadId: thread.id, actionId: "fixture.publish", params: {}, summary: "Publish the fixture." };
+    const call = (id: number) => mcpRequest(api!.baseUrl, "approval-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: arguments_ } });
+
+    const pending = await (await call(1)).json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(pending.result?.content[0]?.text ?? "{}").status).toBe("pending");
+    expect(pending.result?.content[0]?.text).not.toContain("assistant:asst_approval");
+    expect(pending.result?.content[0]?.text).not.toContain("gate:");
+    expect(providerCalls).toBe(0);
+    const unavailable = async (id: number, arguments_: Record<string, unknown>) => {
+      const response = await mcpRequest(api!.baseUrl, "approval-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: arguments_ } });
+      return response.json() as Promise<{ result?: unknown }>;
+    };
+    const missing = await unavailable(20, { ...arguments_, invocationId: "missing", orchestratorId: "asst_missing" });
+    const wrongThread = await unavailable(21, { ...arguments_, invocationId: "wrong-thread", threadId: "thread_foreign" });
+    const archived = await unavailable(22, { ...arguments_, invocationId: "archived", orchestratorId: "asst_archived" });
+    const foreign = await unavailable(23, { ...arguments_, invocationId: "foreign", orchestratorId: "asst_foreign" });
+    expect(missing.result).toEqual(wrongThread.result);
+    expect(missing.result).toEqual(archived.result);
+    expect(missing.result).toEqual(foreign.result);
+    const gates = await api.providers.engineStore.listDecisionGates("assistant:asst_approval", thread.id);
+    expect(gates).toHaveLength(1);
+    await session.resolveDecision(gates[0]!.id, { actionId: "approve", resolvedBy: "approval-user", resolvedAt: Date.now() });
+    await call(2);
+    await call(3);
+    expect(providerCalls).toBe(1);
+
+    const deniedArgs = { ...arguments_, invocationId: "approval-denied" };
+    const deniedCall = (id: number) => mcpRequest(api!.baseUrl, "approval-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: deniedArgs } });
+    await deniedCall(4);
+    const deniedGate = (await api.providers.engineStore.listDecisionGates("assistant:asst_approval", thread.id)).find((gate) => gate.status === "pending");
+    expect(deniedGate).toBeDefined();
+    await session.resolveDecision(deniedGate!.id, { actionId: "deny", resolvedBy: "approval-user", resolvedAt: Date.now() });
+    const denied = await (await deniedCall(5)).json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(denied.result?.content[0]?.text ?? "{}").status).toBe("denied");
+    await deniedCall(6);
+    expect(providerCalls).toBe(1);
+
+    const expiredArgs = { ...arguments_, invocationId: "approval-expired" };
+    const expiredCall = (id: number) => mcpRequest(api!.baseUrl, "approval-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: expiredArgs } });
+    await expiredCall(7);
+    const expiringGate = (await api.providers.engineStore.listDecisionGates("assistant:asst_approval", thread.id)).find((gate) => gate.status === "pending");
+    expect(expiringGate).toBeDefined();
+    await api.providers.engineStore.saveDecisionGate("assistant:asst_approval", thread.id, { ...expiringGate!, status: "expired", updatedAt: Date.now() });
+    const expired = await (await expiredCall(8)).json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(expired.result?.content[0]?.text ?? "{}").status).toBe("denied");
+    await expiredCall(9);
+    expect(providerCalls).toBe(1);
+
+    const rows = (await api.providers.db.select().from(actionInvocations)).filter((row) => row.source === "mcp_call_tool");
+    expect(rows).toHaveLength(3);
+    expect(rows.find((row) => row.clientInvocationId === "approval-once")?.status).toBe("completed");
+    expect(rows.find((row) => row.clientInvocationId === "approval-denied")?.status).toBe("denied");
+    expect(rows.find((row) => row.clientInvocationId === "approval-expired")?.status).toBe("denied");
+    expect(JSON.stringify({ rows, gates })).not.toContain("approval-token");
   });
 });

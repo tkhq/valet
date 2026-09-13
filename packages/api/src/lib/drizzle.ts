@@ -220,6 +220,12 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "action_invocations.source_ip column", probe: { kind: "column", table: "action_invocations", column: "source_ip" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "source_ip" text' },
+  { describe: "action_invocations.source column", probe: { kind: "column", table: "action_invocations", column: "source" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "source" text' },
+  { describe: "action_invocations.client_invocation_id column", probe: { kind: "column", table: "action_invocations", column: "client_invocation_id" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "client_invocation_id" text' },
+  { describe: "action_invocations.orchestrator_id column", probe: { kind: "column", table: "action_invocations", column: "orchestrator_id" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "orchestrator_id" text' },
+  { describe: "action_invocations.thread_id column", probe: { kind: "column", table: "action_invocations", column: "thread_id" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "thread_id" text' },
+  { describe: "action_invocations.binding_hash column", probe: { kind: "column", table: "action_invocations", column: "binding_hash" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "binding_hash" text' },
+  { describe: "action_invocations.updated_at column", probe: { kind: "column", table: "action_invocations", column: "updated_at" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "updated_at" bigint' },
   {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },

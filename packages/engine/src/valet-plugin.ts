@@ -571,6 +571,8 @@ export interface McpToolDef {
   /** Zod raw shape kept opaque so the portable engine does not depend on Zod. */
   inputSchema: Record<string, unknown>;
   readOnly: boolean;
+  /** The port owns the canonical audit row instead of the generic MCP wrapper. */
+  audit?: "generic" | "owned";
   execute(args: Record<string, unknown>, port: McpToolPort): Promise<McpToolResult>;
   /** Remove sensitive values before the host writes invocation audit params. */
   auditArguments?(args: Record<string, unknown>): Record<string, unknown>;

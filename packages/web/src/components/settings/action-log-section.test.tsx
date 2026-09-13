@@ -49,6 +49,9 @@ function entry(overrides: Partial<ActionLogEntryWire> = {}): ActionLogEntryWire 
   return {
     invocationId: "inv_1",
     createdAt: 0,
+    source: null,
+    clientInvocationId: null,
+    updatedAt: null,
     service: "gmail",
     actionId: "gmail.send_email",
     riskLevel: "medium",
@@ -60,6 +63,8 @@ function entry(overrides: Partial<ActionLogEntryWire> = {}): ActionLogEntryWire 
     status: "completed",
     sessionId: "sess_1",
     workflowExecutionId: null,
+    orchestratorId: null,
+    threadId: null,
     userId: "u1",
     params: { to: "a@b.com" },
     paramsTruncated: false,

@@ -5,6 +5,9 @@ import type { TObject } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   pluginCatalogTools,
+  buildPluginCatalog,
+  invokeAction,
+  searchCatalog,
   pinnedToolName,
   prepareActionArgs,
   MAX_PINNED_ACTIONS,
@@ -1671,5 +1674,67 @@ describe("pinned tool: the model's summary", () => {
       "Add a Slack notify step",
       "Drop the approval gate",
     ]);
+  });
+});
+
+
+describe("external catalog seams", () => {
+  it("claims after validation and immediately before action execution", async () => {
+    const order: string[] = [];
+    const plugin: ActionPlugin = {
+      service: "fixture",
+      actions: [{
+        id: "fixture.write",
+        name: "Write",
+        description: "Write a fixture.",
+        riskLevel: "low",
+        parameters: Type.Object({ value: Type.String() }),
+        execute: async () => { order.push("execute"); return { success: true }; },
+      }],
+    };
+    const result = await invokeAction(buildPluginCatalog([plugin]), "fixture.write", { value: "ok" }, makeCtx(), "Write fixture", {
+      claimExecution: async () => { order.push("claim"); },
+    });
+    expect(result.kind).toBe("ok");
+    expect(order).toEqual(["claim", "execute"]);
+  });
+
+  it("does not execute when the durable claim crashes", async () => {
+    let calls = 0;
+    const plugin: ActionPlugin = {
+      service: "fixture",
+      actions: [{
+        id: "fixture.write",
+        name: "Write",
+        description: "Write a fixture.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async () => { calls += 1; return { success: true }; },
+      }],
+    };
+    await expect(invokeAction(buildPluginCatalog([plugin]), "fixture.write", {}, makeCtx(), "Write fixture", {
+      claimExecution: async () => { throw new Error("crash after claim"); },
+    })).rejects.toThrow("crash after claim");
+    expect(calls).toBe(0);
+  });
+
+  it("returns compact dynamic discovery and one authoritative schema", async () => {
+    const plugin: ActionPlugin = {
+      service: "dynamic",
+      actions: [],
+      resolveActions: async () => [{
+        id: "dynamic.read",
+        name: "Read",
+        description: "Read dynamic data.",
+        riskLevel: "low",
+        parameters: Type.Object({ id: Type.String() }),
+        execute: async () => ({ success: true }),
+      }],
+    };
+    const catalog = buildPluginCatalog([plugin]);
+    const compact = await searchCatalog(catalog, {}, makeCtx());
+    expect(compact.actions[0]?.parameters).toBeUndefined();
+    const exact = await searchCatalog(catalog, { actionId: "dynamic.read" }, makeCtx());
+    expect(exact.actions[0]?.parameters).toEqual(Type.Object({ id: Type.String() }));
   });
 });

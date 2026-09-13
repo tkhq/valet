@@ -81,6 +81,11 @@ function toActionLogWire(row: ActionInvocationRow): ActionLogEntryWire {
     status: row.status,
     sessionId: row.sessionId,
     workflowExecutionId: row.workflowExecutionId,
+    source: row.source,
+    clientInvocationId: row.clientInvocationId,
+    orchestratorId: row.orchestratorId,
+    threadId: row.threadId,
+    updatedAt: row.updatedAt,
     userId: row.userId,
     params: row.params,
     paramsTruncated: row.paramsTruncated,
@@ -287,7 +292,7 @@ policiesRouter.post("/preview", async (c) => {
 // ── GET /api/org/action-log — keyset-paginated read ──────────────────────
 
 function isActionInvocationStatus(v: string): v is NonNullable<ActionInvocationRow["status"]> {
-  return ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"].includes(v);
+  return ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout", "created", "pending_approval", "executing", "failed", "indeterminate"].includes(v);
 }
 
 actionLogRouter.get("/", async (c) => {
@@ -330,7 +335,7 @@ actionLogRouter.get("/", async (c) => {
   const status = c.req.query("status");
   if (status !== undefined) {
     if (!isActionInvocationStatus(status)) {
-      return c.json({ error: "status must be one of pending|allowed|denied|approved|rejected|error|completed|cancelled|timeout" }, 400);
+      return c.json({ error: "status must be one of pending|allowed|denied|approved|rejected|error|completed|cancelled|timeout|created|pending_approval|executing|failed|indeterminate" }, 400);
     }
     filters.status = status;
   }
