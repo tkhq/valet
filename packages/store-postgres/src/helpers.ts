@@ -671,6 +671,7 @@ export interface SuspendedTurnRow {
   toolCallId: string;
   toolName: string;
   toolArgs: string;
+  preparedArgsDigest: string | null;
   resumeKey: string;
   ordinal: number;
   attempt: number;
@@ -688,6 +689,7 @@ export function rawToSuspendedTurnRow(raw: Record<string, unknown>): SuspendedTu
     toolCallId: asString(raw.tool_call_id, "tool_call_id"),
     toolName: asString(raw.tool_name, "tool_name"),
     toolArgs: asString(raw.tool_args, "tool_args"),
+    preparedArgsDigest: asStringOrNull(raw.prepared_args_digest, "prepared_args_digest"),
     resumeKey: asString(raw.resume_key, "resume_key"),
     ordinal: toNum(raw.ordinal, "ordinal"),
     attempt: toNum(raw.attempt, "attempt"),

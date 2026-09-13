@@ -112,11 +112,32 @@ describe("runGates resolve", () => {
     expect(resolves).toHaveLength(1);
   });
 
+  it("includes the approval preview and completeness in JSON resolve output", async () => {
+    const complete = gate("g1");
+    complete.approval = { toolId: "payments.send", argsPreview: "{\"amount\":10}" };
+    const { client } = stubClient([complete]);
+    expect(await runGates(client, parseGlobalFlags(["resolve", "g1", "approve", "--session", "s", "--json"]))).toBe(ExitCode.OK);
+    expect(JSON.parse(stdout())).toMatchObject({
+      ok: true,
+      gateId: "g1",
+      approval: { toolId: "payments.send", argsPreview: "{\"amount\":10}" },
+      reviewIncomplete: false,
+    });
+  });
+
   it("blocks built-in approve when tool identity is malformed", async () => {
     const unsafe = gate("g1");
     unsafe.approval = { argsPreview: "{}", reviewIncomplete: true };
     const { client, resolves } = stubClient([unsafe]);
     expect(await runGates(client, parseGlobalFlags(["resolve", "g1", "approve", "--session", "s"]))).toBe(ExitCode.Usage);
+    expect(resolves).toHaveLength(0);
+  });
+
+  it("blocks JSON approval when a legacy preview is blank", async () => {
+    const legacy = gate("g1");
+    legacy.approval = { toolId: "payments.send", argsPreview: "" };
+    const { client, resolves } = stubClient([legacy]);
+    expect(await runGates(client, parseGlobalFlags(["resolve", "g1", "approve", "--session", "s", "--json"]))).toBe(ExitCode.Usage);
     expect(resolves).toHaveLength(0);
   });
 

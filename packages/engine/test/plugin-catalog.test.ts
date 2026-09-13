@@ -995,6 +995,65 @@ describe("pluginCatalogTools: call_tool param validation", () => {
   });
 });
 
+describe("pluginCatalogTools: restart approval integrity", () => {
+  it("rejects a replay when a schema default differs from the reviewed value", async () => {
+    let commitment: string | undefined;
+    const original: ActionPlugin = {
+      service: "test",
+      actions: [{
+        id: "test.defaulted",
+        name: "Defaulted",
+        description: "requires approval",
+        riskLevel: "high",
+        parameters: Type.Object({ value: Type.Optional(Type.String({ default: "approved" })) }),
+        execute: async () => ({ success: true }),
+      }],
+    };
+    const [, originalCall] = pluginCatalogTools({ plugins: [original] });
+    await originalCall.execute(
+      { tool_id: "test.defaulted", params: {}, summary: "use the approved default" },
+      makeCtx({
+        requestDecision: async (gate) => {
+          commitment = typeof gate.context?.preparedArgsDigest === "string"
+            ? gate.context.preparedArgsDigest
+            : undefined;
+          return { actionId: "pending", resolvedBy: "" };
+        },
+      }),
+    );
+    expect(commitment).toMatch(/^[a-f0-9]{64}$/);
+
+    let executed = false;
+    const changed: ActionPlugin = {
+      ...original,
+      actions: [{
+        ...original.actions[0]!,
+        parameters: Type.Object({ value: Type.Optional(Type.String({ default: "changed" })) }),
+        execute: async () => {
+          executed = true;
+          return { success: true };
+        },
+      }],
+    };
+    const [, replayCall] = pluginCatalogTools({ plugins: [changed] });
+    const result = await replayCall.execute(
+      { tool_id: "test.defaulted", params: {}, summary: "use the approved default" },
+      makeCtx({
+        suspendedDecision: {
+          gateId: "gate-1",
+          ordinal: 0,
+          resumeKey: "test.defaulted:opaque",
+          preparedArgsDigest: commitment,
+          approvalReplay: true,
+          resolution: { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 },
+        },
+      }),
+    );
+    expect(result.text).toContain("Approval replay rejected");
+    expect(executed).toBe(false);
+  });
+});
+
 describe("pluginCatalogTools: approval gate terminal outcomes", () => {
   function gatedPlugin(): ActionPlugin {
     return {

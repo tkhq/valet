@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -372,6 +373,8 @@ export interface ToolApprovalGateContext {
   args?: Record<string, unknown>;
   argsPreview?: string;
   reviewIncomplete?: true;
+  /** SHA-256 of the defaulted arguments; never exposes the arguments themselves. */
+  preparedArgsDigest?: string;
   summary?: string;
 }
 
@@ -384,19 +387,30 @@ export function toolApprovalGateContext(
   const isToolApproval =
     context.kind === "tool_approval" ||
     "tool_id" in context ||
+    "toolId" in context ||
+    "toolName" in context ||
+    "tool" in context ||
+    "actionId" in context ||
     "argsPreview" in context ||
-    ("args" in context && ("riskLevel" in context || "service" in context));
+    "args" in context ||
+    "riskLevel" in context ||
+    "service" in context;
   if (!isToolApproval) return null;
   const toolId = typeof context.tool_id === "string" && context.tool_id.trim() !== ""
     ? context.tool_id
     : undefined;
+  const argsPreview = typeof context.argsPreview === "string" && context.argsPreview.trim() !== ""
+    ? context.argsPreview
+    : undefined;
+  const complete = context.kind === "tool_approval" && toolId !== undefined && argsPreview !== undefined && context.reviewIncomplete !== true;
   return {
     toolId,
     riskLevel: typeof context.riskLevel === "string" ? context.riskLevel : undefined,
     service: typeof context.service === "string" ? context.service : undefined,
     args: context.args !== null && typeof context.args === "object" && !Array.isArray(context.args) ? context.args as Record<string, unknown> : undefined,
-    argsPreview: typeof context.argsPreview === "string" ? context.argsPreview : undefined,
-    reviewIncomplete: context.reviewIncomplete === true || toolId === undefined ? true : undefined,
+    argsPreview,
+    reviewIncomplete: complete ? undefined : true,
+    preparedArgsDigest: typeof context.preparedArgsDigest === "string" ? context.preparedArgsDigest : undefined,
     summary: typeof context.summary === "string" ? context.summary : undefined,
   };
 }
@@ -459,6 +473,20 @@ function approvalArgsPreview(args: Record<string, unknown>): { preview: string; 
   return { preview: bounded.text, incomplete: incomplete || bounded.truncated };
 }
 
+/** Stable, non-reversible commitment to the exact prepared argument values. */
+export function preparedArgsDigest(args: Record<string, unknown>): string {
+  const canonicalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalize(item)]));
+    }
+    return value;
+  };
+  return createHash("sha256").update(JSON.stringify(canonicalize(args))).digest("hex");
+}
+
 function approvalGateRequest(
   entry: CatalogEntry,
   actionId: string,
@@ -480,6 +508,7 @@ function approvalGateRequest(
       service: entry.service,
       tool_id: actionId,
       argsPreview: review.preview,
+      preparedArgsDigest: preparedArgsDigest(args),
       ...(review.incomplete ? { reviewIncomplete: true } : {}),
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
@@ -534,6 +563,10 @@ export async function invokeAction(
   }
   const executionArgs = prepared.args;
   const reviewedArgs = structuredClone(executionArgs);
+  // A restart must not apply changed schema defaults after the approval.
+  if (ctx.suspendedDecision?.approvalReplay && ctx.suspendedDecision.preparedArgsDigest !== preparedArgsDigest(reviewedArgs)) {
+    return { kind: "error", message: "Approval replay rejected because the prepared parameters changed. Ask the user to submit the action again for review." };
+  }
 
   // One bound applies to the gate body, gate context, plugin context, and audit.
   const boundedSummary = truncateApprovalText(summary, 4_000).text;

@@ -212,7 +212,7 @@ function boundedPreview(preview: string | undefined): { text: string; truncated:
 }
 
 function isApprovalReviewIncomplete(approval: NonNullable<DecisionGate["approval"]>): boolean {
-  return approval.toolId === undefined || approval.toolId.trim() === "" || approval.argsPreview === undefined || approval.reviewIncomplete === true || boundedPreview(approval.argsPreview).truncated;
+  return approval.toolId === undefined || approval.toolId.trim() === "" || approval.argsPreview === undefined || approval.argsPreview.trim() === "" || approval.reviewIncomplete === true || boundedPreview(approval.argsPreview).truncated;
 }
 
 function GenericGateReview({ body, provenance }: Pick<DecisionGate, "body" | "provenance">) {

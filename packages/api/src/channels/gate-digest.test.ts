@@ -93,6 +93,18 @@ describe("digestGate", () => {
     });
   });
 
+  it("blocks legacy tool-like metadata that lacks a kind or usable preview", () => {
+    const digest = digestGate({
+      ...TOOL_GATE,
+      context: { tool_id: "payments.send", argsPreview: "" },
+    });
+    expect(digest.reviewIncomplete).toBe(true);
+    expect(safeChannelActions({ actions: [
+      { id: "approve", label: "Approve", approves: true },
+      { id: "deny", label: "Reject" },
+    ] }, true).map((action) => action.id)).toEqual(["deny"]);
+  });
+
   it("passes a gate without tool context through untouched (ask_approval)", () => {
     const digest = digestGate({
       type: "approval",

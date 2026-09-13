@@ -6,6 +6,7 @@ export function approvalReviewIncomplete(gate: DecisionGate): boolean {
     approval.toolId === undefined ||
     approval.toolId.trim() === "" ||
     approval.argsPreview === undefined ||
+    approval.argsPreview.trim() === "" ||
     approval.reviewIncomplete === true
   );
 }

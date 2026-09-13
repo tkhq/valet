@@ -15,6 +15,7 @@ import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
+import { toolApprovalGateContext } from "./plugin-catalog.js";
 import {
   DecisionGateExpiredError,
   DecisionGateWithdrawnError,
@@ -386,7 +387,14 @@ export class Thread {
   private currentAssistantEntry: MessageEntry | undefined;
   private toolCtxOverlay: { gateId?: string } = {};
   private suspendedDecisionForReplay:
-    | { gateId: string; ordinal: number; resumeKey: string; resolution?: DecisionResolution }
+    | {
+      gateId: string;
+      ordinal: number;
+      resumeKey: string;
+      preparedArgsDigest?: string;
+      approvalReplay?: boolean;
+      resolution?: DecisionResolution;
+    }
     | undefined;
   /** Token usage from the most recent assistant message, captured at turn_end. */
   private lastAssistantUsage:
@@ -1267,7 +1275,7 @@ export class Thread {
    * resumeKey, the engine returns the stored resolution immediately.
    */
   setReplayContext(
-    ctx: { gateId: string; ordinal: number; resumeKey: string; resolution?: DecisionResolution } | undefined,
+    ctx: { gateId: string; ordinal: number; resumeKey: string; preparedArgsDigest?: string; approvalReplay?: boolean; resolution?: DecisionResolution } | undefined,
   ): void {
     this.suspendedDecisionForReplay = ctx;
   }
@@ -1282,8 +1290,9 @@ export class Thread {
   async replayBlocked(args: {
     suspended: SuspendedTurnState;
     resolution: DecisionResolution;
+    approvalReplay: boolean;
   }): Promise<void> {
-    const { suspended, resolution } = args;
+    const { suspended, resolution, approvalReplay } = args;
     const tools = this.buildTools();
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
@@ -1293,7 +1302,7 @@ export class Thread {
       );
       return;
     }
-    this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resumeKey: suspended.resumeKey, resolution });
+    this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resumeKey: suspended.resumeKey, preparedArgsDigest: suspended.preparedArgsDigest, approvalReplay, resolution });
     // The deterministic gate ID is derived from
     // (sessionId, threadId, queueItemId, resumeKey, ordinal). During replay,
     // the tool's requestDecision call recomputes this from the active queue
@@ -1466,7 +1475,7 @@ export class Thread {
       })
       .then((resolution) => {
         this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
-          this.replayBlocked({ suspended, resolution }),
+          this.replayBlocked({ suspended, resolution, approvalReplay: toolApprovalGateContext(gate.context) !== null }),
         );
       })
       .catch((err) => {
@@ -1729,6 +1738,7 @@ export class Thread {
             toolCallId,
             toolName,
             toolArgs,
+            preparedArgsDigest: typeof req.context?.preparedArgsDigest === "string" ? req.context.preparedArgsDigest : undefined,
             resumeKey: gateCtx.resumeKey,
             ordinal: gate.ordinal,
             attempt: 1,
@@ -3136,7 +3146,11 @@ export class Thread {
         return;
       }
       this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
-        this.replayBlocked({ suspended, resolution }),
+        this.replayBlocked({
+          suspended,
+          resolution,
+          approvalReplay: toolApprovalGateContext(gate.context) !== null,
+        }),
       );
     }
     await this.emitQueueState();

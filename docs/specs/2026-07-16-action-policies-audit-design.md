@@ -165,6 +165,8 @@ Each session-path invocation receives a cryptographically random UUID-based resu
 
 When a gate suspends a turn, the engine persists that opaque resume key in `SuspendedTurnState`. Restart replay seeds the tool context with the persisted key, so the reconstructed invocation reuses the same gate and audit identity. A genuine later invocation, even with identical tool parameters, receives a new key.
 
+The checkpoint also stores a SHA-256 commitment to the complete prepared arguments. The digest does not expose parameter values. On replay, the engine re-prepares the call and rejects it if the digest differs. This prevents changed schemas or defaults from executing values that the approver did not review.
+
 Parameter validation runs before policy evaluation. If validation fails, the audit outcome is `error`, while `resolvedMode` and policy provenance are null because no policy decision occurred. Policy resolver hooks receive deep-cloned parameter snapshots. The approval preview and plugin execution retain independent prepared snapshots, so resolver or post-resolution hooks cannot mutate reviewed or executed values, including nested values.
 
 ## Approval review and composer input (2026-09-13)

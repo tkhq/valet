@@ -111,6 +111,18 @@ describe("DecisionGateCard — reviewable tool requests", () => {
     expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("blocks approval when a legacy preview is blank", () => {
+    renderCard(gate({
+      approval: { toolId: "payments.send", argsPreview: "" },
+      actions: [
+        { id: "approve", label: "Approve", approves: true },
+        { id: "deny", label: "Reject" },
+      ],
+    }));
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("blocks approval when a preview can hide material later fields", () => {
     renderCard(gate({
       approval: {

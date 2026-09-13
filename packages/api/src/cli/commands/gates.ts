@@ -93,7 +93,14 @@ async function gatesResolve(client: GatesClient, flags: ParsedFlags): Promise<nu
   }
   await client.resolveDecision(id, gateId, body);
 
-  if (flags.json) printJson({ ok: true, gateId });
+  if (flags.json) {
+    printJson({
+      ok: true,
+      gateId,
+      approval: gate.approval,
+      reviewIncomplete: approvalReviewIncomplete(gate),
+    });
+  }
   else printLine(`resolved gate ${gateId}`);
   return ExitCode.OK;
 }
