@@ -1006,6 +1006,7 @@ export type PolicyProvenanceSource =
   | "override"
   | "plugin_default"
   | "risk_default"
+  | "canonical_service"
   | "resolver_error";
 
 /**
@@ -1040,6 +1041,9 @@ export interface PolicyDecision {
     requestSubjectDigest: string;
     inputDigest: string;
     policyDigest: string;
+    sourceBundleDigest: string;
+    evaluatorKind: import("./authorization/types.js").EvaluatorIdentity["kind"];
+    engineDigest: string;
     decisionDigest: string;
   };
 }

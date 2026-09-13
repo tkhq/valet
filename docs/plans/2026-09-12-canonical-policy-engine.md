@@ -318,8 +318,10 @@ pnpm typecheck
 - Add request adapters for workflow actions in `packages/api/src/plugins/action-invoker.ts`.
 - Add the compatibility adapter from engine `PolicyResolver` to `AuthorizationService`.
 - Add common obligation, approval, and audit helpers.
-- Use RFC 6901 safe-parameter projections. Reject an action when the projection is absent.
-- Build profile, interpreter, contract, decision, and obligation evidence beside the existing audit row shape.
+- Use explicit all-safe, selected, or no-parameter projections. Selected paths state whether a value is required.
+- Reject absent projections, empty selected path sets, and numeric array indexes.
+- Require the host to supply a durable queue item ID, evaluation time, and #679 dynamic fact tuples.
+- Build profile, interpreter, contract, source bundle, engine, decision, and obligation evidence beside the existing audit row shape.
 - Do not wire the adapters into live production enforcement.
 - Do not invoke the old or new evaluator on live requests.
 
@@ -329,6 +331,9 @@ pnpm typecheck
 - Fully qualified action IDs use the existing service and action convention.
 - Credential secrets never enter the request.
 - Adapter failures are typed and map to fail-closed decisions when wiring occurs.
+- Service, approval, and audit inputs are frozen snapshots with no caller-owned aliases.
+- Approval replay rejects engine, profile, interpreter, contract, or source bundle changes.
+- Source scans prove that production engine, plugin, action, and workflow roots cannot import or alias the seam.
 
 **Validation**
 

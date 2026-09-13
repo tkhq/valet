@@ -14,6 +14,7 @@ export type {
   CurrentPersonalOverrideV1,
   CurrentPluginDefaultV1,
   CurrentPolicyDynamicFactsV1,
+  CurrentPolicyDynamicFactsV2,
   CurrentPolicyMatcherV1,
   CurrentPolicySourceSnapshotV1,
   CurrentRiskDefaultV1,

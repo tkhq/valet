@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { JsonValue } from "@valet/engine/authorization";
+import { validateCurrentPolicyDynamicFactsV2, type CurrentPolicyDynamicFactsV2, type JsonValue } from "@valet/engine/authorization";
 import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, isCurrentPolicyActionV1, isCurrentPolicyRiskV1, isCurrentPolicyServiceV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
 export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
 import { grantPolicyKey } from "../../policies/resolution.js";
@@ -175,7 +175,7 @@ export function buildCurrentPolicyDynamicFacts(input: {
   readonly organizationId: string;
   readonly grants: readonly CurrentRuntimeGrantSourceV1[];
   readonly approvals: readonly CurrentApprovalResolutionSourceV1[];
-}): Record<string, JsonValue> {
+}): CurrentPolicyDynamicFactsV2 {
   nonEmpty("organizationId", input.organizationId);
   if (input.grants.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicGrants) {
     fail("complexity_limit", `Current policy input supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicGrants} grants.`);
@@ -194,11 +194,11 @@ export function buildCurrentPolicyDynamicFacts(input: {
   }
   const bindings = input.approvals.map((row) => [row.requestSubjectDigest, row.originalDecisionDigest, row.appliesIn, row.sessionId ?? row.workflowExecutionId!] as JsonValue[]);
   if (new Set(bindings.map(canonicalJson)).size > 1) fail("approval_binding_limit", "Current policy input supports one approval binding set.");
-  return { schemaVersion: 2, organizationId: input.organizationId,
+  return validateCurrentPolicyDynamicFactsV2({ schemaVersion: 2, organizationId: input.organizationId,
     grants: [...input.grants].sort((a, b) => utf8Compare(a.id, b.id)).map((row) => [row.id, row.policyKey, row.service, row.actionId, row.riskLevel, row.appliesIn, row.sessionId ?? row.workflowExecutionId!, row.createdAtMs, row.expiresAtMs, row.revokedAtMs]),
     approvalBinding: bindings[0] ?? null,
     approvals: [...input.approvals].sort((a, b) => utf8Compare(a.resolutionId, b.resolutionId)).map((row) => [row.resolutionId, row.verdict, row.resolvedAtMs, row.expiresAtMs, row.resolutionVersion]),
-  };
+  }, { organizationId: input.organizationId });
 }
 
 function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {

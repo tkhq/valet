@@ -1,4 +1,5 @@
-import { adaptWorkflowAction, type JsonObject, type PluginAction, type SafeParameterProjectionV1 } from "@valet/engine";
+import type { PluginAction } from "@valet/engine";
+import { adaptWorkflowAction, type CurrentPolicyDynamicFactsV2, type SafeParameterProjectionV1 } from "@valet/engine/authorization";
 import type { WorkflowInvokeActionRequest } from "@valet/workflow";
 import type { ActionInvocationContext } from "./action-invoker.js";
 import { qualifiedActionId } from "./action-id.js";
@@ -14,7 +15,7 @@ export function adaptWorkflowInvocation(input: {
   readonly nodeId: string;
   readonly requestId: string;
   readonly evaluationTimeMs: number;
-  readonly dynamicFacts: JsonObject;
+  readonly dynamicFacts: { readonly currentPolicy?: CurrentPolicyDynamicFactsV2 };
 }) {
   const actionId = qualifiedActionId(input.request.service, input.action);
   return adaptWorkflowAction({
