@@ -10,6 +10,7 @@
  * the web dist comes from `VALET_WEB_DIST_DIR` and PGlite loads its wasm the
  * normal way (no override).
  */
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -49,9 +50,10 @@ export function pgliteAssetDir(): string | undefined {
   return join(assetBase(), "pglite");
 }
 
-/** Worker entry for the in-process policy engine. */
+/** Worker entry from copied dist assets when present, or from the source tree in development. */
 export function policyWorkerUrl(): URL {
-  if (isBundled()) return pathToFileURL(join(assetBase(), "policy-engine", "policy-worker.cjs"));
+  const packaged = join(assetBase(), "policy-engine", "policy-worker.cjs");
+  if (isBundled() || existsSync(packaged)) return pathToFileURL(packaged);
   return new URL("../authorization/evaluators/policy-worker.cjs", import.meta.url);
 }
 
