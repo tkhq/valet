@@ -2,16 +2,26 @@ import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import memoryPlugin from "@valet/plugin-memory/plugin";
+import valetPlugin from "@valet/plugin-valet/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { listActionLog } from "../policies/admin.js";
 import { persistInvocationAuditStrict, updateInvocationOutcomeStrict } from "../policies/service.js";
-import { users, oauthAccessToken, agentSessions, memoryFiles, orgs, orgMembers } from "../schema/index.js";
+import { users, oauthAccessToken, agentSessions, actionInvocations, memoryFiles, orgs, orgMembers, assistants, skills, teamMembers } from "../schema/index.js";
 import { addMember, createTeam } from "../services/teams.js";
+import { ensureAssistantSession, loadAssistant } from "../assistants/service.js";
+import { setPluginEntitlement } from "../services/plugin-entitlements.js";
 import { writeFile } from "../services/memory.js";
 import { validateMcpToolConfiguration, type McpAuditStore } from "./mcp.js";
 
 let api: TestApi | undefined;
+
+const gatedSkillPlugin: ValetPlugin = {
+  name: "gated-skill",
+  version: "0.0.1",
+  gate: { label: "Gated skill", description: "Test-only gated skill." },
+  skills: [{ name: "gated-skill", description: "Gated description", content: "gated body" }],
+};
 
 afterEach(async () => {
   await api?.cleanup();
@@ -387,5 +397,103 @@ describe("MCP endpoint", () => {
     expect(JSON.stringify(audits)).not.toMatch(/mixed-(secret|invalid-secret|unknown-secret)/);
     expect(JSON.stringify(audits)).not.toContain("kept body");
     expect(JSON.stringify(audits)).not.toContain("forbidden-team");
+  });
+});
+
+describe("MCP skill tools", () => {
+  it("uses public assistant ids, live access, and the production skill assembly", async () => {
+    api = await bootTestApi({ auth: true, plugins: [valetPlugin, gatedSkillPlugin] });
+    const { db } = api.providers;
+    const now = Date.now();
+    await db.insert(orgs).values([
+      { id: "skill-org", name: "Skill Org", createdAt: now },
+      { id: "other-org", name: "Other Org", createdAt: now },
+    ]);
+    for (const id of ["skill-reader", "skill-owner"]) {
+      await db.insert(users).values({
+        id, name: id, email: `${id}@nowhere.test`, role: "member", createdAt: new Date(now), updatedAt: new Date(now),
+      });
+      await db.insert(orgMembers).values({ orgId: "skill-org", userId: id, role: "member", createdAt: now });
+    }
+    const team = await createTeam(db, { orgId: "skill-org", name: "Skill Team", creatorUserId: "skill-owner" });
+    await addMember(db, { teamId: team.id, userId: "skill-reader", role: "member" });
+    await db.insert(assistants).values([
+      { id: "asst_accessible", orgId: "skill-org", ownerType: "user", ownerId: "skill-reader", sessionId: "assistant:asst_accessible", isDefault: true, createdAt: now, archivedAt: null },
+      { id: "asst_hidden", orgId: "skill-org", ownerType: "user", ownerId: "skill-owner", sessionId: "assistant:asst_hidden", isDefault: true, createdAt: now, archivedAt: null },
+      { id: "asst_team", orgId: "skill-org", ownerType: "team", ownerId: team.id, sessionId: "assistant:asst_team", isDefault: false, createdAt: now, archivedAt: null },
+    ]);
+    await db.insert(agentSessions).values({ id: "session_vanilla", userId: "skill-reader", orgId: "skill-org", workspace: "/tmp/vanilla", title: null, status: "active", ownerType: "user", ownerId: "skill-reader", createdAt: now, updatedAt: now });
+    await db.insert(skills).values([
+      { id: "personal", orgId: "skill-org", ownerType: "user", ownerId: "skill-reader", origin: "local", sourceId: null, name: "personal-skill", description: "Personal description", content: "personal body", frontmatter: {}, contentSha: "personal-revision", upstreamPath: null, createdAt: now, updatedAt: now },
+      { id: "team", orgId: "skill-org", ownerType: "team", ownerId: team.id, origin: "repo", sourceId: "source", name: "team-skill", description: "Team description", content: "team body", frontmatter: {}, contentSha: "team-revision", upstreamPath: "SKILL.md", createdAt: now, updatedAt: now },
+      { id: "org", orgId: "skill-org", ownerType: "org", ownerId: "skill-org", origin: "local", sourceId: null, name: "org-skill", description: "Org description", content: "org body", frontmatter: {}, contentSha: "org-revision", upstreamPath: null, createdAt: now, updatedAt: now },
+      { id: "shadowed", orgId: "skill-org", ownerType: "user", ownerId: "skill-reader", origin: "local", sourceId: null, name: "using-valet", description: "Hidden collision", content: "hidden collision body", frontmatter: {}, contentSha: "hidden-revision", upstreamPath: null, createdAt: now, updatedAt: now },
+    ]);
+    const token = "skill-mcp-token";
+    await db.insert(oauthAccessToken).values({
+      id: "skill-mcp-token-row", accessToken: token, refreshToken: "skill-mcp-refresh", accessTokenExpiresAt: new Date(now + 60_000), refreshTokenExpiresAt: new Date(now + 3_600_000), clientId: null, userId: "skill-reader", scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now),
+    });
+    const call = async (id: number, name: string, arguments_: Record<string, unknown>) => {
+      const response = await mcpRequest(api!.baseUrl, token, { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: arguments_ } });
+      expect(response.status).toBe(200);
+      return (await response.json()) as JsonRpcResponse & { result?: { content: Array<{ type: string; text: string }>; isError?: boolean } };
+    };
+    const unavailable = async (id: number, orchestratorId: string, expected: unknown) => {
+      const rejected = await call(id, "list_skills", { orchestratorId });
+      expect(rejected.result).toEqual(expected);
+      expect(JSON.stringify(rejected.result)).not.toContain("team body");
+      expect(JSON.stringify(rejected.result)).not.toContain("Team description");
+    };
+
+    const toolsResponse = await mcpRequest(api.baseUrl, token, { jsonrpc: "2.0", id: 0, method: "tools/list", params: {} });
+    const toolsBody = (await toolsResponse.json()) as JsonRpcResponse & { result?: { tools: Array<{ name: string }> } };
+    const toolNames = toolsBody.result?.tools.map((tool) => tool.name) ?? [];
+    expect(toolNames).toEqual(expect.arrayContaining(["list_skills", "skill"]));
+    expect(toolNames).not.toEqual(expect.arrayContaining(["skill_create", "skill_update", "skill_delete", "skill_sync", "skill_attach", "skill_detach"]));
+
+    const listed = await call(1, "list_skills", { orchestratorId: "asst_accessible" });
+    const listedSkills = JSON.parse(listed.result?.content[0]?.text ?? "[]") as Array<{ name: string; source: string; revision: string }>;
+    expect(listed.result?.isError).not.toBe(true);
+    expect(listedSkills).toEqual(expect.arrayContaining([
+      { name: "personal-skill", description: "Personal description", source: "user", revision: "personal-revision" },
+      { name: "team-skill", description: "Team description", source: "repo", revision: "team-revision" },
+      { name: "org-skill", description: "Org description", source: "user", revision: "org-revision" },
+    ]));
+    expect(listedSkills.find((skill) => skill.name === "using-valet")?.source).toBe("plugin");
+    expect(JSON.stringify(listedSkills)).not.toContain("hidden collision");
+    const read = await call(2, "skill", { orchestratorId: "asst_accessible", name: "team-skill" });
+    expect(read.result?.content[0]?.text).toBe("team body");
+    const accessible = await loadAssistant(db, "asst_accessible");
+    if (!accessible) throw new Error("missing accessible assistant fixture");
+    const { session } = await ensureAssistantSession({ db, engineHost: api.providers.engineHost }, accessible, {
+      actorUserId: "skill-reader", orgId: "skill-org",
+    });
+    await setPluginEntitlement(db, "skill-org", "gated-skill", { mode: "off", teamIds: [] });
+    expect((await session.options.skillsProvider!()).map((skill) => skill.name)).not.toContain("gated-skill");
+    const gatedList = await call(20, "list_skills", { orchestratorId: "asst_accessible" });
+    expect(gatedList.result?.content[0]?.text).not.toContain("gated-skill");
+
+    const missing = await call(3, "list_skills", { orchestratorId: "asst_missing" });
+    await unavailable(4, "asst_hidden", missing.result);
+    await unavailable(5, "session_vanilla", missing.result);
+    await db.update(assistants).set({ archivedAt: now }).where(eq(assistants.id, "asst_accessible"));
+    await unavailable(6, "asst_accessible", missing.result);
+    await db.update(assistants).set({ archivedAt: null }).where(eq(assistants.id, "asst_accessible"));
+    await db.delete(orgMembers).where(eq(orgMembers.userId, "skill-reader"));
+    await db.insert(orgMembers).values({ orgId: "other-org", userId: "skill-reader", role: "member", createdAt: now });
+    await unavailable(7, "asst_accessible", missing.result);
+    await db.delete(orgMembers).where(eq(orgMembers.userId, "skill-reader"));
+    await db.insert(orgMembers).values({ orgId: "skill-org", userId: "skill-reader", role: "member", createdAt: now });
+    expect((await call(8, "list_skills", { orchestratorId: "asst_team" })).result?.isError).not.toBe(true);
+    await db.delete(teamMembers).where(eq(teamMembers.userId, "skill-reader"));
+    await unavailable(9, "asst_team", missing.result);
+
+    const auditRows = (await db.select().from(actionInvocations)).filter((row) => row.actionId === "list_skills" || row.actionId === "skill");
+    expect(auditRows).toHaveLength(10);
+    expect(auditRows.every((row) => row.createdAt > 0 && row.userId === "skill-reader" && row.sourceIp !== null)).toBe(true);
+    expect(auditRows.filter((row) => row.status === "error")).toHaveLength(6);
+    const audit = JSON.stringify(auditRows);
+    expect(audit).not.toContain("team body");
+    expect(audit).not.toContain("Team description");
   });
 });

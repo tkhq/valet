@@ -1366,6 +1366,21 @@ export class EngineHost {
    * `undefined` without a db — the session then keeps its construction-time
    * skill set, the same graceful degradation `sessionExtras` applies.
    */
+  /** Returns the exact current skill assembly for one assistant. External
+   * read-only surfaces use this seam so availability, behavior, precedence,
+   * and selected revisions cannot diverge from the orchestrator runtime. */
+  async skillSourcesForAssistant(assistant: {
+    orgId: string;
+    ownerType: Principal["type"];
+    ownerId: string;
+    behavior: string | null;
+    id: string;
+  }): Promise<SkillSource[]> {
+    const owner: Principal = { type: assistant.ownerType, id: assistant.ownerId };
+    const behavior = parseAssistantBehavior(assistant.behavior, assistant.id);
+    return (await this.sessionExtras(owner, assistant.orgId, [], [], behavior)).skills;
+  }
+
   private skillsProviderFor(
     owner: Principal,
     orgId: string,
