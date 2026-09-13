@@ -23,7 +23,6 @@ import {
 } from "~/components/primitives";
 import { TeamOnePasswordToken } from "./team-onepassword-token";
 import { ApiError } from "~/api/client";
-import { defaultAssistantFor, useAssistants } from "~/api/assistants";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
 import { matchesNeedle } from "~/lib/text-match";
@@ -86,10 +85,13 @@ const DELETE_TEAM_NOTE =
 export function TeamsPanel({
   orgMembers,
   teamId,
+  showAssistantLink = false,
 }: {
   orgMembers: OrgDirectoryUserWire[];
   /** Pin the panel to the selected workspace, without team creation. */
   teamId?: string;
+  /** Show the assistant link only when this panel has the active team scope. */
+  showAssistantLink?: boolean;
 }) {
   const teamsQ = useTeams();
   const meQ = useMe();
@@ -123,6 +125,7 @@ export function TeamsPanel({
               team={team}
               orgMembers={orgMembers}
               canMutate={orgAdmin || team.callerRole === "admin"}
+              showAssistantLink={showAssistantLink}
               open={expanded === team.id}
               onToggle={() => setExpanded((cur) => (cur === team.id ? null : team.id))}
             />
@@ -186,19 +189,19 @@ function TeamRow({
   team,
   orgMembers,
   canMutate,
+  showAssistantLink,
   open,
   onToggle,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
+  showAssistantLink: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const deleteTeam = useDeleteTeam();
-  const assistantsQ = useAssistants();
-  const assistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", team.id);
   const idpBacked = team.origin === "idp";
   const declared = team.origin === "config";
 
@@ -236,13 +239,9 @@ function TeamRow({
         <span className="hidden shrink-0 text-xs text-muted sm:block">
           Created {formatDate(team.createdAt)}
         </span>
-        {/* A cross-link to the working surface, not a second door: `/chat`
-            owns the get-or-create, so this creates nothing and needs no
-            pending or error state of its own. It opens the team's DEFAULT
-            assistant; the rail is where the others are chosen. */}
-        {assistant && (
+        {showAssistantLink && (
           <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
-            <Link to="/chat" search={{ assistant: assistant.id }}>
+            <Link to="/assistants">
               <Bot className="h-3.5 w-3.5" aria-hidden />
               Assistant
             </Link>
