@@ -4114,6 +4114,12 @@ export interface PostGithubAppCredentialRequest {
 // from the org-level App setup above. `GET /callback` has no wire response
 // type of its own (always a 302 redirect, or a 400/409/502 error body).
 
+export interface PostGithubConnectRequest {
+  /** The callback destination for an Integrations reconnect. The API accepts
+   * only `"integrations"`; other values use the existing destination. */
+  postAuthDestination?: "integrations";
+}
+
 export interface PostGithubConnectResponse {
   /** `{github}/login/oauth/authorize?...` — where the browser should
    * navigate to start the App-OAuth authorize flow. */

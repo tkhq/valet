@@ -172,7 +172,9 @@ function DecisionPane({
     if (path === "manual") return onEnterToken();
     if (path === "github") {
       try {
-        const res = await connectGithub.mutateAsync();
+        const res = await connectGithub.mutateAsync(
+          service.connected ? { postAuthDestination: "integrations" } : undefined,
+        );
         window.location.href = res.url;
       } catch {
         // Surfaced below via connectGithub.error.

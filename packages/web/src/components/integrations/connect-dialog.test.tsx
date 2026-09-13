@@ -284,6 +284,20 @@ describe("the choice reaches the connect call", () => {
     expect(githubMutateAsync).toHaveBeenCalledTimes(1);
   });
 
+  it("asks the GitHub callback to return to Integrations for a reconnect", () => {
+    show(gmail({ service: "github", connect: "manual", connected: true }), "GitHub");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    expect(githubMutateAsync).toHaveBeenCalledWith({ postAuthDestination: "integrations" });
+  });
+
+  it("keeps a new GitHub connection on its existing callback destination", () => {
+    show(gmail({ service: "github", connect: "manual" }), "GitHub");
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(githubMutateAsync).toHaveBeenCalledWith(undefined);
+  });
+
   it("carries the manual path to the token form and saves under the right service", async () => {
     show(gmail({ service: "typefully", type: "api_key", connect: "manual" }), "Typefully");
 
