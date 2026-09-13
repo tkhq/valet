@@ -200,26 +200,10 @@ Two credentials, one file, both independent of better-auth:
 
 ## Memory tools on the MCP mount (TKAI-252)
 
-The authenticated `/mcp` mount also exposes `mem_capture`, `mem_search`, and
-`mem_read` from the memory plugin. It does not expose other memory mutations.
-The API builds a personal `MemoryScope` only from the verified OAuth token.
-Reads include the caller's current team memberships. A team path resolves only
-after a live membership check.
+The authenticated `/mcp` mount exposes `mem_capture`, `mem_search`, and `mem_read` from the memory plugin. It exposes no other memory mutations. The API builds a personal `MemoryScope` only from the verified OAuth token. Reads include current team memberships and check live membership before resolving a team path.
 
-`mem_capture` creates a personal file at `90-inbox/YYYY-MM-DD-<slug>.md`.
-The slug includes a title hash. A race-safe numeric suffix preserves concurrent
-captures with the same title. The caller cannot set the path or owner. The
-memory service removes embedded frontmatter and sets `origin` to `mcp:external`.
+`mem_capture` creates `90-inbox/YYYY-MM-DD-<slug>.md` with a title hash and race-safe numeric suffix. The caller cannot set the path or owner. The memory service removes embedded frontmatter and sets `origin` to `mcp:external`.
 
-Each authenticated `tools/call` attempt starts a strict `action_invocations`
-row before dispatch. Name and schema rejections finish that row as an error.
-Successful tools finish the same row only after execution. A failed required
-audit write fails the call closed. The row uses the OAuth user's one authorized
-organization, and ambiguous organization membership fails closed. OAuth 401s
-occur before tool dispatch and are outside this tool-call audit boundary.
+Each authenticated `tools/call` attempt starts a strict, organization-scoped `action_invocations` row before dispatch. Name and schema rejections finish as errors. Successful tools finish after execution. Per-request-ID and per-tool FIFO queues keep duplicate IDs distinct. A later start failure finalizes earlier rows before dispatch. Required audit failures fail closed. Ambiguous organization membership also fails closed. OAuth 401s occur before this audit boundary.
 
-Capture content and unvalidated unknown-tool arguments are redacted. With
-`VALET_TRUST_PROXY=1`, Valet requires one trusted ingress to append its observed
-client as the final `x-forwarded-for` hop. Valet ignores all earlier hops. With
-no trusted ingress contract, keep the setting off and use the socket peer. The
-mount keeps the Better Auth challenge and stateless JSON transport behavior.
+Capture content and all unvalidated arguments are redacted. With `VALET_TRUST_PROXY=1`, one trusted ingress must append its observed client as the final `x-forwarded-for` hop. Valet ignores earlier hops. Otherwise, keep the setting off and use the socket peer. The mount keeps the Better Auth challenge and stateless JSON transport.

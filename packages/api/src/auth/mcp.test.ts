@@ -1,14 +1,3 @@
-/**
- * Integration tests for the MCP endpoint (Task 9):
- *
- *   - `/.well-known/oauth-authorization-server` (mounted in Task 6) reports
- *     an `authorization_endpoint` ending `/mcp/authorize` — asserted here as
- *     the discovery half of the contract this endpoint's clients rely on.
- *   - `/mcp` without a `Bearer` token 401s with a `WWW-Authenticate` header
- *     (`withMcpAuth`'s own behavior, not hand-rolled).
- *   - Seeded OAuth tokens drive real JSON-RPC calls through the stateless
- *     transport. Tool handlers use only the verified user and live team access.
- */
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
@@ -16,6 +5,7 @@ import memoryPlugin from "@valet/plugin-memory/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { listActionLog } from "../policies/admin.js";
+import { persistInvocationAuditStrict, updateInvocationOutcomeStrict } from "../policies/service.js";
 import { users, oauthAccessToken, agentSessions, memoryFiles, orgs, orgMembers } from "../schema/index.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { writeFile } from "../services/memory.js";
@@ -54,7 +44,10 @@ function recordTitle(value: unknown): unknown {
   return typeof value === "object" && value !== null && "title" in value ? value.title : undefined;
 }
 
-async function seedOAuthIdentity(db: AppDb, ids: { userId: string; orgId: string; token: string }): Promise<void> {
+async function seedOAuthIdentity(
+  db: AppDb,
+  ids: { userId: string; orgId: string; token: string; expiresAt?: number },
+): Promise<void> {
   const now = Date.now();
   await db.insert(orgs).values({ id: ids.orgId, name: ids.orgId, createdAt: now });
   await db.insert(users).values({
@@ -64,7 +57,7 @@ async function seedOAuthIdentity(db: AppDb, ids: { userId: string; orgId: string
   await db.insert(orgMembers).values({ orgId: ids.orgId, userId: ids.userId, role: "member", createdAt: now });
   await db.insert(oauthAccessToken).values({
     id: `token-row:${ids.userId}`, accessToken: ids.token, refreshToken: `refresh:${ids.userId}`,
-    accessTokenExpiresAt: new Date(now + 60_000), refreshTokenExpiresAt: new Date(now + 3_600_000),
+    accessTokenExpiresAt: new Date(ids.expiresAt ?? now + 60_000), refreshTokenExpiresAt: new Date(now + 3_600_000),
     clientId: null, userId: ids.userId, scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now),
   });
 }
@@ -105,32 +98,8 @@ describe("MCP endpoint", () => {
     const { db } = api.providers;
 
     const now = Date.now();
-    await db.insert(users).values({
-      id: "mcp-user-1",
-      name: "MCP User",
-      email: "mcp-user@nowhere.test",
-      role: "member",
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-
-    await db.insert(orgs).values({ id: "mcp-org-1", name: "MCP Org", createdAt: now });
-    await db.insert(orgMembers).values({ orgId: "mcp-org-1", userId: "mcp-user-1", role: "member", createdAt: now });
-
     const accessToken = "mcp-test-access-token";
-    await db.insert(oauthAccessToken).values({
-      id: "mcp-token-1",
-      accessToken,
-      refreshToken: "mcp-refresh-token-1",
-      accessTokenExpiresAt: new Date(now + 60_000),
-      refreshTokenExpiresAt: new Date(now + 3_600_000),
-      clientId: null,
-      userId: "mcp-user-1",
-      scopes: "mcp",
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-
+    await seedOAuthIdentity(db, { userId: "mcp-user-1", orgId: "mcp-org-1", token: accessToken });
     await db.insert(agentSessions).values({
       id: "mcp-session-1",
       userId: "mcp-user-1",
@@ -180,7 +149,7 @@ describe("MCP endpoint", () => {
     expect(whoamiBody.result?.isError).not.toBe(true);
     const whoamiText = whoamiBody.result?.content[0]?.text ?? "{}";
     const whoami = JSON.parse(whoamiText) as { userId: string; email: string; role: string };
-    expect(whoami).toEqual({ userId: "mcp-user-1", email: "mcp-user@nowhere.test", role: "member" });
+    expect(whoami).toEqual({ userId: "mcp-user-1", email: "mcp-user-1@nowhere.test", role: "member" });
 
     const listSessionsRes = await mcpRequest(api.baseUrl, accessToken, {
       jsonrpc: "2.0",
@@ -207,49 +176,39 @@ describe("MCP endpoint", () => {
     expect(() => validateMcpToolConfiguration([collision], new Set(["collision"]))).toThrow(/declared by both/);
   });
 
-  it("fails closed before tool execution when required audit storage is unavailable", async () => {
+  it("finalizes earlier audits when a later batch audit start fails", async () => {
+    let db: AppDb;
+    let starts = 0;
     const auditStore: McpAuditStore = {
-      start: async () => { throw new Error("injected audit outage"); },
-      finish: async () => undefined,
+      start: async (row) => {
+        if (++starts === 2) throw new Error("injected audit outage");
+        await persistInvocationAuditStrict(db, row);
+      },
+      finish: (id, orgId, outcome) => updateInvocationOutcomeStrict(db, id, orgId, outcome),
     };
     api = await bootTestApi({ auth: true, plugins: [memoryPlugin], mcpAuditStore: auditStore });
-    await seedOAuthIdentity(api.providers.db, { userId: "audit-user", orgId: "audit-org", token: "audit-token" });
-    const response = await mcpRequest(api.baseUrl, "audit-token", {
-      jsonrpc: "2.0", id: 40, method: "tools/call",
-      params: { name: "mem_capture", arguments: { title: "Must not write", content: "blocked" } },
+    db = api.providers.db;
+    await seedOAuthIdentity(db, { userId: "audit-user", orgId: "audit-org", token: "audit-token" });
+    const call = (id: number) => ({
+      jsonrpc: "2.0", id, method: "tools/call",
+      params: { name: "mem_capture", arguments: { title: `Blocked ${id}`, content: "blocked" } },
     });
+    const response = await mcpRequest(api.baseUrl, "audit-token", [call(40), call(41), call(42)]);
     expect(response.status).toBe(500);
     expect(await response.text()).toContain("Retry after audit storage is available");
-    expect(await api.providers.db.select().from(memoryFiles)).toHaveLength(0);
+    expect(await db.select().from(memoryFiles)).toHaveLength(0);
+    const audits = (await listActionLog(db, "audit-org", { service: "mcp" }, 10, undefined)).rows;
+    expect(audits).toHaveLength(1);
+    expect(audits[0].status).toBe("error");
   });
 
   it("an expired oauth_access_token row is rejected with 401", async () => {
     api = await bootTestApi({ auth: true });
     const { db } = api.providers;
 
-    const now = Date.now();
-    await db.insert(users).values({
-      id: "mcp-user-expired",
-      name: "MCP Expired User",
-      email: "mcp-expired@nowhere.test",
-      role: "member",
-      createdAt: new Date(now),
-      updatedAt: new Date(now),
-    });
-
     const accessToken = "mcp-test-access-token-expired";
-    await db.insert(oauthAccessToken).values({
-      id: "mcp-token-expired",
-      accessToken,
-      refreshToken: "mcp-refresh-token-expired",
-      // Expired: expiry is in the past.
-      accessTokenExpiresAt: new Date(now - 60_000),
-      refreshTokenExpiresAt: new Date(now + 3_600_000),
-      clientId: null,
-      userId: "mcp-user-expired",
-      scopes: "mcp",
-      createdAt: new Date(now - 120_000),
-      updatedAt: new Date(now - 120_000),
+    await seedOAuthIdentity(db, {
+      userId: "mcp-user-expired", orgId: "mcp-org-expired", token: accessToken, expiresAt: Date.now() - 60_000,
     });
 
     const res = await mcpRequest(api.baseUrl, accessToken, {
@@ -367,6 +326,21 @@ describe("MCP endpoint", () => {
     const unknown = await call(20, "unknown_private_tool", { secret: "unknown-secret" });
     expect(unknown.result?.isError).toBe(true);
 
+    const batchCall = (name: string, args: Record<string, unknown>) => ({
+      jsonrpc: "2.0", id: 7, method: "tools/call", params: { name, arguments: args },
+    });
+    const duplicateBatch = await mcpRequest(api.baseUrl, token, [
+      batchCall("mem_capture", { title: "Duplicate one", content: "batch-one" }),
+      batchCall("mem_capture", { title: "Duplicate two", content: "batch-two" }),
+    ]);
+    expect(duplicateBatch.status).toBe(200);
+    const mixedBatch = await mcpRequest(api.baseUrl, token, [
+      batchCall("unknown_batch_tool", { secret: "mixed-unknown-secret" }),
+      batchCall("mem_capture", { title: "", content: "mixed-invalid-secret" }),
+      batchCall("mem_capture", { title: "Mixed valid", content: "mixed-secret" }),
+    ]);
+    expect(mixedBatch.status).toBe(200);
+
     const search = await call(12, "mem_search", { query: "oauth-scope-marker", owner: "other-user" });
     const searchRows = JSON.parse(search.result?.content?.[0]?.text ?? "[]") as Array<{ path: string }>;
     expect(searchRows.map((row) => row.path)).toEqual(expect.arrayContaining([
@@ -386,9 +360,18 @@ describe("MCP endpoint", () => {
     const correctLog = await listActionLog(db, "mcp-org", { service: "mcp" }, 100, undefined);
     const otherLog = await listActionLog(db, "other-org", { service: "mcp" }, 100, undefined);
     const audits = correctLog.rows;
-    expect(audits).toHaveLength(10);
+    expect(audits).toHaveLength(15);
     expect(otherLog.rows).toHaveLength(0);
     expect(audits.every((row) => row.createdAt > 0 && row.userId === "mcp-reader" && row.orgId === "mcp-org")).toBe(true);
+    expect(audits.every((row) => row.status !== "pending")).toBe(true);
+    const duplicateAudits = audits.filter((row) =>
+      row.actionId === "mem_capture" && ["Duplicate one", "Duplicate two"].includes(String(recordTitle(row.params))),
+    );
+    expect(duplicateAudits).toHaveLength(2);
+    expect(duplicateAudits.every((row) => row.status === "completed")).toBe(true);
+    expect(audits.find((row) => recordTitle(row.params) === "Mixed valid")?.status).toBe("completed");
+    expect(audits.find((row) => recordTitle(row.params) === "")?.status).toBe("error");
+    expect(audits.find((row) => row.actionId === "unknown_batch_tool")?.status).toBe("error");
     expect(audits.find((row) => row.actionId === "mem_read" && row.status === "error")).toBeDefined();
     const captureAudits = audits.filter((row) =>
       row.actionId === "mem_capture" && recordTitle(row.params) === "OAuth Capture",
@@ -401,6 +384,7 @@ describe("MCP endpoint", () => {
     });
     expect(JSON.stringify(audits)).not.toContain("invalid-secret");
     expect(JSON.stringify(audits)).not.toContain("unknown-secret");
+    expect(JSON.stringify(audits)).not.toMatch(/mixed-(secret|invalid-secret|unknown-secret)/);
     expect(JSON.stringify(audits)).not.toContain("kept body");
     expect(JSON.stringify(audits)).not.toContain("forbidden-team");
   });

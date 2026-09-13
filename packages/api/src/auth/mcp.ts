@@ -4,7 +4,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { McpToolDef, McpToolPort, ValetPlugin } from "@valet/engine";
 import { withMcpAuth } from "better-auth/plugins";
 import { eq } from "drizzle-orm";
-import type { z } from "zod";
+import { z } from "zod";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   persistInvocationAuditStrict,
@@ -45,12 +45,28 @@ interface ToolAttempt {
   requestKey: string;
   tool: string;
   args: Record<string, unknown>;
+  dispatchable: boolean;
 }
 
-function requestKey(id: unknown, index: number): string {
+type LifecycleQueues = Map<string, AuditLifecycle[]>;
+
+function requestKey(id: unknown): string {
   if (typeof id === "string") return `s:${id}`;
   if (typeof id === "number") return `n:${id}`;
-  return `invalid:${index}`;
+  return "invalid";
+}
+
+function lifecycleKey(id: unknown, tool: string): string {
+  return `${requestKey(id)}:${tool}`;
+}
+
+function takeLifecycle(queues: LifecycleQueues, id: unknown, tool: string): AuditLifecycle | undefined {
+  return queues.get(lifecycleKey(id, tool))?.shift();
+}
+
+function inputSchema(tool: McpToolDef): z.ZodRawShape {
+  // The engine keeps this Zod raw shape opaque. The API owns schema parsing.
+  return tool.inputSchema as z.ZodRawShape;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -78,15 +94,19 @@ async function toolAttempts(req: Request, tools: Map<string, McpToolDef>): Promi
   }
   const messages = Array.isArray(body) ? body : [body];
   const attempts: ToolAttempt[] = [];
-  for (const [index, message] of messages.entries()) {
+  for (const message of messages) {
     const request = record(message);
     if (!request || request.method !== "tools/call") continue;
     const params = record(request.params);
     const tool = typeof params?.name === "string" ? params.name : INVALID_TOOL_NAME;
+    const definition = tools.get(tool);
+    const values = record(params?.arguments);
     attempts.push({
-      requestKey: requestKey(request.id, index),
+      requestKey: lifecycleKey(request.id, tool),
       tool,
-      args: BUILTIN_TOOLS.has(tool) ? {} : auditArguments(tools.get(tool), params?.arguments),
+      args: BUILTIN_TOOLS.has(tool) ? {} : auditArguments(definition, values),
+      dispatchable: BUILTIN_TOOLS.has(tool)
+        || (definition !== undefined && values !== undefined && z.object(inputSchema(definition)).safeParse(values).success),
     });
   }
   return attempts;
@@ -160,28 +180,39 @@ async function runAudited(
   }
 }
 
+async function finalizeUnhandled(
+  auditStore: McpAuditStore,
+  lifecycles: AuditLifecycle[],
+  error: string,
+): Promise<void> {
+  await Promise.all(lifecycles.filter((lifecycle) => !lifecycle.handled).map((lifecycle) =>
+    requireAudit(() => auditStore.finish(lifecycle.invocationId, lifecycle.orgId, {
+      status: "error",
+      error,
+      durationMs: Date.now() - lifecycle.startedAt,
+    })),
+  ));
+}
+
 function registerPluginTool(
   server: McpServer,
   tool: McpToolDef,
   port: McpToolPort,
-  lifecycles: Map<string, AuditLifecycle>,
+  lifecycles: LifecycleQueues,
   auditStore: McpAuditStore,
 ): void {
-  // The engine keeps this Zod raw shape opaque. The MCP SDK is the first
-  // boundary that needs the plugin's concrete Zod type.
-  const inputSchema = tool.inputSchema as z.ZodRawShape;
   server.registerTool(
     tool.name,
     {
       description: tool.description,
-      inputSchema,
+      inputSchema: inputSchema(tool),
       annotations: {
         readOnlyHint: tool.readOnly,
         destructiveHint: false,
         idempotentHint: tool.readOnly,
       },
     },
-    async (args, extra) => runAudited(auditStore, lifecycles.get(requestKey(extra.requestId, 0)), async () => {
+    async (args, extra) => runAudited(auditStore, takeLifecycle(lifecycles, extra.requestId, tool.name), async () => {
       const result = await tool.execute(args, port);
       return { content: [{ type: "text", text: result.text }] };
     }),
@@ -195,25 +226,36 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
 
   return (request, sourceIp = "unknown") => withMcpAuth(auth, async (req, session) => {
     const attempts = await toolAttempts(req, pluginTools);
-    const lifecycles = new Map<string, AuditLifecycle>();
+    const lifecycles: AuditLifecycle[] = [];
+    const lifecycleQueues: LifecycleQueues = new Map();
     if (attempts.length > 0) {
       const orgId = await resolveMcpOrgId(db, session.userId);
-      for (const attempt of attempts) {
-        const startedAt = Date.now();
-        const lifecycle = { invocationId: `mcp:${randomUUID()}`, orgId, startedAt, handled: false };
-        await requireAudit(() => auditStore.start({
-          invocationId: lifecycle.invocationId,
-          createdAt: startedAt,
-          startedAt,
-          service: "mcp",
-          actionId: attempt.tool,
-          status: "pending",
-          userId: session.userId,
-          orgId,
-          params: attempt.args,
-          sourceIp,
-        }));
-        lifecycles.set(attempt.requestKey, lifecycle);
+      try {
+        for (const attempt of attempts) {
+          const startedAt = Date.now();
+          const lifecycle = { invocationId: `mcp:${randomUUID()}`, orgId, startedAt, handled: false };
+          await requireAudit(() => auditStore.start({
+            invocationId: lifecycle.invocationId,
+            createdAt: startedAt,
+            startedAt,
+            service: "mcp",
+            actionId: attempt.tool,
+            status: "pending",
+            userId: session.userId,
+            orgId,
+            params: attempt.args,
+            sourceIp,
+          }));
+          lifecycles.push(lifecycle);
+          if (attempt.dispatchable) {
+            const queue = lifecycleQueues.get(attempt.requestKey) ?? [];
+            queue.push(lifecycle);
+            lifecycleQueues.set(attempt.requestKey, queue);
+          }
+        }
+      } catch (error) {
+        await finalizeUnhandled(auditStore, lifecycles, "The MCP batch audit could not start.");
+        throw error;
       }
     }
 
@@ -221,7 +263,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
     server.registerTool(
       "whoami",
       { description: "Returns the authenticated user's identity: userId, email, role." },
-      async (extra) => runAudited(auditStore, lifecycles.get(requestKey(extra.requestId, 0)), async () => {
+      async (extra) => runAudited(auditStore, takeLifecycle(lifecycleQueues, extra.requestId, "whoami"), async () => {
         const rows = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
         const user = rows[0];
         if (!user) {
@@ -236,7 +278,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
     server.registerTool(
       "list_sessions",
       { description: "Lists the authenticated user's sessions: id, title, status." },
-      async (extra) => runAudited(auditStore, lifecycles.get(requestKey(extra.requestId, 0)), async () => ({
+      async (extra) => runAudited(auditStore, takeLifecycle(lifecycleQueues, extra.requestId, "list_sessions"), async () => ({
         content: [{ type: "text", text: JSON.stringify(await listSessions(session.userId)) }],
       })),
     );
@@ -246,7 +288,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
       if (tools.length === 0) continue;
       const port = opts.portForPlugin(plugin.name, session.userId);
       if (!port) throw new Error(`MCP plugin "${plugin.name}" lost its host port. Restart the API after restoring the port factory.`);
-      for (const tool of tools) registerPluginTool(server, tool, port, lifecycles, auditStore);
+      for (const tool of tools) registerPluginTool(server, tool, port, lifecycleQueues, auditStore);
     }
 
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -255,14 +297,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
     });
     await server.connect(transport);
     const response = await transport.handleRequest(req);
-    for (const lifecycle of lifecycles.values()) {
-      if (lifecycle.handled) continue;
-      await requireAudit(() => auditStore.finish(lifecycle.invocationId, lifecycle.orgId, {
-        status: "error",
-        error: "The MCP server rejected the tool name or arguments.",
-        durationMs: Date.now() - lifecycle.startedAt,
-      }));
-    }
+    await finalizeUnhandled(auditStore, lifecycles, "The MCP server rejected the tool name or arguments.");
     return response;
   })(request);
 }

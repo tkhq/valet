@@ -282,13 +282,8 @@ such as `Error: Invalid input` as text.
 
 ## External MCP tools (TKAI-252)
 
-A plugin can declare `mcpTools` in its `ValetPlugin` manifest. Each definition has
-a unique name, a Zod input shape, a read-only marker, an executor, and an optional
-audit filter. The engine treats schemas as opaque and does not import Zod or MCP.
+A plugin can declare `mcpTools` in its `ValetPlugin` manifest. Each definition has a unique name, Zod input shape, read-only marker, executor, and optional audit filter. The engine treats schemas as opaque and imports neither Zod nor MCP.
 
-The API creates one identity-bound plugin port per request. Tool schemas do not
-accept an owner, user, or scope. App creation rejects duplicate names and any
-tool-bearing plugin without a host port factory.
+The API creates one identity-bound plugin port per request. Tool schemas accept no owner, user, or scope. App creation rejects duplicate names and tool-bearing plugins without host port factories.
 
-The stateless `/mcp` server runs each tool through the shared audit writer. A
-plugin must filter sensitive arguments before the writer receives them.
+The stateless `/mcp` server runs each tool through the shared audit writer. Plugins filter sensitive arguments before the writer receives them.
