@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import type { ValetPlugin } from "@valet/engine";
+import type { PluginActionContext, ValetPlugin } from "@valet/engine";
 import memoryPlugin from "@valet/plugin-memory/plugin";
 import valetPlugin from "@valet/plugin-valet/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -502,6 +502,14 @@ describe("MCP governed tool catalog", () => {
   it("executes once across parallel calls and replays the canonical result", async () => {
     let providerCalls = 0;
     let throwCalls = 0;
+    let rejectedCalls = 0;
+    let missingCredentialCalls = 0;
+    let credentialReads = 0;
+    let threadReplyCalls = 0;
+    let nativeControlCalls = 0;
+    let dynamicResolveCalls = 0;
+    let dynamicExecuteCalls = 0;
+    let failNextDynamicResolve = false;
     const fixture = {
       name: "fixture",
       version: "1.0.0",
@@ -528,6 +536,47 @@ describe("MCP governed tool catalog", () => {
             throwCalls += 1;
             throw new Error("provider failed after increment");
           },
+        }, {
+          id: "fixture.reject",
+          name: "Reject",
+          description: "Return a definitive provider rejection.",
+          riskLevel: "low" as const,
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => {
+            rejectedCalls += 1;
+            return { success: false, error: "provider rejected fixture", data: { detail: "x".repeat(20_000) } };
+          },
+        }, {
+          id: "fixture.needs_credential",
+          name: "Needs credential",
+          description: "Request an unavailable credential.",
+          riskLevel: "low" as const,
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async (_args: unknown, ctx: PluginActionContext) => {
+            missingCredentialCalls += 1;
+            await ctx.credentials.request("credential-fixture", "Authenticate the fixture.");
+            return { success: true };
+          },
+        }, {
+          id: "mem_read",
+          name: "Native control collision",
+          description: "Must remain blocked by its exact native name.",
+          riskLevel: "low" as const,
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => {
+            nativeControlCalls += 1;
+            return { success: true };
+          },
+        }, {
+          id: "slack.thread_reply",
+          name: "Thread reply",
+          description: "Exercise an action name that uses a native-looking prefix.",
+          riskLevel: "low" as const,
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => {
+            threadReplyCalls += 1;
+            return { success: true };
+          },
         }],
       }],
     };
@@ -536,7 +585,17 @@ describe("MCP governed tool catalog", () => {
       gate: { label: "Gated fixture", description: "Entitlement fixture." },
       actions: [{ service: "gated", actions: [{ id: "gated.hidden", name: "Hidden", description: "Must be entitled.", riskLevel: "low" as const, parameters: { type: "object", properties: {} }, execute: async () => ({ success: true }) }] }],
     };
-    const dynamicFixture = { name: "dynamic-fixture", version: "1.0.0", actions: [{ service: "dynamic", actions: [], resolveActions: async () => [{ id: "dynamic.echo", name: "Dynamic echo", description: "Resolved dynamically.", riskLevel: "low" as const, parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] }, execute: async () => ({ success: true }) }] }] };
+    const dynamicFixture = { name: "dynamic-fixture", version: "1.0.0", actions: [{ service: "dynamic", actions: [], resolveActions: async () => {
+      dynamicResolveCalls += 1;
+      if (failNextDynamicResolve) {
+        failNextDynamicResolve = false;
+        throw new Error("The dynamic action resolver is unavailable.");
+      }
+      return [{ id: "dynamic.echo", name: "Dynamic echo", description: "Resolved dynamically.", riskLevel: "low" as const, parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] }, execute: async () => {
+        dynamicExecuteCalls += 1;
+        return { success: true };
+      } }];
+    } }] };
     const behaviorFixture = { name: "behavior-fixture", version: "1.0.0", actions: [{ service: "behavior-hidden", actions: [{ id: "behavior-hidden.action", name: "Behavior hidden", description: "Must be allowlisted.", riskLevel: "low" as const, parameters: { type: "object", properties: {} }, execute: async () => ({ success: true }) }] }] };
     const unavailableFixture = {
       name: "unavailable-fixture", version: "1.0.0",
@@ -544,6 +603,11 @@ describe("MCP governed tool catalog", () => {
       actions: [{ service: "unavailable-fixture", actions: [{ id: "unavailable-fixture.hidden", name: "Unavailable", description: "Must be configured.", riskLevel: "low" as const, parameters: { type: "object", properties: {} }, execute: async () => ({ success: true }) }] }],
     };
     api = await bootTestApi({ auth: true, plugins: [valetPlugin, fixture, gatedFixture, dynamicFixture, behaviorFixture, unavailableFixture] });
+    const credentialGet = api.providers.engineCredentials.get.bind(api.providers.engineCredentials);
+    api.providers.engineCredentials.get = async (owner, service) => {
+      if (service === "credential-fixture") credentialReads += 1;
+      return credentialGet(owner, service);
+    };
     const now = Date.now();
     await api.providers.db.insert(orgs).values({ id: "tool-org", name: "Tool Org", createdAt: now });
     await api.providers.db.insert(users).values({ id: "tool-user", name: "Tool User", email: "tool@nowhere.test", role: "member", createdAt: new Date(now), updatedAt: new Date(now) });
@@ -560,10 +624,11 @@ describe("MCP governed tool catalog", () => {
     const thread2 = await toolSession.createThread("thread:two");
 
     const exposed = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 0, method: "tools/list", params: {} });
-    const exposedBody = await exposed.json() as { result?: { tools: Array<{ name: string }> } };
+    const exposedBody = await exposed.json() as { result?: { tools: Array<{ name: string; description?: string }> } };
     const exposedNames = exposedBody.result?.tools.map((tool) => tool.name) ?? [];
     expect(exposedNames).toEqual(expect.arrayContaining(["list_tools", "call_tool"]));
     expect(exposedNames).not.toContain("fixture.increment");
+    expect(exposedBody.result?.tools.find((tool) => tool.name === "call_tool")?.description).toContain("8 KiB audit-field cap");
     const malformed = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 15, method: "tools/call", params: { name: "call_tool", arguments: { invocationId: "malformed", orchestratorId: "asst_tool", actionId: "fixture.increment", summary: "Missing params." } } });
     expect(((await malformed.json()) as { result?: { isError?: boolean } }).result?.isError).toBe(true);
     expect((await api.providers.db.select().from(actionInvocations)).some((row) => row.actionId === "call_tool" && row.status === "error")).toBe(true);
@@ -597,9 +662,15 @@ describe("MCP governed tool catalog", () => {
     const invalidBody = await invalid.json() as { result?: { content: Array<{ text: string }> } };
     expect(JSON.parse(invalidBody.result?.content[0]?.text ?? "{}").status).toBe("failed");
     expect(providerCalls).toBe(0);
-    const reserved = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "call_tool", arguments: { ...invalidArgs, invocationId: "reserved", actionId: "memory.mem_read", params: {} } } });
+    const reserved = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "call_tool", arguments: { ...invalidArgs, invocationId: "reserved", actionId: "mem_read", params: {} } } });
     const reservedBody = await reserved.json() as { result?: { content: Array<{ text: string }> } };
     expect(JSON.parse(reservedBody.result?.content[0]?.text ?? "{}").status).toBe("failed");
+    expect(nativeControlCalls).toBe(0);
+    const threadReplyArgs = { ...invalidArgs, invocationId: "thread-reply", actionId: "slack.thread_reply", params: {} };
+    const threadReply = await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id: 16, method: "tools/call", params: { name: "call_tool", arguments: threadReplyArgs } });
+    const threadReplyBody = await threadReply.json() as { result?: { content: Array<{ text: string }> } };
+    expect(JSON.parse(threadReplyBody.result?.content[0]?.text ?? "{}").status).toBe("completed");
+    expect(threadReplyCalls).toBe(1);
 
     const arguments_ = { invocationId: "once", orchestratorId: "asst_tool", actionId: "fixture.increment", params: { amount: 7 }, summary: "Increment the fixture." };
     const calls = await Promise.all([1, 2].map((id) => mcpRequest(api!.baseUrl, "tool-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: arguments_ } }).then((response) => response.json())));
@@ -624,7 +695,7 @@ describe("MCP governed tool catalog", () => {
     const mismatchBody = await mismatch.json() as { result?: { isError?: boolean } };
     expect(mismatchBody.result?.isError).toBe(true);
     const afterMismatch = await api.providers.db.select().from(actionInvocations);
-    expect(afterMismatch.filter((row) => row.source === "mcp_call_tool")).toHaveLength(3);
+    expect(afterMismatch.filter((row) => row.source === "mcp_call_tool")).toHaveLength(4);
     expect(afterMismatch.filter((row) => row.actionId === "call_tool" && row.status === "rejected")).toHaveLength(1);
     for (const [id, change] of [
       [71, { actionId: "fixture.throw_after" }],
@@ -634,7 +705,7 @@ describe("MCP governed tool catalog", () => {
       await mcpRequest(api.baseUrl, "tool-token", { jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: { ...arguments_, ...change } } });
     }
     const mismatchRows = await api.providers.db.select().from(actionInvocations);
-    expect(mismatchRows.filter((row) => row.source === "mcp_call_tool")).toHaveLength(3);
+    expect(mismatchRows.filter((row) => row.source === "mcp_call_tool")).toHaveLength(4);
     expect(mismatchRows.filter((row) => row.actionId === "call_tool" && row.status === "rejected")).toHaveLength(4);
 
     const uncertainArgs = { invocationId: "uncertain", orchestratorId: "asst_tool", actionId: "fixture.throw_after", params: {}, summary: "Run the uncertain fixture." };
@@ -657,6 +728,69 @@ describe("MCP governed tool catalog", () => {
     const interruptedBody = await interrupted.json() as { result?: { content: Array<{ text: string }> } };
     expect(JSON.parse(interruptedBody.result?.content[0]?.text ?? "{}").status).toBe("in_progress_or_interrupted");
     expect(providerCalls).toBe(2);
+
+    const invoke = async (id: number, arguments_: Record<string, unknown>) => {
+      const response = await mcpRequest(api!.baseUrl, "tool-token", {
+        jsonrpc: "2.0", id, method: "tools/call", params: { name: "call_tool", arguments: arguments_ },
+      });
+      const body = await response.json() as { result?: { content: Array<{ text: string }> } };
+      return JSON.parse(body.result?.content[0]?.text ?? "{}") as {
+        status: string; result?: unknown; error?: string; correctiveAction?: string;
+      };
+    };
+
+    const rejectedArgs = { ...arguments_, invocationId: "provider-rejected", actionId: "fixture.reject", params: {} };
+    const rejected = await invoke(100, rejectedArgs);
+    expect(rejected).toMatchObject({ status: "failed", error: "provider rejected fixture" });
+    expect(JSON.stringify(rejected.result).length).toBeLessThan(9_000);
+    expect(rejectedCalls).toBe(1);
+    expect(await invoke(101, rejectedArgs)).toEqual(rejected);
+    expect(rejectedCalls).toBe(1);
+    const rejectedRow = (await api.providers.db.select().from(actionInvocations))
+      .find((row) => row.clientInvocationId === "provider-rejected");
+    expect(rejectedRow).toMatchObject({ status: "failed", resultTruncated: true, error: "provider rejected fixture" });
+
+    const missingCredentialArgs = { ...arguments_, invocationId: "missing-credential", actionId: "fixture.needs_credential", params: {} };
+    const credentialBaseline = credentialReads;
+    const missingCredential = await invoke(102, missingCredentialArgs);
+    expect(missingCredential).toMatchObject({
+      status: "failed",
+      error: "Missing fixture credential. Connect the integration in Settings.",
+    });
+    expect(missingCredentialCalls).toBe(1);
+    expect(credentialReads).toBeGreaterThan(credentialBaseline);
+    const credentialReadsAfterFailure = credentialReads;
+    expect(await invoke(103, missingCredentialArgs)).toEqual(missingCredential);
+    expect(missingCredentialCalls).toBe(1);
+    expect(credentialReads).toBe(credentialReadsAfterFailure);
+    expect((await api.providers.db.select().from(actionInvocations))
+      .find((row) => row.clientInvocationId === "missing-credential")?.status).toBe("failed");
+
+    failNextDynamicResolve = true;
+    const resolveBaseline = dynamicResolveCalls;
+    const dynamicArgs = {
+      invocationId: "dynamic-retry", orchestratorId: "asst_tool_2", actionId: "dynamic.echo",
+      params: { text: "hello" }, summary: "Resolve and execute the dynamic fixture.",
+    };
+    const transient = await invoke(104, dynamicArgs);
+    expect(transient).toMatchObject({ status: "in_progress_or_interrupted" });
+    expect(transient.error).toContain("Retry with the same invocation ID");
+    expect(dynamicResolveCalls).toBe(resolveBaseline + 1);
+    expect(dynamicExecuteCalls).toBe(0);
+    expect((await api.providers.db.select().from(actionInvocations))
+      .find((row) => row.clientInvocationId === "dynamic-retry")?.status).toBe("created");
+    const dynamicCompleted = await invoke(105, dynamicArgs);
+    expect(dynamicCompleted.status).toBe("completed");
+    expect(dynamicResolveCalls).toBe(resolveBaseline + 2);
+    expect(dynamicExecuteCalls).toBe(1);
+    expect((await invoke(106, dynamicArgs)).status).toBe("completed");
+    expect(dynamicExecuteCalls).toBe(1);
+    const dynamicMismatch = await mcpRequest(api.baseUrl, "tool-token", {
+      jsonrpc: "2.0", id: 107, method: "tools/call",
+      params: { name: "call_tool", arguments: { ...dynamicArgs, params: { text: "changed" } } },
+    });
+    expect(((await dynamicMismatch.json()) as { result?: { isError?: boolean } }).result?.isError).toBe(true);
+    expect(dynamicExecuteCalls).toBe(1);
 
     await api.providers.db.execute(sql.raw(`CREATE FUNCTION reject_mcp_start() RETURNS trigger AS 'BEGIN IF NEW.source = ''mcp_call_tool'' THEN RAISE EXCEPTION ''injected start outage''; END IF; RETURN NEW; END;' LANGUAGE plpgsql`));
     await api.providers.db.execute(sql.raw(`CREATE TRIGGER reject_mcp_start BEFORE INSERT ON action_invocations FOR EACH ROW EXECUTE FUNCTION reject_mcp_start()`));
@@ -738,9 +872,19 @@ describe("MCP governed tool catalog", () => {
     await expiredCall(7);
     const expiringGate = (await api.providers.engineStore.listDecisionGates("assistant:asst_approval", thread.id)).find((gate) => gate.status === "pending");
     expect(expiringGate).toBeDefined();
-    await api.providers.engineStore.saveDecisionGate("assistant:asst_approval", thread.id, { ...expiringGate!, status: "expired", updatedAt: Date.now() });
+    await api.providers.db.execute(sql`
+      UPDATE engine_decision_gates SET expires_at = ${Date.now()} WHERE id = ${expiringGate!.id}
+    `);
     const expired = await (await expiredCall(8)).json() as { result?: { content: Array<{ text: string }> } };
-    expect(JSON.parse(expired.result?.content[0]?.text ?? "{}").status).toBe("denied");
+    const expiredEnvelope = JSON.parse(expired.result?.content[0]?.text ?? "{}") as {
+      status: string; error?: string; correctiveAction?: string;
+    };
+    expect(expiredEnvelope).toMatchObject({
+      status: "denied",
+      error: "The approval expired before execution.",
+      correctiveAction: "If you still need this action, submit it again with a new invocation ID.",
+    });
+    expect((await api.providers.engineStore.getDecisionGate("assistant:asst_approval", expiringGate!.id))?.status).toBe("expired");
     await expiredCall(9);
     expect(providerCalls).toBe(1);
 

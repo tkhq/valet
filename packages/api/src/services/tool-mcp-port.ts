@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   buildPluginCatalog,
+  DecisionGateExpiredError,
   fromRequest,
   invokeAction,
   searchCatalog,
@@ -27,7 +28,11 @@ import {
 
 const ORCHESTRATOR_UNAVAILABLE =
   "This orchestrator is unavailable. Select an orchestrator you can access and try again.";
-const RESERVED_ACTIONS = new Set(["whoami", "list_sessions", "list_tools", "call_tool", "list_skills", "skill"]);
+const RESERVED_ACTIONS = new Set([
+  "whoami", "list_sessions", "list_tools", "call_tool", "list_skills", "skill",
+  "mem_capture", "mem_search", "mem_read", "orchestrator_list", "orchestrator_get",
+  "thread_list", "thread_create", "thread_send", "thread_read", "thread_status",
+]);
 
 class ExecutionClaimLostError extends Error {}
 
@@ -52,8 +57,7 @@ function recordArg(args: Record<string, unknown>, key: string): Record<string, u
 }
 
 function isReservedAction(actionId: string): boolean {
-  const name = actionId.includes(".") ? actionId.slice(actionId.lastIndexOf(".") + 1) : actionId;
-  return RESERVED_ACTIONS.has(actionId) || RESERVED_ACTIONS.has(name) || name.startsWith("thread_") || name.startsWith("mem_") || actionId.startsWith("mcp.");
+  return RESERVED_ACTIONS.has(actionId) || actionId.startsWith("mcp.");
 }
 
 function json(result: unknown): McpToolResult {
@@ -211,7 +215,16 @@ export class ToolMcpPort implements McpToolPort {
         });
         const stored = await this.engineStore.getDecisionGate(runtime.assistant.sessionId, gate.id);
         if (stored?.status === "resolved" && stored.resolution) return stored.resolution;
-        if (stored?.status === "expired" || stored?.status === "withdrawn") {
+        if (stored?.status === "expired") throw new DecisionGateExpiredError(stored.id, stored.ordinal);
+        if (stored?.status === "pending" && stored.expiresAt <= Date.now()) {
+          await this.engineStore.saveDecisionGate(runtime.assistant.sessionId, gate.threadId, {
+            ...stored,
+            status: "expired",
+            updatedAt: Date.now(),
+          });
+          throw new DecisionGateExpiredError(stored.id, stored.ordinal);
+        }
+        if (stored?.status === "withdrawn") {
           return { actionId: "deny", resolvedBy: "system", resolvedAt: stored.updatedAt, gateOrdinal: stored.ordinal };
         }
         if (!stored) {
@@ -244,16 +257,34 @@ export class ToolMcpPort implements McpToolPort {
       if (outcome.kind === "pending-approval") return json(invocationEnvelope(await this.invocations.get(opened.invocationId) ?? opened));
       if (outcome.kind === "ok" && outcome.result.success) {
         await this.invocations.markTerminal(opened.invocationId, "executing", { state: "completed", result: outcome.result }, audit);
+      } else if (outcome.kind === "ok") {
+        await this.invocations.markTerminal(opened.invocationId, "executing", {
+          state: "failed",
+          result: outcome.result,
+          error: outcome.result.error ?? "The provider rejected the action without an error message.",
+        }, audit);
+      } else if (outcome.kind === "missing-credential") {
+        await this.invocations.markTerminal(opened.invocationId, "executing", {
+          state: "failed",
+          error: `Missing ${outcome.service} credential. Connect the integration in Settings.`,
+        }, audit);
       } else if (outcome.kind === "denied-policy" || outcome.kind === "denied-approval" || outcome.kind === "expired-approval") {
-        await this.invocations.markTerminal(opened.invocationId, ["created", "pending_approval"], { state: "denied", error: "The action was denied before execution." }, audit);
+        const error = outcome.kind === "expired-approval"
+          ? "The approval expired before execution."
+          : outcome.kind === "denied-approval"
+            ? "The approval was denied before execution."
+            : "The action policy denied execution.";
+        await this.invocations.markTerminal(opened.invocationId, ["created", "pending_approval"], { state: "denied", error }, audit);
       } else if (executionClaimed) {
         await this.invocations.markTerminal(opened.invocationId, "executing", { state: "indeterminate", error: "The provider may have started the action, but no completed result is available." }, audit);
-      } else {
-        const error = outcome.kind === "invalid-args" ? outcome.error
-          : outcome.kind === "unknown" ? `Unknown action: ${outcome.toolId}`
-          : outcome.kind === "missing-credential" ? `Missing ${outcome.service} credential. Connect the integration in Settings.`
-          : "The action could not be prepared safely. Check the request and orchestrator configuration, then retry with a new invocation ID.";
+      } else if (outcome.kind === "invalid-args" || outcome.kind === "unknown") {
+        const error = outcome.kind === "invalid-args" ? outcome.error : `Unknown action: ${outcome.toolId}`;
         await this.invocations.markTerminal(opened.invocationId, ["created", "pending_approval"], { state: "failed", error }, audit);
+      } else {
+        await this.invocations.markRetryable(
+          opened.invocationId,
+          `${outcome.message} Retry with the same invocation ID.`,
+        );
       }
     } catch (error) {
       if (error instanceof ExecutionClaimLostError) {
@@ -261,12 +292,17 @@ export class ToolMcpPort implements McpToolPort {
         if (!current) throw error;
         return json(invocationEnvelope(current));
       }
-      const message = executionClaimed
-        ? "The provider may have started the action, but no completed result is available."
-        : "The action could not be prepared safely. Check the request and orchestrator configuration, then retry with a new invocation ID.";
-      await this.invocations.markTerminal(opened.invocationId, executionClaimed ? "executing" : ["created", "pending_approval"], {
-        state: executionClaimed ? "indeterminate" : "failed", error: message,
-      }, audit);
+      if (executionClaimed) {
+        await this.invocations.markTerminal(opened.invocationId, "executing", {
+          state: "indeterminate",
+          error: "The provider may have started the action, but no completed result is available.",
+        }, audit);
+      } else {
+        const detail = error instanceof Error && error.message.includes("retry with the same invocation ID")
+          ? error.message
+          : "A required service was unavailable before execution. Retry with the same invocation ID.";
+        await this.invocations.markRetryable(opened.invocationId, detail);
+      }
     }
     const terminal = await this.invocations.get(opened.invocationId);
     if (!terminal) throw new Error("The invocation record is unavailable. Ask an operator to inspect it.");

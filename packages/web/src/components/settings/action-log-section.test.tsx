@@ -148,6 +148,15 @@ describe("ActionLogSection — filters", () => {
     expect((screen.getByLabelText("Resolved mode") as HTMLSelectElement).value).toBe("deny");
   });
 
+  it("offers executing and indeterminate status filters", () => {
+    renderSection();
+    const statuses = Array.from((screen.getByLabelText("Status") as HTMLSelectElement).options)
+      .map((option) => option.value);
+    expect(statuses).toEqual(expect.arrayContaining(["executing", "indeterminate"]));
+    expect(parseActionLogSearch({ status: "executing" }).status).toBe("executing");
+    expect(parseActionLogSearch({ status: "indeterminate" }).status).toBe("indeterminate");
+  });
+
   it("Apply filters resets the pager to the first page", async () => {
     const user = userEvent.setup();
     useActionLogMock.mockReturnValue({

@@ -12,7 +12,7 @@ const MODE_BADGE: Record<ApprovalModeWire, "success" | "accent" | "danger"> = {
 };
 
 const RESOLVED_MODES: readonly ApprovalModeWire[] = ["allow", "require_approval", "deny"];
-const STATUSES = ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"] as const;
+const STATUSES = ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout", "executing", "indeterminate"] as const;
 
 type ActionLogStatus = (typeof STATUSES)[number];
 

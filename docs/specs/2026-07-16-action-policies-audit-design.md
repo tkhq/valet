@@ -238,9 +238,11 @@ action ID, and raw client parameters. A mismatched reuse fails before policy,
 credential, dynamic provider, or action access.
 
 The state machine is `created -> pending_approval -> executing ->
-completed|denied|failed|indeterminate`. Pre-execution work can run again.
-Only a compare-and-set from `created` or `pending_approval` can claim
-`executing`. No retry can claim an `executing` row.
+completed|denied|failed|indeterminate`. Deterministic request, schema, reserved
+action, and policy outcomes become terminal. Infrastructure failures before the
+execution claim keep the row re-drivable. Their response tells the client to
+retry with the same invocation ID. Only a compare-and-set from `created` or
+`pending_approval` can claim `executing`. No retry can claim an `executing` row.
 
 The engine calls the claim hook after dynamic action resolution, policy,
 approval, and parameter validation. It calls the hook immediately before
@@ -255,12 +257,15 @@ Valet does not use a lease or timeout to execute it again. An operator can
 mark an abandoned row `indeterminate` after investigation.
 
 If the provider throws after the claim, Valet records `indeterminate` unless
-the action contract proves that no external effect occurred. If the process
-dies after provider success but before terminal persistence, the row remains
-`executing`. The caller must inspect the provider or ask an operator to
-reconcile it. This contract prevents repeated side effects. It does not
-promise provider-independent exactly-once completion or recovery of a lost
-provider result.
+the action contract proves that no external effect occurred. A structured
+`success: false` response is a definitive provider result, so Valet records
+`failed` with its bounded result. A missing credential also records `failed`
+because credential lookup proves that the selected action had no provider
+effect. If the process dies after provider success but before terminal
+persistence, the row remains `executing`. The caller must inspect the provider
+or ask an operator to reconcile it. This contract prevents repeated side
+effects. It does not promise provider-independent exactly-once completion or
+recovery of a lost provider result.
 
 Approval uses a deterministic durable `DecisionGate` with the canonical row
 key as its queue item identity. Pending approval does not execute the action.

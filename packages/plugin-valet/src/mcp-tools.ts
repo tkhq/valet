@@ -22,7 +22,7 @@ export const valetMcpTools: McpToolDef[] = [
   },
   {
     name: "call_tool",
-    description: "Invoke one governed plugin action with durable at-most-once safety.",
+    description: "Invoke one governed plugin action with durable at-most-once safety. Live and replayed results use the 8 KiB audit-field cap.",
     inputSchema: {
       invocationId: z.string().trim().min(1).max(256),
       orchestratorId: z.string().trim().regex(/^asst_/).max(256),

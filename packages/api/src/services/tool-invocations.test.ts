@@ -34,6 +34,20 @@ describe("MCP invocation state", () => {
     expect(stored?.status).toBe("created");
   });
 
+  it("keeps pre-execution infrastructure errors retryable on the same binding", async () => {
+    let now = 15;
+    const store = new McpInvocationStore(db, () => now);
+    const row = await store.open(binding);
+    now = 16;
+    const retryable = await store.markRetryable(row.invocationId, "Resolver unavailable. Retry with the same invocation ID.");
+    expect(retryable).toMatchObject({ status: "created", updatedAt: 16 });
+    expect(invocationEnvelope(retryable)).toMatchObject({
+      status: "in_progress_or_interrupted",
+      error: "Resolver unavailable. Retry with the same invocation ID.",
+    });
+    expect(await store.claimExecution(row.invocationId)).toBe(true);
+  });
+
   it("allows exactly one parallel execution claim", async () => {
     const store = new McpInvocationStore(db, () => 20);
     const row = await store.open(binding);

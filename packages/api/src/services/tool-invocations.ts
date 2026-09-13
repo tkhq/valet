@@ -66,15 +66,22 @@ export function invocationEnvelope(row: ActionInvocationRow): McpInvocationEnvel
     case "completed":
       return { invocationId, status: "completed", result: row.result, correctiveAction: "No action is required." };
     case "denied":
-      return { invocationId, status: "denied", error: row.error ?? undefined, correctiveAction: "Change the request or ask an administrator to update the action policy." };
+      return {
+        invocationId,
+        status: "denied",
+        error: row.error ?? undefined,
+        correctiveAction: row.error?.startsWith("The approval expired")
+          ? "If you still need this action, submit it again with a new invocation ID."
+          : "Change the request or ask an administrator to update the action policy.",
+      };
     case "failed":
-      return { invocationId, status: "failed", error: row.error ?? undefined, correctiveAction: "Fix the request and retry with a new invocation ID." };
+      return { invocationId, status: "failed", result: row.result ?? undefined, error: row.error ?? undefined, correctiveAction: "Fix the request and retry with a new invocation ID." };
     case "indeterminate":
       return { invocationId, status: "indeterminate", error: row.error ?? "The provider may have completed the action, but Valet could not persist the result.", correctiveAction: "Inspect the provider before you retry. Ask an operator to reconcile this invocation if its outcome is unclear." };
     case "pending_approval":
-      return { invocationId, status: "pending", correctiveAction: "Approve or deny the pending request, then retry with the same invocation ID." };
+      return { invocationId, status: "pending", error: row.error ?? undefined, correctiveAction: "Approve or deny the pending request, then retry with the same invocation ID." };
     case "created":
-      return { invocationId, status: "in_progress_or_interrupted", correctiveAction: "Retry with the same invocation ID. Valet can safely re-drive pre-execution work." };
+      return { invocationId, status: "in_progress_or_interrupted", error: row.error ?? undefined, correctiveAction: "Retry with the same invocation ID. Valet can safely re-drive pre-execution work." };
     case "executing":
       return { invocationId, status: "in_progress_or_interrupted", error: "The action may still be running, or the prior driver may have stopped after the execution claim.", correctiveAction: "Do not use a new invocation ID. Inspect the provider or ask an operator to reconcile this invocation." };
   }
@@ -116,6 +123,15 @@ export class McpInvocationStore {
       .where(and(eq(actionInvocations.invocationId, invocationId), inArray(actionInvocations.status, ["created", "pending_approval"])))
       .returning({ invocationId: actionInvocations.invocationId });
     return rows.length === 1;
+  }
+
+  async markRetryable(invocationId: string, error: string): Promise<ActionInvocationRow> {
+    const boundedError = error.length > POLICY_AUDIT_FIELD_CAP ? error.slice(0, POLICY_AUDIT_FIELD_CAP) : error;
+    const rows = await this.db.update(actionInvocations).set({ error: boundedError, updatedAt: this.clock() })
+      .where(and(eq(actionInvocations.invocationId, invocationId), inArray(actionInvocations.status, ["created", "pending_approval"]))).returning();
+    const row = rows[0] ?? await this.get(invocationId);
+    if (!row) throw new Error("This invocation record is unavailable. Retry with the same invocation ID.");
+    return row;
   }
 
   async markTerminal(
