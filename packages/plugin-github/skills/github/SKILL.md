@@ -58,6 +58,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 - `github.merge_pull_request` — merge a PR
 - `github.create_comment` — comment on an issue or PR
 - `github.create_review` — post a PR review with optional inline comments; set `updateExisting` to replace its own previous review
+- `github.request_reviewers` — request GitHub users, team slugs, or both for PR review; this does not change assignees
 
 ### Branches & Commits
 - `github.create_branch` — create a branch from a ref

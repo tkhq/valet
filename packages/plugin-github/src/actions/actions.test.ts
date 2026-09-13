@@ -902,6 +902,137 @@ describe("github.create_review", () => {
   });
 });
 
+// ─── request_reviewers ──────────────────────────────────────────────────────
+
+describe("github.request_reviewers", () => {
+  function request(args: Record<string, unknown>) {
+    return findAction("github.request_reviewers").execute(
+      { owner: "acme", repo: "widgets", pullNumber: 7, reviewers: ["octavia"], ...args },
+      fakeActionContext("test-token"),
+    );
+  }
+
+  it("publishes optional non-empty user and team reviewer lists", () => {
+    const action = findAction("github.request_reviewers");
+
+    expect(action.parameters).toMatchObject({
+      required: ["owner", "repo", "pullNumber"],
+      properties: {
+        pullNumber: { minimum: 1 },
+        reviewers: { minItems: 1, items: { minLength: 1 } },
+        teamReviewers: { minItems: 1, items: { minLength: 1 } },
+      },
+    });
+  });
+
+  it("requests user and team reviewers without changing assignees", async () => {
+    const server = useFixture({
+      requestReviewers: () => ({
+        body: {
+          number: 7,
+          html_url: "https://github.com/acme/widgets/pull/7",
+          requested_reviewers: [{ login: "octavia" }],
+          requested_teams: [{ slug: "platform" }],
+        },
+      }),
+    });
+
+    const result = await request({ teamReviewers: ["platform"] });
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        number: 7,
+        url: "https://github.com/acme/widgets/pull/7",
+        requested_reviewers: ["octavia"],
+        requested_teams: ["platform"],
+      },
+    });
+    expect(server.calls).toHaveLength(1);
+    expect(server.calls[0]).toMatchObject({
+      method: "POST",
+      path: "/repos/acme/widgets/pulls/7/requested_reviewers",
+      body: { reviewers: ["octavia"], team_reviewers: ["platform"] },
+    });
+    expect(server.calls[0]?.path).not.toContain("issues");
+  });
+
+  it("requests a team when no individual reviewer is supplied", async () => {
+    const server = useFixture({
+      requestReviewers: () => ({
+        body: {
+          number: 7,
+          html_url: "https://github.com/acme/widgets/pull/7",
+          requested_reviewers: [],
+          requested_teams: [{ slug: "platform" }],
+        },
+      }),
+    });
+
+    const result = await request({ reviewers: undefined, teamReviewers: ["platform"] });
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { requested_reviewers: [], requested_teams: ["platform"] },
+    });
+    expect(server.calls[0]?.body).toEqual({ reviewers: [], team_reviewers: ["platform"] });
+  });
+
+  it("rejects a call without individual or team reviewers before GitHub", async () => {
+    const server = useFixture();
+
+    const result = await request({ reviewers: undefined, teamReviewers: undefined });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("reviewers");
+    expect(result.error).toContain("teamReviewers");
+    expect(server.calls).toHaveLength(0);
+  });
+
+  it("does not send team_reviewers when no teams are requested", async () => {
+    const server = useFixture();
+
+    await request({});
+
+    expect(server.calls[0]?.body).toEqual({ reviewers: ["octavia"] });
+  });
+
+  it("explains author, collaborator, and atomic failures from GitHub", async () => {
+    useFixture({
+      requestReviewers: () => ({
+        status: 422,
+        body: { message: "Validation Failed" },
+      }),
+    });
+
+    const result = await request({});
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("author");
+    expect(result.error).toContain("collaborator");
+    expect(result.error).toContain("atomically");
+    expect(result.error).toContain("no reviewer was added");
+  });
+
+  it("reports the required permission when GitHub denies the request", async () => {
+    useFixture({
+      requestReviewers: () => ({
+        status: 403,
+        body: { message: "Resource not accessible by integration" },
+      }),
+    });
+
+    const result = await request({});
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("403 Forbidden");
+    expect(result.error).toContain("pull_requests:write");
+  });
+});
+
 // ─── update_pull_request ────────────────────────────────────────────────────
 
 describe("github.update_pull_request", () => {

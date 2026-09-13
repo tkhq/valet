@@ -57,6 +57,8 @@ export interface GithubFixtureHandlers {
   listReviews?: (ref: PullRef, query: Record<string, string>) => GithubFixtureResponse;
   /** `POST /repos/:owner/:repo/pulls/:pull_number/reviews` */
   createReview?: (ref: PullRef, body: unknown) => GithubFixtureResponse;
+  /** `POST /repos/:owner/:repo/pulls/:pull_number/requested_reviewers` */
+  requestReviewers?: (ref: PullRef, body: unknown) => GithubFixtureResponse;
   /** `PUT /repos/:owner/:repo/pulls/:pull_number/reviews/:review_id` */
   updateReview?: (ref: PullRef, reviewId: string, body: unknown) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/pulls/:pull_number/comments` */
@@ -123,6 +125,14 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   listPullFiles: () => ({ body: [] }),
   listReviews: () => ({ body: [] }),
   createReview: () => ({ status: 200, body: { id: 5001, state: "COMMENTED", html_url: "https://github.com/o/r/pull/1#pullrequestreview-5001" } }),
+  requestReviewers: (ref) => ({
+    body: {
+      number: Number(ref.pullNumber),
+      html_url: `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.pullNumber}`,
+      requested_reviewers: [],
+      requested_teams: [],
+    },
+  }),
   updateReview: (_ref, reviewId) => ({
     body: { id: Number(reviewId), state: "COMMENTED", html_url: `https://github.com/o/r/pull/1#pullrequestreview-${reviewId}` },
   }),
@@ -213,6 +223,14 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     record(c, asParams(ref), body);
     const { status, body: respBody } = handlers.createReview(ref, body);
     return c.json(respBody as object, status ?? 200);
+  });
+
+  app.post("/repos/:owner/:repo/pulls/:pull_number/requested_reviewers", async (c) => {
+    const ref = pullRef(c);
+    const body = await readJson(c);
+    record(c, asParams(ref), body);
+    const { status, body: respBody } = handlers.requestReviewers(ref, body);
+    return c.json(respBody as object, status ?? 201);
   });
 
   app.put("/repos/:owner/:repo/pulls/:pull_number/reviews/:review_id", async (c) => {
