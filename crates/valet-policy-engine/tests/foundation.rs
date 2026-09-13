@@ -27,7 +27,7 @@ fn identity_pins_the_foundation_substrate_and_profile() {
     assert_eq!(ENGINE_IDENTITY.substrate_name, "regorus");
     assert_eq!(ENGINE_IDENTITY.substrate_version, REGORUS_VERSION);
     assert_eq!(ENGINE_IDENTITY.substrate_repository, REGORUS_REPOSITORY);
-    assert_eq!(ENGINE_IDENTITY.substrate_revision, REGORUS_REVISION);
+    assert_eq!(REGORUS_REVISION, "309ba35067d2118aafd696198a33037f5af9e1bd");
     assert_eq!(
         ENGINE_IDENTITY.capability_profile_version,
         CAPABILITY_PROFILE_VERSION

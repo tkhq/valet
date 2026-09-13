@@ -327,7 +327,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "regorus"
 version = "0.12.0"
-source = "git+https://github.com/tkhq/regorus?rev=f938ef286fdf9b229d3933b064dfd87323f397e8#f938ef286fdf9b229d3933b064dfd87323f397e8"
+source = "git+https://github.com/tkhq/regorus?rev=309ba35067d2118aafd696198a33037f5af9e1bd#309ba35067d2118aafd696198a33037f5af9e1bd"
 dependencies = [
  "anyhow",
  "data-encoding",
