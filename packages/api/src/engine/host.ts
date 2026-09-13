@@ -1304,46 +1304,37 @@ export class EngineHost {
     return kept;
   }
 
-  private async sessionExtras(
+  /** Applies every runtime plugin gate once for initial assembly, refresh, and MCP. */
+  private async sessionPlugins(
     owner: Principal,
     orgId: string,
-    pins: readonly PinnedActionSpec[] = [],
-    // Build-scoped plugin additions (the security runner's disabled-in-
-    // registry manifest) — appended after the registry set so registry
-    // plugins keep shadow priority.
     extraPlugins: readonly ValetPlugin[] = [],
     behavior: AssistantBehavior | null = null,
-  ): Promise<PluginSessionExtras> {
+    pins: readonly PinnedActionSpec[] = [],
+  ): Promise<ValetPlugin[]> {
     const assembled = [...this.basePlugins(), ...extraPlugins];
-    // Org entitlement filter (plugin-entitlements design): drop any GATEABLE
-    // plugin the owner's org disables for the owner, so a disabled
-    // action-plugin's tools never reach a normal session. Best-effort — a
-    // lookup failure leaves the plugin in place (default to allowed) and logs,
-    // so an entitlement read can never break a build. Security rides its
-    // create-route gate primarily; this covers future action-plugins.
-    const allPlugins = await this.filterEntitledPlugins(assembled, owner, orgId);
-    // Availability gate (integration-availability design): a service whose
-    // deployment/org prerequisite is missing never reaches the catalog, so
-    // `list_tools` has nothing to hide. Per-build, not process-static: the
-    // org-credential half of availability changes when an admin connects or
-    // removes the org app. `owner` lets a team session keep a service the
-    // team holds its own row for.
-    const gated = gateUnavailableActions(
-      allPlugins,
+    const entitled = await this.filterEntitledPlugins(assembled, owner, orgId);
+    const available = gateUnavailableActions(
+      entitled,
       await unavailableServiceSet({
-        plugins: allPlugins,
+        plugins: entitled,
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
         owner,
       }),
     );
-    // Behavior filter AFTER availability gating: both subtract, order only
-    // matters for the wrapper identity, and gating first keeps its
-    // unavailable-service messages accurate. The pin set rides along so the
-    // filter never gates a pinned action (assistant-editor design, "Never
-    // gated") — pins resolve from this same filtered catalog below.
-    const plugins = applyBehaviorToPlugins(gated, behavior, pinnedIdSet(pins));
+    return applyBehaviorToPlugins(available, behavior, pinnedIdSet(pins));
+  }
+
+  private async sessionExtras(
+    owner: Principal,
+    orgId: string,
+    pins: readonly PinnedActionSpec[] = [],
+    extraPlugins: readonly ValetPlugin[] = [],
+    behavior: AssistantBehavior | null = null,
+  ): Promise<PluginSessionExtras> {
+    const plugins = await this.sessionPlugins(owner, orgId, extraPlugins, behavior, pins);
     if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
     return pluginSessionExtras(
       plugins,
@@ -1366,6 +1357,21 @@ export class EngineHost {
    * `undefined` without a db — the session then keeps its construction-time
    * skill set, the same graceful degradation `sessionExtras` applies.
    */
+  /** Returns the exact current skill assembly for one assistant. External
+   * read-only surfaces use this seam so availability, behavior, precedence,
+   * and selected revisions cannot diverge from the orchestrator runtime. */
+  async skillSourcesForAssistant(assistant: {
+    orgId: string;
+    ownerType: Principal["type"];
+    ownerId: string;
+    behavior: string | null;
+    id: string;
+  }): Promise<SkillSource[]> {
+    const owner: Principal = { type: assistant.ownerType, id: assistant.ownerId };
+    const behavior = parseAssistantBehavior(assistant.behavior, assistant.id);
+    return (await this.sessionExtras(owner, assistant.orgId, [], [], behavior)).skills;
+  }
+
   private skillsProviderFor(
     owner: Principal,
     orgId: string,
@@ -1377,15 +1383,9 @@ export class EngineHost {
   ): (() => Promise<SkillSource[]>) | undefined {
     const db = this.opts.db;
     if (!db) return undefined;
-    // Filtered once, outside the closure: both inputs are fixed for the
-    // closure's lifetime — every behavior PATCH evicts the cached session
-    // (assistant-editor design, Task 2), so a stale result never outlives
-    // its config. Only the stored-skill read is per-call.
-    const plugins = [...this.basePlugins(), ...extraPlugins];
-    const filtered = applyBehaviorToPlugins(plugins, behavior);
     return async () =>
       mergedSkillSources(
-        filtered,
+        await this.sessionPlugins(owner, orgId, extraPlugins, behavior),
         filterSkillSources(await listSkillSourcesFor(db, owner, orgId), behavior),
       ).skills;
   }

@@ -207,3 +207,25 @@ The authenticated `/mcp` mount exposes `mem_capture`, `mem_search`, and `mem_rea
 Each authenticated `tools/call` attempt starts a strict, organization-scoped `action_invocations` row before dispatch. Name and schema rejections finish as errors. Successful tools finish after execution. Per-request-ID and per-tool FIFO queues keep duplicate IDs distinct. A later start failure finalizes earlier rows before dispatch. Required audit failures fail closed. Ambiguous organization membership also fails closed. OAuth 401s occur before this audit boundary.
 
 Capture content and all unvalidated arguments are redacted. With `VALET_TRUST_PROXY=1`, one trusted ingress must append its observed client as the final `x-forwarded-for` hop. Valet ignores earlier hops. Otherwise, keep the setting off and use the socket peer. The mount keeps the Better Auth challenge and stateless JSON transport.
+
+## External MCP skill discovery
+
+The authenticated `/mcp` mount exposes `list_skills` and `skill` through the
+Valet plugin MCP seam. Both calls require an assistant row `orchestratorId`. The server gets
+the caller only from the verified OAuth token.
+
+The host first verifies the caller can view the selected assistant row. A missing,
+archived, or inaccessible assistant returns the same unavailable error. The
+response does not disclose which condition applied.
+
+The host reads skills through `EngineHost.skillSourcesForAssistant`. This uses
+the same behavior filter, plugin availability, source precedence, visibility,
+and selected content revision as the orchestrator runtime. `list_skills`
+returns name, description, source, and content revision. `skill` returns the
+selected content. Both tools are read-only and audit only their request
+arguments, never a skill body.
+
+`orchestratorId` is the assistant row ID returned by `orchestrator_list`, such
+as `asst_...`. It is not the assistant session address. A normal session ID
+never resolves through this MCP contract. The host uses one plugin filtering
+path for initial orchestrator assembly, skill refresh, and MCP reads.

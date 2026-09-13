@@ -12,6 +12,7 @@ import { logger } from "hono/logger";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { ValetError } from "@valet/shared";
 import type { AppEnv } from "./env.js";
+import type { McpToolPort } from "@valet/engine";
 import type { RunningServer, ServerAdapter } from "./server-adapter.js";
 import { nodeServerAdapter } from "./server-adapter.node.js";
 import type { Providers } from "./providers/types.js";
@@ -22,6 +23,7 @@ import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler, validateMcpToolConfiguration, type McpAuditStore } from "./auth/mcp.js";
 import { MemoryMcpPort } from "./services/memory-mcp-port.js";
+import { SkillMcpPort } from "./services/skill-mcp-port.js";
 import type { AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
 import { VALET_VERSION } from "./version.js";
@@ -86,10 +88,7 @@ import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
 
-/**
- * Source address for MCP audit. A trusted single ingress appends its observed
- * client as the final XFF hop. Earlier client-supplied hops are not trusted.
- */
+/** Source address for MCP audit. A trusted ingress appends the observed client as the final XFF hop. */
 function mcpSourceIp(c: import("hono").Context<AppEnv>): string {
   if (process.env.VALET_TRUST_PROXY === "1") {
     const hops = c.req.header("x-forwarded-for")?.split(",").map((hop) => hop.trim()).filter(Boolean);
@@ -168,8 +167,9 @@ export function createApp(
 ): CreatedApp {
   const app = new Hono<AppEnv>();
   const { auth, authConfig } = authWiring;
-  const mcpPortFactories = new Map([
+  const mcpPortFactories = new Map<string, (userId: string) => McpToolPort>([
     ["memory", (userId: string) => new MemoryMcpPort(providers.db, userId)],
+    ["valet", (userId: string) => new SkillMcpPort(providers.db, providers.engineHost, userId)],
   ]);
   validateMcpToolConfiguration(providers.plugins, new Set(mcpPortFactories.keys()));
 
