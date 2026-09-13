@@ -216,7 +216,7 @@ export class ToolMcpPort implements McpToolPort {
         const stored = await this.engineStore.getDecisionGate(runtime.assistant.sessionId, gate.id);
         if (stored?.status === "resolved" && stored.resolution) return stored.resolution;
         if (stored?.status === "expired") throw new DecisionGateExpiredError(stored.id, stored.ordinal);
-        if (stored?.status === "pending" && stored.expiresAt <= Date.now()) {
+        if (stored?.status === "pending" && stored.expiresAt !== undefined && stored.expiresAt <= Date.now()) {
           await this.engineStore.saveDecisionGate(runtime.assistant.sessionId, gate.threadId, {
             ...stored,
             status: "expired",
