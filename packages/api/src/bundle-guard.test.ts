@@ -62,9 +62,9 @@ describe("copied sibling assets", () => {
     }
   });
 
-  it.skipIf(!assetsBuilt)("executes the evaluator from the production artifact and copied worker", async () => {
+  it.skipIf(!assetsBuilt)("executes the evaluator from dist assets without VALET_BUNDLED", async () => {
     const previousBundled = process.env.VALET_BUNDLED;
-    process.env.VALET_BUNDLED = "1";
+    delete process.env.VALET_BUNDLED;
     const built: typeof import("./authorization/build-entry.js") = await import(
       `${pathToFileURL(resolve(apiRoot, "dist/policy-evaluator.mjs")).href}?test=${Date.now()}`
     );
