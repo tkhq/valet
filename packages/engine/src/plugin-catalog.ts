@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -490,7 +490,7 @@ export function preparedArgsDigest(args: Record<string, unknown>): string {
     }
     return value;
   };
-  return createHash("sha256").update(JSON.stringify(canonicalize(args))).digest("hex");
+  return Array.from(sha256(new TextEncoder().encode(JSON.stringify(canonicalize(args))))).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function approvalGateRequest(
@@ -820,7 +820,8 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     for (const action of plugin.actions) {
       const entry: CatalogEntry = { service: plugin.service, plugin, action };
       entries.push(entry);
-      const fqid = action.id.includes(".") ? action.id : `${plugin.service}.${action.id}`;
+      const fqid = action.id.includes(".") ? action.id : `.`;
+      if (byId.has(fqid)) throw new Error(`duplicate plugin action id: `);
       byId.set(fqid, entry);
       // Allow a bare id lookup when unambiguous.
       if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);

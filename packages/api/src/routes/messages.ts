@@ -1019,7 +1019,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   if (!gate) return c.json({ error: "gate not pending" }, 404);
   const approval = gate.type === "approval" ? toolApprovalGateContext(gate.context) : null;
   const bodyOnlyToolApproval = gate.type === "approval" && /(?:tool_id|args)=/.test(gate.body ?? "");
-  if ((approval && (approval.argsPreview === undefined || approval.reviewIncomplete) || bodyOnlyToolApproval) && resolutionApproves(gate, { actionId: body.actionId, resolvedBy: "", resolvedAt: 0 })) {
+  if ((approval && (approval.argsPreview === undefined || approval.reviewIncomplete) || (!approval && bodyOnlyToolApproval)) && resolutionApproves(gate, { actionId: body.actionId, resolvedBy: "", resolvedAt: 0 })) {
     return c.json({ error: "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request." }, 409);
   }
 

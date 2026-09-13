@@ -1172,7 +1172,7 @@ export class ChannelHost {
     const gate = (await session.pendingDecisionGates()).find((candidate) => candidate.id === mapped.gateId);
     const approval = gate?.type === "approval" ? toolApprovalGateContext(gate.context) : null;
     const channelReviewIncomplete = gate ? digestGate(gate).reviewIncomplete === true : false;
-    if (gate && approval && channelReviewIncomplete && resolutionApproves(gate, { actionId: gateCallback.actionId, resolvedBy: "", resolvedAt: 0 })) {
+    if (gate && channelReviewIncomplete && resolutionApproves(gate, { actionId: gateCallback.actionId, resolvedBy: "", resolvedAt: 0 })) {
       await transport?.answerCallback?.(gateCallback.callbackId, "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request.");
       return;
     }
