@@ -75,6 +75,11 @@ const APP_TABLES = [
   "action_invocations",
   "authorization_decisions",
   "authorization_execution_attempts",
+  "policy_authoring_documents",
+  "policy_authoring_revisions",
+  "policy_authoring_reviews",
+  "policy_authoring_operations",
+  "policy_authoring_audit",
   "llm_providers",
   "session_repos",
   "github_installations",
@@ -1059,6 +1064,19 @@ describe("pg app schema + migrations", () => {
       );
 
       await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("repairs policy authoring tables, constraints, and indexes", async () => {
+      await db.query('DROP TABLE "policy_authoring_reviews", "policy_authoring_revisions", "policy_authoring_audit", "policy_authoring_operations", "policy_authoring_documents"');
+      expect((await missingSchemaRepairs(db)).map((repair) => repair.describe)).toContain("policy authoring documents table");
+      await applyAppMigrations(db);
+      for (const table of ["policy_authoring_documents", "policy_authoring_revisions", "policy_authoring_reviews", "policy_authoring_operations", "policy_authoring_audit"]) expect(await tableExists(db, table)).toBe(true);
+      const indexes = await db.query(`SELECT indexname FROM pg_indexes WHERE indexname LIKE 'policy_authoring_%' ORDER BY indexname`);
+      expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining(["policy_authoring_documents_scope", "policy_authoring_reviews_identity", "policy_authoring_audit_idempotency", "policy_authoring_audit_document"]));
+      const constraints = await db.query(`SELECT c.relname AS table_name, p.contype FROM pg_constraint p JOIN pg_class c ON c.oid=p.conrelid WHERE c.relname LIKE 'policy_authoring_%' AND p.contype <> 'n' ORDER BY c.relname,p.contype`);
+      expect(constraints.rows).toEqual([{ table_name: "policy_authoring_audit", contype: "p" }, { table_name: "policy_authoring_documents", contype: "c" }, { table_name: "policy_authoring_documents", contype: "c" }, { table_name: "policy_authoring_documents", contype: "p" }, { table_name: "policy_authoring_operations", contype: "p" }, { table_name: "policy_authoring_reviews", contype: "c" }, { table_name: "policy_authoring_reviews", contype: "f" }, { table_name: "policy_authoring_reviews", contype: "p" }, { table_name: "policy_authoring_revisions", contype: "f" }, { table_name: "policy_authoring_revisions", contype: "p" }]);
+      await expect(db.query(`INSERT INTO policy_authoring_documents VALUES ('bad','o',NULL,'live',1,1,'i',NULL,NULL,'{}','u',1,1)`)).rejects.toThrow();
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 

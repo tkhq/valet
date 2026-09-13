@@ -1536,3 +1536,50 @@ CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
 CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");
+--> statement-breakpoint
+CREATE TABLE "policy_authoring_documents" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "team_id" text,
+  "status" text NOT NULL DEFAULT 'draft', "revision" integer NOT NULL,
+  "state_version" integer NOT NULL, "normalized_identity" text NOT NULL,
+  "source_bundle_digest" text, "policy_digest" text, "validation_summary" jsonb NOT NULL,
+  "created_by" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
+  CONSTRAINT "policy_authoring_documents_status" CHECK ("status" IN ('draft','in_review','approved_for_publication')),
+  CONSTRAINT "policy_authoring_documents_revision" CHECK ("revision" > 0 AND "state_version" > 0)
+);
+--> statement-breakpoint
+CREATE INDEX "policy_authoring_documents_scope" ON "policy_authoring_documents" ("org_id","team_id","updated_at");
+--> statement-breakpoint
+CREATE TABLE "policy_authoring_revisions" (
+  "document_id" text NOT NULL, "revision" integer NOT NULL, "draft" jsonb NOT NULL,
+  "normalized_identity" text NOT NULL, "bundle" jsonb, "source_bundle_digest" text,
+  "policy_digest" text, "validation_summary" jsonb NOT NULL, "created_by" text NOT NULL,
+  "created_at" bigint NOT NULL, PRIMARY KEY("document_id","revision"),
+  FOREIGN KEY ("document_id") REFERENCES "policy_authoring_documents"("id")
+);
+--> statement-breakpoint
+CREATE TABLE "policy_authoring_reviews" (
+  "id" text PRIMARY KEY NOT NULL, "document_id" text NOT NULL, "revision" integer NOT NULL,
+  "normalized_identity" text NOT NULL, "source_bundle_digest" text NOT NULL, "policy_digest" text NOT NULL,
+  "reviewer_id" text NOT NULL, "verdict" text NOT NULL, "request_id" text NOT NULL, "created_at" bigint NOT NULL,
+  CONSTRAINT "policy_authoring_reviews_verdict" CHECK ("verdict" IN ('approve','reject')),
+  FOREIGN KEY ("document_id","revision") REFERENCES "policy_authoring_revisions"("document_id","revision")
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "policy_authoring_reviews_identity" ON "policy_authoring_reviews" ("document_id","revision","reviewer_id");
+--> statement-breakpoint
+CREATE TABLE "policy_authoring_operations" (
+  "org_id" text NOT NULL, "idempotency_key" text NOT NULL, "operation" text NOT NULL,
+  "payload_digest" text NOT NULL, "response" jsonb, "created_at" bigint NOT NULL,
+  PRIMARY KEY("org_id","idempotency_key")
+);
+--> statement-breakpoint
+CREATE TABLE "policy_authoring_audit" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "team_id" text, "document_id" text NOT NULL,
+  "revision" integer NOT NULL, "state_version" integer NOT NULL, "actor_id" text NOT NULL,
+  "operation" text NOT NULL, "idempotency_key" text NOT NULL, "prior_state" text,
+  "new_state" text NOT NULL, "source_bundle_digest" text, "policy_digest" text, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "policy_authoring_audit_idempotency" ON "policy_authoring_audit" ("org_id","idempotency_key");
+--> statement-breakpoint
+CREATE INDEX "policy_authoring_audit_document" ON "policy_authoring_audit" ("org_id","team_id","document_id","created_at");
