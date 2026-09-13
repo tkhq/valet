@@ -85,7 +85,7 @@ describe("local Valet evaluator containment", () => {
     });
   });
 
-  it("preempts expensive evaluate_bundle work on a warmed worker and recovers", async () => {
+  it("returns deterministic fuel exhaustion without poisoning the worker", async () => {
     const policy = `package valet.authz
 import rego.v1
 decision := {"effect":"deny","reasonCode":"marshaled","matchedRuleIds":[],"obligations":[],"redactions":[]} if {
@@ -94,10 +94,7 @@ decision := {"effect":"deny","reasonCode":"marshaled","matchedRuleIds":[],"oblig
 }
 `;
     const { identity, evaluator, host, pointer } = await activeEvaluator(runtime, testBundle(policy));
-    const values = Array.from(
-      { length: 80_000 },
-      (_, index) => `value-${index.toString().padStart(6, "0")}-${"x".repeat(128)}`,
-    );
+    const values = Array.from({ length: 100 }, (_, index) => `value-${index}`);
     const generation = runtime.generation;
     await expect(
       runtime.run({
@@ -106,8 +103,9 @@ decision := {"effect":"deny","reasonCode":"marshaled","matchedRuleIds":[],"oblig
         input: { values },
         explain: "off",
       }),
-    ).rejects.toMatchObject({ code: "timeout" });
-    expect(runtime.generation).toBe(generation + 1);
+    ).rejects.toMatchObject({ code: "evaluation_budget" });
+    expect(runtime.generation).toBe(generation);
+
     const replacement = await host.publish(testBundle());
     await host.activate("org-1", pointer, replacement.sourceBundleDigest);
     await expect(evaluator.evaluate(testRequest())).resolves.toMatchObject({
