@@ -8,7 +8,7 @@ import { cn } from "~/lib/cn";
 
 const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
-const MAX_APPROVAL_PREVIEW_CHARS = 16_000;
+const MAX_APPROVAL_PREVIEW_BYTES = 16_000;
 
 export function DecisionGateCard({
   sessionId,
@@ -26,6 +26,7 @@ export function DecisionGateCard({
   const Icon = ICON_FOR_TYPE[gate.type];
   const tone = TONE_FOR_TYPE[gate.type];
   const approval = gate.approval;
+  const approvalReviewIncomplete = approval !== undefined && isApprovalReviewIncomplete(approval);
   const dismissLabel = DISMISS_LABEL[gate.type];
 
   async function pickAction(actionId: string) {
@@ -99,12 +100,12 @@ export function DecisionGateCard({
         {approval ? (
           <ApprovalReview approval={approval} provenance={gate.provenance} />
         ) : (
-          <GenericGateReview body={gate.body} bodyTruncated={gate.bodyTruncated} provenance={gate.provenance} />
+          <GenericGateReview body={gate.body} provenance={gate.provenance} />
         )}
       </div>
 
       {gate.type === "question" ? (
-        <div className="flex shrink-0 items-end gap-2 border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
+        <div className="flex max-h-[35dvh] shrink-0 items-end gap-2 overflow-y-auto border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
           <Textarea
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -121,7 +122,8 @@ export function DecisionGateCard({
         <div className="flex max-h-[35dvh] shrink-0 flex-wrap gap-2 overflow-y-auto border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
           {gate.actions.map((action) => {
             const isAlwaysAllow = action.id === GATE_ACTION_ALWAYS_ALLOW;
-            const disabled = busy || (isAlwaysAllow && !isAdmin);
+            const reviewBlocked = approvalReviewIncomplete && !isRejectAction(action);
+            const disabled = busy || reviewBlocked || (isAlwaysAllow && !isAdmin);
             const button = (
               <Button
                 key={action.id}
@@ -133,6 +135,9 @@ export function DecisionGateCard({
                 <span className="max-w-full break-all text-center">{action.label}</span>
               </Button>
             );
+            if (reviewBlocked) {
+              return <Tooltip key={action.id} content="Review the complete request in the action log, then retry this action."><span>{button}</span></Tooltip>;
+            }
             if (isAlwaysAllow && !isAdmin) {
               return <Tooltip key={action.id} content={ALWAYS_ALLOW_TOOLTIP}><span>{button}</span></Tooltip>;
             }
@@ -152,7 +157,7 @@ function ApprovalReview({
   provenance?: DecisionGate["provenance"];
 }) {
   const argsPreview = boundedPreview(approval.argsPreview);
-  const argsTruncated = approval.argsTruncated || argsPreview.truncated;
+  const reviewIncomplete = isApprovalReviewIncomplete(approval);
   const facts = [
     ["Tool", approval.toolId],
     ["Service", approval.service],
@@ -181,7 +186,7 @@ function ApprovalReview({
           <pre className="max-h-52 overflow-auto overscroll-contain whitespace-pre-wrap break-all rounded bg-ink-wash p-2 text-xs text-[--fg]" tabIndex={0} aria-label="Approval request parameters">
             {argsPreview.text}
           </pre>
-          {argsTruncated && <p className="mt-2 text-xs text-muted">The parameter preview is truncated.</p>}
+          {reviewIncomplete && <p className="mt-2 text-xs text-muted">The complete parameters are not available here. Reject this request and ask the agent to retry with a smaller request.</p>}
         </div>
       </details>
     </div>
@@ -190,16 +195,34 @@ function ApprovalReview({
 
 function boundedPreview(preview: string | undefined): { text: string; truncated: boolean } {
   if (preview === undefined) return { text: "{}", truncated: false };
-  return preview.length > MAX_APPROVAL_PREVIEW_CHARS
-    ? { text: preview.slice(0, MAX_APPROVAL_PREVIEW_CHARS), truncated: true }
-    : { text: preview, truncated: false };
+  const encoder = new TextEncoder();
+  const suffix = "…";
+  const suffixBytes = encoder.encode(suffix).length;
+  let bytes = 0;
+  let text = "";
+  for (const point of preview) {
+    const pointBytes = encoder.encode(point).length;
+    if (bytes + pointBytes > MAX_APPROVAL_PREVIEW_BYTES - suffixBytes) {
+      return { text: `${text}${suffix}`, truncated: true };
+    }
+    text += point;
+    bytes += pointBytes;
+  }
+  return { text, truncated: false };
 }
 
-function GenericGateReview({ body, bodyTruncated, provenance }: Pick<DecisionGate, "body" | "bodyTruncated" | "provenance">) {
+function isApprovalReviewIncomplete(approval: NonNullable<DecisionGate["approval"]>): boolean {
+  return approval.reviewIncomplete === true || boundedPreview(approval.argsPreview).truncated;
+}
+
+function isRejectAction(action: DecisionGate["actions"][number]): boolean {
+  return action.style === "danger" || /deny|reject|cancel/i.test(action.id);
+}
+
+function GenericGateReview({ body, provenance }: Pick<DecisionGate, "body" | "provenance">) {
   return (
     <div className="space-y-2">
       {body && <p className="whitespace-pre-wrap break-all text-sm text-muted">{body}</p>}
-      {bodyTruncated && <p className="text-xs text-muted">The request details are truncated.</p>}
       {provenance && <p className="text-xs text-muted" data-testid="gate-provenance">{provenanceLine(provenance)}</p>}
     </div>
   );

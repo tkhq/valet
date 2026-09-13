@@ -1352,7 +1352,8 @@ export interface DecisionGateApprovalDetails {
   service?: string;
   /** A bounded JSON preview. The complete body remains the gate record. */
   argsPreview?: string;
-  argsTruncated?: true;
+  /** True when the full arguments cannot be reviewed in this card. */
+  reviewIncomplete?: true;
   summary?: string;
 }
 
@@ -1363,8 +1364,6 @@ export interface DecisionGate {
   type: DecisionGateType;
   title: string;
   body?: string;
-  /** The gate body exceeded the safe live-review payload limit. */
-  bodyTruncated?: true;
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;

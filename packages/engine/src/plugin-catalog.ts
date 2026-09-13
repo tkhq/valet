@@ -394,6 +394,23 @@ export function toolApprovalGateContext(
  * dodge a deny/expiry. Safe for the prefix rule because every approval
  * resumeKey is `${qualifiedId}:<argsHash>`.
  */
+/** Truncate on code-point boundaries and count UTF-8 bytes, not UTF-16 units. */
+export function truncateApprovalText(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  const encoder = new TextEncoder();
+  const suffix = "…";
+  const suffixBytes = encoder.encode(suffix).length;
+  if (maxBytes <= suffixBytes) return { text: "", truncated: text.length > 0 };
+  let bytes = 0;
+  let output = "";
+  for (const point of text) {
+    const pointBytes = encoder.encode(point).length;
+    if (bytes + pointBytes > maxBytes - suffixBytes) return { text: `${output}${suffix}`, truncated: true };
+    output += point;
+    bytes += pointBytes;
+  }
+  return { text, truncated: false };
+}
+
 function approvalGateRequest(
   entry: CatalogEntry,
   actionId: string,
@@ -401,10 +418,11 @@ function approvalGateRequest(
   summary: string,
   resumeKey: string,
 ): DecisionGateRequest {
+  const boundedSummary = truncateApprovalText(summary, 4_000).text;
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: `${boundedSummary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
     resumeKey,
     dedupeKey: qualifiedId(entry),
     context: {
@@ -414,7 +432,7 @@ function approvalGateRequest(
       args,
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
-      summary,
+      summary: boundedSummary,
     },
   };
 }
@@ -448,6 +466,8 @@ export async function invokeAction(
   }
   if (!entry) return { kind: "unknown", toolId: actionId };
 
+  // One bound applies to the gate body, gate context, plugin context, and audit.
+  const boundedSummary = truncateApprovalText(summary, 4_000).text;
   const resolver = ctx.policyResolver;
   // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
   // to ctx.requestDecision when a gate opens for this call. Recorded on every
@@ -468,7 +488,7 @@ export async function invokeAction(
     if (approvalMode === "require_approval") {
       const gateOutcome = await requestApprovalDecision(
         ctx,
-        approvalGateRequest(entry, actionId, args, summary, resumeKey),
+        approvalGateRequest(entry, actionId, args, boundedSummary, resumeKey),
       );
       if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
       const resolution = gateOutcome.resolution;
@@ -477,7 +497,7 @@ export async function invokeAction(
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
     }
-    return executeAction(entry, actionId, args, summary, ctx);
+    return executeAction(entry, actionId, args, boundedSummary, ctx);
   }
 
   // Present resolver: consult the host policy port. The policy-facing
@@ -509,7 +529,7 @@ export async function invokeAction(
     userId: ctx.userId,
     orgId: ctx.orgId,
     appliesIn: "session",
-    summary,
+    summary: boundedSummary,
     resumeKey,
     queueItemId: ctx.queueItemId,
     params: args,
@@ -566,7 +586,7 @@ export async function invokeAction(
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
     const extras: DecisionAction[] = decision.extraGateActions ?? [];
-    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    const baseReq = approvalGateRequest(entry, actionId, args, boundedSummary, resumeKey);
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
       actions: [

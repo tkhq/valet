@@ -83,7 +83,7 @@ describe("DecisionGateCard — reviewable tool requests", () => {
         riskLevel: "high",
         summary: "Create an issue in the external repository.",
         argsPreview: JSON.stringify({ callbackUrl: longUrl, source: "x".repeat(2000) }),
-        argsTruncated: true,
+        reviewIncomplete: true,
       },
     }));
 
@@ -93,15 +93,33 @@ describe("DecisionGateCard — reviewable tool requests", () => {
     const details = screen.getByTestId("approval-details");
     expect(details.querySelector("pre")?.className).toContain("max-h-52");
     expect(details.querySelector("pre")?.className).toContain("break-all");
-    expect(screen.getByText("The parameter preview is truncated.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(screen.getByText(/complete parameters are not available/i)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+
+  it("blocks approval when a preview can hide material later fields", () => {
+    renderCard(gate({
+      approval: {
+        toolId: "payments.send",
+        argsPreview: `{"note":"${"x".repeat(16_000)}","recipient":"outside@example.test","amount":1000}`,
+        reviewIncomplete: true,
+      },
+      actions: [
+        { id: "approve", label: "Approve", style: "primary" },
+        { id: "deny", label: "Reject", style: "danger" },
+      ],
+    }));
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/reject this request and ask the agent to retry/i)).toBeTruthy();
   });
 
   it("caps an oversized preview from an older server before it mounts", () => {
     renderCard(gate({ approval: { toolId: "github.create_issue", argsPreview: "x".repeat(20_000) } }));
-    expect(screen.getByLabelText("Approval request parameters").textContent).toHaveLength(16_000);
-    expect(screen.getByText("The parameter preview is truncated.")).toBeTruthy();
+    expect(new TextEncoder().encode(screen.getByLabelText("Approval request parameters").textContent).length).toBeLessThanOrEqual(16_000);
+    expect(screen.getByText(/complete parameters are not available/i)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("shows the authoritative body when typed approval details are unavailable", () => {
@@ -121,6 +139,14 @@ describe("DecisionGateCard — bounded card layout", () => {
     expect(screen.getByRole("heading").className).toContain("max-h-12");
     expect(screen.getByRole("button", { name: /Approve/ }).querySelector("span")?.className).toContain("break-all");
     expect(screen.getByRole("button", { name: /Approve/ }).parentElement?.className).toContain("max-h-[35dvh]");
+  });
+
+  it("bounds the question footer when the visual viewport is short", () => {
+    renderCard(gate({ type: "question" }));
+    const answer = screen.getByPlaceholderText("Your answer…");
+    expect(answer.parentElement?.className).toContain("max-h-[35dvh]");
+    expect(answer.parentElement?.className).toContain("overflow-y-auto");
+    expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BusEvent, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
+import { truncateApprovalText } from "@valet/engine";
 import { busEventToWire, engineGateToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
 
 function ev(event: BusEvent["event"], threadId = "t1"): BusEvent {
@@ -77,6 +78,11 @@ describe("engineToWireParts", () => {
 });
 
 describe("engineGateToWire", () => {
+  it("truncates approval text at UTF-8 and code-point boundaries", () => {
+    expect(truncateApprovalText("猫😀a", 8)).toEqual({ text: "猫…", truncated: true });
+    expect(truncateApprovalText("猫😀", 10)).toEqual({ text: "猫😀", truncated: false });
+  });
+
   it("projects typed tool approval details without exposing raw context", () => {
     const wire = engineGateToWire({
       id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
@@ -103,14 +109,23 @@ describe("engineGateToWire", () => {
     expect(wire.body).toBe("tool_id=github.create_issue\nargs=[bad]");
   });
 
+  it.each(["question", "credential_request"] as const)("preserves a long %s body", (type) => {
+    const body = "猫😀".repeat(20_000);
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type, title: "Review", body, actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+    });
+    expect(wire.body).toBe(body);
+  });
+
   it("caps the live parameter preview and marks it truncated", () => {
     const wire = engineGateToWire({
       id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
       type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
       context: { tool_id: "github.create_issue", args: { content: "x".repeat(20_000) } },
     });
-    expect(wire.approval?.argsPreview).toHaveLength(16_000);
-    expect(wire.approval?.argsTruncated).toBe(true);
+    expect(new TextEncoder().encode(wire.approval?.argsPreview).length).toBeLessThanOrEqual(16_000);
+    expect(wire.approval?.reviewIncomplete).toBe(true);
   });
 });
 

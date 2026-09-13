@@ -139,6 +139,25 @@ describe("policyResolver seam: absent resolver", () => {
     expect((gateReq?.context as Record<string, unknown>)?.provenance).toBeUndefined();
   });
 
+  it("bounds a call_tool summary before it enters an approval gate", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ riskLevel: "critical" }))] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: `猫😀${"x".repeat(5_000)}` },
+      makeCtx({
+        requestDecision: async (req) => {
+          gateReq = req;
+          return { actionId: "deny", resolvedBy: "u1", resolvedAt: Date.now() };
+        },
+      }),
+    );
+    const summary = gateReq?.context?.summary;
+    expect(typeof summary).toBe("string");
+    expect(new TextEncoder().encode(summary).length).toBeLessThanOrEqual(4_000);
+    expect(summary?.endsWith("…")).toBe(true);
+    expect(gateReq?.body).toContain(summary);
+  });
+
   it("deny text is unchanged when a plugin declares defaultApprovalMode=deny", async () => {
     const plugin: ActionPlugin = {
       service: "github",

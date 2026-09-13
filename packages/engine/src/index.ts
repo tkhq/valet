@@ -144,6 +144,7 @@ export {
   prepareActionArgs,
   approvalModeForAction,
   toolApprovalGateContext,
+  truncateApprovalText,
   type ToolApprovalGateContext,
   pinnedToolName,
   MAX_PINNED_ACTIONS,

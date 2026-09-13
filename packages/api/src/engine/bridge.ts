@@ -1,4 +1,4 @@
-import { toolApprovalGateContext } from "@valet/engine";
+import { toolApprovalGateContext, truncateApprovalText } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -28,16 +28,13 @@ import type {
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
   const approval = g.type === "approval" ? gateApprovalDetails(g.context) : undefined;
-  const body = g.body && g.body.length > MAX_GATE_BODY_CHARS ? g.body.slice(0, MAX_GATE_BODY_CHARS) : g.body;
-  const bodyTruncated = g.body !== undefined && body !== g.body;
   return {
     id: g.id,
     sessionId: g.sessionId,
     threadId: g.threadId,
     type: g.type,
     title: g.title,
-    body,
-    ...(bodyTruncated ? { bodyTruncated: true } : {}),
+    body: g.body,
     actions: g.actions,
     expiresAt: g.expiresAt,
     status: g.status,
@@ -49,8 +46,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
 }
 
 const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
-const MAX_APPROVAL_ARGS_CHARS = 16_000;
-const MAX_GATE_BODY_CHARS = 32_000;
+const MAX_APPROVAL_ARGS_BYTES = 16_000;
 
 /**
  * Project only a valid tool approval. A malformed `args` value must leave the
@@ -70,8 +66,9 @@ function gateApprovalDetails(context: Record<string, unknown> | undefined): Wire
   try {
     const json = JSON.stringify(approval.args ?? {});
     if (json !== undefined) {
-      argsPreview = json.length > MAX_APPROVAL_ARGS_CHARS ? json.slice(0, MAX_APPROVAL_ARGS_CHARS) : json;
-      argsTruncated = json.length > MAX_APPROVAL_ARGS_CHARS;
+      const bounded = truncateApprovalText(json, MAX_APPROVAL_ARGS_BYTES);
+      argsPreview = bounded.text;
+      argsTruncated = bounded.truncated;
     }
   } catch {
     return undefined;
@@ -82,7 +79,7 @@ function gateApprovalDetails(context: Record<string, unknown> | undefined): Wire
     service: approval.service,
     summary: approval.summary,
     ...(argsPreview !== undefined ? { argsPreview } : {}),
-    ...(argsTruncated ? { argsTruncated: true } : {}),
+    ...(argsTruncated ? { reviewIncomplete: true } : {}),
   };
 }
 
