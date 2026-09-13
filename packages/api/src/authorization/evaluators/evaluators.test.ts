@@ -42,6 +42,41 @@ describe("local Valet evaluator containment", () => {
     expect(envelope.evaluator).toEqual({ kind: "local_valet", engineDigest: identity.engineDigest });
   });
 
+  it.each([
+    {
+      name: "absent",
+      optionalFields: "",
+      expected: { tier: "high", approverType: "team", replay: "once" },
+    },
+    {
+      name: "present",
+      optionalFields: '"approverId": "team-1", "expiresAtMs": 123,',
+      expected: { tier: "high", approverType: "team", approverId: "team-1", replay: "once", expiresAtMs: 123 },
+    },
+  ])("preserves $name approval optionals across the TypeScript WASM boundary", async ({ optionalFields, expected }) => {
+    const policy = `package valet.authz
+import rego.v1
+decision := {
+  "effect": "require_approval",
+  "reasonCode": "approval_required",
+  "matchedRuleIds": ["approval.test"],
+  "obligations": [],
+  "redactions": [],
+  "approvalRequirement": {
+    "tier": "high",
+    "approverType": "team",
+    ${optionalFields}
+    "replay": "once",
+  },
+}
+`;
+    const { evaluator } = await activeEvaluator(runtime, testBundle(policy));
+    const decision = (await evaluator.evaluate(testRequest())).decision;
+    expect(decision.approvalRequirement).toEqual(expected);
+    expect(Object.hasOwn(decision.approvalRequirement ?? {}, "approverId")).toBe("approverId" in expected);
+    expect(Object.hasOwn(decision.approvalRequirement ?? {}, "expiresAtMs")).toBe("expiresAtMs" in expected);
+  });
+
   it("serializes concurrent requests without charging queue time", async () => {
     const { evaluator } = await activeEvaluator(runtime);
     const results = await Promise.all(
