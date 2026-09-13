@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod bundle;
 pub mod compatibility;
 pub mod contract;
 pub mod explain;
@@ -10,6 +11,12 @@ pub mod provenance;
 pub mod source_bundle;
 mod syntax;
 
+pub use bundle::{
+    manifest_entry, sha256_hex, BundleSourceMetadata, CanonicalSourceBundle, InterpreterIdentity,
+    ManifestFileEntry, SourceBundleFile, SourceBundleManifestV1, ValidatedSourceBundle,
+    JSON_MEDIA_TYPE, PROVENANCE_MEDIA_TYPE, REGO_MEDIA_TYPE, SOURCE_BUNDLE_MEDIA_TYPE,
+    SOURCE_BUNDLE_SCHEMA_VERSION,
+};
 pub use compatibility::{
     capability_profile, BuiltinCapability, BuiltinClass, BuiltinStatus, CapabilityProfile,
     CompatibilityStatus, EngineIdentity, CAPABILITY_PROFILE_VERSION, ENGINE_CONTRACT_VERSION,
@@ -35,6 +42,42 @@ use thiserror::Error;
 pub enum EngineError {
     #[error("The embedded capability profile is invalid: {0}")]
     CapabilityProfile(String),
+    #[error("The source bundle manifest is invalid: {0}")]
+    BundleManifest(String),
+    #[error("The source bundle manifest is not RFC 8785 canonical JSON")]
+    NonCanonicalBundleManifest,
+    #[error("The source bundle path `{0}` is invalid")]
+    InvalidBundlePath(String),
+    #[error("The source bundle path `{0}` occurs more than once")]
+    DuplicateBundlePath(String),
+    #[error("The source bundle manifest paths are not sorted by UTF-8 bytes")]
+    UnsortedBundlePaths,
+    #[error("The source bundle supplied file set does not match its manifest")]
+    BundleFileSetMismatch,
+    #[error("The source bundle file `{0}` is missing")]
+    MissingBundleFile(String),
+    #[error("The source bundle file `{path}` has {actual} bytes, expected {expected}")]
+    BundleLengthMismatch {
+        path: String,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("The source bundle file `{0}` does not match its SHA-256 digest")]
+    BundleDigestMismatch(String),
+    #[error("The source bundle file `{0}` has an invalid SHA-256 digest")]
+    InvalidBundleDigest(String),
+    #[error("The source bundle media type `{0}` is unsupported")]
+    UnsupportedBundleMediaType(String),
+    #[error("The source bundle has more than one {0} file")]
+    DuplicateBundleRole(&'static str),
+    #[error("The source bundle has no {0} file")]
+    MissingBundleRole(&'static str),
+    #[error("The Rego file `{0}` is not valid UTF-8")]
+    InvalidRegoUtf8(String),
+    #[error("The Rego file `{0}` must use LF line endings and end with LF")]
+    NonLfRego(String),
+    #[error("The source bundle file `{0}` is not valid UTF-8")]
+    InvalidBundleUtf8(String),
     #[error(
         "The bundle compatibility field `{field}` expected `{expected}` but received `{actual}`"
     )]
