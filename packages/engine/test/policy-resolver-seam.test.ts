@@ -158,6 +158,38 @@ describe("policyResolver seam: absent resolver", () => {
     expect(gateReq?.body).toContain(summary);
   });
 
+  it("reviews and executes the defaulted calendar.delete_event arguments", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    let executed: Record<string, unknown> | undefined;
+    const calendar = makeAction({
+      id: "calendar.delete_event",
+      riskLevel: "critical",
+      parameters: Type.Object({ eventId: Type.String(), sendUpdates: Type.Optional(Type.String({ default: "all" })) }),
+      execute: async (params) => { executed = params as Record<string, unknown>; return { success: true, data: {} }; },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [{ service: "calendar", actions: [calendar] }] });
+    await callTool.execute(
+      { tool_id: "calendar.delete_event", params: { eventId: "evt_1" }, summary: "Delete event" },
+      makeCtx({ requestDecision: async (req) => { gateReq = req; return { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 }; } }),
+    );
+    expect(gateReq?.context?.argsPreview).toContain("sendUpdates");
+    expect(gateReq?.context?.argsPreview).toContain("all");
+    expect(gateReq?.body).not.toContain("args=");
+    expect(gateReq?.context?.args).toBeUndefined();
+    expect(executed).toEqual({ eventId: "evt_1", sendUpdates: "all" });
+  });
+
+  it("fails closed when a direct resolver approves an incomplete review", async () => {
+    let executed = false;
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ riskLevel: "critical", parameters: Type.Object({ content: Type.String() }), execute: async () => { executed = true; return { success: true, data: {} }; } }))] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { content: "x".repeat(2_000) }, summary: "s" },
+      makeCtx({ requestDecision: async () => ({ actionId: "approve", resolvedBy: "u1", resolvedAt: 1 }) }),
+    );
+    expect(executed).toBe(false);
+    expect(result.text).toContain("did not approve");
+  });
+
   it("deny text is unchanged when a plugin declares defaultApprovalMode=deny", async () => {
     const plugin: ActionPlugin = {
       service: "github",
@@ -299,7 +331,7 @@ describe("policyResolver seam: require_approval gate", () => {
     // Default approve/deny plus the extra. `approves` rides along so the
     // gate row can classify host actions for denial stickiness.
     expect(gateReq?.actions).toEqual([
-      { id: "approve", label: "Approve", style: "primary" },
+      { id: "approve", label: "Approve", style: "primary", approves: true },
       { id: "deny", label: "Deny", style: "danger" },
       { id: "approve_always", label: "Always allow", style: "primary", approves: true },
     ]);
@@ -438,7 +470,7 @@ describe("policyResolver seam: fail-closed + audit edges", () => {
     expect(invocations[0].error).toContain("boom");
   });
 
-  it("invalid params → one error record, execute never runs", async () => {
+  it("invalid params fail before policy resolution and never execute", async () => {
     let executed = false;
     const { resolver, invocations } = makeResolver();
     const [, callTool] = pluginCatalogTools({
@@ -450,8 +482,7 @@ describe("policyResolver seam: fail-closed + audit edges", () => {
     );
     expect(executed).toBe(false);
     expect(result.text).toContain("invalid params");
-    expect(invocations).toHaveLength(1);
-    expect(invocations[0].status).toBe("error");
+    expect(invocations).toHaveLength(0);
   });
 
   it("onInvocation throwing never breaks call_tool", async () => {

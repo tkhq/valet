@@ -122,7 +122,7 @@ export function DecisionGateCard({
         <div className="flex max-h-[35dvh] shrink-0 flex-wrap gap-2 overflow-y-auto border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
           {gate.actions.map((action) => {
             const isAlwaysAllow = action.id === GATE_ACTION_ALWAYS_ALLOW;
-            const reviewBlocked = approvalReviewIncomplete && !isRejectAction(action);
+            const reviewBlocked = approvalReviewIncomplete && action.approves === true;
             const disabled = busy || reviewBlocked || (isAlwaysAllow && !isAdmin);
             const button = (
               <Button
@@ -212,11 +212,7 @@ function boundedPreview(preview: string | undefined): { text: string; truncated:
 }
 
 function isApprovalReviewIncomplete(approval: NonNullable<DecisionGate["approval"]>): boolean {
-  return approval.reviewIncomplete === true || boundedPreview(approval.argsPreview).truncated;
-}
-
-function isRejectAction(action: DecisionGate["actions"][number]): boolean {
-  return action.style === "danger" || /deny|reject|cancel/i.test(action.id);
+  return approval.argsPreview === undefined || approval.reviewIncomplete === true || boundedPreview(approval.argsPreview).truncated;
 }
 
 function GenericGateReview({ body, provenance }: Pick<DecisionGate, "body" | "provenance">) {

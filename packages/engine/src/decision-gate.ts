@@ -224,7 +224,7 @@ export function latestGateForResume(
  * PolicyDecision — the two MUST classify a resolution the same way, or a
  * host rejection action escapes denial stickiness.
  */
-function resolutionApproves(gate: DecisionGate, resolution: DecisionResolution): boolean {
+export function resolutionApproves(gate: DecisionGate, resolution: DecisionResolution): boolean {
   if (resolution.actionId === "approve") return true;
   return gate.actions.some((a) => a.approves === true && a.id === resolution.actionId);
 }
@@ -366,7 +366,7 @@ export function fromRequest(
       req.actions ??
       (req.type === "approval"
         ? [
-            { id: "approve", label: "Approve", style: "primary" },
+            { id: "approve", label: "Approve", style: "primary", approves: true },
             { id: "deny", label: "Deny", style: "danger" },
           ]
         : []),

@@ -1,4 +1,4 @@
-import { toolApprovalGateContext, truncateApprovalText } from "@valet/engine";
+import { toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -46,8 +46,6 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
 }
 
 const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
-const MAX_APPROVAL_ARGS_BYTES = 16_000;
-
 /**
  * Project only a valid tool approval. A malformed `args` value must leave the
  * authoritative gate body visible instead of claiming that its arguments are
@@ -57,29 +55,13 @@ const MAX_APPROVAL_ARGS_BYTES = 16_000;
 function gateApprovalDetails(context: Record<string, unknown> | undefined): WireDecisionGate["approval"] | undefined {
   const approval = toolApprovalGateContext(context);
   if (!approval) return undefined;
-  const rawArgs = context?.args;
-  if (rawArgs !== undefined && (rawArgs === null || typeof rawArgs !== "object" || Array.isArray(rawArgs))) {
-    return undefined;
-  }
-  let argsPreview: string | undefined;
-  let argsTruncated = false;
-  try {
-    const json = JSON.stringify(approval.args ?? {});
-    if (json !== undefined) {
-      const bounded = truncateApprovalText(json, MAX_APPROVAL_ARGS_BYTES);
-      argsPreview = bounded.text;
-      argsTruncated = bounded.truncated;
-    }
-  } catch {
-    return undefined;
-  }
   return {
     toolId: approval.toolId,
     riskLevel: approval.riskLevel,
     service: approval.service,
     summary: approval.summary,
-    ...(argsPreview !== undefined ? { argsPreview } : {}),
-    ...(argsTruncated ? { reviewIncomplete: true } : {}),
+    ...(approval.argsPreview !== undefined ? { argsPreview: approval.argsPreview } : {}),
+    ...(approval.argsPreview === undefined || approval.reviewIncomplete ? { reviewIncomplete: true } : {}),
   };
 }
 

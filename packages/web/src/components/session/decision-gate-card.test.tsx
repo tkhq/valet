@@ -38,9 +38,9 @@ function gate(overrides: Partial<DecisionGate> = {}): DecisionGate {
     type: "approval",
     title: "Send email to external address?",
     actions: [
-      { id: "approve_session", label: "Approve for session" },
-      { id: "approve_once", label: "Approve once" },
-      { id: "always_allow", label: "Always allow" },
+      { id: "approve_session", label: "Approve for session", approves: true },
+      { id: "approve_once", label: "Approve once", approves: true },
+      { id: "always_allow", label: "Always allow", approves: true },
       { id: "deny", label: "Deny", style: "danger" },
     ],
     status: "pending",
@@ -106,13 +106,25 @@ describe("DecisionGateCard — reviewable tool requests", () => {
         reviewIncomplete: true,
       },
       actions: [
-        { id: "approve", label: "Approve", style: "primary" },
-        { id: "deny", label: "Reject", style: "danger" },
+        { id: "approve", label: "Approve", style: "primary", approves: true },
+        { id: "deny", label: "Reject", style: "danger", approves: false },
       ],
     }));
     expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText(/reject this request and ask the agent to retry/i)).toBeTruthy();
+  });
+
+  it("uses the authoritative approves flag instead of action labels or styles", () => {
+    renderCard(gate({
+      approval: { toolId: "tool", argsPreview: "{}", reviewIncomplete: true },
+      actions: [
+        { id: "dangerous_grant", label: "Reject", style: "danger", approves: true },
+        { id: "safe_stop", label: "Approve", style: "primary", approves: false },
+      ],
+    }));
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("caps an oversized preview from an older server before it mounts", () => {

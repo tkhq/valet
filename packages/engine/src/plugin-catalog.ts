@@ -367,7 +367,10 @@ export interface ToolApprovalGateContext {
   toolId: string;
   riskLevel?: string;
   service?: string;
+  /** Legacy gate contexts may contain raw args; new gates never write them. */
   args?: Record<string, unknown>;
+  argsPreview?: string;
+  reviewIncomplete?: true;
   summary?: string;
 }
 
@@ -377,12 +380,13 @@ export function toolApprovalGateContext(
   context: Record<string, unknown> | undefined,
 ): ToolApprovalGateContext | null {
   if (!context || typeof context.tool_id !== "string") return null;
-  const args = context.args;
   return {
     toolId: context.tool_id,
     riskLevel: typeof context.riskLevel === "string" ? context.riskLevel : undefined,
     service: typeof context.service === "string" ? context.service : undefined,
-    args: args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined,
+    args: context.args !== null && typeof context.args === "object" && !Array.isArray(context.args) ? context.args as Record<string, unknown> : undefined,
+    argsPreview: typeof context.argsPreview === "string" ? context.argsPreview : undefined,
+    reviewIncomplete: context.reviewIncomplete === true ? true : undefined,
     summary: typeof context.summary === "string" ? context.summary : undefined,
   };
 }
@@ -411,25 +415,61 @@ export function truncateApprovalText(text: string, maxBytes: number): { text: st
   return { text, truncated: false };
 }
 
+/** Build a bounded display projection without serializing the full argument tree. */
+function approvalArgsPreview(args: Record<string, unknown>): { preview: string; incomplete: boolean } {
+  let incomplete = false;
+  const copy = (value: unknown, depth: number): unknown => {
+    if (depth > 8) { incomplete = true; return "[nested value omitted]"; }
+    if (typeof value === "string") {
+      const bounded = truncateApprovalText(value, 1_024);
+      if (bounded.truncated) incomplete = true;
+      return bounded.text;
+    }
+    if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+    if (Array.isArray(value)) {
+      if (value.length > 32) incomplete = true;
+      return value.slice(0, 32).map((item) => copy(item, depth + 1));
+    }
+    if (typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      if (entries.length > 64) incomplete = true;
+      const object: Record<string, unknown> = {};
+      for (const [key, item] of entries.slice(0, 64)) {
+        const boundedKey = truncateApprovalText(key, 128);
+        if (boundedKey.truncated) incomplete = true;
+        object[boundedKey.text] = copy(item, depth + 1);
+      }
+      return object;
+    }
+    incomplete = true;
+    return "[unsupported value omitted]";
+  };
+  const rendered = JSON.stringify(copy(args, 0));
+  const bounded = truncateApprovalText(rendered, 16_000);
+  return { preview: bounded.text, incomplete: incomplete || bounded.truncated };
+}
+
 function approvalGateRequest(
   entry: CatalogEntry,
   actionId: string,
-  args: Record<string, unknown> | undefined,
+  args: Record<string, unknown>,
   summary: string,
   resumeKey: string,
 ): DecisionGateRequest {
   const boundedSummary = truncateApprovalText(summary, 4_000).text;
+  const review = approvalArgsPreview(args);
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${boundedSummary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: `${boundedSummary}\n\ntool_id=${actionId}`,
     resumeKey,
     dedupeKey: qualifiedId(entry),
     context: {
       riskLevel: entry.action.riskLevel,
       service: entry.service,
       tool_id: actionId,
-      args,
+      argsPreview: review.preview,
+      ...(review.incomplete ? { reviewIncomplete: true } : {}),
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
       summary: boundedSummary,
@@ -466,6 +506,11 @@ export async function invokeAction(
   }
   if (!entry) return { kind: "unknown", toolId: actionId };
 
+  // Gate review and execution must use one defaulted, validated object.
+  const prepared = prepareActionArgs(entry.action.parameters, args);
+  if (!prepared.ok) return { kind: "invalid-args", error: prepared.error };
+  const reviewedArgs = prepared.args;
+
   // One bound applies to the gate body, gate context, plugin context, and audit.
   const boundedSummary = truncateApprovalText(summary, 4_000).text;
   const resolver = ctx.policyResolver;
@@ -476,7 +521,7 @@ export async function invokeAction(
   // a bounded suffix: the key is embedded in the engine_decision_gates and
   // action_invocations primary keys, and Postgres btree index rows cap at
   // ~2704 bytes.
-  const resumeKey = `${qualifiedId(entry)}:${boundedArgsKey(stableJson(args ?? {}))}`;
+  const resumeKey = `${qualifiedId(entry)}:${boundedArgsKey(stableJson(reviewedArgs))}`;
 
   // ── Decision phase ────────────────────────────────────────────
   // Absent resolver: byte-identical to pre-policy behavior — derive the
@@ -488,16 +533,17 @@ export async function invokeAction(
     if (approvalMode === "require_approval") {
       const gateOutcome = await requestApprovalDecision(
         ctx,
-        approvalGateRequest(entry, actionId, args, boundedSummary, resumeKey),
+        approvalGateRequest(entry, actionId, reviewedArgs, boundedSummary, resumeKey),
       );
       if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
       const resolution = gateOutcome.resolution;
       // No resolution / an explicit "pending" action means the gate has not
       // yet been decided — distinct from an outright deny.
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
+      if (resolution.actionId === "approve" && approvalArgsPreview(reviewedArgs).incomplete) return { kind: "denied-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
     }
-    return executeAction(entry, actionId, args, boundedSummary, ctx);
+    return executeAction(entry, actionId, reviewedArgs, boundedSummary, ctx);
   }
 
   // Present resolver: consult the host policy port. The policy-facing
@@ -512,7 +558,7 @@ export async function invokeAction(
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
-    params: args,
+    params: reviewedArgs,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId: ctx.sessionId,
@@ -532,7 +578,7 @@ export async function invokeAction(
     summary: boundedSummary,
     resumeKey,
     queueItemId: ctx.queueItemId,
-    params: args,
+    params: reviewedArgs,
   };
 
   let decision: PolicyDecision;
@@ -586,11 +632,11 @@ export async function invokeAction(
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
     const extras: DecisionAction[] = decision.extraGateActions ?? [];
-    const baseReq = approvalGateRequest(entry, actionId, args, boundedSummary, resumeKey);
+    const baseReq = approvalGateRequest(entry, actionId, reviewedArgs, boundedSummary, resumeKey);
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
       actions: [
-        { id: "approve", label: "Approve", style: "primary" },
+        { id: "approve", label: "Approve", style: "primary", approves: true },
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],
@@ -617,6 +663,12 @@ export async function invokeAction(
     // record.
     if (resolution.actionId === "pending") return { kind: "pending-approval" };
     gateOrdinal = resolution.gateOrdinal;
+    if (approvalArgsPreview(reviewedArgs).incomplete && isApprovedResolution(resolution, decision.extraGateActions)) {
+      emitInvocation(resolver, {
+        ...baseRecord, status: "rejected", resolvedMode: "require_approval", provenance: decision.provenance, gateOrdinal,
+      });
+      return { kind: "denied-approval" };
+    }
     // onResolution is awaited BEFORE the outcome is interpreted; a throw
     // fails the approval closed (treated as not-approved).
     let onResolutionThrew = false;
@@ -644,7 +696,7 @@ export async function invokeAction(
   }
 
   // allow, or an approved require_approval → execute with audit.
-  return executeAction(entry, actionId, args, summary, ctx, {
+  return executeAction(entry, actionId, reviewedArgs, boundedSummary, ctx, {
     resolver,
     record: {
       ...baseRecord,
@@ -1230,21 +1282,6 @@ async function executeAction(
   ctx: ToolContext,
   audit?: { resolver: PolicyResolver; record: BaseAuditedRecord },
 ): Promise<InvokeActionResult> {
-  // Validate (and apply schema defaults to) LLM-supplied params before they
-  // reach the plugin action's execute body — closes the gap where unvalidated
-  // params flowed straight into plugin code.
-  const prepared = prepareActionArgs(entry.action.parameters, args);
-  if (!prepared.ok) {
-    if (audit) {
-      emitInvocation(audit.resolver, {
-        ...audit.record,
-        status: "error",
-        error: `invalid params: ${prepared.error}`,
-      });
-    }
-    return { kind: "invalid-args", error: prepared.error };
-  }
-
   // Build the plugin action context. credentialService routing is per-plugin;
   // the action sees the same ToolContext shape plus actionId/service/summary,
   // with credentials defaulting to the plugin's credentialService.
@@ -1265,7 +1302,7 @@ async function executeAction(
   const startedAt = Date.now();
   try {
     const result = await entry.action.execute(
-      prepared.args as Static<typeof entry.action.parameters>,
+      args as Static<typeof entry.action.parameters>,
       actionCtx,
     );
     if (audit) {

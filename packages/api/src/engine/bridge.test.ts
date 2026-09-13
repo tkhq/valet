@@ -89,7 +89,7 @@ describe("engineGateToWire", () => {
       type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
       context: {
         tool_id: "github.create_issue", service: "github", riskLevel: "high",
-        summary: "Create an issue in the public repository.", args: { title: "Fix the bug" }, private: "omit",
+        summary: "Create an issue in the public repository.", argsPreview: "{\"title\":\"Fix the bug\"}", private: "omit",
       },
     });
     expect(wire.approval).toEqual({
@@ -105,7 +105,7 @@ describe("engineGateToWire", () => {
       type: "approval", title: "Approve issue?", body: "tool_id=github.create_issue\nargs=[bad]", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
       context: { tool_id: "github.create_issue", args: ["bad"] },
     });
-    expect(wire.approval).toBeUndefined();
+    expect(wire.approval?.reviewIncomplete).toBe(true);
     expect(wire.body).toBe("tool_id=github.create_issue\nargs=[bad]");
   });
 
@@ -122,7 +122,7 @@ describe("engineGateToWire", () => {
     const wire = engineGateToWire({
       id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
       type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
-      context: { tool_id: "github.create_issue", args: { content: "x".repeat(20_000) } },
+      context: { tool_id: "github.create_issue", argsPreview: "x".repeat(15_998), reviewIncomplete: true },
     });
     expect(new TextEncoder().encode(wire.approval?.argsPreview).length).toBeLessThanOrEqual(16_000);
     expect(wire.approval?.reviewIncomplete).toBe(true);

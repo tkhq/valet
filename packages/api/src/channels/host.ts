@@ -16,6 +16,8 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
+  resolutionApproves,
+  toolApprovalGateContext,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -1165,6 +1167,12 @@ export class ChannelHost {
           ? "This assistant was deleted. The approval no longer applies."
           : "Valet could not process this approval. Open the session in Valet to resolve it.",
       );
+      return;
+    }
+    const gate = (await session.pendingDecisionGates()).find((candidate) => candidate.id === mapped.gateId);
+    const approval = gate?.type === "approval" ? toolApprovalGateContext(gate.context) : null;
+    if (gate && approval && (approval.argsPreview === undefined || approval.reviewIncomplete) && resolutionApproves(gate, { actionId: gateCallback.actionId, resolvedBy: "", resolvedAt: 0 })) {
+      await transport?.answerCallback?.(gateCallback.callbackId, "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request.");
       return;
     }
     try {

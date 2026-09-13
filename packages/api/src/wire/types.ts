@@ -1326,6 +1326,8 @@ export interface DecisionAction {
   id: string;
   label: string;
   style?: "primary" | "danger";
+  /** True when this action authorizes the gated operation. */
+  approves?: boolean;
 }
 
 /**

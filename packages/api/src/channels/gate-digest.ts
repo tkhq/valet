@@ -38,9 +38,8 @@ export interface GateDigest {
 
 /** Slack renders at most 10 fields per section; leave room for Tool + Risk. */
 const MAX_ARG_FIELDS = 8;
-/** Fields are for scanning, not reading — the web session has the full args. */
+/** Fields are for scanning, not reading. */
 const MAX_VALUE_CHARS = 120;
-/** Labels are arg keys; a runaway key must not blow a transport's field cap. */
 const MAX_LABEL_CHARS = 60;
 
 /** Code-point-safe truncation: never splits a surrogate pair at the cap. */
@@ -49,11 +48,6 @@ function truncate(text: string, max: number): string {
   return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
 }
 
-/**
- * One markdown value per arg. Scalars render plain; structured values render
- * as single-line JSON in inline code (embedded backticks swapped for a
- * curly quote so they cannot terminate the code span early).
- */
 function argValue(value: unknown): string {
   if (typeof value === "string") return truncate(value, MAX_VALUE_CHARS);
   if (value === null || typeof value === "number" || typeof value === "boolean") return String(value);
@@ -72,15 +66,19 @@ export function digestGate(gate: Pick<DecisionGate, "type" | "title" | "body" | 
     fields.push({ label: "Risk", value: ctx.riskLevel });
   }
 
-  if (ctx.args !== undefined) {
-    const entries = Object.entries(ctx.args).filter(([, v]) => v !== undefined);
+  if (ctx.argsPreview !== undefined) {
+    const value = truncate(ctx.argsPreview.replaceAll("`", "ʼ"), MAX_VALUE_CHARS);
+    fields.push({ label: "Parameters", value: `\`${value}\`` });
+  } else if (ctx.args !== undefined) {
+    const entries = Object.entries(ctx.args).filter(([, value]) => value !== undefined);
     for (const [key, value] of entries.slice(0, MAX_ARG_FIELDS)) {
       fields.push({ label: truncate(key, MAX_LABEL_CHARS), value: argValue(value) });
     }
     const overflow = entries.length - MAX_ARG_FIELDS;
-    if (overflow > 0) {
-      fields.push({ label: "More", value: `+${overflow} more parameter${overflow === 1 ? "" : "s"} in Valet` });
-    }
+    if (overflow > 0) fields.push({ label: "More", value: `+${overflow} more parameter${overflow === 1 ? "" : "s"} in Valet` });
+  }
+  if (ctx.reviewIncomplete) {
+    fields.push({ label: "Review", value: "Incomplete. Reject and ask the agent to retry with a smaller request." });
   }
 
   // A blank summary must not leave the durable notification row (and the
