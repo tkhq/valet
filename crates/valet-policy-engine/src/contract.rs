@@ -70,10 +70,10 @@ pub struct ApprovalRequirement {
     pub tier: String,
     #[serde(rename = "approverType")]
     pub approver_type: ApproverType,
-    #[serde(rename = "approverId")]
+    #[serde(rename = "approverId", skip_serializing_if = "Option::is_none")]
     pub approver_id: Option<String>,
     pub replay: ApprovalReplay,
-    #[serde(rename = "expiresAtMs")]
+    #[serde(rename = "expiresAtMs", skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
 }
 
@@ -105,5 +105,49 @@ where
         Err(serde::de::Error::custom(
             "target_idempotency.required must be true",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn requirement(approver_id: Option<&str>, expires_at_ms: Option<u64>) -> ApprovalRequirement {
+        ApprovalRequirement {
+            tier: "high".to_owned(),
+            approver_type: ApproverType::Team,
+            approver_id: approver_id.map(str::to_owned),
+            replay: ApprovalReplay::Once,
+            expires_at_ms,
+        }
+    }
+
+    #[test]
+    fn approval_requirement_omits_absent_optional_fields() {
+        let value = serde_json::to_value(requirement(None, None)).expect("requirement serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "tier": "high",
+                "approverType": "team",
+                "replay": "once"
+            })
+        );
+    }
+
+    #[test]
+    fn approval_requirement_serializes_present_optional_fields() {
+        let value = serde_json::to_value(requirement(Some("team-1"), Some(123)))
+            .expect("requirement serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "tier": "high",
+                "approverType": "team",
+                "approverId": "team-1",
+                "replay": "once",
+                "expiresAtMs": 123
+            })
+        );
     }
 }

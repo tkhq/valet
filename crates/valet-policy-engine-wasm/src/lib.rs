@@ -279,10 +279,46 @@ fn engine_digest() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use valet_policy_engine::{
+        ApprovalReplay, ApprovalRequirement, ApproverType, AuthorizationEffect, PolicyDecisionV1,
+    };
 
     #[test]
     fn engine_digest_is_stable_sha256() {
         assert_eq!(engine_digest().len(), 64);
         assert_eq!(engine_digest(), engine_digest());
+    }
+
+    #[test]
+    fn wasm_response_preserves_optional_approval_field_presence() {
+        for (approver_id, expires_at_ms, expected) in [
+            (None, None, serde_json::json!({})),
+            (
+                Some("team-1".to_owned()),
+                Some(123),
+                serde_json::json!({"approverId": "team-1", "expiresAtMs": 123}),
+            ),
+        ] {
+            let decision = PolicyDecisionV1 {
+                effect: AuthorizationEffect::RequireApproval,
+                reason_code: "approval_required".to_owned(),
+                matched_rule_ids: vec![],
+                obligations: vec![],
+                redactions: vec![],
+                approval_requirement: Some(ApprovalRequirement {
+                    tier: "high".to_owned(),
+                    approver_type: ApproverType::Team,
+                    approver_id,
+                    replay: ApprovalReplay::Once,
+                    expires_at_ms,
+                }),
+            };
+            let response: serde_json::Value =
+                serde_json::from_str(&serialize_response(response_value(decision)))
+                    .expect("WASM response serializes");
+            let requirement = &response["value"]["approvalRequirement"];
+            assert_eq!(requirement.get("approverId"), expected.get("approverId"));
+            assert_eq!(requirement.get("expiresAtMs"), expected.get("expiresAtMs"));
+        }
     }
 }
