@@ -160,7 +160,7 @@ TKMS and TVC have different roles:
 
 Rego v1 remains the canonical authoring language. Valet targets full Rego v1 syntax, language semantics, and pure built-in coverage. The first engine profile does not claim full compatibility until it passes the required corpus and built-in gates.
 
-Valet publishes a versioned compatibility profile. Version 1 pins Rego v1 and the reviewed `tkhq/regorus` fork at commit `aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e`. Cargo uses the Git repository and exact `rev`, and `Cargo.lock` records the resolved Git source. The profile records the repository, commit, crate version, Valet engine contract, and these built-in classes:
+Valet publishes a versioned compatibility profile. Version 1 pins Rego v1 and the reviewed `tkhq/regorus` fork at commit `309ba35067d2118aafd696198a33037f5af9e1bd`. Cargo uses the Git repository and exact `rev`, and `Cargo.lock` records the resolved Git source. The profile records the repository, commit, crate version, Valet engine contract, and these built-in classes:
 
 - `pure`: deterministic for explicit arguments and implemented by the pinned substrate;
 - `fact_backed`: replaced by a named, schema-versioned value in canonical policy input;
@@ -171,7 +171,7 @@ The checked-in inventory lists every built-in known to the pinned substrate. Eac
 
 The default capability allowlist is empty. Network, filesystem, wall clock, randomness, environment, process, dynamic loading, and arbitrary host callbacks are rejected. A policy can use a deterministic fact from explicit input instead. A later injected capability requires a profile version, an input and output schema, limits, provenance, and a fail-closed rule.
 
-Validation rejects unsupported syntax and rejected, missing, or undeclared built-ins before bundle activation. If an injected capability later fails at evaluation, the engine returns a typed denial. It does not use an approximation, ambient authority, old evaluator, approval fallback, or another policy engine.
+Validation rejects unsupported syntax and rejected, missing, or undeclared built-ins before bundle activation. User function names and their package-qualified names cannot collide with inventoried built-in names. This rule prevents a declaration from changing capability classification. Validation normalizes chained static string-key bracket segments before it rejects the callable path. It rejects dynamic bracket callables without treating indexed values as calls. If an injected capability later fails at evaluation, the engine returns a typed denial. It does not use an approximation, ambient authority, old evaluator, approval fallback, or another policy engine.
 
 The versioned compatibility corpus contains Valet contract fixtures, the pinned Regorus conformance fixtures, and licensed upstream Rego v1 fixtures. Its manifest records each fixture's origin, license, feature, expected parse status, expected result, and required or informational status. A release can claim full Rego v1 compatibility only when all required fixtures pass on every supported target, every built-in is classified, and no behavior-changing gap remains open.
 
@@ -179,10 +179,10 @@ Profile version 1 sets these engine limits per compilation or evaluation:
 
 - 256 modules and 1 MiB of Rego source;
 - 8 MiB of canonical policy data and 8 MiB of canonical input;
-- 250,000 parsed nodes and 16 MiB of source bundle bytes;
+- 250,000 source tokens and 16 MiB of source bundle bytes;
 - 1,000,000 deterministic evaluation work units;
-- 128 document-reference, call, and recursion depth;
-- 100,000 generated comprehension values;
+- 128 source nesting, document, and document-reference depth;
+- 100,000 input, data, and decision values;
 - 10,000 explain events; and
 - 1 MiB of decision output.
 
@@ -197,7 +197,7 @@ The Rust engine owns these design-level modules:
 - `evaluator`: bounded execution over immutable Rego source, canonical data, and explicit input;
 - `bundle`: source manifest validation, digest checks, version pinning, loading, and compatibility checks;
 - `contract`: language-neutral input validation and `PolicyDecisionV1` output validation;
-- `explain`: matched rule IDs, rejected branches, source spans, values, and redacted trace events; and
+- `explain`: bounded, redacted evaluation summaries; detailed semantic traces remain unsupported until Regorus exposes a safe stable event API; and
 - `host`: an allowlisted capability interface that is empty for normal policy evaluation.
 
 Source bundles contain Rego v1 modules, canonical data, a manifest, and source digests. They do not require Regorus Virtual Machine (RVM) bytecode. The policy digest binds the source modules, canonical data, manifest, engine identity, and capability profile.
@@ -210,7 +210,7 @@ The local native and WebAssembly targets use one selected semantic path. Target-
 
 ### Regorus foundation and ownership
 
-Valet adopts the reviewed `tkhq/regorus` fork at commit `aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e` as its initial Rust Rego substrate. Cargo declares `https://github.com/tkhq/regorus` with that exact `rev`. The committed lockfile must resolve the same Git commit. Branch, tag, semver, and floating Git pins are not permitted. The dependency remains subject to license review, source audit, vulnerability scanning, compatibility tests, and denial-of-service tests.
+Valet adopts the reviewed `tkhq/regorus` fork at commit `309ba35067d2118aafd696198a33037f5af9e1bd` as its initial Rust Rego substrate. Cargo declares `https://github.com/tkhq/regorus` with that exact `rev`. The committed lockfile must resolve the same Git commit. Branch, tag, semver, and floating Git pins are not permitted. The dependency remains subject to license review, source audit, vulnerability scanning, compatibility tests, and denial-of-service tests.
 
 Valet owns the public engine contract, capability profile, compatibility corpus, limits, evaluator boundary, and release decisions. The public crate API does not expose Regorus types. Regorus does not select capabilities, load policy data, resolve facts, or define Valet authorization results.
 
@@ -824,7 +824,7 @@ Operational metrics include evaluation count and latency by kind and effect, act
 | Native and WebAssembly targets drift | Both targets share one Rust implementation and conformance corpus. A target cannot ship until its decisions and limits agree. |
 | Engine upgrade changes decisions | Releases pin engine and bundle versions. Offline migration checks and paired rollback artifacts gate upgrades. |
 | Source bundle output is nondeterministic | Canonical inputs, sorted encoding, repeated-build tests, and digests block unstable bundles. |
-| Policy exhausts CPU or memory | Source, instruction, time, memory, depth, and result limits fail closed. Exact limits remain a gate. |
+| Policy exhausts CPU or memory | Engine source, work-unit, depth, and result limits fail closed. The local adapter owns wall-time and memory limits. Exact limits remain a gate. |
 | The owned engine misses latency targets | Native and WebAssembly benchmarks cover load latency, evaluation latency, throughput, and memory before target selection. |
 | Rust substrate drifts or is compromised | Valet pins and audits dependencies and tests them against its published compatibility profile. Owning the contract does not remove supply-chain risk. |
 | Database operator drops audit rows | Valet monitoring can detect sequence gaps and missing outcomes. Future signed or chained records improve external verification. |
