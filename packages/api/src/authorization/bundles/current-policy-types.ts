@@ -1,5 +1,5 @@
 import type { ApprovalMode, RiskLevel } from "@valet/engine";
-import type { JsonValue } from "@valet/engine/authorization";
+import type { CurrentPolicyDynamicFactsV2, JsonValue } from "@valet/engine/authorization";
 import type { ParamMatcherOp } from "../../policies/matchers.js";
 
 export type CurrentPolicyMode = ApprovalMode;
@@ -130,10 +130,6 @@ export interface CurrentApprovalResolutionSourceV1 {
   readonly resolutionVersion: 1;
 }
 
-export interface CurrentPolicyDynamicFactsV1 {
-  readonly schemaVersion: 2;
-  readonly organizationId: string;
-  readonly grants: readonly JsonValue[][];
-  readonly approvalBinding: readonly JsonValue[] | null;
-  readonly approvals: readonly JsonValue[][];
-}
+export type { CurrentPolicyDynamicFactsV2 };
+/** @deprecated Use CurrentPolicyDynamicFactsV2 from the engine authorization contract. */
+export type CurrentPolicyDynamicFactsV1 = CurrentPolicyDynamicFactsV2;

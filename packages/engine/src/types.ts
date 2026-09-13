@@ -1006,6 +1006,7 @@ export type PolicyProvenanceSource =
   | "override"
   | "plugin_default"
   | "risk_default"
+  | "canonical_service"
   | "resolver_error";
 
 /**
@@ -1030,6 +1031,21 @@ export interface PolicyDecision {
    * so denial stickiness classifies host rejection actions the same way.
    */
   extraGateActions?: (DecisionAction & { approves: boolean })[];
+  /** Canonical decision metadata carried only by the inert AuthorizationService compatibility adapter. */
+  canonical?: {
+    reasonCode: string;
+    obligations: import("./authorization/types.js").Obligation[];
+    redactions: import("./authorization/types.js").RedactionDirective[];
+    approvalRequirement?: import("./authorization/types.js").ApprovalRequirement;
+    requestId: string;
+    requestSubjectDigest: string;
+    inputDigest: string;
+    policyDigest: string;
+    sourceBundleDigest: string;
+    evaluatorKind: import("./authorization/types.js").EvaluatorIdentity["kind"];
+    engineDigest: string;
+    decisionDigest: string;
+  };
 }
 
 /**

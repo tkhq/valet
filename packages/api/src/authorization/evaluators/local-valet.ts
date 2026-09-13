@@ -52,6 +52,7 @@ export class LocalValetEvaluator implements AuthorizationEvaluator {
       sourceBundleDigest: result.sourceBundleDigest,
       evaluator: this.identity,
       decision: result.decision,
+      decisionDigest: result.decisionDigest,
       evaluatedAtMs: Date.now(),
     };
   }

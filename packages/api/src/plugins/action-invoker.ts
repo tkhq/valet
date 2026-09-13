@@ -583,7 +583,8 @@ async function enforceWorkflowPolicy(
       params: req.params,
       createdAt: now,
     });
-    return { ok: false, error: `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy` };
+    const policyScope = decision.provenance.source === "team_policy" ? "team" : decision.provenance.source === "org_policy" ? "org" : "authorization";
+    return { ok: false, error: `${req.service}.${req.action} is blocked by ${policyScope} policy` };
   }
 
   // decision.mode === "require_approval"

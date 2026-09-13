@@ -15,8 +15,8 @@ export type AuthorizationKind =
 export type AuthorizationEffect = "allow" | "deny" | "require_approval";
 
 export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-export type JsonObject = { [key: string]: JsonValue };
+export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+export type JsonObject = { readonly [key: string]: JsonValue };
 
 export interface AuthorizationPrincipal {
   type: "user" | "team" | "org" | "app";
@@ -133,6 +133,9 @@ export interface PolicyDecisionEnvelope {
   sourceBundleDigest: string;
   evaluator: EvaluatorIdentity;
   decision: PolicyDecisionV1;
+  /** Optional worker-supplied digests. Consumers recompute them before use. */
+  decisionDigest?: string;
+  obligationDigest?: string;
   evaluatedAtMs: number;
   proof?: TvcDecisionProof;
 }
