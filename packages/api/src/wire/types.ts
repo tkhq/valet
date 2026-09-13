@@ -1349,7 +1349,8 @@ export interface DecisionGateProvenance {
 
 /** Typed, reviewable facts for a tool approval. Raw gate context stays private. */
 export interface DecisionGateApprovalDetails {
-  toolId: string;
+  /** Missing means the tool identity is malformed and approval is unsafe. */
+  toolId?: string;
   riskLevel?: string;
   service?: string;
   /** A bounded JSON preview. The complete body remains the gate record. */

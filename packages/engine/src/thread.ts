@@ -386,7 +386,7 @@ export class Thread {
   private currentAssistantEntry: MessageEntry | undefined;
   private toolCtxOverlay: { gateId?: string } = {};
   private suspendedDecisionForReplay:
-    | { gateId: string; ordinal: number; resolution?: DecisionResolution }
+    | { gateId: string; ordinal: number; resumeKey: string; resolution?: DecisionResolution }
     | undefined;
   /** Token usage from the most recent assistant message, captured at turn_end. */
   private lastAssistantUsage:
@@ -1267,7 +1267,7 @@ export class Thread {
    * resumeKey, the engine returns the stored resolution immediately.
    */
   setReplayContext(
-    ctx: { gateId: string; ordinal: number; resolution?: DecisionResolution } | undefined,
+    ctx: { gateId: string; ordinal: number; resumeKey: string; resolution?: DecisionResolution } | undefined,
   ): void {
     this.suspendedDecisionForReplay = ctx;
   }
@@ -1293,7 +1293,7 @@ export class Thread {
       );
       return;
     }
-    this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resolution });
+    this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resumeKey: suspended.resumeKey, resolution });
     // The deterministic gate ID is derived from
     // (sessionId, threadId, queueItemId, resumeKey, ordinal). During replay,
     // the tool's requestDecision call recomputes this from the active queue

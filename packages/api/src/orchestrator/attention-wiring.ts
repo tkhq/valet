@@ -34,7 +34,7 @@ import { parseAssistantSessionId } from "@valet/engine";
 import type { DeliveredBusEvent, EventStream, SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
-import { digestGate } from "../channels/gate-digest.js";
+import { digestGate, safeChannelActions } from "../channels/gate-digest.js";
 import {
   markGateNotificationsRead,
   routeAttention,
@@ -135,7 +135,11 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
     body: digest.body,
     href: attentionHref(sessionId, gate.threadId),
     dedupeKey: gate.id,
-    gate: { id: gate.id, actions: gate.actions, fields: digest.fields },
+    gate: {
+      id: gate.id,
+      actions: safeChannelActions(gate, digest.reviewIncomplete === true),
+      fields: digest.fields,
+    },
   });
 }
 

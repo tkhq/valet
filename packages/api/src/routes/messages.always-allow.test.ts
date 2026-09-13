@@ -111,6 +111,22 @@ it("lets current team members reach an existing workflow agent gate without an a
   const approved = await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
   expect(approved.status).toBe(200);
   expect(await p.engineStore.getDecisionGate(sessionId, "join-channel")).toMatchObject({ status: "resolved", resolution: { actionId: "approve", resolvedBy: "local-user" } });
+  await p.engineStore.saveDecisionGate(sessionId, threadId, {
+    id: "malformed-tool", sessionId, threadId, queueItemId: "q2", resumeKey: "opaque", ordinal: 0,
+    type: "approval", title: "Unsafe tool review",
+    actions: [{ id: "approve", label: "Approve", approves: true }, { id: "deny", label: "Deny" }],
+    context: { kind: "tool_approval", argsPreview: "{\"amount\":10}" },
+    status: "pending", createdAt: now, updatedAt: now,
+  });
+  const unsafeApprove = await fetch(    `${base}/malformed-tool/resolve`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) },
+  );
+  expect(unsafeApprove.status).toBe(409);
+  expect(await p.engineStore.getDecisionGate(sessionId, "malformed-tool")).toMatchObject({ status: "pending" });
+  const safeDeny = await fetch(    `${base}/malformed-tool/resolve`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "deny" }) },
+  );
+  expect(safeDeny.status).toBe(200);
   const guessed = "wf:approval-run:never-created";
   expect((await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(guessed)}/decisions`)).status).toBe(404);
   expect(await p.engineStore.getSession(guessed)).toBeNull();

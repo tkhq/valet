@@ -166,7 +166,7 @@ function ApprovalReview({
 
   return (
     <div className="space-y-3">
-      <p className="break-words text-sm text-[--fg]">{approval.summary ?? `Run ${approval.toolId}.`}</p>
+      <p className="break-words text-sm text-[--fg]">{approval.summary ?? (approval.toolId ? `Run ${approval.toolId}.` : "The tool identity is unavailable.")}</p>
       <dl className="grid gap-2 sm:grid-cols-3">
         {facts.map(([label, detail]) => (
           <div key={label} className="min-w-0 rounded border border-amber-300/70 bg-white/50 px-2.5 py-2 dark:border-amber-700/50 dark:bg-neutral-950/20">
@@ -212,7 +212,7 @@ function boundedPreview(preview: string | undefined): { text: string; truncated:
 }
 
 function isApprovalReviewIncomplete(approval: NonNullable<DecisionGate["approval"]>): boolean {
-  return approval.argsPreview === undefined || approval.reviewIncomplete === true || boundedPreview(approval.argsPreview).truncated;
+  return approval.toolId === undefined || approval.toolId.trim() === "" || approval.argsPreview === undefined || approval.reviewIncomplete === true || boundedPreview(approval.argsPreview).truncated;
 }
 
 function GenericGateReview({ body, provenance }: Pick<DecisionGate, "body" | "provenance">) {

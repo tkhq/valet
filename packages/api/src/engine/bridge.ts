@@ -56,12 +56,12 @@ function gateApprovalDetails(context: Record<string, unknown> | undefined): Wire
   const approval = toolApprovalGateContext(context);
   if (!approval) return undefined;
   return {
-    toolId: approval.toolId,
+    ...(approval.toolId !== undefined ? { toolId: approval.toolId } : {}),
     riskLevel: approval.riskLevel,
     service: approval.service,
     summary: approval.summary,
     ...(approval.argsPreview !== undefined ? { argsPreview: approval.argsPreview } : {}),
-    ...(approval.argsPreview === undefined || approval.reviewIncomplete ? { reviewIncomplete: true } : {}),
+    ...(approval.toolId === undefined || approval.argsPreview === undefined || approval.reviewIncomplete ? { reviewIncomplete: true } : {}),
   };
 }
 

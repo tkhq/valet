@@ -14,6 +14,7 @@ import { ExitCode } from "../exit.js";
 import { emitNdjson, parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession, type StreamSessionOpts } from "../stream.js";
+import { approvalPreviewLines } from "./approval-review.js";
 import type { CliContext } from "../types.js";
 import type {
   DecisionGate,
@@ -75,8 +76,7 @@ export function renderToolEnd(toolName: string, isError: boolean): string {
 export function renderGate(gate: DecisionGate): string {
   const lines = [`decision required: ${gate.title} [${gate.type}]`];
   if (gate.body) lines.push(gate.body);
-  if (gate.approval?.argsPreview) lines.push(`parameters: ${gate.approval.argsPreview}`);
-  if (gate.approval && (gate.approval.argsPreview === undefined || gate.approval.reviewIncomplete)) lines.push("parameter review is incomplete; only rejection actions can resolve this gate");
+  lines.push(...approvalPreviewLines(gate));
   for (const a of gate.actions) lines.push(`  - ${a.id}: ${a.label}`);
   lines.push(`resolve with: valet gates resolve ${gate.id} <actionId>`);
   return lines.join("\n");

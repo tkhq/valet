@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { digestGate } from "./gate-digest.js";
+import { digestGate, safeChannelActions } from "./gate-digest.js";
 
 const TOOL_GATE = {
   type: "approval" as const,
@@ -26,7 +26,9 @@ describe("digestGate", () => {
       { label: "repo", value: "tkhq/tk-brain" },
       { label: "title", value: "fix" },
       { label: "draft", value: "false" },
+      { label: "Review", value: "Incomplete. Reject and ask the agent to retry with a smaller request." },
     ]);
+    expect(digest.reviewIncomplete).toBe(true);
   });
 
   it("renders structured arg values as bounded single-line JSON", () => {
@@ -44,8 +46,9 @@ describe("digestGate", () => {
     const args = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`k${i}`, i]));
     const digest = digestGate({ ...TOOL_GATE, context: { ...TOOL_GATE.context, args } });
     // Tool + Risk + 8 args + overflow note.
-    expect(digest.fields).toHaveLength(11);
-    expect(digest.fields?.at(-1)).toEqual({ label: "More", value: "+3 more parameters in Valet" });
+    expect(digest.fields).toHaveLength(12);
+    expect(digest.fields).toContainEqual({ label: "More", value: "+3 more parameters in Valet" });
+    expect(digest.reviewIncomplete).toBe(true);
   });
 
   it("falls back to naming the tool when the gate carries no summary, rather than dumping JSON or going blank", () => {
@@ -67,9 +70,27 @@ describe("digestGate", () => {
       ...TOOL_GATE,
       context: { ...TOOL_GATE.context, args: { ["k".repeat(200)]: 1 } },
     });
-    const label = digest.fields?.at(-1)?.label ?? "";
+    const label = digest.fields?.find((field) => field.label.startsWith("k"))?.label ?? "";
     expect(label.length).toBeLessThanOrEqual(60);
     expect(label.endsWith("…")).toBe(true);
+  });
+
+  it("marks a truncated preview incomplete when an early long field hides recipient and amount", () => {
+    const argsPreview = JSON.stringify({ note: "x".repeat(500), recipient: "later@example.test", amount: 2500 });
+    const digest = digestGate({
+      ...TOOL_GATE,
+      context: { ...TOOL_GATE.context, args: undefined, argsPreview },
+    });
+    expect(digest.fields?.find((field) => field.label === "Parameters")?.value).not.toContain("recipient");
+    expect(digest.reviewIncomplete).toBe(true);
+    expect(safeChannelActions({ ...TOOL_GATE, actions: [
+      { id: "approve", label: "Approve", approves: true },
+      { id: "deny", label: "Reject" },
+    ] }, digest.reviewIncomplete === true).map((action) => action.id)).toEqual(["deny"]);
+    expect(digest.fields).toContainEqual({
+      label: "Review",
+      value: "Incomplete. Reject and ask the agent to retry with a smaller request.",
+    });
   });
 
   it("passes a gate without tool context through untouched (ask_approval)", () => {

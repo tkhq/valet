@@ -98,6 +98,19 @@ describe("DecisionGateCard — reviewable tool requests", () => {
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
 
+  it("blocks approval when the typed review has no tool identity", () => {
+    renderCard(gate({
+      approval: { argsPreview: "{\"amount\":10}", reviewIncomplete: true },
+      actions: [
+        { id: "approve", label: "Approve", style: "primary", approves: true },
+        { id: "deny", label: "Reject", style: "danger", approves: false },
+      ],
+    }));
+    expect(screen.getByText(/tool identity is unavailable/i)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("blocks approval when a preview can hide material later fields", () => {
     renderCard(gate({
       approval: {

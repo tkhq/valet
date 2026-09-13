@@ -101,6 +101,25 @@ describe("runGates resolve", () => {
     expect(stdout()).toContain("resolved gate g1");
   });
 
+  it("shows the typed preview before resolving a complete approval", async () => {
+    const complete = gate("g1");
+    complete.actions = [{ id: "approve", label: "Approve", approves: true }];
+    complete.approval = { toolId: "payments.send", argsPreview: "{\"amount\":10}" };
+    const { client, resolves } = stubClient([complete]);
+    expect(await runGates(client, parseGlobalFlags(["resolve", "g1", "approve", "--session", "s"]))).toBe(ExitCode.OK);
+    expect(stdout()).toContain("tool: payments.send");
+    expect(stdout()).toContain("parameters: {\"amount\":10}");
+    expect(resolves).toHaveLength(1);
+  });
+
+  it("blocks built-in approve when tool identity is malformed", async () => {
+    const unsafe = gate("g1");
+    unsafe.approval = { argsPreview: "{}", reviewIncomplete: true };
+    const { client, resolves } = stubClient([unsafe]);
+    expect(await runGates(client, parseGlobalFlags(["resolve", "g1", "approve", "--session", "s"]))).toBe(ExitCode.Usage);
+    expect(resolves).toHaveLength(0);
+  });
+
   it("does not send an approving action for incomplete parameters", async () => {
     const incomplete = gate("g1");
     incomplete.actions = [{ id: "approve", label: "Approve", approves: true }];

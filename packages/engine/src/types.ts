@@ -741,7 +741,7 @@ export interface ToolContext {
    */
   queueItemId?: string;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
-  suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
+  suspendedDecision?: { gateId: string; ordinal: number; resumeKey: string; resolution?: DecisionResolution };
   signal: AbortSignal;
   threadRead: (key: string, opts?: MessageQuery) => Promise<SessionEntry[]>;
   /**
@@ -1058,16 +1058,16 @@ export interface PolicyInvocationRecord {
   appliesIn: "session" | "workflow";
   summary?: string;
   status: "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed";
-  resolvedMode: ApprovalMode;
-  provenance: PolicyDecision["provenance"];
+  /** Null when parameter validation failed before policy evaluation. */
+  resolvedMode: ApprovalMode | null;
+  /** Null when parameter validation failed before policy evaluation. */
+  provenance: PolicyDecision["provenance"] | null;
   durationMs?: number;
   error?: string;
   /**
-   * The deterministic resumeKey `call_tool` derives for this invocation
-   * (`${tool_id}:${stableJson(params)}`) — same value passed as
-   * `DecisionGateRequest.resumeKey` when a gate opens. Always present, even
-   * for `allow`/`deny` dispositions that never open a gate, so an audit sink
-   * can correlate every record for a given (tool, args) pair.
+   * The opaque invocation key passed to `DecisionGateRequest.resumeKey` when
+   * a gate opens. It contains no parameter values. Restart replay reuses the
+   * key from `SuspendedTurnState`.
    */
   resumeKey: string;
   /**

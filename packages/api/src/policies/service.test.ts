@@ -417,19 +417,32 @@ describe("buildPolicyResolver", () => {
     expect(await db.select().from(runtimeGrants)).toHaveLength(0);
   });
 
+  it("persists validation failures as policy-not-evaluated", async () => {
+    await resolver.onInvocation?.({
+      service: "github", actionId: "create_issue", toolId: "github.create_issue", riskLevel: "high",
+      sessionId: SESSION, threadId: "t1", userId: MEMBER, orgId: ORG, appliesIn: "session",
+      status: "error", resolvedMode: null, provenance: null,
+      resumeKey: "github.create_issue:123e4567-e89b-12d3-a456-426614174000",
+      error: "invalid params",
+    });
+    const [row] = await db.select().from(actionInvocations).where(eq(actionInvocations.sessionId, SESSION));
+    expect(row.resolvedMode).toBeNull();
+    expect(row.baseMode).toBeNull();
+  });
+
   it("onInvocation persists an audit row keyed on the gate ordinal for a gated record", async () => {
     const record: PolicyInvocationRecord = {
       service: "github", actionId: "create_issue", toolId: "github.create_issue", riskLevel: "high",
       sessionId: SESSION, threadId: "t1", userId: MEMBER, orgId: ORG, appliesIn: "session",
       status: "completed", resolvedMode: "require_approval",
       provenance: { baseMode: "require_approval", source: "risk_default" },
-      resumeKey: "github.create_issue:{}", gateOrdinal: 3, durationMs: 12, queueItemId: "qi-1",
+      resumeKey: "github.create_issue:123e4567-e89b-12d3-a456-426614174000", gateOrdinal: 3, durationMs: 12, queueItemId: "qi-1",
     };
     await resolver.onInvocation?.(record);
     await resolver.onInvocation?.(record); // replay same ordinal → dedup
     const rows = await db.select().from(actionInvocations).where(eq(actionInvocations.sessionId, SESSION));
     expect(rows).toHaveLength(1);
-    expect(rows[0].invocationId).toBe(gatedAuditId(SESSION, "qi-1", "github.create_issue:{}", 3));
+    expect(rows[0].invocationId).toBe(gatedAuditId(SESSION, "qi-1", "github.create_issue:123e4567-e89b-12d3-a456-426614174000", 3));
 
     // A LATER turn gating on the identical (tool, args) pair — same
     // resumeKey, gateOrdinal reset to 0 — is a DIFFERENT decision and gets

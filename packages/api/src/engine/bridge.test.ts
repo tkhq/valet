@@ -99,6 +99,15 @@ describe("engineGateToWire", () => {
     expect(Object.keys(wire)).not.toContain("context");
   });
 
+  it("projects malformed tool identity as an incomplete unsafe review", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: { kind: "tool_approval", argsPreview: "{\"amount\":10}" },
+    });
+    expect(wire.approval).toEqual({ argsPreview: "{\"amount\":10}", reviewIncomplete: true });
+  });
+
   it("keeps the body when tool context has malformed arguments", () => {
     const wire = engineGateToWire({
       id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
