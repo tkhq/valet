@@ -14,9 +14,9 @@ fn request(policy_source: &str) -> EvaluationRequest<'_> {
     EvaluationRequest {
         module_id: "foundation.rego",
         policy_source,
-        policy_data_json: DATA,
-        input_json: INPUT,
-        entrypoint: "data.valet.foundation.decision",
+        policy_data_json: DATA.trim(),
+        input_json: INPUT.trim(),
+        entrypoint: "data.valet.authz.decision",
         max_evaluation_work_units: None,
     }
 }
@@ -43,12 +43,12 @@ fn capability_profile_is_explicit_about_current_coverage() {
     assert_eq!(profile.substrate.revision, REGORUS_REVISION);
     assert!(!profile.full_rego_v1_compatible);
     assert!(profile.default_host_capabilities.is_empty());
-    assert_eq!(profile.inventory_builtin_count, 163);
+    assert_eq!(profile.inventory_builtin_count, 164);
     assert_eq!(profile.builtins.len(), profile.inventory_builtin_count);
 
     let serialized = serde_json::to_value(&profile).expect("profile must serialize");
     let enforced = &serialized["limits"]["enforced"];
-    let declared_v2 = &serialized["limits"]["declared_v2"];
+    let unsupported = &serialized["limits"]["unsupported"];
     for name in [
         "max_rego_source_bytes",
         "max_policy_data_bytes",
@@ -57,17 +57,14 @@ fn capability_profile_is_explicit_about_current_coverage() {
         "max_evaluation_work_units",
     ] {
         assert!(enforced.get(name).is_some());
-        assert!(declared_v2.get(name).is_none());
+        assert!(unsupported.get(name).is_none());
     }
     for name in [
-        "max_modules",
-        "max_parsed_nodes",
-        "max_source_bundle_bytes",
-        "max_document_depth",
-        "max_comprehension_values",
-        "max_explain_events",
+        "recursion_depth",
+        "intermediate_comprehension_values",
+        "detailed_trace_events",
     ] {
-        assert!(declared_v2.get(name).is_some());
+        assert!(unsupported.get(name).is_some());
         assert!(enforced.get(name).is_none());
     }
 
@@ -113,7 +110,7 @@ fn explicit_input_produces_a_typed_deterministic_decision() {
 #[test]
 fn low_deterministic_budget_rejects_large_range_through_valet_boundary() {
     let policy = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         decision := {
           "effect": "deny",
@@ -135,21 +132,21 @@ fn low_deterministic_budget_rejects_large_range_through_valet_boundary() {
 #[test]
 fn rejected_ambient_builtins_fail_before_evaluation() {
     let policy = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         decision := {"effect": "deny"} if { time.now_ns() > 0 }
     "#;
 
     assert!(matches!(
         evaluate(&request(policy)),
-        Err(EngineError::UnavailableBuiltin(name)) if name == "time.now_ns"
+        Err(EngineError::RejectedBuiltin(name)) if name == "time.now_ns"
     ));
 }
 
 #[test]
 fn strings_and_comments_do_not_request_host_capabilities() {
     let policy = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         # time.now_ns() is unavailable.
         decision := {
@@ -168,7 +165,7 @@ fn strings_and_comments_do_not_request_host_capabilities() {
 #[test]
 fn invalid_decision_output_fails_the_valet_contract() {
     let policy = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         decision := {"effect": "allow"}
     "#;
@@ -187,7 +184,7 @@ fn enforced_byte_limits_fail_closed() {
     let oversized_source = " ".repeat(enforced.max_rego_source_bytes + 1);
     assert!(matches!(
         evaluate(&request(&oversized_source)),
-        Err(EngineError::PolicySourceLimit)
+        Err(EngineError::PolicySourceLimit { .. })
     ));
 
     let oversized_data = " ".repeat(enforced.max_policy_data_bytes + 1);
@@ -195,7 +192,7 @@ fn enforced_byte_limits_fail_closed() {
     oversized_data_request.policy_data_json = &oversized_data;
     assert!(matches!(
         evaluate(&oversized_data_request),
-        Err(EngineError::PolicyDataLimit)
+        Err(EngineError::PolicyDataLimit { .. })
     ));
 
     let oversized_input = " ".repeat(enforced.max_input_bytes + 1);
@@ -203,11 +200,11 @@ fn enforced_byte_limits_fail_closed() {
     oversized_input_request.input_json = &oversized_input;
     assert!(matches!(
         evaluate(&oversized_input_request),
-        Err(EngineError::InputLimit)
+        Err(EngineError::InputLimit { .. })
     ));
 
     let output_policy = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         decision := {
           "effect": "deny",
@@ -224,14 +221,14 @@ fn enforced_byte_limits_fail_closed() {
     output_request.policy_data_json = &output_data;
     assert!(matches!(
         evaluate(&output_request),
-        Err(EngineError::DecisionLimit)
+        Err(EngineError::DecisionLimit { .. })
     ));
 }
 
 #[test]
 fn unknown_decision_fields_fail_the_valet_contract() {
     let top_level = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         decision := {
           "effect": "allow",
@@ -243,7 +240,7 @@ fn unknown_decision_fields_fail_the_valet_contract() {
         }
     "#;
     let nested = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         decision := {
           "effect": "allow",
@@ -265,7 +262,7 @@ fn unknown_decision_fields_fail_the_valet_contract() {
 #[test]
 fn target_idempotency_requires_true() {
     let policy = r#"
-        package valet.foundation
+        package valet.authz
         import rego.v1
         decision := {
           "effect": "allow",

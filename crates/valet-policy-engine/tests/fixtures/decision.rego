@@ -1,4 +1,4 @@
-package valet.foundation
+package valet.authz
 
 import rego.v1
 
