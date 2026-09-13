@@ -52,9 +52,9 @@ const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_appr
  * empty. The JSON preview is capped before it reaches React, so a large tool
  * call cannot make the approval card serialize the same payload again.
  */
-function gateApprovalDetails(context: Record<string, unknown> | undefined): WireDecisionGate["approval"] | undefined {
+function gateApprovalDetails(context: Record<string, unknown> | undefined, body?: string): WireDecisionGate["approval"] | undefined {
   const approval = toolApprovalGateContext(context);
-  if (!approval) return undefined;
+  if (!approval) return /(?:tool_id|args)=/.test(body ?? "") ? { reviewIncomplete: true } : undefined;
   return {
     ...(approval.toolId !== undefined ? { toolId: approval.toolId } : {}),
     riskLevel: approval.riskLevel,

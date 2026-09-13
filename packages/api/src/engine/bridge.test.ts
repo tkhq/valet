@@ -88,7 +88,7 @@ describe("engineGateToWire", () => {
       id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
       type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
       context: {
-        tool_id: "github.create_issue", service: "github", riskLevel: "high",
+        kind: "tool_approval", tool_id: "github.create_issue", service: "github", riskLevel: "high",
         summary: "Create an issue in the public repository.", argsPreview: "{\"title\":\"Fix the bug\"}", private: "omit",
       },
     });

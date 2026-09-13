@@ -231,3 +231,7 @@ Policy edits apply on the next action; no session restart is required.
 
 If a team policy read fails, chat and workflow actions remain blocked until
 a successful check. A prior approval cannot bypass an unread team deny.
+
+### Approval replay identity
+
+The engine stores the canonical qualified action id with the prepared-argument digest. Replay compares both values. An alias or plugin ordering change cannot authorize a different action. Readers treat a scalar, array, null, or malformed tool approval context as incomplete. They do not approve it.

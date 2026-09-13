@@ -72,7 +72,7 @@ export function safeChannelActions(
 export function digestGate(gate: Pick<DecisionGate, "type" | "title" | "body" | "context">): GateDigest {
   const ctx = gate.type === "approval" ? toolApprovalGateContext(gate.context) : null;
   if (ctx === null) {
-    return { title: gate.title, body: gate.body };
+    return { title: gate.title, body: gate.body, ...((gate.type === "approval" && /(?:tool_id|args)=/.test(gate.body ?? "")) ? { reviewIncomplete: true } : {}) };
   }
 
   const fields: GateField[] = [{ label: "Tool", value: ctx.toolId === undefined ? "Unavailable" : `\`${ctx.toolId}\`` }];

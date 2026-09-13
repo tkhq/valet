@@ -382,38 +382,42 @@ export interface ToolApprovalGateContext {
 /** Narrow a gate's context to {@link ToolApprovalGateContext}; `null` when
  * the gate is not a tool approval (e.g. `ask_approval`, question gates). */
 export function toolApprovalGateContext(
-  context: Record<string, unknown> | undefined,
+  context: unknown,
 ): ToolApprovalGateContext | null {
-  if (!context) return null;
+  if (context === undefined) return null;
+  if (context === null || typeof context !== "object" || Array.isArray(context)) {
+    return { reviewIncomplete: true };
+  }
+  const record = context as Record<string, unknown>;
   const isToolApproval =
-    context.kind === "tool_approval" ||
-    "tool_id" in context ||
-    "toolId" in context ||
-    "toolName" in context ||
-    "tool" in context ||
-    "actionId" in context ||
-    "argsPreview" in context ||
-    "args" in context ||
-    "riskLevel" in context ||
-    "service" in context;
+    record.kind === "tool_approval" ||
+    "tool_id" in record ||
+    "toolId" in record ||
+    "toolName" in record ||
+    "tool" in record ||
+    "actionId" in record ||
+    "argsPreview" in record ||
+    "args" in record ||
+    "riskLevel" in record ||
+    "service" in record;
   if (!isToolApproval) return null;
-  const toolId = typeof context.tool_id === "string" && context.tool_id.trim() !== ""
-    ? context.tool_id
+  const toolId = typeof record.tool_id === "string" && record.tool_id.trim() !== ""
+    ? record.tool_id
     : undefined;
-  const argsPreview = typeof context.argsPreview === "string" && context.argsPreview.trim() !== ""
-    ? context.argsPreview
+  const argsPreview = typeof record.argsPreview === "string" && record.argsPreview.trim() !== ""
+    ? record.argsPreview
     : undefined;
-  const complete = context.kind === "tool_approval" && toolId !== undefined && argsPreview !== undefined && context.reviewIncomplete !== true;
+  const complete = record.kind === "tool_approval" && toolId !== undefined && argsPreview !== undefined && record.reviewIncomplete !== true;
   return {
     toolId,
-    riskLevel: typeof context.riskLevel === "string" ? context.riskLevel : undefined,
-    service: typeof context.service === "string" ? context.service : undefined,
-    args: context.args !== null && typeof context.args === "object" && !Array.isArray(context.args) ? context.args as Record<string, unknown> : undefined,
+    riskLevel: typeof record.riskLevel === "string" ? record.riskLevel : undefined,
+    service: typeof record.service === "string" ? record.service : undefined,
+    args: record.args !== null && typeof record.args === "object" && !Array.isArray(record.args) ? record.args as Record<string, unknown> : undefined,
     argsPreview,
     reviewIncomplete: complete ? undefined : true,
-    preparedArgsDigest: typeof context.preparedArgsDigest === "string" ? context.preparedArgsDigest : undefined,
-    preparedToolId: typeof context.preparedToolId === "string" ? context.preparedToolId : undefined,
-    summary: typeof context.summary === "string" ? context.summary : undefined,
+    preparedArgsDigest: typeof record.preparedArgsDigest === "string" ? record.preparedArgsDigest : undefined,
+    preparedToolId: typeof record.preparedToolId === "string" ? record.preparedToolId : undefined,
+    summary: typeof record.summary === "string" ? record.summary : undefined,
   };
 }
 
@@ -511,7 +515,7 @@ function approvalGateRequest(
       tool_id: actionId,
       argsPreview: review.preview,
       preparedArgsDigest: preparedArgsDigest(args),
-      preparedToolId: actionId,
+      preparedToolId: qualifiedId(entry),
       ...(review.incomplete ? { reviewIncomplete: true } : {}),
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
@@ -568,7 +572,7 @@ export async function invokeAction(
   const reviewedArgs = structuredClone(executionArgs);
   // A restart must not apply changed schema defaults after the approval.
   if (ctx.suspendedDecision?.approvalReplay && (
-    ctx.suspendedDecision.preparedToolId !== actionId ||
+    ctx.suspendedDecision.preparedToolId !== qualifiedId(entry) ||
     ctx.suspendedDecision.preparedArgsDigest !== preparedArgsDigest(reviewedArgs)
   )) {
     return { kind: "error", message: "Approval replay rejected because the approved tool or prepared parameters changed. Ask the user to submit the action again for review." };
