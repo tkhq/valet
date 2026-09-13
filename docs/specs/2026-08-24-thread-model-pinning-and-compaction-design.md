@@ -367,3 +367,31 @@ response replaces canonical rows for the thread.
 This change edits the same `makeResolveModel` seam as the spend-limits spec —
 whichever lands second rebases. The small-fixes spec (2026-08-24) defers its
 split-brain candidates 2 and 5 and its silent-downgrade fix to this document.
+
+## Amendment (2026-09-13, TKAI-211): child compaction keeps the active task
+
+The transcript store is a DAG. Each new entry now points to the thread's active
+leaf. The thread serializes entry appends, so a command cannot race an agent
+message and create two accidental leaves. The reader follows parent links from
+the durable active leaf. It excludes entries from inactive branches. For old
+transcripts with null parents, the reader keeps the chronological root prefix.
+V1 had no branch controls, so insertion order is the durable path for those
+entries.
+
+Compaction now selects, prunes, and summarizes entries from the active path.
+The compaction entry points to the prior active leaf. Its `coveredEntryIds`
+contains the compacted path prefix. The summarizer also reads the bounded tail.
+This lets the persisted summary record the current task state and prior tool
+results.
+
+The summary has a `Continuation Checkpoint` section. It records the branch,
+commit, changed files, worktree status, last command, failure output, next
+action, and acceptance checklist. A field uses `(unknown)` or `(none)` when the
+transcript does not contain that fact. The portable engine does not run Git
+commands or enforce repository policy.
+
+A proactive compaction continues inside the same queue item. The engine appends
+the hidden continuation prompt to the active path, then runs the agent again.
+It does not admit a second queue item. The original submission settles only
+after this continuation ends. A child watcher therefore cannot report
+`child.settled` at the compaction boundary.

@@ -24,6 +24,7 @@ import {
   ValidationError as EngineValidationError,
   type ChannelOrigin,
   type ChildReader,
+  type CompactionEntry,
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
@@ -32,6 +33,7 @@ import {
   type SpawnChildRequest,
   type SpawnChildResult,
   type SubmissionResult,
+  walkTranscriptDag,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
@@ -694,6 +696,13 @@ export class ChildWatcher {
       .where(eq(agentSessions.id, watch.childSessionId))
       .limit(1);
     const title = appRows[0]?.title ?? undefined;
+    const continuationCheckpoint =
+      result.outcome === "failed"
+        ? await this.latestContinuationCheckpoint(
+            watch.childSessionId,
+            childSession.thread().id,
+          )
+        : undefined;
 
     await admitSignal(this.deps, {
       from: { sessionId: watch.childSessionId, owner: childData.owner },
@@ -702,11 +711,14 @@ export class ChildWatcher {
       content: {
         kind: "signal",
         signalType: "child.settled",
-        body: resultBody(result, watch.childSessionId),
+        body: resultBody(result, watch.childSessionId, continuationCheckpoint),
         attributes: {
           child_session_id: watch.childSessionId,
           outcome: result.outcome,
           ...(title !== undefined ? { title } : {}),
+          ...(continuationCheckpoint !== undefined
+            ? { continuation_checkpoint_entry_id: continuationCheckpoint.id }
+            : {}),
         },
         // Preserve the route but make settlement explicit-only. The parent can
         // use reply_to_origin, but settlement does not trigger a first auto-reply.
@@ -717,6 +729,20 @@ export class ChildWatcher {
 
     await this.markSettled(watch.childSessionId, watch.queueItemId);
     await this.parkChildSandbox(watch.childSessionId);
+  }
+
+  private async latestContinuationCheckpoint(
+    childSessionId: string,
+    childThreadId: string,
+  ): Promise<CompactionEntry | undefined> {
+    const entries = await this.deps.engineStore.getEntries(childSessionId, childThreadId);
+    const thread = await this.deps.engineStore.getThread(childSessionId, childThreadId);
+    const activeEntries = walkTranscriptDag(entries, thread?.activeLeafEntryId);
+    for (let index = activeEntries.length - 1; index >= 0; index--) {
+      const entry = activeEntries[index];
+      if (entry.type === "compaction") return entry;
+    }
+    return undefined;
   }
 
   private async markSettled(childSessionId: string, queueItemId: string): Promise<void> {
@@ -1231,11 +1257,12 @@ export const CHILD_RESULT_MAX_CHARS = 16_000;
  * row because the truncation notice is useless without it: the parent needs
  * the id to pass to `child_read`.
  */
-export function resultBody(result: SubmissionResult, childSessionId: string): string {
+export function resultBody(
+  result: SubmissionResult,
+  childSessionId: string,
+  continuationCheckpoint?: CompactionEntry,
+): string {
   const isFailure = result.outcome === "failed" || result.outcome === "aborted";
-  // `text` is undefined when no terminal entry matched at read time — e.g.
-  // the child's final message was compacted away between settlement and
-  // this read. An empty body would leave the parent no lead to follow.
   if (!isFailure && result.text === undefined) {
     return (
       `[No result text was captured for this ${result.outcome} child submission. ` +
@@ -1245,20 +1272,32 @@ export function resultBody(result: SubmissionResult, childSessionId: string): st
   const full = isFailure
     ? (result.error ?? result.text ?? `child submission ${result.outcome}`)
     : (result.text ?? "");
-  if (full.length <= CHILD_RESULT_MAX_CHARS) return full;
-  const dropped = full.length - CHILD_RESULT_MAX_CHARS;
+  const checkpointHeader = continuationCheckpoint
+    ? `\n\n## Continuation checkpoint (${continuationCheckpoint.id})\n`
+    : "";
+  const checkpointMaxChars = Math.floor(CHILD_RESULT_MAX_CHARS / 2);
+  const checkpointSummary = continuationCheckpoint?.summary ?? "";
+  const checkpoint = checkpointSummary.length <= checkpointMaxChars
+    ? checkpointHeader + checkpointSummary
+    : checkpointHeader + checkpointSummary.slice(0, checkpointMaxChars) +
+      `\n\n[Checkpoint truncated. Call child_read with child_session_id ` +
+      `"${childSessionId}" for the complete recovery state.]`;
+  const available = Math.max(0, CHILD_RESULT_MAX_CHARS - checkpoint.length);
+  if (full.length <= available) return full + checkpoint;
+
+  const dropped = full.length - available;
+  const prefix = full.slice(0, available);
   if (isFailure) {
-    // The error string lives only in the settlement outcome, not in the
-    // child's transcript — child_read cannot return the dropped tail.
     return (
-      full.slice(0, CHILD_RESULT_MAX_CHARS) +
+      prefix +
       `\n\n[Truncated. ${dropped} more characters of this error were dropped and ` +
       `are not recoverable. Call child_read with child_session_id ` +
-      `"${childSessionId}" to inspect the child's transcript instead.]`
+      `"${childSessionId}" to inspect the child's transcript instead.]` +
+      checkpoint
     );
   }
   return (
-    full.slice(0, CHILD_RESULT_MAX_CHARS) +
+    prefix +
     `\n\n[Truncated. ${dropped} more characters follow this point. To read the ` +
     `full result, call child_read with child_session_id "${childSessionId}".]`
   );

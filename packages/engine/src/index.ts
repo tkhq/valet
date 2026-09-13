@@ -250,6 +250,7 @@ export {
   usableTokens,
   tailBudget,
   inputSpillThreshold,
+  walkTranscriptDag,
   turns,
   selectCutPoint,
   planPrune,

@@ -218,6 +218,47 @@ export function tailBudget(usable: number, cfg?: CompactionConfig): number {
   return Math.max(min, capped);
 }
 
+// ── Transcript DAG traversal ───────────────────────────────────────
+
+/**
+ * Return the active transcript path in root-to-leaf order. Entries on other
+ * branches stay durable but do not enter compaction or model context.
+ */
+export function walkTranscriptDag(
+  entries: readonly SessionEntry[],
+  activeLeafEntryId: string | undefined,
+): SessionEntry[] {
+  if (activeLeafEntryId === undefined) return [...entries];
+
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const path: SessionEntry[] = [];
+  const visited = new Set<string>();
+  let entryId: string | null = activeLeafEntryId;
+  while (entryId !== null) {
+    if (visited.has(entryId)) {
+      throw new Error(`Transcript DAG contains a cycle at entry ${entryId}.`);
+    }
+    visited.add(entryId);
+    const entry = byId.get(entryId);
+    if (!entry) {
+      throw new Error(`Transcript DAG is missing entry ${entryId}.`);
+    }
+    path.push(entry);
+    entryId = entry.parentId;
+  }
+  path.reverse();
+
+  // Entries written before TKAI-211 used null parents. If the linked path
+  // starts after a chronological prefix of those roots, keep that prefix.
+  // V1 had no branch controls, so insertion order is its durable path.
+  const rootIndex = entries.findIndex((entry) => entry.id === path[0]?.id);
+  const legacyPrefix = entries.slice(0, rootIndex);
+  if (legacyPrefix.length > 0 && legacyPrefix.every((entry) => entry.parentId === null)) {
+    return [...legacyPrefix, ...path];
+  }
+  return path;
+}
+
 // ── Turn segmentation ──────────────────────────────────────────────
 
 export interface Turn {
@@ -555,6 +596,16 @@ After the analysis, output exactly the Markdown structure shown inside <template
 
 ## Active Tools & Skills
 - [tools, skills, or integrations in active use — name each and what it is being used for, or "(none)"]
+
+## Continuation Checkpoint
+- Branch: [current branch, or "(unknown)"]
+- Commit: [current commit, or "(unknown)"]
+- Changed Files: [changed paths, or "(none)"]
+- Worktree Status: [clean/dirty plus relevant status, or "(unknown)"]
+- Last Command: [exact command, or "(none)"]
+- Failure Output: [exact unresolved failure, or "(none)"]
+- Next Action: [one concrete action]
+- Acceptance Checklist: [remaining acceptance checks, or "(none)"]
 
 ## Next Steps
 - [ordered next actions or "(none)"; for the immediate next step, include a verbatim quote from the most recent messages showing exactly where work left off, so there is no drift in task interpretation]
