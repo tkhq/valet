@@ -741,7 +741,7 @@ export interface ToolContext {
    */
   queueItemId?: string;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
-  suspendedDecision?: { gateId: string; ordinal: number; resumeKey: string; preparedArgsDigest?: string; approvalReplay?: boolean; resolution?: DecisionResolution };
+  suspendedDecision?: { gateId: string; ordinal: number; resumeKey: string; preparedArgsDigest?: string; preparedToolId?: string; approvalReplay?: boolean; resolution?: DecisionResolution };
   signal: AbortSignal;
   threadRead: (key: string, opts?: MessageQuery) => Promise<SessionEntry[]>;
   /**
@@ -964,6 +964,8 @@ export interface SuspendedTurnState {
   toolArgs: Record<string, unknown>;
   /** SHA-256 commitment to the defaulted arguments reviewed for a tool approval. */
   preparedArgsDigest?: string;
+  /** Tool identity approved with the prepared arguments. */
+  preparedToolId?: string;
   resumeKey: string;
   /** The gate's ordinal at checkpoint time — replay reconstructs the gate id from (resumeKey, ordinal). */
   ordinal: number;

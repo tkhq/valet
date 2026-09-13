@@ -111,6 +111,23 @@ describe("DecisionGateCard — reviewable tool requests", () => {
     expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("blocks legacy built-in approve but keeps a legacy rejection action enabled", () => {
+    renderCard(gate({
+      approval: { toolId: "payments.send", argsPreview: "", reviewIncomplete: true },
+      actions: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
+    }));
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows the authoritative body for incomplete typed metadata", () => {
+    renderCard(gate({
+      body: "tool_id=payments.send\nargs=[legacy]",
+      approval: { toolId: "payments.send", argsPreview: "", reviewIncomplete: true },
+    }));
+    expect(screen.getByText(/tool_id=payments\.send/).textContent).toContain("args=[legacy]");
+  });
+
   it("blocks approval when a legacy preview is blank", () => {
     renderCard(gate({
       approval: { toolId: "payments.send", argsPreview: "" },

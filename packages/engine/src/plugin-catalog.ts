@@ -375,6 +375,7 @@ export interface ToolApprovalGateContext {
   reviewIncomplete?: true;
   /** SHA-256 of the defaulted arguments; never exposes the arguments themselves. */
   preparedArgsDigest?: string;
+  preparedToolId?: string;
   summary?: string;
 }
 
@@ -411,6 +412,7 @@ export function toolApprovalGateContext(
     argsPreview,
     reviewIncomplete: complete ? undefined : true,
     preparedArgsDigest: typeof context.preparedArgsDigest === "string" ? context.preparedArgsDigest : undefined,
+    preparedToolId: typeof context.preparedToolId === "string" ? context.preparedToolId : undefined,
     summary: typeof context.summary === "string" ? context.summary : undefined,
   };
 }
@@ -509,6 +511,7 @@ function approvalGateRequest(
       tool_id: actionId,
       argsPreview: review.preview,
       preparedArgsDigest: preparedArgsDigest(args),
+      preparedToolId: actionId,
       ...(review.incomplete ? { reviewIncomplete: true } : {}),
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
@@ -564,8 +567,11 @@ export async function invokeAction(
   const executionArgs = prepared.args;
   const reviewedArgs = structuredClone(executionArgs);
   // A restart must not apply changed schema defaults after the approval.
-  if (ctx.suspendedDecision?.approvalReplay && ctx.suspendedDecision.preparedArgsDigest !== preparedArgsDigest(reviewedArgs)) {
-    return { kind: "error", message: "Approval replay rejected because the prepared parameters changed. Ask the user to submit the action again for review." };
+  if (ctx.suspendedDecision?.approvalReplay && (
+    ctx.suspendedDecision.preparedToolId !== actionId ||
+    ctx.suspendedDecision.preparedArgsDigest !== preparedArgsDigest(reviewedArgs)
+  )) {
+    return { kind: "error", message: "Approval replay rejected because the approved tool or prepared parameters changed. Ask the user to submit the action again for review." };
   }
 
   // One bound applies to the gate body, gate context, plugin context, and audit.

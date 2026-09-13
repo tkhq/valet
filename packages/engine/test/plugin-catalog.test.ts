@@ -998,6 +998,7 @@ describe("pluginCatalogTools: call_tool param validation", () => {
 describe("pluginCatalogTools: restart approval integrity", () => {
   it("rejects a replay when a schema default differs from the reviewed value", async () => {
     let commitment: string | undefined;
+    let approvedToolId: string | undefined;
     const original: ActionPlugin = {
       service: "test",
       actions: [{
@@ -1017,11 +1018,15 @@ describe("pluginCatalogTools: restart approval integrity", () => {
           commitment = typeof gate.context?.preparedArgsDigest === "string"
             ? gate.context.preparedArgsDigest
             : undefined;
+          approvedToolId = typeof gate.context?.preparedToolId === "string"
+            ? gate.context.preparedToolId
+            : undefined;
           return { actionId: "pending", resolvedBy: "" };
         },
       }),
     );
     expect(commitment).toMatch(/^[a-f0-9]{64}$/);
+    expect(approvedToolId).toBe("test.defaulted");
 
     let executed = false;
     const changed: ActionPlugin = {
@@ -1044,7 +1049,36 @@ describe("pluginCatalogTools: restart approval integrity", () => {
           ordinal: 0,
           resumeKey: "test.defaulted:opaque",
           preparedArgsDigest: commitment,
+          preparedToolId: approvedToolId,
           approvalReplay: true,
+          resolution: { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 },
+        },
+      }),
+    );
+    expect(result.text).toContain("Approval replay rejected");
+    expect(executed).toBe(false);
+  });
+
+  it("rejects a replay when persisted approved tool identity is corrupted", async () => {
+    let executed = false;
+    const plugin: ActionPlugin = {
+      service: "test",
+      actions: [{
+        id: "test.dangerous",
+        name: "Dangerous",
+        description: "requires approval",
+        riskLevel: "high",
+        parameters: Type.Object({ value: Type.String() }),
+        execute: async () => { executed = true; return { success: true }; },
+      }],
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute(
+      { tool_id: "test.dangerous", params: { value: "reviewed" }, summary: "run" },
+      makeCtx({
+        suspendedDecision: {
+          gateId: "gate-1", ordinal: 0, resumeKey: "opaque", preparedToolId: "test.other",
+          preparedArgsDigest: "0".repeat(64), approvalReplay: true,
           resolution: { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 },
         },
       }),

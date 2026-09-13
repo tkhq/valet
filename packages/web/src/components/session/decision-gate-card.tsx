@@ -98,7 +98,7 @@ export function DecisionGateCard({
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-3">
         {approval ? (
-          <ApprovalReview approval={approval} provenance={gate.provenance} />
+          <ApprovalReview approval={approval} body={gate.body} provenance={gate.provenance} />
         ) : (
           <GenericGateReview body={gate.body} provenance={gate.provenance} />
         )}
@@ -122,7 +122,7 @@ export function DecisionGateCard({
         <div className="flex max-h-[35dvh] shrink-0 flex-wrap gap-2 overflow-y-auto border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
           {gate.actions.map((action) => {
             const isAlwaysAllow = action.id === GATE_ACTION_ALWAYS_ALLOW;
-            const reviewBlocked = approvalReviewIncomplete && action.approves === true;
+            const reviewBlocked = approvalReviewIncomplete && (action.approves === true || action.id === "approve");
             const disabled = busy || reviewBlocked || (isAlwaysAllow && !isAdmin);
             const button = (
               <Button
@@ -151,9 +151,11 @@ export function DecisionGateCard({
 
 function ApprovalReview({
   approval,
+  body,
   provenance,
 }: {
   approval: NonNullable<DecisionGate["approval"]>;
+  body?: string;
   provenance?: DecisionGate["provenance"];
 }) {
   const argsPreview = boundedPreview(approval.argsPreview);
@@ -175,6 +177,7 @@ function ApprovalReview({
           </div>
         ))}
       </dl>
+      {reviewIncomplete && body && <p className="whitespace-pre-wrap break-all text-sm text-muted">{body}</p>}
       {provenance && <p className="text-xs text-muted" data-testid="gate-provenance">{provenanceLine(provenance)}</p>}
       <details className="group rounded border border-amber-300/70 bg-white/40 dark:border-amber-700/50 dark:bg-neutral-950/20" data-testid="approval-details">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs font-medium text-[--fg] marker:hidden">

@@ -392,6 +392,7 @@ export class Thread {
       ordinal: number;
       resumeKey: string;
       preparedArgsDigest?: string;
+      preparedToolId?: string;
       approvalReplay?: boolean;
       resolution?: DecisionResolution;
     }
@@ -1275,7 +1276,7 @@ export class Thread {
    * resumeKey, the engine returns the stored resolution immediately.
    */
   setReplayContext(
-    ctx: { gateId: string; ordinal: number; resumeKey: string; preparedArgsDigest?: string; approvalReplay?: boolean; resolution?: DecisionResolution } | undefined,
+    ctx: { gateId: string; ordinal: number; resumeKey: string; preparedArgsDigest?: string; preparedToolId?: string; approvalReplay?: boolean; resolution?: DecisionResolution } | undefined,
   ): void {
     this.suspendedDecisionForReplay = ctx;
   }
@@ -1302,7 +1303,7 @@ export class Thread {
       );
       return;
     }
-    this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resumeKey: suspended.resumeKey, preparedArgsDigest: suspended.preparedArgsDigest, approvalReplay, resolution });
+    this.setReplayContext({ gateId: suspended.gateId, ordinal: suspended.ordinal, resumeKey: suspended.resumeKey, preparedArgsDigest: suspended.preparedArgsDigest, preparedToolId: suspended.preparedToolId, approvalReplay, resolution });
     // The deterministic gate ID is derived from
     // (sessionId, threadId, queueItemId, resumeKey, ordinal). During replay,
     // the tool's requestDecision call recomputes this from the active queue
@@ -1330,6 +1331,9 @@ export class Thread {
         fakeAbort.signal,
       );
     } catch (err) {
+      // requestDecision may not consume an invalid replay before execution
+      // returns. Never retain its authority for a subsequent turn.
+      this.suspendedDecisionForReplay = undefined;
       this.runningItem = priorActive;
       this.emitError(
         "replay_tool_failed",
@@ -1337,6 +1341,9 @@ export class Thread {
       );
       return;
     }
+    // A rejected replay can return before requestDecision consumes this state.
+    // Clear the one-shot authority before any continuation or later tool call.
+    this.suspendedDecisionForReplay = undefined;
     this.runningItem = priorActive;
     this.agent.state.messages = [
       ...this.agent.state.messages,
@@ -1739,6 +1746,7 @@ export class Thread {
             toolName,
             toolArgs,
             preparedArgsDigest: typeof req.context?.preparedArgsDigest === "string" ? req.context.preparedArgsDigest : undefined,
+            preparedToolId: typeof req.context?.preparedToolId === "string" ? req.context.preparedToolId : undefined,
             resumeKey: gateCtx.resumeKey,
             ordinal: gate.ordinal,
             attempt: 1,

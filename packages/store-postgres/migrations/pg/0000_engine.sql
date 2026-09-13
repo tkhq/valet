@@ -193,6 +193,7 @@ CREATE TABLE "engine_suspended_turns" (
 	"tool_name" text NOT NULL,
 	"tool_args" text NOT NULL,
 	"prepared_args_digest" text,
+	"prepared_tool_id" text,
 	"resume_key" text NOT NULL,
 	"ordinal" integer NOT NULL,
 	"attempt" integer NOT NULL,
