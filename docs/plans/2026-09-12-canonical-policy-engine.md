@@ -127,7 +127,7 @@ pnpm typecheck
 **Scope**
 
 - Add the Rust workspace, pinned toolchain, and a narrowly scoped Valet policy engine crate.
-- Pin `https://github.com/tkhq/regorus` at exact commit `aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e`. Keep its API behind the Valet engine boundary.
+- Pin `https://github.com/tkhq/regorus` at exact commit `f938ef286fdf9b229d3933b064dfd87323f397e8`. Keep its API behind the Valet engine boundary.
 - Add versioned engine identity and capability-profile metadata.
 - Inventory Regorus built-ins under the Valet capability classifications.
 - Add boundary fixtures and compatibility tests that state their current coverage.
@@ -137,7 +137,7 @@ pnpm typecheck
 
 **Acceptance checks**
 
-- Cargo and the committed lockfile resolve `tkhq/regorus` commit `aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e`.
+- Cargo and the committed lockfile resolve `tkhq/regorus` commit `f938ef286fdf9b229d3933b064dfd87323f397e8`.
 - The public crate API exposes Valet types rather than Regorus types.
 - The capability profile classifies each inventoried built-in and rejects ambient authority by default.
 - Fixtures prove deterministic evaluation for explicit input and typed output at the Valet boundary. A low deterministic budget rejects `count(numbers.range(0, 10000000))` through that boundary.
@@ -179,7 +179,8 @@ cargo fmt --all -- --check
 - A language gap or rejected capability built-in fails validation before activation.
 - Missing, failed, or undeclared capabilities deny without fallback.
 - Network, filesystem, wall clock, randomness, process access, and dynamic loading remain unavailable by default.
-- Instruction, time, memory, depth, recursion, comprehension, trace, and result limits fail closed.
+- Deterministic work-unit, source, module, data, input, document, explain, and result limits fail closed in the engine.
+- The PR 5 adapter owns the 100 ms wall-time and 64 MiB engine memory limits. Separately unobservable recursion and intermediate-comprehension limits remain named gaps bounded by work units.
 - Native and WebAssembly targets return equal decisions, errors, and limit behavior before both can ship.
 - One release selects one semantic path. It never runs interpreter and RVM paths together or falls back between them.
 - The engine crate contains no authentication, proof verification, database, lock, sandbox, network enforcement, or durable audit code.

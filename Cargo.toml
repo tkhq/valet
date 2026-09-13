@@ -11,4 +11,6 @@ rust-version = "1.98.1"
 regorus = { git = "https://github.com/tkhq/regorus", rev = "f938ef286fdf9b229d3933b064dfd87323f397e8", default-features = false, features = ["arc", "base64", "base64url", "glob", "graph", "hex", "jsonpatch", "no_std", "regex", "semver", "urlquery", "yaml"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_jcs = "0.1"
+anyhow = "1.0"
 thiserror = "2.0"
