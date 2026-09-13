@@ -17,6 +17,19 @@ original request asked for, because Slack was marked not-ready in the
 template gallery at the time it shipped. Slack readiness has since landed
 (`dev-v2` identity-linking, PR #321), so that gap can close.
 
+## Reviewer request action
+
+`github.request_reviewers` requests review from one or more GitHub users and
+optional organization team slugs. It sends `POST
+/repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers` with
+`reviewers` and optional `team_reviewers` fields. The action adds reviewer
+requests. It does not change PR assignees.
+
+The action is medium risk. It requires the GitHub App `pull_requests:write`
+permission. A 403 response identifies that permission. This action lets an
+agent or a workflow apply reviewer choices from CODEOWNERS, workstream, or
+topic logic. It does not change this template definition.
+
 ## What changes
 
 ### Trigger

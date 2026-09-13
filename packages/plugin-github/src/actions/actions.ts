@@ -63,6 +63,7 @@ const PERMISSION_HINTS: Record<string, string> = {
   "github.update_issue": "issues:write",
   "github.create_comment": "issues:write",
   "github.create_review": "pull_requests:write",
+  "github.request_reviewers": "pull_requests:write",
   "github.create_pull_request": "pull_requests:write",
   "github.update_pull_request": "pull_requests:write",
   "github.merge_pull_request": "pull_requests:write + contents:write",
@@ -1014,6 +1015,56 @@ const createReview = action(Type.Object({
         };
       }
       return handleOctokitError(err, "github.create_review", "Create review");
+    }
+  },
+});
+
+const requestReviewers = action(Type.Object({
+    owner: Type.String({ description: "Repository owner" }),
+    repo: Type.String({ description: "Repository name" }),
+    pullNumber: Type.Integer({ minimum: 1, description: "Pull request number" }),
+    reviewers: Type.Array(Type.String({ minLength: 1 }), {
+      minItems: 1,
+      description:
+        "GitHub usernames to request for review. This adds reviewer requests and does not change PR assignees.",
+    }),
+    teamReviewers: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        minItems: 1,
+        description:
+          "Organization team slugs to request for review. This adds reviewer requests and does not change PR assignees.",
+      }),
+    ),
+  }))({
+  id: "github.request_reviewers",
+  name: "Request Pull Request Reviewers",
+  description:
+    "Request GitHub users and optional teams to review a pull request. This adds reviewer requests and does not replace PR assignees.",
+  riskLevel: "medium",
+  execute: async (args, ctx) => {
+    const octokit = await getOctokit(ctx);
+    try {
+      const { data: pull } = await octokit.request(
+        "POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers",
+        {
+          owner: args.owner,
+          repo: args.repo,
+          pull_number: args.pullNumber,
+          reviewers: args.reviewers,
+          ...(args.teamReviewers === undefined ? {} : { team_reviewers: args.teamReviewers }),
+        },
+      );
+      return {
+        success: true,
+        data: {
+          number: pull.number,
+          url: pull.html_url,
+          requested_reviewers: (pull.requested_reviewers ?? []).map((reviewer) => reviewer.login),
+          requested_teams: (pull.requested_teams ?? []).map((team) => team.slug),
+        },
+      };
+    } catch (err) {
+      return handleOctokitError(err, "github.request_reviewers", "Request reviewers");
     }
   },
 });
@@ -2279,6 +2330,7 @@ export const githubPlugin: ActionPlugin = {
     listPullRequests,
     inspectPullRequest,
     createReview,
+    requestReviewers,
     updatePullRequest,
     createPullRequest,
     mergePullRequest,

@@ -902,6 +902,86 @@ describe("github.create_review", () => {
   });
 });
 
+// ─── request_reviewers ──────────────────────────────────────────────────────
+
+describe("github.request_reviewers", () => {
+  function request(args: Record<string, unknown>) {
+    return findAction("github.request_reviewers").execute(
+      { owner: "acme", repo: "widgets", pullNumber: 7, reviewers: ["octavia"], ...args },
+      fakeActionContext("test-token"),
+    );
+  }
+
+  it("publishes a schema with required non-empty users and optional teams", () => {
+    const action = findAction("github.request_reviewers");
+
+    expect(action.parameters).toMatchObject({
+      required: ["owner", "repo", "pullNumber", "reviewers"],
+      properties: {
+        pullNumber: { minimum: 1 },
+        reviewers: { minItems: 1, items: { minLength: 1 } },
+        teamReviewers: { minItems: 1, items: { minLength: 1 } },
+      },
+    });
+  });
+
+  it("requests user and team reviewers without changing assignees", async () => {
+    const server = useFixture({
+      requestReviewers: () => ({
+        body: {
+          number: 7,
+          html_url: "https://github.com/acme/widgets/pull/7",
+          requested_reviewers: [{ login: "octavia" }],
+          requested_teams: [{ slug: "platform" }],
+        },
+      }),
+    });
+
+    const result = await request({ teamReviewers: ["platform"] });
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        number: 7,
+        url: "https://github.com/acme/widgets/pull/7",
+        requested_reviewers: ["octavia"],
+        requested_teams: ["platform"],
+      },
+    });
+    expect(server.calls).toHaveLength(1);
+    expect(server.calls[0]).toMatchObject({
+      method: "POST",
+      path: "/repos/acme/widgets/pulls/7/requested_reviewers",
+      body: { reviewers: ["octavia"], team_reviewers: ["platform"] },
+    });
+    expect(server.calls[0]?.path).not.toContain("issues");
+  });
+
+  it("does not send team_reviewers when no teams are requested", async () => {
+    const server = useFixture();
+
+    await request({});
+
+    expect(server.calls[0]?.body).toEqual({ reviewers: ["octavia"] });
+  });
+
+  it("reports the required permission when GitHub denies the request", async () => {
+    useFixture({
+      requestReviewers: () => ({
+        status: 403,
+        body: { message: "Resource not accessible by integration" },
+      }),
+    });
+
+    const result = await request({});
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("403 Forbidden");
+    expect(result.error).toContain("pull_requests:write");
+  });
+});
+
 // ─── update_pull_request ────────────────────────────────────────────────────
 
 describe("github.update_pull_request", () => {
