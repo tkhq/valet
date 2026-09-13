@@ -78,3 +78,6 @@ workspaces/*
 
 # Eval run output (baselines stay tracked; see packages/eval)
 evals/results/
+
+# Rust
+target/
