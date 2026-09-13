@@ -16,6 +16,7 @@ import {
   tailBudget,
   turns,
   usableTokens,
+  walkTranscriptDag,
   type MessageEntry,
   type SessionEntry,
 } from "../src/index.js";
@@ -128,6 +129,68 @@ describe("compaction: usableTokens / tailBudget", () => {
     expect(tailBudget(100_000, { maxPreserveRecentTokens: 8_000 })).toBe(8_000);
     // The floor still wins over a configured ceiling below it.
     expect(tailBudget(100_000, { maxPreserveRecentTokens: 1_000 })).toBe(2_000);
+  });
+});
+
+describe("compaction: transcript DAG", () => {
+  it("walks only the active branch and keeps its tool output for the summary", () => {
+    const root = user("u-root", "implement the fix");
+    const tool = assistant("a-tool", "", [
+      {
+        type: "tool_call",
+        callId: "call-active",
+        toolName: "bash",
+        status: "completed",
+        args: { command: "git status --short" },
+        result: "M packages/engine/src/thread.ts",
+      },
+    ]);
+    tool.parentId = root.id;
+    const activeUser = user("u-active", "continue the implementation");
+    activeUser.parentId = tool.id;
+    const activeLeaf = assistant("a-active", "working");
+    activeLeaf.parentId = activeUser.id;
+    const abandonedUser = user("u-abandoned", "unrelated branch");
+    abandonedUser.parentId = root.id;
+    const abandonedLeaf = assistant("a-abandoned", "wrong branch");
+    abandonedLeaf.parentId = abandonedUser.id;
+    const entries = [root, tool, abandonedUser, abandonedLeaf, activeUser, activeLeaf];
+
+    const path = walkTranscriptDag(entries, activeLeaf.id);
+    expect(path.map((entry) => entry.id)).toEqual([
+      root.id,
+      tool.id,
+      activeUser.id,
+      activeLeaf.id,
+    ]);
+    const summaryInput = entriesToSummaryMessages(path, { toolOutputMaxChars: 2_000 });
+    expect(JSON.stringify(summaryInput)).toContain("M packages/engine/src/thread.ts");
+    expect(JSON.stringify(summaryInput)).not.toContain("wrong branch");
+
+    const live = entriesToAgentMessages(entries, MODEL, { activeLeafEntryId: activeLeaf.id });
+    expect(JSON.stringify(live)).toContain("continue the implementation");
+    expect(JSON.stringify(live)).not.toContain("unrelated branch");
+  });
+
+  it("keeps the chronological prefix from transcripts written before DAG links", () => {
+    const oldUser = user("old-user", "old request");
+    const oldAssistant = assistant("old-assistant", "old answer");
+    const continued = user("continued", "new request");
+    continued.parentId = oldAssistant.id;
+
+    expect(
+      walkTranscriptDag([oldUser, oldAssistant, continued], continued.id).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([oldUser.id, oldAssistant.id, continued.id]);
+  });
+
+  it("rejects a broken active path instead of silently dropping context", () => {
+    const leaf = assistant("leaf", "answer");
+    leaf.parentId = "missing-parent";
+    expect(() => walkTranscriptDag([leaf], leaf.id)).toThrow(
+      "Transcript DAG is missing entry missing-parent.",
+    );
   });
 });
 

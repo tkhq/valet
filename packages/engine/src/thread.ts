@@ -83,6 +83,7 @@ import {
   summarize,
   SummarizeOverflowError,
   usableTokens,
+  walkTranscriptDag,
   type PruneResult,
   type SummarizeResult,
 } from "./compaction.js";
@@ -448,14 +449,6 @@ export class Thread {
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
   /**
-   * Set after compactThread runs; cleared by the next runItem before
-   * checking shouldCompactProactive. Prevents recursive compaction loops
-   * where each compaction's auto-continue immediately re-triggers
-   * compaction (e.g. when the summary itself plus the system prompt
-   * still exceeds usable on a small-context model).
-   */
-  private skipNextProactiveCheck = false;
-  /**
    * Consecutive proactive-compaction failures (TKAI-306). At
    * MAX_CONSECUTIVE_COMPACTION_FAILURES the proactive trigger opens the
    * circuit and stops retrying; any successful compaction (manual /compact
@@ -534,7 +527,10 @@ export class Thread {
    */
   private turnApiKey?: string;
   private readonly threadCreatedAt: number;
+  /** Durable leaf used to link each new entry into the active transcript path. */
+  private activeLeafEntryId: string | undefined;
 
+  private entryAppendTail: Promise<void> = Promise.resolve();
   private transcriptPending: boolean;
   private transcriptLoad?: Promise<void>;
 
@@ -551,6 +547,7 @@ export class Thread {
     this.reasoningDisabled = data.reasoning === THREAD_REASONING_DISABLED;
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
+    this.activeLeafEntryId = data.activeLeafEntryId;
     this.agent = this.buildAgent();
   }
 
@@ -1155,7 +1152,7 @@ export class Thread {
 
   private replaceActiveSkillInvocations(entries: readonly SessionEntry[]): void {
     this.activeSkillInvocations.clear();
-    for (const fact of skillInvocationsInContext(entries)) {
+    for (const fact of skillInvocationsInContext(entries, this.activeLeafEntryId)) {
       this.activeSkillInvocations.set(fact.id, fact);
     }
   }
@@ -1799,7 +1796,7 @@ export class Thread {
           createdAt: Date.now(),
         };
         await fencedGateWrite(() =>
-          session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
+          this.appendEntry(gateEntry, fence),
         );
       }
 
@@ -1967,6 +1964,26 @@ export class Thread {
     }
   }
 
+  /** Append one entry after the durable active leaf and advance the leaf. */
+  async appendEntry(entry: SessionEntry, fence?: WriteFence): Promise<void> {
+    const append = this.entryAppendTail.then(async () => {
+      if (this.activeLeafEntryId === undefined) {
+        const data = await this.session.providers.store.getThread(this.session.id, this.id);
+        this.activeLeafEntryId = data?.activeLeafEntryId;
+      }
+      entry.parentId = this.activeLeafEntryId ?? null;
+      await this.session.providers.store.appendEntries(
+        this.session.id,
+        this.id,
+        [entry],
+        fence,
+      );
+      this.activeLeafEntryId = entry.id;
+    });
+    this.entryAppendTail = append.catch(() => undefined);
+    return append;
+  }
+
   /** Load restored history only when this thread needs an agent transcript. */
   private async ensureTranscript(): Promise<void> {
     if (!this.transcriptPending) return;
@@ -2002,6 +2019,7 @@ export class Thread {
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
+      activeLeafEntryId: this.activeLeafEntryId,
     });
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
@@ -2033,7 +2051,7 @@ export class Thread {
       sessionId: this.session.id,
       key: this.key,
       status: this.paused ? "paused" : "active",
-      activeLeafEntryId: undefined,
+      activeLeafEntryId: this.activeLeafEntryId,
       queueMode: this.mode,
       paused: this.paused,
       model: this.modelOverride,
@@ -3319,7 +3337,11 @@ export class Thread {
           provider: resumeModel.provider,
           id: resumeModel.id,
         },
-        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
+        {
+          attributeAuthors: this.attributeAuthors,
+          threadKey: this.key,
+          activeLeafEntryId: this.activeLeafEntryId,
+        },
       );
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
@@ -3560,7 +3582,7 @@ export class Thread {
       createdAt: Date.now(),
     };
     await this.fencedWrite(() =>
-      this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
+      this.appendEntry(userEntry, this.fence),
     );
     return { text, attachments };
   }
@@ -4133,35 +4155,68 @@ export class Thread {
    * reduce), and without the breaker that repeats silently on every turn.
    */
   private async runProactiveCompaction(autoContinue?: false): Promise<void> {
+    let outcome: CompactionOutcome;
     try {
-      const outcome = await this.compactThread(
+      outcome = await this.compactThread(
         autoContinue === false ? { mode: "proactive", autoContinue } : { mode: "proactive" },
       );
-      if (outcome === "noop") {
-        this.recordProactiveCompactionFailure(
-          "compaction_noop",
-          "Compaction found nothing to reclaim: the recent turns already fit the tail budget, so the context is dominated by the system prompt and tool definitions. Reduce enabled tools or start a new thread.",
-        );
-      } else if (outcome === "insufficient") {
-        // The newest turn alone exceeds the window; compaction cannot help.
-        // compactThreadInner ALREADY emitted context_overflow_unrecoverable —
-        // feed the breaker without re-emitting, so the trigger stops re-firing
-        // without surfacing the same error twice for one pass.
-        this.bumpCompactionFailureBreaker();
-      }
     } catch (err) {
       this.recordProactiveCompactionFailure(
         "compaction_failed",
         err instanceof Error ? err.message : String(err),
       );
+      return;
+    }
+
+    if (outcome === "noop") {
+      this.recordProactiveCompactionFailure(
+        "compaction_noop",
+        "Compaction found nothing to reclaim: the recent turns already fit the tail budget, so the context is dominated by the system prompt and tool definitions. Reduce enabled tools or start a new thread.",
+      );
+    } else if (outcome === "insufficient") {
+      // The newest turn alone exceeds the window; compaction cannot help.
+      // compactThreadInner ALREADY emitted context_overflow_unrecoverable.
+      this.bumpCompactionFailureBreaker();
+    } else if (
+      outcome === "compacted" &&
+      autoContinue !== false &&
+      this.session.options.compaction?.autoContinue !== false
+    ) {
+      try {
+        await this.continueAfterCompaction();
+      } catch (err) {
+        this.turnAgentError = err;
+        this.emitError(
+          "compaction_continuation_failed",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
   }
 
-  private shouldCompactProactive(): boolean {
-    if (this.skipNextProactiveCheck) {
-      this.skipNextProactiveCheck = false;
-      return false;
+  private async continueAfterCompaction(): Promise<void> {
+    const item = this.runningItem;
+    if (!item) {
+      throw new Error("Compaction continuation has no active submission.");
     }
+    const entry: MessageEntry = {
+      id: uid("e"),
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: AUTO_CONTINUE_PROMPT,
+      channel: item.channel,
+      metadata: { compaction_continue: true, synthetic: true },
+      queueItemId: item.id,
+      createdAt: Date.now(),
+    };
+    await this.fencedWrite(() => this.appendEntry(entry, this.fence));
+    await this.runAgent(AUTO_CONTINUE_PROMPT);
+  }
+
+  private shouldCompactProactive(): boolean {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return false;
     // Circuit breaker (TKAI-306): a thread whose proactive compaction keeps
@@ -4247,8 +4302,12 @@ export class Thread {
       : this.effectiveModelLenient();
     const model = cfg?.summarizerModel ?? effectiveModel;
 
-    // Load full DAG for the thread.
-    const entries = await store.getEntries(session.id, this.id);
+    // Load the full DAG, then follow the active leaf to the root. Other
+    // branches stay durable but must not enter this compaction pass.
+    const allEntries = await store.getEntries(session.id, this.id);
+    const threadData = await store.getThread(session.id, this.id);
+    this.activeLeafEntryId = threadData?.activeLeafEntryId;
+    const entries = walkTranscriptDag(allEntries, this.activeLeafEntryId);
 
     // Step 1: pruning pass (cheap, no LLM).
     const protectedTools = new Set<string>();
@@ -4334,7 +4393,10 @@ export class Thread {
       // — under overflow duress losing the oldest detail from the summary
       // beats failing the compaction outright, and `previousSummary` still
       // anchors facts from earlier compactions.
-      let headForSummary = head;
+      // Include the bounded verbatim tail in the summarizer input so the
+      // persisted checkpoint records the current task state, not only the
+      // older prefix that the summary replaces.
+      let headForSummary = entries;
       for (let attempt = 0; ; attempt++) {
         try {
           summaryResult = await summarize({
@@ -4384,7 +4446,7 @@ export class Thread {
         id: uid("c"),
         sessionId: session.id,
         threadId: this.id,
-        parentId: head[head.length - 1].id,
+        parentId: null,
         type: "compaction",
         summary: summaryResult.summary,
         coveredEntryIds: head.map((e) => e.id),
@@ -4399,7 +4461,7 @@ export class Thread {
         "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
       });
       // Fenced under the current turn's attempt (compaction is always in-turn).
-      await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
+      await this.appendEntry(compactionEntry, this.fence);
       // A persisted summary closes the failure circuit breaker — any mode's
       // success proves the summarizer works again (manual /compact included).
       this.consecutiveCompactionFailures = 0;
@@ -4415,7 +4477,11 @@ export class Thread {
           provider: effectiveModel.provider,
           id: effectiveModel.id,
         },
-        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
+        {
+          attributeAuthors: this.attributeAuthors,
+          threadKey: this.key,
+          activeLeafEntryId: this.activeLeafEntryId,
+        },
       );
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
@@ -4448,33 +4514,8 @@ export class Thread {
       }
     }
 
-    // Step 6: auto-continue (proactive only). Inject a synthetic user
-    // message tagged with metadata.compaction_continue so client UIs can
-    // hide it. Admitted as a durable submission so the claim loop picks it up
-    // after the current turn settles.
-    if (opts.mode === "proactive" && opts.autoContinue !== false && cfg?.autoContinue !== false) {
-      // Durable admission: the claim loop picks this up after the current turn
-      // settles. metadata flags let client UIs hide the synthetic continuation.
-      const followUp = this.buildQueueItem(AUTO_CONTINUE_PROMPT, {
-        metadata: { compaction_continue: true, synthetic: true },
-        // The continuation answers the same reader as the turn it continues.
-        // Without the inherited channel mark, the outbound channel path
-        // classifies the continuation as a web prompt and mutes the rest of
-        // a channel-originated answer (TKAI-323).
-        channel: this.runningItem?.channel,
-      });
-      await store.admitSubmission(session.id, this.id, followUp);
-      await this.emitQueueState();
-    }
-
-    // Cool-down: skip the next proactive check so the auto-continue turn
-    // doesn't immediately re-trigger compaction on a small-context model.
-    // NOT armed for the pre-turn rehydration pass (autoContinue: false) —
-    // there is no follow-up turn there, and arming it would suppress the
-    // SAME turn's legitimate post-turn check.
-    if (opts.autoContinue !== false) {
-      this.skipNextProactiveCheck = true;
-    }
+    // The proactive caller continues this same submission after this method
+    // returns. Settlement therefore cannot race ahead of the continuation.
 
     return "compacted";
   }
@@ -4880,7 +4921,7 @@ export class Thread {
             createdAt: Date.now(),
           };
           await this.fencedWrite(() =>
-            this.session.providers.store.appendEntries(this.session.id, this.id, [entry], this.fence),
+            this.appendEntry(entry, this.fence),
           );
           // Hold a reference so tool_execution_end can re-persist as each
           // tool completes (`parts` is shared by reference; mutating a
@@ -5676,17 +5717,19 @@ function isSkillInvocationFact(value: unknown): value is SkillInvocationFact {
 /** Return skill bodies that are still present in the active transcript. */
 export function skillInvocationsInContext(
   entries: readonly SessionEntry[],
+  activeLeafEntryId?: string,
 ): SkillInvocationFact[] {
+  const activeEntries = walkTranscriptDag(entries, activeLeafEntryId);
   let covered = new Set<string>();
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
+  for (let i = activeEntries.length - 1; i >= 0; i--) {
+    const entry = activeEntries[i];
     if (entry.type === "compaction") {
       covered = new Set(entry.coveredEntryIds);
       break;
     }
   }
   const facts: SkillInvocationFact[] = [];
-  for (const entry of entries) {
+  for (const entry of activeEntries) {
     if (entry.type !== "message" || covered.has(entry.id)) continue;
     const promptFact = entry.metadata?.skillInvocation;
     if (isSkillInvocationFact(promptFact)) facts.push(promptFact);
@@ -5751,12 +5794,15 @@ export function entriesToAgentMessages(
      * adapted (TKAI-306).
      */
     threadKey?: string;
+    /** Durable leaf of the active transcript branch. */
+    activeLeafEntryId?: string;
   },
 ): AgentMessage[] {
+  const activeEntries = walkTranscriptDag(entries, opts?.activeLeafEntryId);
   // 1. Find the most recent CompactionEntry. Everything in its coveredEntryIds is dropped.
   let activeCompaction: { summary: string; covered: Set<string> } | undefined;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
+  for (let i = activeEntries.length - 1; i >= 0; i--) {
+    const e = activeEntries[i];
     if (e.type === "compaction") {
       activeCompaction = { summary: e.summary, covered: new Set(e.coveredEntryIds) };
       break;
@@ -5783,7 +5829,7 @@ export function entriesToAgentMessages(
     });
   }
 
-  for (const e of entries) {
+  for (const e of activeEntries) {
     if (e.type !== "message") continue;
     if (activeCompaction?.covered.has(e.id)) continue;
 

@@ -68,7 +68,7 @@ describe("compaction: proactive (token threshold)", () => {
       workspace: "/",
       sandbox: {},
       model: faux2.getModel("tiny")!,
-      compaction: { tailTurns: 1 },
+      compaction: { tailTurns: 1, autoContinue: false },
     });
 
     // Pre-populate two prior turns directly in the store so we have a
@@ -182,7 +182,7 @@ describe("compaction: proactive (token threshold)", () => {
         model,
         apiKey: "org-key-xyz",
       }),
-      compaction: { tailTurns: 1 },
+      compaction: { tailTurns: 1, autoContinue: false },
     });
 
     const thread = session.thread();
@@ -350,13 +350,111 @@ describe("compaction: auto-continue", () => {
       // channel path does not classify it as a web prompt (TKAI-323).
       expect(autoContinue.channel).toEqual({ channelType: "slack", channelId: "slack:T1:D1" });
     }
-    // And the assistant's continuation response should follow it.
+    // The continuation stays inside the original submission. The child
+    // watcher therefore cannot observe settlement at the compaction boundary.
+    expect(autoContinue?.queueItemId).toBe(receipt.queueItemId);
+    const compaction = entries.find((entry) => entry.type === "compaction");
+    expect(autoContinue?.parentId).toBe(compaction?.id);
     const lastAssistant = entries
       .filter((e) => e.type === "message" && e.role === "assistant")
       .at(-1);
     expect(lastAssistant?.type === "message" && lastAssistant.content).toBe(
       "continued from where I left off",
     );
+    expect(lastAssistant?.queueItemId).toBe(receipt.queueItemId);
+    expect(lastAssistant?.parentId).toBe(autoContinue?.id);
+    const result = await thread.awaitResult(receipt.queueItemId);
+    expect(result).toMatchObject({
+      outcome: "completed",
+      text: "continued from where I left off",
+    });
+    const settled = events.filter(
+      (event) =>
+        event.queueItemId === receipt.queueItemId &&
+        event.event.type === "submission_settled",
+    );
+    expect(settled).toHaveLength(1);
+    expect(
+      (await store.listUnsettledSubmissions(session.id)).filter(
+        (item) => item.metadata?.compaction_continue === true,
+      ),
+    ).toHaveLength(0);
+
+    faux.unregister();
+  });
+
+  it("fails a child visibly when its same-submission continuation cannot start", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-child-continuation-failure",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("implementation reached the boundary"),
+      fauxAssistantMessage(
+        "## Goal\n- finish child work\n\n## Continuation Checkpoint\n- Branch: fix/child\n- Next Action: continue implementation",
+      ),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      purpose: "child",
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1 },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      {
+        id: "u-before",
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "start implementation",
+        createdAt: 1,
+      },
+      {
+        id: "a-before",
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: "u-before",
+        type: "message",
+        role: "assistant",
+        content: "working",
+        createdAt: 2,
+      },
+    ]);
+    const append = store.appendEntries.bind(store);
+    store.appendEntries = async (sessionId, threadId, entries, fence) => {
+      if (
+        entries.some(
+          (entry) => entry.type === "message" && entry.metadata?.compaction_continue === true,
+        )
+      ) {
+        throw new Error("could not persist continuation checkpoint edge");
+      }
+      await append(sessionId, threadId, entries, fence);
+    };
+
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+    const result = await thread.awaitResult(receipt.queueItemId);
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toContain("could not persist continuation checkpoint edge");
+    expect(
+      events.some(
+        (event) =>
+          event.event.type === "error" &&
+          event.event.code === "compaction_continuation_failed",
+      ),
+    ).toBe(true);
+    expect(
+      (await store.getEntries(session.id, thread.id)).some(
+        (entry) => entry.type === "compaction",
+      ),
+    ).toBe(true);
 
     faux.unregister();
   });
@@ -447,6 +545,7 @@ describe("compaction: pruning persists via updateEntry", () => {
       model: faux.getModel("tiny")!,
       compaction: {
         tailTurns: 1,
+        autoContinue: false,
         // Tiny token thresholds so a moderately-sized fixture triggers pruning
         // even though we're working with chars, not real tokens.
         pruneProtectTokens: 200,
