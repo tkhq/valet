@@ -131,7 +131,9 @@ export interface CurrentApprovalResolutionSourceV1 {
 }
 
 export interface CurrentPolicyDynamicFactsV1 {
-  readonly schemaVersion: 1;
-  readonly grants: readonly CurrentRuntimeGrantSourceV1[];
-  readonly approvals: readonly CurrentApprovalResolutionSourceV1[];
+  readonly schemaVersion: 2;
+  readonly organizationId: string;
+  readonly grants: readonly JsonValue[][];
+  readonly approvalBinding: readonly JsonValue[] | null;
+  readonly approvals: readonly JsonValue[][];
 }

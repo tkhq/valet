@@ -276,7 +276,7 @@ describe("current policy source builder", () => {
   });
 
   it("fails malformed dynamic input closed and rejects malformed source", async () => {
-    const malformed = await evaluate(snapshot(), request({ facts: { currentPolicy: { schemaVersion: 2, grants: [], approvals: [] } } }));
+    const malformed = await evaluate(snapshot(), request({ facts: { currentPolicy: { schemaVersion: 3, grants: [], approvals: [] } } }));
     expect(malformed.decision).toMatchObject({ effect: "deny", reasonCode: "malformed_dynamic_facts" });
     expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ actionId: "send_email" })] }))).toThrow(CurrentPolicySourceError);
     expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ id: "one" }), orgRule({ id: "two" })] }))).toThrow(/ambiguous/);

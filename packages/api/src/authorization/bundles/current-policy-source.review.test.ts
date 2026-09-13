@@ -212,7 +212,7 @@ describe("current policy source review regressions", () => {
     }
   });
 
-  it.fails("evaluates the declared 32 grant and 32 approval limit", async () => {
+  it("evaluates the declared 8 grant and 8 approval limit", async () => {
     const grants = Array.from({ length: CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicGrants }, (_, index) => ({
       schemaVersion: 1 as const,
       id: `grant-${index}`,
@@ -248,15 +248,15 @@ describe("current policy source review regressions", () => {
     const currentPolicy = buildCurrentPolicyDynamicFacts({ organizationId: ORG, grants, approvals });
     const input = request();
     const result = await evaluate(snapshot(), { ...input, facts: { currentPolicy } });
-    expect(result.decision.effect).toBe("allow");
+    expect(result.decision.effect).toBe("allow"); expect(result.usage.work_units).toBeLessThan(750_000);
   });
 
-  it.fails("matches a large regex target within the engine input profile", async () => {
+  it("denies a large targeted regex input within the engine profile", async () => {
     const source = snapshot({
       organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: [{ path: "selector", op: "regex", value: "^a+$" }] })],
     });
     const result = await evaluate(source, request({ selector: "a".repeat(200_000) }));
-    expect(result.decision.effect).toBe("deny");
+    expect(result.decision).toMatchObject({ effect: "deny", reasonCode: "input_limit" }); expect(result.usage.work_units).toBeLessThan(750_000);
   });
 
   it("keeps the engine input document profile limit", async () => {
@@ -535,7 +535,7 @@ describe("current policy source review regressions", () => {
   it("has zero unexpected mismatches in a seeded resolver sweep", async () => {
     let state = 0x679;
     const random = (): number => ((state = (state * 1664525 + 1013904223) >>> 0) / 0x1_0000_0000);
-    for (let iteration = 0; iteration < 64; iteration++) {
+    for (let iteration = 0; iteration < 160; iteration++) {
       const rows = Array.from({ length: 6 }, (_, index) => orgRule(index, {
         id: `seed-${iteration}-${index}`,
         actionId: index % 3 === 0 ? "gmail.send_email" : undefined,

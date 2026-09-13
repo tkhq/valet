@@ -28,15 +28,17 @@ export const CURRENT_POLICY_COMPLEXITY_LIMITS_V1 = Object.freeze({
   maxMatchersPerRule: 16,
   maxTotalMatchers: 128,
   maxPathSegments: 8,
-  maxRegexLength: 128,
+  maxRegexLength: 64,
+  maxRegexMatchers: 2,
+  maxRegexTargetCodeUnits: 256,
   maxMatcherValueBytes: 768,
   maxMatcherValueNodes: 256,
   maxMatcherValueDepth: 16,
   maxTotalMatcherValueBytes: 12_288,
   maxTotalMatcherValueNodes: 2_048,
   maxPluginDefaults: 32,
-  maxDynamicGrants: 32,
-  maxDynamicApprovals: 32,
+  maxDynamicGrants: 8,
+  maxDynamicApprovals: 8,
 });
 
 export interface BuiltCurrentPolicySourceV1 {
@@ -130,7 +132,7 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
     interpreter: {
       name: "regorus",
       version: "0.12.0",
-      revision: "aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e",
+      revision: "f938ef286fdf9b229d3933b064dfd87323f397e8",
     },
     contractVersion: 1,
     regoVersion: "v1",
@@ -210,10 +212,12 @@ export function buildCurrentPolicyDynamicFacts(input: {
     validateApproval(approval, input.organizationId);
     unique(ids, `approval:${approval.resolutionId}`);
   }
-  return {
-    schemaVersion: 1,
-    grants: [...input.grants].sort((a, b) => utf8Compare(a.id, b.id)).map((row) => ({ ...row })),
-    approvals: [...input.approvals].sort((a, b) => utf8Compare(a.resolutionId, b.resolutionId)).map((row) => ({ ...row })),
+  const bindings = input.approvals.map((row) => [row.requestSubjectDigest, row.originalDecisionDigest, row.appliesIn, row.sessionId ?? row.workflowExecutionId!] as JsonValue[]);
+  if (new Set(bindings.map(canonicalJson)).size > 1) fail("approval_binding_limit", "Current policy input supports one approval binding set.");
+  return { schemaVersion: 2, organizationId: input.organizationId,
+    grants: [...input.grants].sort((a, b) => utf8Compare(a.id, b.id)).map((row) => [row.id, row.policyKey, row.service, row.actionId, row.riskLevel, row.appliesIn, row.sessionId ?? row.workflowExecutionId!, row.createdAtMs, row.expiresAtMs, row.revokedAtMs]),
+    approvalBinding: bindings[0] ?? null,
+    approvals: [...input.approvals].sort((a, b) => utf8Compare(a.resolutionId, b.resolutionId)).map((row) => [row.resolutionId, row.verdict, row.resolvedAtMs, row.expiresAtMs, row.resolutionVersion]),
   };
 }
 
@@ -234,6 +238,7 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules} rules.`);
   }
   let matcherCount = 0;
+  let regexCount = 0;
   let matcherValueBytes = 0;
   let matcherValueNodes = 0;
   for (const row of rules) {
@@ -249,9 +254,11 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
       fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} matchers.`);
     }
     matcherCount += row.paramMatchers.length;
+    regexCount += row.paramMatchers.filter((matcher) => matcher.op === "regex").length;
     matcherValueBytes += valueComplexity.bytes;
     matcherValueNodes += valueComplexity.nodes;
   }
+  if (regexCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexMatchers) fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexMatchers} regex matchers.`);
   if (matcherCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers) {
     fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers} matchers.`);
   }
@@ -551,6 +558,7 @@ function buildPolicySource(
     lines.push("}");
     ranges.set(row.id, { start_line: startLine, end_line: lines.length });
   }
+  emitRegexInputLimit(lines, records);
   emitWinner(lines, "org_winner", records.filter((row) => row.ownerType === "organization"), candidateNames);
   emitWinner(lines, "team_winner", records.filter((row) => row.ownerType === "team"), candidateNames);
   emitWinner(lines, "override_winner", records.filter((row) => row.ownerType === "personal"), candidateNames);
@@ -559,8 +567,22 @@ function buildPolicySource(
   const bundleStart = lines.length + 1;
   lines.push(`bundle_winner := ${canonicalJson({ id: bundleDefault.id, mode: bundleDefault.actionEffect, source: "bundle" })}`);
   ranges.set(bundleDefault.id, { start_line: bundleStart, end_line: lines.length });
+  emitFactWinner(lines, "grant", 8);
+  emitFactWinner(lines, "approval", 8);
   lines.push(...CURRENT_ACTION_POLICY_SUFFIX.trimStart().split("\n"));
   return { source: `${lines.join("\n")}\n`, ranges };
+}
+
+function emitRegexInputLimit(lines: string[], records: readonly NormalizedRule[]): void {
+  const paths = [...new Set(records.flatMap((row) => row.matchers.filter((matcher) => matcher.op === "regex").map((matcher) => regoPath(matcher.segments))))];
+  paths.forEach((path, i) => lines.push(`regex_target_${i}_oversized if { count(${path}) > 256 }`));
+  lines.push(paths.length ? `regex_input_valid if { ${paths.map((_, i) => `not regex_target_${i}_oversized`).join("; ")} }` : "regex_input_valid if { true }");
+}
+function emitFactWinner(lines: string[], kind: "grant" | "approval", limit: number): void {
+  const facts = kind === "grant" ? "grants" : "approvals";
+  const match = kind === "grant" ? "count(fact) == 10; fact[1] == input.action.id; fact[2] == input.action.service; fact[3] == input.action.id; fact[4] == input.action.riskLevel; scope_matches(fact); fact[9] == null; fact[7] <= input.context.evaluationTimeMs; fact[8] > input.context.evaluationTimeMs" : "input.facts.currentPolicy.approvalBinding[0] == input.context.requestSubjectDigest; input.facts.currentPolicy.approvalBinding[1] == input.context.originalDecisionDigest; approval_scope_matches; count(fact) == 5; fact[4] == 1; fact[1] == \"approved\"; fact[2] <= input.context.evaluationTimeMs; fact[3] > input.context.evaluationTimeMs";
+  for (let i=0;i<limit;i++) lines.push(`${i ? "else" : kind+"_winner"} := fact[0] if { fact := input.facts.currentPolicy.${facts}[${i}]; ${match} }`);
+  lines.push("else := null if { true }");
 }
 
 function emitWinner(lines: string[], name: string, records: readonly NormalizedRule[], candidates: ReadonlyMap<string, string>): void {
@@ -765,45 +787,14 @@ input_valid if {
 }
 
 current_policy_present if { _ = input.facts.currentPolicy }
-dynamic := input.facts.currentPolicy if { current_policy_present }
-else := {"schemaVersion":1,"grants":[],"approvals":[]} if { true }
-
-dynamic_valid if {
-  dynamic.schemaVersion == 1
-  is_array(dynamic.grants)
-  is_array(dynamic.approvals)
-  every grant in dynamic.grants { grant_shape_valid(grant) }
-  every approval in dynamic.approvals { approval_shape_valid(approval) }
-}
-
-grant_shape_valid(grant) if {
-  grant.schemaVersion == 1
-  grant.organizationId == input.subject.orgId
-}
-
-approval_shape_valid(approval) if {
-  approval.schemaVersion == 1
-  approval.resolutionVersion == 1
-  approval.organizationId == input.subject.orgId
-}
-
-workflow_id_absent(fact) if { not fact.workflowExecutionId }
-workflow_id_absent(fact) if { fact.workflowExecutionId == null }
-session_id_absent(fact) if { not fact.sessionId }
-session_id_absent(fact) if { fact.sessionId == null }
-
-scope_matches(fact) if {
-  applies_in == "session"
-  fact.appliesIn == "session"
-  fact.sessionId == input.subject.sessionId
-  workflow_id_absent(fact)
-}
-scope_matches(fact) if {
-  applies_in == "workflow"
-  fact.appliesIn == "workflow"
-  fact.workflowExecutionId == input.subject.workflowExecutionId
-  session_id_absent(fact)
-}
+dynamic_valid if { not current_policy_present }
+dynamic_valid if { input.facts.currentPolicy.schemaVersion == 2; input.facts.currentPolicy.organizationId == input.subject.orgId; is_array(input.facts.currentPolicy.grants); is_array(input.facts.currentPolicy.approvals); count(input.facts.currentPolicy.grants) <= 8; count(input.facts.currentPolicy.approvals) <= 8; approval_binding_valid }
+approval_binding_valid if { count(input.facts.currentPolicy.approvals) == 0; input.facts.currentPolicy.approvalBinding == null }
+approval_binding_valid if { count(input.facts.currentPolicy.approvals) > 0; is_array(input.facts.currentPolicy.approvalBinding); count(input.facts.currentPolicy.approvalBinding) == 4 }
+scope_matches(fact) if { applies_in == "session"; fact[5] == "session"; fact[6] == input.subject.sessionId }
+scope_matches(fact) if { applies_in == "workflow"; fact[5] == "workflow"; fact[6] == input.subject.workflowExecutionId }
+approval_scope_matches if { applies_in == "session"; input.facts.currentPolicy.approvalBinding[2] == "session"; input.facts.currentPolicy.approvalBinding[3] == input.subject.sessionId }
+approval_scope_matches if { applies_in == "workflow"; input.facts.currentPolicy.approvalBinding[2] == "workflow"; input.facts.currentPolicy.approvalBinding[3] == input.subject.workflowExecutionId }
 `;
 
 const CURRENT_ACTION_POLICY_SUFFIX = `
@@ -828,9 +819,9 @@ static_layers := layers if {
   layers := {"org":org,"team":team,"override":override,"base":base}
 }
 
-grant_ids := [grant.id | grant := dynamic.grants[_]; grant.policyKey == input.action.id; grant.service == input.action.service; grant.actionId == input.action.id; grant.riskLevel == input.action.riskLevel; grant.revokedAtMs == null; grant.createdAtMs <= input.context.evaluationTimeMs; grant.expiresAtMs > input.context.evaluationTimeMs; scope_matches(grant)]
-approval_ids := [approval.resolutionId | approval := dynamic.approvals[_]; approval.verdict == "approved"; approval.resolvedAtMs <= input.context.evaluationTimeMs; approval.expiresAtMs > input.context.evaluationTimeMs; approval.requestSubjectDigest == input.context.requestSubjectDigest; approval.originalDecisionDigest == input.context.originalDecisionDigest; scope_matches(approval)]
-dynamic_ids := sort(array.concat(grant_ids, approval_ids))
+dynamic_ids := [grant_winner] if { grant_winner != null }
+else := [approval_winner] if { approval_winner != null }
+else := [] if { true }
 
 approval_requirement := {"tier":"human","approverType":"org","replay":"once"}
 result(effect, reason, ids) := object.union({"effect":effect,"reasonCode":reason,"matchedRuleIds":sort(ids),"obligations":[],"redactions":[]}, approval_field(effect))
@@ -846,6 +837,7 @@ else := result(layers.base.mode, concat("", [layers.base.source, "_", "default"]
 
 decision := result("deny", "unsupported_authorization_context", [bundle_winner.id]) if { not action_context }
 else := result("deny", "policy_input_invalid", []) if { not input_valid }
+else := result("deny", "input_limit", []) if { not regex_input_valid }
 else := result("deny", "malformed_dynamic_facts", []) if { not dynamic_valid }
 else := resolved if {
   layers := static_layers
