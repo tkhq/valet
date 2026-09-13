@@ -27,6 +27,7 @@ export interface RuntimeIdentity {
 }
 
 type EngineCommand = Record<string, unknown> & { readonly operation: string };
+type WorkerUrl = URL | ((generation: number) => URL);
 interface EngineResponse<T> {
   readonly status: "ok" | "error";
   readonly value?: T;
@@ -44,9 +45,17 @@ interface PendingRequest {
   readonly id: number;
   readonly state: WorkerState;
   readonly timeoutMs: number;
+  started: boolean;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
+}
+interface QueueEntry {
+  started: boolean;
+  cancelled: boolean;
+  settled: boolean;
+  timer?: NodeJS.Timeout;
+  reject: (error: Error) => void;
 }
 interface WorkerState {
   readonly worker: Worker;
@@ -55,18 +64,22 @@ interface WorkerState {
   resolveReady: (identity: RuntimeIdentity) => void;
   rejectReady: (error: Error) => void;
   readySettled: boolean;
+  readySucceeded: boolean;
   poison?: Promise<void>;
 }
 
 export class WasmPolicyRuntime {
   private state: WorkerState;
+  private starting?: WorkerState;
   private nextId = 0;
   private closed = false;
+  private closing?: Promise<void>;
   private queue: Promise<void> = Promise.resolve();
+  private readonly queued = new Set<QueueEntry>();
   private pending?: PendingRequest;
   private readonly loaded = new Map<string, ValidatedBundleIdentity>();
 
-  constructor(private readonly workerUrl: URL = policyWorkerUrl()) {
+  constructor(private readonly workerUrl: WorkerUrl = policyWorkerUrl()) {
     this.state = this.spawn(0);
   }
 
@@ -74,8 +87,11 @@ export class WasmPolicyRuntime {
     return this.state.generation;
   }
 
-  identity(): Promise<RuntimeIdentity> {
-    return this.waitUntilReady(this.state);
+  async identity(): Promise<RuntimeIdentity> {
+    this.assertOpen();
+    const identity = await this.waitUntilReady(this.state);
+    this.assertOpen();
+    return identity;
   }
 
   async loadBundle(
@@ -97,32 +113,88 @@ export class WasmPolicyRuntime {
   }
 
   run<T>(command: EngineCommand): Promise<T> {
-    if (this.closed) {
-      return Promise.reject(new LocalEvaluatorError("worker_failure", "The policy runtime is closed."));
-    }
-    const task = withTimeout(
-      this.queue,
-      MAX_QUEUE_TIME_MS,
-      new LocalEvaluatorError("worker_queue", `Policy request waited more than ${MAX_QUEUE_TIME_MS} ms.`),
-    ).then(() => this.execute<T>(command));
+    if (this.closed) return Promise.reject(closedError());
+
+    const predecessor = this.queue;
+    let resolveVisible!: (value: T) => void;
+    let rejectVisible!: (error: Error) => void;
+    const visible = new Promise<T>((resolve, reject) => {
+      resolveVisible = resolve;
+      rejectVisible = reject;
+    });
+    const entry: QueueEntry = {
+      started: false,
+      cancelled: false,
+      settled: false,
+      reject: (error) => settleReject(entry, error, rejectVisible),
+    };
+    this.queued.add(entry);
+    entry.timer = setTimeout(() => {
+      if (entry.started) return;
+      entry.cancelled = true;
+      entry.reject(new LocalEvaluatorError("worker_queue", `Policy request waited more than ${MAX_QUEUE_TIME_MS} ms.`));
+    }, MAX_QUEUE_TIME_MS);
+
+    const task = predecessor.then(async () => {
+      if (entry.timer !== undefined) clearTimeout(entry.timer);
+      if (entry.cancelled) {
+        this.queued.delete(entry);
+        return;
+      }
+      entry.started = true;
+      if (this.closed) {
+        entry.reject(closedError());
+        this.queued.delete(entry);
+        return;
+      }
+      try {
+        settleResolve(entry, await this.execute<T>(command), resolveVisible);
+      } catch (error) {
+        entry.reject(asError(error));
+      } finally {
+        this.queued.delete(entry);
+      }
+    });
     this.queue = task.then(
       () => undefined,
       () => undefined,
     );
-    return task;
+    return visible;
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closing !== undefined) return this.closing;
     this.closed = true;
-    this.pending?.reject(new LocalEvaluatorError("worker_failure", "The policy runtime was closed."));
+    const error = closedError();
+    for (const entry of this.queued) {
+      entry.cancelled = true;
+      if (entry.timer !== undefined) clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this.pending?.reject(error);
     this.clearPending();
-    await this.state.worker.terminate();
+    const states = [...new Set([this.state, this.starting].filter((state): state is WorkerState => state !== undefined))];
+    for (const state of states) this.rejectReadiness(state, error);
+    this.closing = (async () => {
+      await Promise.all(states.map((state) => state.worker.terminate().catch(() => undefined)));
+      await this.queue;
+      this.queued.clear();
+    })();
+    return this.closing;
   }
 
   private async execute<T>(command: EngineCommand): Promise<T> {
+    if (this.pending !== undefined) {
+      throw new LocalEvaluatorError("worker_failure", "The policy worker already has a pending command.");
+    }
+    this.assertOpen();
     const state = this.state;
     await this.waitUntilReady(state);
+    this.assertOpen();
     if (state !== this.state) return this.execute(command);
+    if (this.pending !== undefined) {
+      throw new LocalEvaluatorError("worker_failure", "The policy worker already has a pending command.");
+    }
     const id = ++this.nextId;
     const timeoutMs = command.operation === "evaluate" ? MAX_WALL_TIME_MS : MAX_CONTROL_TIME_MS;
     return new Promise<T>((resolve, reject) => {
@@ -130,6 +202,7 @@ export class WasmPolicyRuntime {
         id,
         state,
         timeoutMs,
+        started: false,
         resolve: resolve as (value: unknown) => void,
         reject,
       };
@@ -140,7 +213,16 @@ export class WasmPolicyRuntime {
         );
       }, MAX_START_TIME_MS);
       this.pending = pending;
-      state.worker.postMessage({ id, command: wireCommand(command) });
+      if (this.closed) {
+        this.clearPending();
+        reject(closedError());
+        return;
+      }
+      try {
+        state.worker.postMessage({ id, command: wireCommand(command) });
+      } catch (error) {
+        void this.rejectFatal(pending, new LocalEvaluatorError("worker_failure", asError(error).message, { cause: error }));
+      }
     });
   }
 
@@ -151,7 +233,9 @@ export class WasmPolicyRuntime {
       resolveReady = resolve;
       rejectReady = reject;
     });
-    const worker = new Worker(this.workerUrl, {
+    void ready.catch(() => undefined);
+    const url = typeof this.workerUrl === "function" ? this.workerUrl(generation) : this.workerUrl;
+    const worker = new Worker(url, {
       resourceLimits: { maxOldGenerationSizeMb: MAX_WORKER_HEAP_MIB },
     });
     const state: WorkerState = {
@@ -161,11 +245,12 @@ export class WasmPolicyRuntime {
       resolveReady,
       rejectReady,
       readySettled: false,
+      readySucceeded: false,
     };
     worker.on("message", (message: WorkerMessage) => this.onMessage(state, message));
     worker.on("error", (error) => this.onWorkerFailure(state, error));
     worker.on("exit", (code) => {
-      if (!this.closed && code !== 0 && state === this.state) {
+      if (!this.closed && code !== 0 && (state === this.state || state === this.starting)) {
         this.onWorkerFailure(state, new Error(`Policy worker exited with code ${code}.`));
       }
     });
@@ -174,6 +259,7 @@ export class WasmPolicyRuntime {
 
   private onMessage(state: WorkerState, message: WorkerMessage): void {
     if (message.type === "ready") {
+      if (state.readySettled) return;
       if (message.identity === undefined) {
         this.rejectReadiness(state, new LocalEvaluatorError("stale_artifact", "The policy worker omitted its identity."));
         return;
@@ -181,15 +267,18 @@ export class WasmPolicyRuntime {
       try {
         validateIdentity(message.identity);
         state.readySettled = true;
+        state.readySucceeded = true;
         state.resolveReady(message.identity);
       } catch (error) {
-        this.rejectReadiness(state, error instanceof Error ? error : new Error(String(error)));
+        this.rejectReadiness(state, asError(error));
       }
       return;
     }
     const pending = this.pending;
     if (pending === undefined || pending.state !== state || pending.id !== message.id) return;
     if (message.type === "started") {
+      if (pending.started) return;
+      pending.started = true;
       if (pending.timer !== undefined) clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
         void this.rejectFatal(
@@ -203,6 +292,13 @@ export class WasmPolicyRuntime {
       return;
     }
     if (message.response === undefined) return;
+    if (!pending.started) {
+      void this.rejectFatal(
+        pending,
+        new LocalEvaluatorError("command_start", "The policy worker returned a result before command start."),
+      );
+      return;
+    }
     if (message.fatal === true) {
       void this.rejectFatal(
         pending,
@@ -227,8 +323,10 @@ export class WasmPolicyRuntime {
   }
 
   private onWorkerFailure(state: WorkerState, error: Error): void {
-    if (!state.readySettled) {
-      this.rejectReadiness(state, new LocalEvaluatorError("worker_readiness", error.message, { cause: error }));
+    if (!state.readySucceeded) {
+      if (!state.readySettled) {
+        this.rejectReadiness(state, new LocalEvaluatorError("worker_readiness", error.message, { cause: error }));
+      }
       return;
     }
     const pending = this.pending;
@@ -246,18 +344,28 @@ export class WasmPolicyRuntime {
       await this.replace(pending.state);
       pending.reject(error);
     } catch (replacementError) {
-      pending.reject(replacementError instanceof Error ? replacementError : new Error(String(replacementError)));
+      pending.reject(asError(replacementError));
     }
   }
 
   private replace(state: WorkerState): Promise<void> {
     if (state.poison !== undefined) return state.poison;
     state.poison = (async () => {
-      const replacement = this.spawn(state.generation + 1);
-      this.state = replacement;
-      this.loaded.clear();
       await state.worker.terminate();
-      await this.waitUntilReady(replacement);
+      this.assertOpen();
+      const replacement = this.spawn(state.generation + 1);
+      this.starting = replacement;
+      this.loaded.clear();
+      try {
+        await this.waitUntilReady(replacement);
+        this.assertOpen();
+        this.state = replacement;
+      } catch (error) {
+        await replacement.worker.terminate().catch(() => undefined);
+        throw error;
+      } finally {
+        if (this.starting === replacement) this.starting = undefined;
+      }
     })();
     return state.poison;
   }
@@ -270,6 +378,7 @@ export class WasmPolicyRuntime {
   }
 
   private waitUntilReady(state: WorkerState): Promise<RuntimeIdentity> {
+    if (this.closed) return Promise.reject(closedError());
     const error = new LocalEvaluatorError(
       "worker_readiness",
       `Policy worker was not ready within ${MAX_READY_TIME_MS} ms.`,
@@ -285,6 +394,30 @@ export class WasmPolicyRuntime {
     if (this.pending?.timer !== undefined) clearTimeout(this.pending.timer);
     this.pending = undefined;
   }
+
+  private assertOpen(): void {
+    if (this.closed) throw closedError();
+  }
+}
+
+function settleResolve<T>(entry: QueueEntry, value: T, resolve: (value: T) => void): void {
+  if (entry.settled) return;
+  entry.settled = true;
+  resolve(value);
+}
+
+function settleReject(entry: QueueEntry, error: Error, reject: (error: Error) => void): void {
+  if (entry.settled) return;
+  entry.settled = true;
+  reject(error);
+}
+
+function closedError(): LocalEvaluatorError {
+  return new LocalEvaluatorError("worker_failure", "The policy runtime is closed.");
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function wireCommand(command: EngineCommand): EngineCommand {
