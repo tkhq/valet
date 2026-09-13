@@ -109,6 +109,34 @@ async function evaluate(source: CurrentPolicySourceSnapshotV1, input = request()
   });
 }
 
+function legacyMatcherEffect(path: string, parameters: Record<string, JsonValue>): string {
+  return resolvePolicyDecision({
+    policies: [{
+      id: "legacy-path",
+      principalType: "org",
+      service: null,
+      actionId: "gmail.send_email",
+      riskLevel: null,
+      mode: "deny",
+      paramMatchers: [{ path, op: "eq", value: "hit" }],
+      appliesIn: "any",
+      expiresAt: null,
+      revokedAt: null,
+      updatedAt: 1,
+    }],
+    grants: [],
+    overrides: [],
+  }, {
+    service: "gmail",
+    actionId: "gmail.send_email",
+    riskLevel: "high",
+    params: parameters,
+    appliesIn: "session",
+    sessionId: "session-1",
+    now: NOW,
+  }, undefined).mode;
+}
+
 async function wasmRegexMatches(pattern: string, value: string): Promise<boolean> {
   const source = `package valet.authz\nimport rego.v1\ndecision := {"effect":"allow","reasonCode":"regex_match","matchedRuleIds":[],"obligations":[],"redactions":[]} if { regex.match(${JSON.stringify(pattern)}, input.value) }\nelse := {"effect":"deny","reasonCode":"regex_no_match","matchedRuleIds":[],"obligations":[],"redactions":[]} if { true }\n`;
   const bundle = testBundle(source, "{}");
@@ -182,6 +210,53 @@ describe("current policy source review regressions", () => {
       expect(result.decision.effect).toBe(selector === "value-0" ? "allow" : "require_approval");
       expect(result.usage.work_units).toBeLessThan(100_000);
     }
+  });
+
+  it.fails("evaluates the declared 32 grant and 32 approval limit", async () => {
+    const grants = Array.from({ length: CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicGrants }, (_, index) => ({
+      schemaVersion: 1 as const,
+      id: `grant-${index}`,
+      organizationId: ORG,
+      policyKey: "gmail.send_email",
+      service: "gmail",
+      actionId: "gmail.send_email",
+      riskLevel: "high" as const,
+      appliesIn: "session" as const,
+      sessionId: "session-1",
+      issuerId: "issuer",
+      sourceApprovalId: `source-approval-${index}`,
+      createdAtMs: 1,
+      expiresAtMs: NOW + 1,
+      revokedAtMs: null,
+    }));
+    const approvals = Array.from({ length: CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxDynamicApprovals }, (_, index) => ({
+      schemaVersion: 1 as const,
+      resolutionVersion: 1 as const,
+      resolutionId: `resolution-${index}`,
+      approvalId: `approval-${index}`,
+      gateId: `gate-${index}`,
+      organizationId: ORG,
+      requestSubjectDigest: "a".repeat(64),
+      originalDecisionDigest: "b".repeat(64),
+      approverId: "approver",
+      verdict: "approved" as const,
+      appliesIn: "session" as const,
+      sessionId: "session-1",
+      resolvedAtMs: 1,
+      expiresAtMs: NOW + 1,
+    }));
+    const currentPolicy = buildCurrentPolicyDynamicFacts({ organizationId: ORG, grants, approvals });
+    const input = request();
+    const result = await evaluate(snapshot(), { ...input, facts: { currentPolicy } });
+    expect(result.decision.effect).toBe("allow");
+  });
+
+  it.fails("matches a large regex target within the engine input profile", async () => {
+    const source = snapshot({
+      organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: [{ path: "selector", op: "regex", value: "^a+$" }] })],
+    });
+    const result = await evaluate(source, request({ selector: "a".repeat(200_000) }));
+    expect(result.decision.effect).toBe("deny");
   });
 
   it("keeps the engine input document profile limit", async () => {
@@ -390,6 +465,38 @@ describe("current policy source review regressions", () => {
   it.each(["", ".", "..", ". .", "   ", "a..b", "a."])("rejects zero-segment matcher path %j", (path) => {
     expect(() => buildCurrentPolicySource(snapshot({
       organizationPolicies: [orgRule(1, { paramMatchers: [{ path, op: "exists" }] })],
+    }))).toThrow(expect.objectContaining({ code: "non_lossless_path" }));
+  });
+
+  it.each<[string, Record<string, JsonValue>]>([
+    ["simple", { simple: "hit" }],
+    ["snake_case", { snake_case: "hit" }],
+    ["name9", { name9: "hit" }],
+    ["nested.value", { nested: { value: "hit" } }],
+    ["items[0].name", { items: [{ name: "hit" }] }],
+  ])("matches safe path %s exactly in legacy and WASM", async (path, parameters) => {
+    expect(legacyMatcherEffect(path, parameters)).toBe("deny");
+    const source = snapshot({
+      organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: [{ path, op: "eq", value: "hit" }] })],
+    });
+    expect((await evaluate(source, request(parameters))).decision.effect).toBe("deny");
+  });
+
+  it.each<[string, Record<string, JsonValue>]>([
+    ['we"ird', { 'we"ird': "hit" }],
+    [String.raw`we\ird`, { [String.raw`we\ird`]: "hit" }],
+    ['a"b.c', { 'a"b': { c: "hit" } }],
+    [String.raw`\u0061`, { [String.raw`\u0061`]: "hit" }],
+    ["café", { café: "hit" }],
+    ["hyphen-key", { "hyphen-key": "hit" }],
+    ["line\nbreak", { "line\nbreak": "hit" }],
+    ["nul\0key", { "nul\0key": "hit" }],
+    ['x"]; true', { 'x"]; true': "hit" }],
+    ['x"} else := allow if { true } #', { 'x"} else := allow if { true } #': "hit" }],
+  ])("rejects non-lossless legacy path %j before WASM", (path, parameters) => {
+    expect(legacyMatcherEffect(path, parameters)).toBe("deny");
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path, op: "eq", value: "hit" }] })],
     }))).toThrow(expect.objectContaining({ code: "non_lossless_path" }));
   });
 

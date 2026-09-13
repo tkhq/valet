@@ -443,6 +443,10 @@ function normalizeRule(
   };
 }
 
+// Pinned Regorus round-trips ASCII identifier segments and canonical decimal array indexes.
+const SAFE_PATH_SEGMENT_V1 = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SAFE_ARRAY_INDEX_V1 = /^(?:0|[1-9][0-9]*)$/;
+
 function parseMatcherPath(path: string): Array<string | number> {
   const result: Array<string | number> = [];
   let index = 0;
@@ -450,21 +454,25 @@ function parseMatcherPath(path: string): Array<string | number> {
     let end = index;
     while (end < path.length && path[end] !== "." && path[end] !== "[") end += 1;
     const segment = path.slice(index, end);
-    if (segment.trim().length === 0) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an empty segment.`);
+    if (!SAFE_PATH_SEGMENT_V1.test(segment)) {
+      fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unsafe segment.`);
+    }
     if (["__proto__", "constructor", "prototype"].includes(segment)) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} depends on JavaScript prototype lookup.`);
     result.push(segment);
     index = end;
     while (index < path.length && path[index] === "[") {
       const close = path.indexOf("]", index);
-      if (close === -1) fail("matcher_path", `Matcher path ${JSON.stringify(path)} has an unterminated index.`);
+      if (close === -1) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unterminated index.`);
       const text = path.slice(index + 1, close);
       const arrayIndex = Number(text);
-      if (text.trim() === "" || !Number.isSafeInteger(arrayIndex) || arrayIndex < 0) fail("matcher_path", `Matcher path ${JSON.stringify(path)} has an invalid index.`);
+      if (!SAFE_ARRAY_INDEX_V1.test(text) || !Number.isSafeInteger(arrayIndex)) {
+        fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unsafe index.`);
+      }
       result.push(arrayIndex);
       index = close + 1;
     }
     if (index === path.length) break;
-    if (path[index] !== ".") fail("matcher_path", `Matcher path ${JSON.stringify(path)} requires a separator.`);
+    if (path[index] !== ".") fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} requires a separator.`);
     index += 1;
   }
   if (result.length === 0 || path.endsWith(".")) {
