@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import type { McpToolPort, McpToolResult } from "@valet/engine";
 import { MEMORY_MCP_ORIGIN } from "@valet/plugin-memory/mcp-tools";
+import { ValidationError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { readFile, searchFiles, writeFile, type MemoryScope } from "./memory.js";
 
@@ -12,14 +14,21 @@ function stringArg(args: Record<string, unknown>, key: string): string {
 }
 
 export function captureSlug(title: string): string {
-  return title
+  const readable = title
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 80)
+    .slice(0, 70)
     .replace(/-+$/g, "") || "capture";
+  const hash = createHash("sha256").update(title).digest("hex").slice(0, 8);
+  return `${readable}-${hash}`;
+}
+
+function capturePath(day: string, slug: string, ordinal: number): string {
+  const suffix = ordinal === 1 ? "" : `-${ordinal}`;
+  return `90-inbox/${day}-${slug}${suffix}.md`;
 }
 
 export class MemoryMcpPort implements McpToolPort {
@@ -39,14 +48,23 @@ export class MemoryMcpPort implements McpToolPort {
         const title = stringArg(args, "title");
         const content = stringArg(args, "content");
         const day = this.clock().toISOString().slice(0, 10);
-        const path = `90-inbox/${day}-${captureSlug(title)}.md`;
-        const result = await writeFile(this.db, scope, {
-          path,
-          content,
-          origin: MEMORY_MCP_ORIGIN,
-          createOnly: true,
-        });
-        return { text: JSON.stringify({ path: result.file.path, warnings: result.warnings }) };
+        const slug = captureSlug(title);
+        for (let ordinal = 1; ordinal <= 1_000; ordinal += 1) {
+          const path = capturePath(day, slug, ordinal);
+          try {
+            const result = await writeFile(this.db, scope, {
+              path,
+              content,
+              origin: MEMORY_MCP_ORIGIN,
+              createOnly: true,
+            });
+            return { text: JSON.stringify({ path: result.file.path, warnings: result.warnings }) };
+          } catch (error) {
+            if (error instanceof ValidationError && error.message.includes("already exists")) continue;
+            throw error;
+          }
+        }
+        throw new Error("The inbox has too many captures with this title today. Change the title and try again.");
       }
       if (operation === "search") {
         const query = stringArg(args, "query");

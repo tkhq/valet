@@ -206,14 +206,20 @@ The API builds a personal `MemoryScope` only from the verified OAuth token.
 Reads include the caller's current team memberships. A team path resolves only
 after a live membership check.
 
-`mem_capture` creates one new personal file at
-`90-inbox/YYYY-MM-DD-<slug>.md`. It refuses an existing path. The caller cannot
-set the path or owner. The memory service removes embedded frontmatter and sets
-`origin` to `mcp:external`.
+`mem_capture` creates a personal file at `90-inbox/YYYY-MM-DD-<slug>.md`.
+The slug includes a title hash. A race-safe numeric suffix preserves concurrent
+captures with the same title. The caller cannot set the path or owner. The
+memory service removes embedded frontmatter and sets `origin` to `mcp:external`.
 
-Every executed MCP tool writes to `action_invocations`. The row records its
-timestamp, user id, tool name, filtered arguments, outcome, duration, and source
-IP. Capture content is replaced with a redaction marker before the audit write.
-The source IP trusts `x-forwarded-for` only when `VALET_TRUST_PROXY=1`; otherwise
-it uses the socket peer address. The mount keeps the Better Auth challenge and
-stateless JSON transport behavior.
+Each authenticated `tools/call` attempt starts a strict `action_invocations`
+row before dispatch. Name and schema rejections finish that row as an error.
+Successful tools finish the same row only after execution. A failed required
+audit write fails the call closed. The row uses the OAuth user's one authorized
+organization, and ambiguous organization membership fails closed. OAuth 401s
+occur before tool dispatch and are outside this tool-call audit boundary.
+
+Capture content and unvalidated unknown-tool arguments are redacted. With
+`VALET_TRUST_PROXY=1`, Valet requires one trusted ingress to append its observed
+client as the final `x-forwarded-for` hop. Valet ignores all earlier hops. With
+no trusted ingress contract, keep the setting off and use the socket peer. The
+mount keeps the Better Auth challenge and stateless JSON transport behavior.

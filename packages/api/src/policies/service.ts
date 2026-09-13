@@ -441,94 +441,92 @@ export interface AuditInvocationRow {
   createdAt?: number;
 }
 
-/**
- * Fire-and-forget audit write. NEVER throws (a failed audit write must not
- * break a tool call or a workflow node) — every error is logged and
- * swallowed. Dedups on the PK via `onConflictDoNothing`: a deterministic id
- * makes a replay double-fire a no-op; a random id records every distinct
- * emission.
- */
+/** Strict audit insert for external calls that must fail closed. */
+export async function persistInvocationAuditStrict(db: AppDb, row: AuditInvocationRow, failOnConflict = true): Promise<void> {
+  const params = row.params === undefined ? null : capAuditField(row.params);
+  const result = row.result === undefined ? null : capAuditField(row.result);
+  const error = row.error != null && row.error.length > POLICY_AUDIT_FIELD_CAP
+    ? row.error.slice(0, POLICY_AUDIT_FIELD_CAP)
+    : (row.error ?? null);
+  const inserted = await db.insert(actionInvocations).values({
+    invocationId: row.invocationId,
+    createdAt: row.createdAt ?? Date.now(),
+    service: row.service ?? null,
+    actionId: row.actionId ?? null,
+    riskLevel: row.riskLevel ?? null,
+    resolvedMode: row.resolvedMode ?? null,
+    baseMode: row.baseMode ?? null,
+    matchedPolicyId: row.matchedPolicyId ?? null,
+    matchedGrantId: row.matchedGrantId ?? null,
+    matchedOverrideId: row.matchedOverrideId ?? null,
+    status: row.status ?? null,
+    sessionId: row.sessionId ?? null,
+    workflowExecutionId: row.workflowExecutionId ?? null,
+    userId: row.userId ?? null,
+    sourceIp: row.sourceIp ?? null,
+    orgId: row.orgId ?? null,
+    params: params ? params.value : null,
+    paramsTruncated: params ? params.truncated : null,
+    result: result ? result.value : null,
+    resultTruncated: result ? result.truncated : null,
+    error,
+    durationMs: row.durationMs ?? null,
+    startedAt: row.startedAt ?? null,
+  }).onConflictDoNothing().returning({ invocationId: actionInvocations.invocationId });
+  if (failOnConflict && inserted.length === 0) throw new Error(`audit invocation ${row.invocationId} already exists`);
+}
+
+/** Best-effort audit write for internal calls. It never throws. */
 export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow): Promise<void> {
   try {
-    const params = row.params === undefined ? null : capAuditField(row.params);
-    const result = row.result === undefined ? null : capAuditField(row.result);
-    const error =
-      row.error != null && row.error.length > POLICY_AUDIT_FIELD_CAP
-        ? row.error.slice(0, POLICY_AUDIT_FIELD_CAP)
-        : (row.error ?? null);
-
-    await db
-      .insert(actionInvocations)
-      .values({
-        invocationId: row.invocationId,
-        createdAt: row.createdAt ?? Date.now(),
-        service: row.service ?? null,
-        actionId: row.actionId ?? null,
-        riskLevel: row.riskLevel ?? null,
-        resolvedMode: row.resolvedMode ?? null,
-        baseMode: row.baseMode ?? null,
-        matchedPolicyId: row.matchedPolicyId ?? null,
-        matchedGrantId: row.matchedGrantId ?? null,
-        matchedOverrideId: row.matchedOverrideId ?? null,
-        status: row.status ?? null,
-        sessionId: row.sessionId ?? null,
-        workflowExecutionId: row.workflowExecutionId ?? null,
-        userId: row.userId ?? null,
-        sourceIp: row.sourceIp ?? null,
-        orgId: row.orgId ?? null,
-        params: params ? params.value : null,
-        paramsTruncated: params ? params.truncated : null,
-        result: result ? result.value : null,
-        resultTruncated: result ? result.truncated : null,
-        error,
-        durationMs: row.durationMs ?? null,
-        startedAt: row.startedAt ?? null,
-      })
-      .onConflictDoNothing();
+    await persistInvocationAuditStrict(db, row, false);
   } catch (err) {
     console.error(`policy audit write failed for invocation ${row.invocationId}:`, err);
   }
 }
 
-/**
- * Stamp the execution OUTCOME onto an existing audit row (workflow path: the
- * decision row is written by `enforceWorkflowPolicy` BEFORE execution; this
- * fills in `status`/`result`/`error`/`durationMs` after `action.execute`
- * settles). Fire-and-forget like `persistInvocationAudit` — never throws. A
- * replayed node re-stamps the same values; idempotent.
- */
+export interface InvocationOutcome {
+  status: "completed" | "error" | "approved" | "denied" | "cancelled" | "timeout";
+  result?: unknown;
+  error?: string;
+  durationMs?: number;
+  resolvedBy?: string;
+}
+
+/** Strict outcome update for external calls that must fail closed. */
+export async function updateInvocationOutcomeStrict(
+  db: AppDb,
+  invocationId: string,
+  orgId: string,
+  outcome: InvocationOutcome,
+): Promise<void> {
+  const result = outcome.result === undefined ? null : capAuditField(outcome.result);
+  const error = outcome.error != null && outcome.error.length > POLICY_AUDIT_FIELD_CAP
+    ? outcome.error.slice(0, POLICY_AUDIT_FIELD_CAP)
+    : (outcome.error ?? null);
+  const updated = await db.update(actionInvocations).set({
+    status: outcome.status,
+    result: result ? result.value : null,
+    resultTruncated: result ? result.truncated : null,
+    error,
+    durationMs: outcome.durationMs ?? null,
+    ...(outcome.resolvedBy !== undefined ? { resolvedBy: outcome.resolvedBy } : {}),
+  }).where(and(
+    eq(actionInvocations.invocationId, invocationId),
+    eq(actionInvocations.orgId, orgId),
+  )).returning({ invocationId: actionInvocations.invocationId });
+  if (updated.length === 0) throw new Error(`audit invocation ${invocationId} was not found`);
+}
+
+/** Best-effort outcome update for internal calls. It never throws. */
 export async function updateInvocationOutcome(
   db: AppDb,
   invocationId: string,
   orgId: string,
-  outcome: {
-    status: "completed" | "error" | "approved" | "denied" | "cancelled" | "timeout";
-    result?: unknown;
-    error?: string;
-    durationMs?: number;
-    resolvedBy?: string;
-  },
+  outcome: InvocationOutcome,
 ): Promise<void> {
   try {
-    const result = outcome.result === undefined ? null : capAuditField(outcome.result);
-    const error =
-      outcome.error != null && outcome.error.length > POLICY_AUDIT_FIELD_CAP
-        ? outcome.error.slice(0, POLICY_AUDIT_FIELD_CAP)
-        : (outcome.error ?? null);
-    await db
-      .update(actionInvocations)
-      .set({
-        status: outcome.status,
-        result: result ? result.value : null,
-        resultTruncated: result ? result.truncated : null,
-        error,
-        durationMs: outcome.durationMs ?? null,
-        ...(outcome.resolvedBy !== undefined ? { resolvedBy: outcome.resolvedBy } : {}),
-      })
-      // Org-scoped: `invocationId` embeds the workflow node id, which the
-      // workflow AUTHOR controls — without the orgId predicate a crafted
-      // node id could collide with (and overwrite) another org's row.
-      .where(and(eq(actionInvocations.invocationId, invocationId), eq(actionInvocations.orgId, orgId)));
+    await updateInvocationOutcomeStrict(db, invocationId, orgId, outcome);
   } catch (err) {
     console.error(`policy audit outcome update failed for invocation ${invocationId}:`, err);
   }

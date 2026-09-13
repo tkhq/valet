@@ -6,9 +6,24 @@ import { withMcpAuth } from "better-auth/plugins";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import type { AppDb } from "../lib/drizzle.js";
-import { persistInvocationAudit } from "../policies/service.js";
-import { users } from "../schema/index.js";
+import {
+  persistInvocationAuditStrict,
+  updateInvocationOutcomeStrict,
+  type AuditInvocationRow,
+  type InvocationOutcome,
+} from "../policies/service.js";
+import { orgMembers, users } from "../schema/index.js";
 import type { ValetAuth } from "./index.js";
+
+const BUILTIN_TOOLS = new Set(["whoami", "list_sessions"]);
+const INVALID_TOOL_NAME = "<invalid-tool-name>";
+const REDACTED_ARGUMENTS = { arguments: "[redacted unvalidated arguments]" };
+const AUDIT_FAILURE = "Valet could not record the required MCP audit entry. Retry after audit storage is available.";
+
+export interface McpAuditStore {
+  start(row: AuditInvocationRow): Promise<void>;
+  finish(invocationId: string, orgId: string, outcome: InvocationOutcome): Promise<void>;
+}
 
 export interface McpHandlerOpts {
   auth: ValetAuth;
@@ -16,65 +31,144 @@ export interface McpHandlerOpts {
   plugins: ValetPlugin[];
   portForPlugin: (pluginName: string, userId: string) => McpToolPort | undefined;
   listSessions: (userId: string) => Promise<Array<{ id: string; title: string | null; status: string }>>;
+  auditStore?: McpAuditStore;
 }
 
-interface AuditCall {
-  userId: string;
+interface AuditLifecycle {
+  invocationId: string;
+  orgId: string;
+  startedAt: number;
+  handled: boolean;
+}
+
+interface ToolAttempt {
+  requestKey: string;
   tool: string;
   args: Record<string, unknown>;
-  sourceIp: string;
 }
 
-async function auditCall(
-  db: AppDb,
-  call: AuditCall,
+function requestKey(id: unknown, index: number): string {
+  if (typeof id === "string") return `s:${id}`;
+  if (typeof id === "number") return `n:${id}`;
+  return `invalid:${index}`;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function auditArguments(tool: McpToolDef | undefined, args: unknown): Record<string, unknown> {
+  const values = record(args);
+  if (!tool || !values) return REDACTED_ARGUMENTS;
+  try {
+    return tool.auditArguments ? tool.auditArguments(values) : values;
+  } catch {
+    return REDACTED_ARGUMENTS;
+  }
+}
+
+async function toolAttempts(req: Request, tools: Map<string, McpToolDef>): Promise<ToolAttempt[]> {
+  let body: unknown;
+  try {
+    body = await req.clone().json();
+  } catch {
+    return [];
+  }
+  const messages = Array.isArray(body) ? body : [body];
+  const attempts: ToolAttempt[] = [];
+  for (const [index, message] of messages.entries()) {
+    const request = record(message);
+    if (!request || request.method !== "tools/call") continue;
+    const params = record(request.params);
+    const tool = typeof params?.name === "string" ? params.name : INVALID_TOOL_NAME;
+    attempts.push({
+      requestKey: requestKey(request.id, index),
+      tool,
+      args: BUILTIN_TOOLS.has(tool) ? {} : auditArguments(tools.get(tool), params?.arguments),
+    });
+  }
+  return attempts;
+}
+
+export function validateMcpToolConfiguration(plugins: ValetPlugin[], portPlugins: ReadonlySet<string>): void {
+  const ownerByTool = new Map<string, string>([...BUILTIN_TOOLS].map((name) => [name, "Valet"]));
+  for (const plugin of plugins) {
+    const tools = plugin.mcpTools ?? [];
+    if (tools.length > 0 && !portPlugins.has(plugin.name)) {
+      throw new Error(`MCP plugin "${plugin.name}" has tools but no host port. Add its port factory and restart the API.`);
+    }
+    for (const tool of tools) {
+      const owner = ownerByTool.get(tool.name);
+      if (owner) {
+        throw new Error(`MCP tool "${tool.name}" is declared by both "${owner}" and "${plugin.name}". Rename one tool and restart the API.`);
+      }
+      ownerByTool.set(tool.name, plugin.name);
+    }
+  }
+}
+
+async function resolveMcpOrgId(db: AppDb, userId: string): Promise<string> {
+  const memberships = await db.select({ orgId: orgMembers.orgId })
+    .from(orgMembers).where(eq(orgMembers.userId, userId)).limit(2);
+  if (memberships.length !== 1) {
+    throw new Error("Your OAuth account must belong to exactly one organization. Ask an administrator to correct your organization membership.");
+  }
+  return memberships[0].orgId;
+}
+
+function defaultAuditStore(db: AppDb): McpAuditStore {
+  return {
+    start: (row) => persistInvocationAuditStrict(db, row),
+    finish: (invocationId, orgId, outcome) => updateInvocationOutcomeStrict(db, invocationId, orgId, outcome),
+  };
+}
+
+async function requireAudit(operation: () => Promise<void>): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    console.error("required MCP audit write failed:", error);
+    throw new Error(AUDIT_FAILURE);
+  }
+}
+
+async function runAudited(
+  auditStore: McpAuditStore,
+  lifecycle: AuditLifecycle | undefined,
   run: () => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
-  const startedAt = Date.now();
+  if (!lifecycle) throw new Error(AUDIT_FAILURE);
+  lifecycle.handled = true;
   try {
     const result = await run();
-    await persistInvocationAudit(db, {
-      invocationId: `mcp:${randomUUID()}`,
-      createdAt: startedAt,
-      startedAt,
-      service: "mcp",
-      actionId: call.tool,
+    await requireAudit(() => auditStore.finish(lifecycle.invocationId, lifecycle.orgId, {
       status: result.isError ? "error" : "completed",
-      userId: call.userId,
-      params: call.args,
-      sourceIp: call.sourceIp,
-      durationMs: Date.now() - startedAt,
-    });
+      durationMs: Date.now() - lifecycle.startedAt,
+    }));
     return result;
   } catch (error) {
+    if (error instanceof Error && error.message === AUDIT_FAILURE) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    await persistInvocationAudit(db, {
-      invocationId: `mcp:${randomUUID()}`,
-      createdAt: startedAt,
-      startedAt,
-      service: "mcp",
-      actionId: call.tool,
+    await requireAudit(() => auditStore.finish(lifecycle.invocationId, lifecycle.orgId, {
       status: "error",
-      userId: call.userId,
-      params: call.args,
-      sourceIp: call.sourceIp,
-      durationMs: Date.now() - startedAt,
       error: message,
-    });
+      durationMs: Date.now() - lifecycle.startedAt,
+    }));
     return { content: [{ type: "text", text: message }], isError: true };
   }
 }
 
 function registerPluginTool(
   server: McpServer,
-  db: AppDb,
   tool: McpToolDef,
   port: McpToolPort,
-  userId: string,
-  sourceIp: string,
+  lifecycles: Map<string, AuditLifecycle>,
+  auditStore: McpAuditStore,
 ): void {
-  // The engine keeps this Zod raw shape opaque to stay portable. The plugin
-  // creates it with Zod, and the MCP SDK is the first boundary that needs its type.
+  // The engine keeps this Zod raw shape opaque. The MCP SDK is the first
+  // boundary that needs the plugin's concrete Zod type.
   const inputSchema = tool.inputSchema as z.ZodRawShape;
   server.registerTool(
     tool.name,
@@ -87,32 +181,47 @@ function registerPluginTool(
         idempotentHint: tool.readOnly,
       },
     },
-    async (args) => auditCall(
-      db,
-      {
-        userId,
-        tool: tool.name,
-        args: tool.auditArguments ? tool.auditArguments(args) : args,
-        sourceIp,
-      },
-      async () => {
-        const result = await tool.execute(args, port);
-        return { content: [{ type: "text", text: result.text }] };
-      },
-    ),
+    async (args, extra) => runAudited(auditStore, lifecycles.get(requestKey(extra.requestId, 0)), async () => {
+      const result = await tool.execute(args, port);
+      return { content: [{ type: "text", text: result.text }] };
+    }),
   );
 }
 
 export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: string) => Promise<Response> {
   const { auth, db, listSessions } = opts;
+  const pluginTools = new Map(opts.plugins.flatMap((plugin) => (plugin.mcpTools ?? []).map((tool) => [tool.name, tool] as const)));
+  const auditStore = opts.auditStore ?? defaultAuditStore(db);
 
   return (request, sourceIp = "unknown") => withMcpAuth(auth, async (req, session) => {
-    const server = new McpServer({ name: "valet", version: "1.0.0" });
+    const attempts = await toolAttempts(req, pluginTools);
+    const lifecycles = new Map<string, AuditLifecycle>();
+    if (attempts.length > 0) {
+      const orgId = await resolveMcpOrgId(db, session.userId);
+      for (const attempt of attempts) {
+        const startedAt = Date.now();
+        const lifecycle = { invocationId: `mcp:${randomUUID()}`, orgId, startedAt, handled: false };
+        await requireAudit(() => auditStore.start({
+          invocationId: lifecycle.invocationId,
+          createdAt: startedAt,
+          startedAt,
+          service: "mcp",
+          actionId: attempt.tool,
+          status: "pending",
+          userId: session.userId,
+          orgId,
+          params: attempt.args,
+          sourceIp,
+        }));
+        lifecycles.set(attempt.requestKey, lifecycle);
+      }
+    }
 
+    const server = new McpServer({ name: "valet", version: "1.0.0" });
     server.registerTool(
       "whoami",
       { description: "Returns the authenticated user's identity: userId, email, role." },
-      async () => auditCall(db, { userId: session.userId, tool: "whoami", args: {}, sourceIp }, async () => {
+      async (extra) => runAudited(auditStore, lifecycles.get(requestKey(extra.requestId, 0)), async () => {
         const rows = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
         const user = rows[0];
         if (!user) {
@@ -124,26 +233,20 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
         return { content: [{ type: "text", text: JSON.stringify({ userId: user.id, email: user.email, role: user.role }) }] };
       }),
     );
-
     server.registerTool(
       "list_sessions",
       { description: "Lists the authenticated user's sessions: id, title, status." },
-      async () => auditCall(db, { userId: session.userId, tool: "list_sessions", args: {}, sourceIp }, async () => ({
+      async (extra) => runAudited(auditStore, lifecycles.get(requestKey(extra.requestId, 0)), async () => ({
         content: [{ type: "text", text: JSON.stringify(await listSessions(session.userId)) }],
       })),
     );
 
-    const names = new Set(["whoami", "list_sessions"]);
     for (const plugin of opts.plugins) {
+      const tools = plugin.mcpTools ?? [];
+      if (tools.length === 0) continue;
       const port = opts.portForPlugin(plugin.name, session.userId);
-      if (!port) continue;
-      for (const tool of plugin.mcpTools ?? []) {
-        if (names.has(tool.name)) {
-          throw new Error(`MCP tool name "${tool.name}" is duplicated. Rename one plugin tool and restart the API.`);
-        }
-        names.add(tool.name);
-        registerPluginTool(server, db, tool, port, session.userId, sourceIp);
-      }
+      if (!port) throw new Error(`MCP plugin "${plugin.name}" lost its host port. Restart the API after restoring the port factory.`);
+      for (const tool of tools) registerPluginTool(server, tool, port, lifecycles, auditStore);
     }
 
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -151,6 +254,15 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
       enableJsonResponse: true,
     });
     await server.connect(transport);
-    return transport.handleRequest(req);
+    const response = await transport.handleRequest(req);
+    for (const lifecycle of lifecycles.values()) {
+      if (lifecycle.handled) continue;
+      await requireAudit(() => auditStore.finish(lifecycle.invocationId, lifecycle.orgId, {
+        status: "error",
+        error: "The MCP server rejected the tool name or arguments.",
+        durationMs: Date.now() - lifecycle.startedAt,
+      }));
+    }
+    return response;
   })(request);
 }
