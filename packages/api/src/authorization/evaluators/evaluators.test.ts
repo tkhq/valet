@@ -94,7 +94,10 @@ decision := {"effect":"deny","reasonCode":"marshaled","matchedRuleIds":[],"oblig
 }
 `;
     const { identity, evaluator, host, pointer } = await activeEvaluator(runtime, testBundle(policy));
-    const values = Array.from({ length: 99_000 }, (_, index) => `value-${index.toString().padStart(6, "0")}`);
+    const values = Array.from(
+      { length: 80_000 },
+      (_, index) => `value-${index.toString().padStart(6, "0")}-${"x".repeat(128)}`,
+    );
     const generation = runtime.generation;
     await expect(
       runtime.run({
