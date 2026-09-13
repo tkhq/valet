@@ -140,7 +140,110 @@ describe("Session.prompt command interception", () => {
     }
     const entries = await store.getEntries(session.id, thread.id);
     expect(entries.filter((e) => e.type === "compaction")).toHaveLength(1);
-    expect(entries.filter((e) => e.type === "command_result")).toHaveLength(2);
+    const results = entries.filter((e) => e.type === "command_result");
+    expect(results).toHaveLength(2);
+    expect(results[1]?.type === "command_result" && results[1].output).toContain(
+      "already in progress",
+    );
+    expect(results[1]?.type === "command_result" && results[1].output).not.toContain(
+      "keep decisions",
+    );
+    expect(events.filter((e) => e.event.type === "compaction_end")).toHaveLength(1);
+    expect(thread.isCompacting()).toBe(false);
+  });
+
+  it("gives a manual join one lifecycle when a proactive owner exits as noop", async () => {
+    const faux = registerFauxProvider({ provider: "s-compact-join-noop" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store, bus, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread();
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    vi.spyOn(store, "getEntries").mockImplementationOnce(async () => {
+      entered();
+      await blocked;
+      return [];
+    });
+    let activeAtEnd: boolean | undefined;
+    bus.subscribe({}, (event) => {
+      if (event.event.type === "compaction_end") activeAtEnd = thread.isCompacting();
+    });
+
+    const proactive = thread.compactThread({ mode: "proactive" });
+    await enteredPromise;
+    expect(thread.isCompacting()).toBe(false);
+    const receipt = await session.prompt("/compact use these new instructions");
+    expect(receipt.command?.status).toBe("started");
+    expect(thread.isCompacting()).toBe(true);
+    release();
+    await expect(proactive).resolves.toBe("noop");
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await store.getEntries(session.id, thread.id)).some((e) => e.type === "command_result")) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const entries = await store.getEntries(session.id, thread.id);
+    const result = entries.find((e) => e.type === "command_result");
+    expect(result?.type === "command_result" && result.output).toContain("already in progress");
+    expect(result?.type === "command_result" && result.output).not.toContain(
+      "use these new instructions",
+    );
+    expect(events.filter((e) => e.event.type === "compaction_start")).toHaveLength(1);
+    expect(events.filter((e) => e.event.type === "compaction_end")).toHaveLength(1);
+    expect(activeAtEnd).toBe(false);
+  });
+
+  it("clears a manual join lifecycle when a proactive owner fails", async () => {
+    const faux = registerFauxProvider({ provider: "s-compact-join-failure" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread();
+    let reject!: (error: Error) => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((_resolve, rejectPromise) => { reject = rejectPromise; });
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    vi.spyOn(store, "getEntries").mockImplementationOnce(async () => {
+      entered();
+      await blocked;
+      return [];
+    });
+
+    const proactive = thread.compactThread({ mode: "proactive" });
+    const proactiveFailure = expect(proactive).rejects.toThrow("owner failed");
+    await enteredPromise;
+    const receipt = await session.prompt("/compact ignored instructions");
+    expect(receipt.command?.status).toBe("started");
+    reject(new Error("owner failed"));
+    await proactiveFailure;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await store.getEntries(session.id, thread.id)).some((e) => e.type === "command_result")) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const entries = await store.getEntries(session.id, thread.id);
+    const result = entries.find((e) => e.type === "command_result");
+    expect(result?.type === "command_result" && result.ok).toBe(false);
+    expect(result?.type === "command_result" && result.output).toContain("Retry /compact");
+    expect(
+      events.some((e) => e.event.type === "error" && e.event.code === "compaction_failed"),
+    ).toBe(true);
+    expect(events.filter((e) => e.event.type === "compaction_start")).toHaveLength(1);
     expect(events.filter((e) => e.event.type === "compaction_end")).toHaveLength(1);
     expect(thread.isCompacting()).toBe(false);
   });

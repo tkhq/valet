@@ -117,14 +117,21 @@ assistant message.
 
 One per-thread promise owns manual, proactive, and reactive compaction.
 Concurrent callers join that promise. They do not start another summarizer or
-DAG rewrite. `compactThread` still accepts `instructions`; the first owner
-supplies the instructions for the joined pass.
+DAG rewrite. A manual join starts the shared lifecycle if the nonmanual owner
+has not started it. The owner emits one matching end event for all joiners.
+`compactThread` still accepts `instructions`; only the first owner supplies
+instructions. A joined command result states that the request did not change the existing
+pass instructions.
 
 The web client sets the target thread's compacting state before it sends
 `/compact`. A failed POST clears that state. Durable `compaction_start`,
 `compaction_end`, and error events then own the state. Each WebSocket
 handshake sends a `compaction.state` snapshot after replay. The snapshot
-corrects reconnects whose resume offset is already past the start event.
+corrects reconnects whose resume offset is already past the start event. The
+engine marks the snapshot inactive before it publishes the end event. A
+snapshot after replayed completion cannot restore stale active state. Durable
+`command_result` frames append the result after the end event, so the result
+does not depend on the earlier completion refetch.
 
 ### 7. Compaction crosses the wire
 

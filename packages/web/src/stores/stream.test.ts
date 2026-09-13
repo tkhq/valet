@@ -97,6 +97,33 @@ describe("stream store reducer", () => {
     expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBeUndefined();
   });
 
+  it("appends and deduplicates a durable command result", () => {
+    const { ingest } = useStreamStore.getState();
+    const message: Message = {
+      id: "command-1",
+      sessionId: SESSION,
+      threadId: THREAD,
+      role: "system",
+      content: "Compacted the thread context.",
+      parts: [],
+      createdAt: Date.now(),
+      command: { name: "compact", source: "builtin", ok: true },
+    };
+    const event: WireEvent = {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "command_result",
+      threadId: THREAD,
+      message,
+    };
+
+    ingest(SESSION, event);
+    ingest(SESSION, { ...event, seq: 2, offset: offset(2) });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages).toEqual([message]);
+  });
+
   it("preserves store identity for an offset-free ping", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));

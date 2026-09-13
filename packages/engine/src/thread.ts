@@ -439,6 +439,12 @@ export class Thread {
   private consecutiveCompactionFailures = 0;
   /** One owner for any manual, proactive, or reactive compaction on this thread. */
   private compactionInFlight: Promise<CompactionOutcome> | null = null;
+  /** Shared lifecycle start for the current pass. Manual joiners can create it. */
+  private compactionLifecycleStart: Promise<void> | null = null;
+  /** Snapshot state clears before compaction_end is published. */
+  private compactionSnapshotActive = false;
+  /** True when the current pass owns or gained a manual command request. */
+  private compactionManualRequested = false;
   /**
    * Content hashes from the model's file reads, backing the
    * read-before-write staleness gate (TKAI-318). In-memory only: after a
@@ -4138,14 +4144,32 @@ export class Thread {
      */
     autoContinue?: false;
   }): Promise<CompactionOutcome> {
-    // Join the current pass instead of starting a second summarizer and DAG
-    // rewrite. This lock covers every caller, not only the HTTP command path.
-    if (this.compactionInFlight) return this.compactionInFlight;
+    return (await this.compactThreadWithStatus(opts)).outcome;
+  }
 
+  /** Run or join one pass and report whether another caller owns it. */
+  async compactThreadWithStatus(opts: {
+    mode: "proactive" | "reactive" | "manual";
+    instructions?: string;
+    autoContinue?: false;
+  }): Promise<{ outcome: CompactionOutcome; joined: boolean }> {
+    if (this.compactionInFlight) {
+      // A nonmanual owner can exit before its normal step-3 start. A manual
+      // join must still create one balanced lifecycle for optimistic clients.
+      if (opts.mode === "manual") {
+        this.compactionManualRequested = true;
+        await this.startCompactionLifecycle();
+      }
+      return { outcome: await this.compactionInFlight, joined: true };
+    }
+
+    this.compactionLifecycleStart = null;
+    this.compactionManualRequested = opts.mode === "manual";
+    this.compactionSnapshotActive = false;
     const pending = Promise.resolve().then(() => this.compactThreadOwned(opts));
     this.compactionInFlight = pending;
     try {
-      return await pending;
+      return { outcome: await pending, joined: false };
     } finally {
       if (this.compactionInFlight === pending) this.compactionInFlight = null;
     }
@@ -4153,7 +4177,18 @@ export class Thread {
 
   /** Current in-process state for the WebSocket handshake snapshot. */
   isCompacting(): boolean {
-    return this.compactionInFlight !== null;
+    return this.compactionSnapshotActive;
+  }
+
+  private startCompactionLifecycle(): Promise<void> {
+    if (!this.compactionLifecycleStart) {
+      this.compactionSnapshotActive = true;
+      this.compactionLifecycleStart = this.session.emit(
+        { type: "compaction_start", threadId: this.id },
+        { queueItemId: this.runningItem?.id },
+      );
+    }
+    return this.compactionLifecycleStart;
   }
 
   private async compactThreadOwned(opts: {
@@ -4161,10 +4196,7 @@ export class Thread {
     instructions?: string;
     autoContinue?: false;
   }): Promise<CompactionOutcome> {
-    const manual = opts.mode === "manual";
-    if (manual) {
-      await this.session.emit({ type: "compaction_start", threadId: this.id });
-    }
+    if (opts.mode === "manual") await this.startCompactionLifecycle();
     try {
       const cfg = this.session.options.compaction;
       if (cfg?.enabled === false) return "noop";
@@ -4179,7 +4211,7 @@ export class Thread {
         (span) => this.compactThreadInner(opts, span),
       );
     } catch (err) {
-      if (manual) {
+      if (this.compactionManualRequested) {
         const reason = err instanceof Error ? err.message : String(err);
         this.emitError(
           "compaction_failed",
@@ -4188,8 +4220,16 @@ export class Thread {
       }
       throw err;
     } finally {
-      if (manual) {
-        await this.session.emit({ type: "compaction_end", threadId: this.id });
+      // Report inactive before end publication. A handshake after replayed
+      // compaction_end must not restore stale active state from this promise.
+      this.compactionSnapshotActive = false;
+      const started = this.compactionLifecycleStart;
+      if (started) {
+        await started;
+        await this.session.emit(
+          { type: "compaction_end", threadId: this.id },
+          { queueItemId: this.runningItem?.id },
+        );
       }
     }
   }
@@ -4285,20 +4325,11 @@ export class Thread {
       return "insufficient";
     }
 
-    // Step 3: summarize. Manual compaction owns its lifecycle in the outer
-    // wrapper so pruning-only and no-op results also clear optimistic state.
-    if (opts.mode !== "manual") {
-      await session.emit(
-        { type: "compaction_start", threadId: this.id },
-        { queueItemId: this.runningItem?.id },
-      );
-    }
+    // Step 3: summarize. The shared lifecycle also covers a manual
+    // request that joined this pass before it reached this point.
+    await this.startCompactionLifecycle();
     let summaryResult: SummarizeResult;
-    // Everything between compaction_start and here MUST balance the pair —
-    // the wire contract promises "compaction_end fires on failure too", and
-    // the web store's compacting indicator only clears on the end frame. The
-    // finally covers the summarizer AND the persist/rebuild steps.
-    try {
+    {
       const previousSummary = findMostRecentCompaction(entries)?.summary;
       // Overflow retry (TKAI-306): if the summarize call itself blows the
       // summarizer model's context, drop the oldest half of the head input
@@ -4393,13 +4424,6 @@ export class Thread {
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
-    } finally {
-      if (opts.mode !== "manual") {
-        await session.emit(
-          { type: "compaction_end", threadId: this.id },
-          { queueItemId: this.runningItem?.id },
-        );
-      }
     }
 
     // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each

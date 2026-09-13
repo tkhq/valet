@@ -689,9 +689,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "command_result": {
-      // Command results reach the message list through the REST refetch in
-      // useSendPrompt's onSuccess, not through the stream store. The frame
-      // still advances lastOffset via `next`.
+      // The result is persisted after compaction_end. Append its durable wire
+      // message directly so the earlier completion refetch cannot miss it.
+      if (slice.messages.some((message) => message.id === ev.message.id)) return next;
+      next.messages = [...slice.messages, ev.message];
       return next;
     }
   }
