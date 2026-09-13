@@ -30,111 +30,34 @@ function snapshot(overrides: Partial<CurrentPolicySourceSnapshotV1> = {}): Curre
 }
 
 function orgRule(index: number, overrides: Partial<CurrentPolicySourceSnapshotV1["organizationPolicies"][number]> = {}): CurrentPolicySourceSnapshotV1["organizationPolicies"][number] {
-  return {
-    id: `org-${index}`,
-    organizationId: ORG,
-    principalType: "org",
-    principalId: ORG,
-    actionId: "gmail.send_email",
-    mode: "allow",
-    paramMatchers: [{ path: "selector", op: "eq", value: `value-${index}` }],
-    appliesIn: "any",
-    expiresAtMs: null,
-    revokedAtMs: null,
-    createdAtMs: 1,
-    updatedAtMs: index + 1,
-    sourceTable: "action_policies",
-    sourcePath: `org/${index}`,
-    ...overrides,
-  };
+  return { id: `org-${index}`, organizationId: ORG, principalType: "org", principalId: ORG, actionId: "gmail.send_email", mode: "allow",
+    paramMatchers: [{ path: "selector", op: "eq", value: `value-${index}` }], appliesIn: "any", expiresAtMs: null, revokedAtMs: null,
+    createdAtMs: 1, updatedAtMs: index + 1, sourceTable: "action_policies", sourcePath: `org/${index}`, ...overrides };
 }
-
 function teamRule(index: number): CurrentPolicySourceSnapshotV1["teamPolicies"][number] {
-  return {
-    ...orgRule(index),
-    id: `team-${index}`,
-    principalType: "team",
-    principalId: "team-1",
-    sourcePath: `team/${index}`,
-  };
+  return { ...orgRule(index), id: `team-${index}`, principalType: "team", principalId: "team-1", sourcePath: `team/${index}` };
 }
-
 function overrideRule(index: number): CurrentPolicySourceSnapshotV1["personalOverrides"][number] {
-  return {
-    id: `override-${index}`,
-    organizationId: ORG,
-    userId: "user-1",
-    actionId: "gmail.send_email",
-    mode: "allow",
-    paramMatchers: [{ path: "selector", op: "eq", value: `value-${index}` }],
-    createdAtMs: 1,
-    updatedAtMs: index + 1,
-    sourceTable: "action_policy_overrides",
-    sourcePath: `override/${index}`,
-  };
+  return { id: `override-${index}`, organizationId: ORG, userId: "user-1", actionId: "gmail.send_email", mode: "allow",
+    paramMatchers: [{ path: "selector", op: "eq", value: `value-${index}` }], createdAtMs: 1, updatedAtMs: index + 1,
+    sourceTable: "action_policy_overrides", sourcePath: `override/${index}` };
 }
-
 function request(parameters?: NonNullable<AuthorizationRequest["action"]["parameters"]>): AuthorizationRequest {
-  return {
-    schemaVersion: 1,
-    requestId: "review-request",
-    idempotencyKey: "interactive:review",
-    kind: "tool.action",
-    subject: {
-      orgId: ORG,
-      principal: { type: "user", id: "user-1" },
-      invocation: { type: "interactive", id: "review" },
-      sessionId: "session-1",
-    },
-    action: {
-      service: "gmail",
-      id: "gmail.send_email",
-      riskLevel: "high",
-      ...(parameters === undefined ? {} : { parameters }),
-    },
-    context: { evaluationTimeMs: NOW },
-    facts: {},
-  };
+  return { schemaVersion: 1, requestId: "review-request", idempotencyKey: "interactive:review", kind: "tool.action",
+    subject: { orgId: ORG, principal: { type: "user", id: "user-1" }, invocation: { type: "interactive", id: "review" }, sessionId: "session-1" },
+    action: { service: "gmail", id: "gmail.send_email", riskLevel: "high", ...(parameters === undefined ? {} : { parameters }) },
+    context: { evaluationTimeMs: NOW }, facts: {} };
 }
-
 async function evaluate(source: CurrentPolicySourceSnapshotV1, input = request()): Promise<EvaluationResult> {
   const host = new SourceBundleHost(new InMemorySourceBundleStorage(), runtime);
   const identity = await host.publish(buildCurrentPolicySource(source).bundle);
   await host.activate(ORG, undefined, identity.sourceBundleDigest);
-  return runtime.run<EvaluationResult>({
-    operation: "evaluate",
-    sourceBundleDigest: identity.sourceBundleDigest,
-    input,
-    explain: "off",
-  });
+  return runtime.run<EvaluationResult>({ operation: "evaluate", sourceBundleDigest: identity.sourceBundleDigest, input, explain: "off" });
 }
-
-function legacyMatcherEffect(path: string, parameters: Record<string, JsonValue>): string {
-  return resolvePolicyDecision({
-    policies: [{
-      id: "legacy-path",
-      principalType: "org",
-      service: null,
-      actionId: "gmail.send_email",
-      riskLevel: null,
-      mode: "deny",
-      paramMatchers: [{ path, op: "eq", value: "hit" }],
-      appliesIn: "any",
-      expiresAt: null,
-      revokedAt: null,
-      updatedAt: 1,
-    }],
-    grants: [],
-    overrides: [],
-  }, {
-    service: "gmail",
-    actionId: "gmail.send_email",
-    riskLevel: "high",
-    params: parameters,
-    appliesIn: "session",
-    sessionId: "session-1",
-    now: NOW,
-  }, undefined).mode;
+function legacyMatcherEffect(path: string, parameters: Record<string, JsonValue>, op: "eq" | "regex" = "eq", value = "hit"): string {
+  return resolvePolicyDecision({ policies: [{ id: "legacy-path", principalType: "org", service: null, actionId: "gmail.send_email", riskLevel: null,
+    mode: "deny", paramMatchers: [{ path, op, value }], appliesIn: "any", expiresAt: null, revokedAt: null, updatedAt: 1 }], grants: [], overrides: [] },
+  { service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: parameters, appliesIn: "session", sessionId: "session-1", now: NOW }, undefined).mode;
 }
 
 async function wasmRegexMatches(pattern: string, value: string): Promise<boolean> {
@@ -257,6 +180,48 @@ describe("current policy source review regressions", () => {
     });
     const result = await evaluate(source, request({ selector: "a".repeat(200_000) }));
     expect(result.decision).toMatchObject({ effect: "deny", reasonCode: "input_limit" }); expect(result.usage.work_units).toBeLessThan(750_000);
+    expect((await evaluate(source, request({ selector: "a", body: "x".repeat(200_000) }))).decision).toMatchObject({ effect: "deny", reasonCode: "organization_policy" });
+  });
+
+  it.each([1, true, null, Array.from({ length: 1_000 }, () => "x"), Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => [`k${i}`, "x"]))])
+  ("keeps non-string regex target %j on legacy no-match semantics", async (selector) => {
+    const source = snapshot({ organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: [{ path: "selector", op: "regex", value: "^x+$" }] })] });
+    expect((await evaluate(source, request({ selector }))).decision.effect).toBe(legacyMatcherEffect("selector", { selector }, "regex", "^x+$"));
+  });
+
+  it.each([
+    ["ASCII", "a".repeat(256), "a".repeat(257)], ["BMP", "é".repeat(256), "é".repeat(257)],
+    ["astral", "💥".repeat(128), "💥".repeat(129)],
+  ])("enforces the regex target boundary for %s", async (_name, boundary, over) => {
+    const source = snapshot({ organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: [{ path: "selector", op: "regex", value: "^x+$" }] })] });
+    expect((await evaluate(source, request({ selector: boundary }))).decision.reasonCode).not.toBe("input_limit");
+    expect((await evaluate(source, request({ selector: over }))).decision).toMatchObject({ effect: "deny", reasonCode: "input_limit" });
+  });
+
+  it("rejects lone surrogates at the JSON boundary", async () => {
+    await expect(evaluate(snapshot(), request({ selector: "\ud800" }))).rejects.toThrow();
+  });
+
+  it.each([
+    ["action", { actionId: "gmail.read_email" }], ["service", { actionId: undefined, service: "slack" }],
+    ["risk", { actionId: undefined, riskLevel: "low" }], ["scope", { appliesIn: "workflow" }],
+    ["expiry", { expiresAtMs: NOW }],
+  ])("ignores oversized input for inapplicable %s regex rules", async (_name, overrides) => {
+    const source = snapshot({ organizationPolicies: [orgRule(1, { ...overrides, mode: "deny", paramMatchers: [{ path: "selector", op: "regex", value: "^a+$" }] } as never)] });
+    expect((await evaluate(source, request({ selector: "a".repeat(200_000) }))).decision.reasonCode).not.toBe("input_limit");
+  });
+
+  it("ignores oversized input for an unrelated owner", async () => {
+    const source = snapshot({ teamIds: ["team-1"], teamPolicies: [{ ...teamRule(1), mode: "deny", paramMatchers: [{ path: "selector", op: "regex", value: "^a+$" }] }] });
+    expect((await evaluate(source, request({ selector: "a".repeat(200_000) }))).decision.reasonCode).not.toBe("input_limit");
+  });
+
+  it("bounds two applicable regex candidates", async () => {
+    const regex = [{ path: "selector", op: "regex" as const, value: "a".repeat(64) }];
+    const source = snapshot({ organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: regex })], personalOverrides: [overrideRule(1), { ...overrideRule(2), id: "regex-override", paramMatchers: regex }] });
+    const result = await evaluate(source, request({ selector: "a".repeat(256) }));
+    expect(result.decision.effect).toBe("deny"); expect(result.usage.work_units).toBeLessThan(750_000);
+    expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [0, 1, 2].map((i) => orgRule(i, { actionId: `action.${i}`, paramMatchers: regex })) }))).toThrow(expect.objectContaining({ code: "complexity_limit" }));
   });
 
   it("keeps the engine input document profile limit", async () => {

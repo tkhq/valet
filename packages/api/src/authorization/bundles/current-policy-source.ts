@@ -132,7 +132,7 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
     interpreter: {
       name: "regorus",
       version: "0.12.0",
-      revision: "f938ef286fdf9b229d3933b064dfd87323f397e8",
+      revision: "309ba35067d2118aafd696198a33037f5af9e1bd",
     },
     contractVersion: 1,
     regoVersion: "v1",
@@ -574,9 +574,14 @@ function buildPolicySource(
 }
 
 function emitRegexInputLimit(lines: string[], records: readonly NormalizedRule[]): void {
-  const paths = [...new Set(records.flatMap((row) => row.matchers.filter((matcher) => matcher.op === "regex").map((matcher) => regoPath(matcher.segments))))];
-  paths.forEach((path, i) => lines.push(`regex_target_${i}_oversized if { count(${path}) > 256 }`));
-  lines.push(paths.length ? `regex_input_valid if { ${paths.map((_, i) => `not regex_target_${i}_oversized`).join("; ")} }` : "regex_input_valid if { true }");
+  const guards: string[] = [];
+  records.forEach((row, rowIndex) => row.matchers.forEach((matcher, matcherIndex) => {
+    if (matcher.op !== "regex") return;
+    const guard = `regex_target_${rowIndex}_${matcherIndex}_oversized`;
+    guards.push(guard);
+    lines.push(`${guard} if { ${ruleApplicabilityConditions(row).join("; ")}; value := ${regoPath(matcher.segments)}; is_string(value); count(value) > 256 }`);
+  }));
+  lines.push(guards.length ? `regex_input_valid if { ${guards.map((guard) => `not ${guard}`).join("; ")} }` : "regex_input_valid if { true }");
 }
 function emitFactWinner(lines: string[], kind: "grant" | "approval", limit: number): void {
   const facts = kind === "grant" ? "grants" : "approvals";
@@ -619,15 +624,17 @@ function emitDefaultCandidates(
 }
 
 function ruleConditions(row: NormalizedRule, rowIndex: number): string[] {
-  const conditions = [
+  return [...ruleApplicabilityConditions(row), ...row.matchers.map((matcher, matcherIndex) => matcherCondition(matcher, rowIndex, matcherIndex))];
+}
+
+function ruleApplicabilityConditions(row: NormalizedRule): string[] {
+  return [
     row.ownerType === "team" ? `input.subject.principal.type == "team"` : row.ownerType === "personal" ? `input.subject.principal.type == "user"` : undefined,
     row.ownerType === "organization" ? undefined : `input.subject.principal.id == ${canonicalJson(row.ownerId)}`,
     row.target.kind === "action" ? `input.action.id == ${canonicalJson(row.target.value)}` : row.target.kind === "service" ? `input.action.service == ${canonicalJson(row.target.value)}` : `input.action.riskLevel == ${canonicalJson(row.target.value)}`,
     row.appliesIn === "any" ? undefined : `applies_in == ${canonicalJson(row.appliesIn)}`,
     row.expiresAtMs === null ? undefined : `input.context.evaluationTimeMs < ${row.expiresAtMs}`,
-    ...row.matchers.map((matcher, matcherIndex) => matcherCondition(matcher, rowIndex, matcherIndex)),
-  ];
-  return conditions.filter((condition): condition is string => condition !== undefined);
+  ].filter((condition): condition is string => condition !== undefined);
 }
 
 function matcherCondition(matcher: NormalizedRule["matchers"][number], rowIndex: number, matcherIndex: number): string {
