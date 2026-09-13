@@ -7,7 +7,7 @@ import { LocalValetEvaluator } from "../evaluators/local-valet.js";
 import { WasmPolicyRuntime } from "../evaluators/wasm-runtime.js";
 import { normalizePolicyDraft } from "./model.js";
 import { projectActionDraftToCurrentSnapshot } from "./current-action-projection.js";
-import type { PolicyDraftV1 } from "./types.js";
+import type { PolicyDraftV1, PolicyRuleDraftV1 } from "./types.js";
 
 let runtime: WasmPolicyRuntime;
 beforeAll(() => {
@@ -72,11 +72,7 @@ describe("browser draft to current source contract", () => {
   it("maps losslessly, validates the bundle, and evaluates through LocalValetEvaluator", async () => {
     const normalized = normalizePolicyDraft(draft);
     const snapshot = projectActionDraftToCurrentSnapshot(normalized, "org-1");
-    expect(snapshot.organizationPolicies[0]).toMatchObject({
-      id: "rule-1",
-      actionId: "gmail.send_email",
-      paramMatchers: [{ path: "to", op: "eq", value: "a@example.com" }],
-    });
+    expect(snapshot.organizationPolicies[0]).toEqual({ id: "rule-1", organizationId: "org-1", actionId: "gmail.send_email", mode: "deny", paramMatchers: [{ path: "to", op: "eq", value: "a@example.com" }], createdAtMs: 1, updatedAtMs: 1, principalType: "org", principalId: "org-1", appliesIn: "any", expiresAtMs: null, revokedAtMs: null, sourceTable: "action_policies", sourcePath: "builder/draft-1/rule-1" });
     const built = buildCurrentPolicySource(snapshot);
     const provenance = JSON.parse(Buffer.from(built.bundle.files.find((file) => file.path.startsWith("provenance/"))!.contentBase64, "base64").toString("utf8"));
     expect(provenance.entries.find((entry: { rule_id: string }) => entry.rule_id === "rule-1")).toMatchObject({
@@ -95,4 +91,10 @@ describe("browser draft to current source contract", () => {
     });
     expect(result.policyDigest).toBe(identity.policyDigest);
   });
+  it.each(["workflow.action", "approval", "description", "obligations", "subjects"] as const)("rejects lossy %s projection", field => {
+    const patch: Partial<PolicyRuleDraftV1> = field === "workflow.action" ? { context: field } : field === "approval" ? { approval: { tier: "human", replay: "once" } } : field === "description" ? { description: "lost" } : field === "obligations" ? { obligations: [{ type: "redact" }] } : { subjects: ["user"] };
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], ...patch }] };
+    expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action/i);
+  });
+
 });

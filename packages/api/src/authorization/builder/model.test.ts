@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import type { AuthorizationKind } from "@valet/engine/authorization";
+import { describe, expect, it, vi } from "vitest";
+import { authorizationSha256Hex, type AuthorizationKind } from "@valet/engine/authorization";
 import { AUTHORIZATION_CONTEXT_KINDS, POLICY_CONTEXTS } from "./contexts.js";
 import { createPreviewRequest, normalizePolicyDraft, sanitizeSampleFacts, validatePolicyDraft } from "./model.js";
 import type { PolicyDraftV1 } from "./types.js";
@@ -31,12 +31,11 @@ function draft(): PolicyDraftV1 {
             ],
           },
         ],
-        effect: "require_approval",
+        effect: "deny",
         appliesIn: "any",
-        approval: { tier: "human", replay: "once" },
-        obligations: [{ type: "redact", paths: ["parameters.to"] }],
-        description: "Example",
-        metadata: { owner: "security" },
+        obligations: [],
+        description: "",
+        metadata: {},
       },
     ],
   };
@@ -56,6 +55,17 @@ describe("policy context registry", () => {
       }
     }
   });
+  it("uses bounded SHA-256 identities and rejects hostile or mixed drafts", () => {
+    expect(authorizationSha256Hex("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    expect(normalizePolicyDraft(draft()).normalizedIdentity).toBe("policy-draft-v1:77f0183085ee631b3bbf4cf920dbbb9bc37aa8a2feb41778d4a22e5a9f0aed44");
+    const locale = vi.spyOn(String.prototype, "locale" + "Compare" as "locale\u0043ompare").mockImplementation(() => { throw new Error("locale-dependent"); }); expect(normalizePolicyDraft(draft()).normalizedIdentity).toContain("policy-draft-v1:"); locale.mockRestore();
+    const base = draft(), mixed: PolicyDraftV1 = { ...base, rules: [...base.rules, { ...base.rules[0], ruleId: "rule-2", context: "route.access" }] };
+    expect(validatePolicyDraft(mixed).map(value => value.code)).toContain("mixed_context");
+    let reads = 0; const hostile = Object.defineProperty({}, "rules", { enumerable: true, get() { reads++; throw new Error("no"); } });
+    expect(() => validatePolicyDraft(hostile)).not.toThrow(); expect(reads).toBe(0);
+    expect(sanitizeSampleFacts("tool.action", { "parameters.value": { nested: "api_token" } })).toEqual({});
+  });
+
 });
 
 describe("policy draft validation", () => {

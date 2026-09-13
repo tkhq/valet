@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { JsonValue } from "@valet/engine/authorization";
-import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, isLosslessRegexV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
+import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyValueComplexityV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
 export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
 import { grantPolicyKey } from "../../policies/resolution.js";
 import type { CanonicalSourceBundle } from "./types.js";
@@ -374,28 +374,9 @@ function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[
     if (!MATCHER_OPS.has(matcher.op)) fail("unknown_matcher", `Rule ${id} matcher ${index} has an unknown operator.`);
     const path = parseMatcherPath(matcher.path);
     if (path.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPathSegments) fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the path segment limit.`);
-    const valueBearing = !["exists", "not_exists"].includes(matcher.op);
-    if (valueBearing !== Object.hasOwn(matcher, "value")) fail("matcher_value", `Rule ${id} matcher ${index} has an invalid value.`);
-    if (["in", "not_in"].includes(matcher.op) && !Array.isArray(matcher.value)) fail("matcher_value", `Rule ${id} matcher ${index} requires an array value.`);
-    if (["gt", "gte", "lt", "lte"].includes(matcher.op) && (typeof matcher.value !== "number" || !Number.isFinite(matcher.value))) fail("matcher_value", `Rule ${id} matcher ${index} requires a finite number.`);
-    if (matcher.op === "regex" && (typeof matcher.value !== "string" || !isLosslessRegexV1(matcher.value))) {
-      fail("non_lossless_regex", `Rule ${id} matcher ${index} cannot be translated losslessly by regex subset v1.`);
-    }
-    assertJsonValue(`${id}.paramMatchers[${index}].value`, matcher.value, !valueBearing);
-    if (valueBearing) {
-      const complexity = matcherValueComplexity(matcher.value);
-      bytes += complexity.bytes;
-      nodes += complexity.nodes;
-      if (complexity.bytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes) {
-        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value byte limit.`);
-      }
-      if (complexity.nodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes) {
-        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value node limit.`);
-      }
-      if (complexity.depth > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth) {
-        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value depth limit.`);
-      }
-    }
+    const matcherIssues = currentPolicyMatcherIssuesV1(matcher);
+    if (matcherIssues.length) fail(matcherIssues[0] === "unsafe_regex" ? "non_lossless_regex" : matcherIssues[0], `Rule ${id} matcher ${index} cannot be translated losslessly by the current input contract.`);
+    if (Object.hasOwn(matcher, "value")) { const complexity = currentPolicyValueComplexityV1(matcher.value)!; bytes += complexity.bytes; nodes += complexity.nodes; }
     const identity = canonicalJson(matcher);
     if (identities.has(identity)) fail("duplicate_matcher", `Rule ${id} matcher ${index} is duplicated.`);
     identities.add(identity);
@@ -585,41 +566,6 @@ function canonicalJson(value: unknown): string {
     return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(",")}}`;
   }
   fail("non_json_value", "Canonical policy data contains a non-JSON value.");
-}
-
-function matcherValueComplexity(value: unknown): { bytes: number; nodes: number; depth: number } {
-  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
-  let nodes = 0;
-  let depth = 0;
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    nodes += 1;
-    depth = Math.max(depth, current.depth);
-    if (nodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes
-      || depth > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth) {
-      return { bytes: 0, nodes, depth };
-    }
-    if (Array.isArray(current.value)) {
-      for (const entry of current.value) stack.push({ value: entry, depth: current.depth + 1 });
-    } else if (current.value !== null && typeof current.value === "object") {
-      for (const entry of Object.values(current.value as Record<string, unknown>)) {
-        stack.push({ value: entry, depth: current.depth + 1 });
-      }
-    }
-  }
-  return { bytes: Buffer.byteLength(canonicalJson(value)), nodes, depth };
-}
-
-function assertJsonValue(path: string, value: unknown, allowUndefined: boolean): void {
-  if (value === undefined && allowUndefined) return;
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (Number.isFinite(value)) return;
-    fail("non_json_value", `${path} contains a non-finite number.`);
-  }
-  if (Array.isArray(value)) { value.forEach((entry, index) => assertJsonValue(`${path}[${index}]`, entry, false)); return; }
-  if (typeof value === "object") { Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => assertJsonValue(`${path}.${key}`, entry, false)); return; }
-  fail("non_json_value", `${path} contains a non-JSON value.`);
 }
 
 function bundleFile(path: string, mediaType: string, bytes: string): { path: string; mediaType: string; bytes: string } { return { path, mediaType, bytes }; }

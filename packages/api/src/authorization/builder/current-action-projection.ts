@@ -10,8 +10,11 @@ export function projectActionDraftToCurrentSnapshot(draft: NormalizedPolicyDraft
     personalOverrides: CurrentPersonalOverrideV1[] = [];
   const teamIds = new Set<string>();
   for (const rule of draft.rules) {
-    if (rule.context !== "tool.action" && rule.context !== "workflow.action") throw new TypeError("Current source projection supports action contexts only.");
+    if (rule.context !== "tool.action") throw new TypeError("Current source projection supports tool.action only.");
     if (rule.matcherGroups.some((group) => group.mode !== "all")) throw new TypeError("Current source projection supports all matcher groups only.");
+    if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length || rule.approval) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
+    if (rule.subjects.length !== 1 || rule.subjects[0] !== rule.owner.kind) throw new TypeError("Current source projection rejects subject scope loss.");
+    if (rule.authority === "personal" && (rule.appliesIn !== "any" || rule.expiresAtMs !== undefined)) throw new TypeError("Personal overrides cannot preserve scope or expiry.");
     const target = actionTarget(rule),
       paramMatchers = rule.matcherGroups.flatMap((group) =>
         group.matchers.map(

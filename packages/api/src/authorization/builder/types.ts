@@ -106,6 +106,6 @@ export type PolicyPreviewResultV1 =
       readonly issues: readonly DraftValidationIssue[];
     };
 export interface PolicyPreviewProvider {
-  preview(request: PolicyPreviewRequestV1): Promise<PolicyPreviewResultV1>;
+  preview(request: PolicyPreviewRequestV1, signal: AbortSignal): Promise<PolicyPreviewResultV1>;
 }
 export type { AuthorizationKind, JsonValue } from "@valet/engine/authorization";
