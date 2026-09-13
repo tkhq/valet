@@ -16,7 +16,7 @@ pub const ENGINE_CONTRACT_VERSION: u32 = 1;
 pub const CAPABILITY_PROFILE_VERSION: u32 = 1;
 pub const REGORUS_VERSION: &str = "0.12.0";
 pub const REGORUS_REPOSITORY: &str = "https://github.com/tkhq/regorus";
-pub const REGORUS_REVISION: &str = "aee1a9b12b1ec1e0599a53acd665b31d3bb5ea2e";
+pub const REGORUS_REVISION: &str = "f938ef286fdf9b229d3933b064dfd87323f397e8";
 pub const REGO_VERSION: &str = "v1";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
