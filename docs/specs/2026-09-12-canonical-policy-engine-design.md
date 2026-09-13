@@ -636,6 +636,16 @@ The current organization and team forms can read imported builder projections du
 
 The importer preserves original row IDs, source tables, timestamps, authors, matchers, and ownership in provenance. It rejects an expression that has no lossless builder or advanced-source representation. The migration records an explicit issue for that expression and blocks affected bundle activation. It never weakens, drops, or approximates the expression.
 
+### Current action-policy source projection
+
+The PR 6 source builder accepts one immutable, versioned organization snapshot. It does not read a database or plugin registry. The snapshot contains organization rules, team rules, personal overrides, plugin defaults, risk defaults, and the bundle default. The builder sorts source identities and emits one Rego v1 kernel, canonical JSON data, and a provenance map.
+
+The projection preserves action, service, and risk specificity. It also preserves mode, `appliesIn`, parameter matchers, owner scope, expiration, revocation, and the newest-row tie-break. The builder rejects equal-precedence identities because the current resolver would select them by database encounter order. It rejects regular expressions that use JavaScript features without lossless Regorus semantics.
+
+Runtime grants and approval resolutions are versioned input facts. The fact builder requires exact action and risk targets, organization ownership, one session or workflow scope, issuer provenance, creation and expiry times, and revocation state. Approval facts also bind the gate, request subject digest, original decision digest, approver, verdict, and resolution version. Unknown fact schema versions or cross-organization fact sets deny evaluation. A well-shaped expired, revoked, cross-scope, or nonmatching fact is excluded. This choice preserves fail-closed matching without making stale facts an evaluator failure.
+
+The current projection supports only `tool.action` and `workflow.action`. Other authorization kinds return `unsupported_authorization_context`. Action requests return a typed human approval requirement only for `require_approval` decisions. The standard new-organization snapshot keeps the current low and medium risk allows and high and critical approval requirements. If a snapshot omits all plugin and risk defaults, the explicit bundle default requires approval. This last case intentionally differs from the current resolver's hard-coded low-risk allow. Cutover must publish a complete risk-default snapshot.
+
 ### Open policy builder gates
 
 The implementation must resolve these gates before builder publication is enabled:
