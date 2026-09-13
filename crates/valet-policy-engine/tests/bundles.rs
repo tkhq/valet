@@ -72,11 +72,11 @@ fn canonical_bundle_validates_and_has_distinct_stable_identities() {
     assert_eq!(first.source_bundle_digest.len(), 64);
     assert_eq!(
         first.source_bundle_digest,
-        "00c9429b95b2aa7ae9fec08a8aaba218cedaeae3ccb8510eea17b06de7ccd6d7"
+        "11561d1b37def836025784f113873ef0949388e6b3cc4800e5f52fa926d42c1e"
     );
     assert_eq!(
         first.policy_digest,
-        "b5630487e46169e6038b3f0fe2a0cb8109ccb3c6ce5f9ab8f96c8b313ef59a13"
+        "4e88d6371343bec2ab15662209f512b5fe9409b77d2146b449482f1f72fc232f"
     );
 }
 
