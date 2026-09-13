@@ -912,11 +912,11 @@ describe("github.request_reviewers", () => {
     );
   }
 
-  it("publishes a schema with required non-empty users and optional teams", () => {
+  it("publishes optional non-empty user and team reviewer lists", () => {
     const action = findAction("github.request_reviewers");
 
     expect(action.parameters).toMatchObject({
-      required: ["owner", "repo", "pullNumber", "reviewers"],
+      required: ["owner", "repo", "pullNumber"],
       properties: {
         pullNumber: { minimum: 1 },
         reviewers: { minItems: 1, items: { minLength: 1 } },
@@ -957,12 +957,63 @@ describe("github.request_reviewers", () => {
     expect(server.calls[0]?.path).not.toContain("issues");
   });
 
+  it("requests a team when no individual reviewer is supplied", async () => {
+    const server = useFixture({
+      requestReviewers: () => ({
+        body: {
+          number: 7,
+          html_url: "https://github.com/acme/widgets/pull/7",
+          requested_reviewers: [],
+          requested_teams: [{ slug: "platform" }],
+        },
+      }),
+    });
+
+    const result = await request({ reviewers: undefined, teamReviewers: ["platform"] });
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { requested_reviewers: [], requested_teams: ["platform"] },
+    });
+    expect(server.calls[0]?.body).toEqual({ reviewers: [], team_reviewers: ["platform"] });
+  });
+
+  it("rejects a call without individual or team reviewers before GitHub", async () => {
+    const server = useFixture();
+
+    const result = await request({ reviewers: undefined, teamReviewers: undefined });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("reviewers");
+    expect(result.error).toContain("teamReviewers");
+    expect(server.calls).toHaveLength(0);
+  });
+
   it("does not send team_reviewers when no teams are requested", async () => {
     const server = useFixture();
 
     await request({});
 
     expect(server.calls[0]?.body).toEqual({ reviewers: ["octavia"] });
+  });
+
+  it("explains author, collaborator, and atomic failures from GitHub", async () => {
+    useFixture({
+      requestReviewers: () => ({
+        status: 422,
+        body: { message: "Validation Failed" },
+      }),
+    });
+
+    const result = await request({});
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error).toContain("author");
+    expect(result.error).toContain("collaborator");
+    expect(result.error).toContain("atomically");
+    expect(result.error).toContain("no reviewer was added");
   });
 
   it("reports the required permission when GitHub denies the request", async () => {

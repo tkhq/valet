@@ -19,8 +19,8 @@ template gallery at the time it shipped. Slack readiness has since landed
 
 ## Reviewer request action
 
-`github.request_reviewers` requests review from one or more GitHub users and
-optional organization team slugs. It sends `POST
+`github.request_reviewers` requests review from GitHub users, organization
+team slugs, or both. It requires at least one nonempty list. It sends `POST
 /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers` with
 `reviewers` and optional `team_reviewers` fields. The action adds reviewer
 requests. It does not change PR assignees.
