@@ -1774,3 +1774,13 @@ describe("toolApprovalGateContext malformed persistence", () => {
     }
   });
 });
+
+describe("pluginCatalogTools duplicate action identity", () => {
+  it("rejects duplicate qualified action ids instead of selecting by plugin order", () => {
+    const action = makeMockPlugin().plugin.actions[0]!;
+    expect(() => pluginCatalogTools({ plugins: [
+      { service: "one", actions: [{ ...action, id: "shared.run" }] },
+      { service: "two", actions: [{ ...action, id: "shared.run" }] },
+    ] })).toThrow("duplicate plugin action id: shared.run");
+  });
+});
