@@ -215,7 +215,7 @@
   "enabled_builtin_count": 104,
   "targets": [
     {"target":"native","status":"supported","evidence":"cargo test --workspace --locked"},
-    {"target":"wasm32-unknown-unknown","status":"pending","evidence":"cargo check succeeds; execution parity remains unproven"}
+    {"target":"wasm32-unknown-unknown","status":"supported","evidence":"Rust-to-WASM worker parity, 100 ms termination, 64 MiB linker cap, and post-failure recovery tests"}
   ],
   "ambient_capabilities": [
     {"name":"wall_clock","class":"fact_backed","status":"disabled","replacement":"canonical input fact"},
@@ -245,7 +245,6 @@
     {"id":"comprehension-count","area":"limits","description":"Intermediate comprehension value count is not separately observable through the stable API.","enforcement":"deterministic work units and result value limits fail closed"},
     {"id":"detailed-explain","area":"explain","description":"Regorus has no stable redacted semantic event API.","enforcement":"detailed explain requests fail closed"},
     {"id":"numeric-unicode-corpus","area":"semantics","description":"Numeric edge cases and Unicode normalization are not exhaustively covered.","enforcement":"compatibility status remains partial"},
-    {"id":"wasm-parity","area":"target","description":"Rust to WebAssembly parity is not established in PR 4.","enforcement":"the profile marks the target pending"},
     {"id":"rvm-parity","area":"semantic_path","description":"RVM with, cache, unwind, format, limit, and corpus parity are incomplete.","enforcement":"the rvm feature is disabled"}
   ],
   "conformance": {
