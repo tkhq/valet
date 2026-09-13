@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { JsonValue } from "@valet/engine/authorization";
+import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, isCurrentPolicyActionV1, isCurrentPolicyRiskV1, isCurrentPolicyServiceV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
+export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
 import { grantPolicyKey } from "../../policies/resolution.js";
 import type { CanonicalSourceBundle } from "./types.js";
 import type {
@@ -12,34 +14,12 @@ import type {
 } from "./current-policy-types.js";
 
 const MODES = new Set(["allow", "require_approval", "deny"]);
-const RISKS = new Set(["low", "medium", "high", "critical"]);
 const APPLIES_IN = new Set(["any", "session", "workflow"]);
 const MATCHER_OPS = new Set(["eq", "neq", "regex", "in", "not_in", "gt", "gte", "lt", "lte", "exists", "not_exists"]);
-const SERVICE_ID = /^[a-z][a-z0-9_-]*$/;
-const LOCAL_ACTION_ID = /^[a-z0-9][a-z0-9_.:-]*$/;
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
 const POLICY_PATH = "policies/current-action-policy.rego";
 const DATA_PATH = "data/current-action-policy.json";
 const PROVENANCE_PATH = "provenance/current-action-policy.json";
-
-export const CURRENT_POLICY_COMPLEXITY_LIMITS_V1 = Object.freeze({
-  schemaVersion: 1 as const,
-  maxRules: 64,
-  maxMatchersPerRule: 16,
-  maxTotalMatchers: 128,
-  maxPathSegments: 8,
-  maxRegexLength: 64,
-  maxRegexMatchers: 2,
-  maxRegexTargetCodeUnits: 256,
-  maxMatcherValueBytes: 768,
-  maxMatcherValueNodes: 256,
-  maxMatcherValueDepth: 16,
-  maxTotalMatcherValueBytes: 12_288,
-  maxTotalMatcherValueNodes: 2_048,
-  maxPluginDefaults: 32,
-  maxDynamicGrants: 8,
-  maxDynamicApprovals: 8,
-});
 
 export interface BuiltCurrentPolicySourceV1 {
   readonly bundle: CanonicalSourceBundle;
@@ -307,7 +287,7 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   }
   for (const row of snapshot.riskDefaults) {
     unique(ids, row.id);
-    if (!RISKS.has(row.riskLevel)) fail("unknown_risk", `Risk default ${row.id} has an unknown risk level.`);
+    if (!isCurrentPolicyRiskV1(row.riskLevel)) fail("unknown_risk", `Risk default ${row.id} has an unknown risk level.`);
     validateMode(row.id, row.mode);
     nonEmpty(`${row.id}.sourcePath`, row.sourcePath);
   }
@@ -339,7 +319,7 @@ function validateGrant(grant: CurrentRuntimeGrantSourceV1, organizationId: strin
   if (grant.organizationId !== organizationId) fail("cross_organization", `Grant ${grant.id} belongs to another organization.`);
   validateService(grant.service);
   validateAction(grant.service, grant.actionId);
-  if (!RISKS.has(grant.riskLevel)) fail("unknown_risk", `Grant ${grant.id} has an unknown risk level.`);
+  if (!isCurrentPolicyRiskV1(grant.riskLevel)) fail("unknown_risk", `Grant ${grant.id} has an unknown risk level.`);
   if (grant.policyKey !== grantPolicyKey(grant.service, grant.actionId)) fail("invalid_policy_key", `Grant ${grant.id} has an invalid policy key.`);
   validateScope(grant.id, grant.appliesIn, grant.sessionId, grant.workflowExecutionId);
   nonEmpty(`${grant.id}.issuerId`, grant.issuerId);
@@ -371,18 +351,7 @@ function validateScope(id: string, appliesIn: string, sessionId: string | undefi
   fail("invalid_scope", `Fact ${id} has a scope that does not match appliesIn.`);
 }
 
-function validateTarget(id: string, target: CurrentPolicyTargetV1): void {
-  const count = Number(target.service !== undefined) + Number(target.actionId !== undefined) + Number(target.riskLevel !== undefined);
-  if (count !== 1) fail("invalid_target", `Rule ${id} must have exactly one target.`);
-  if (target.service !== undefined) validateService(target.service);
-  if (target.actionId !== undefined) {
-    const separator = target.actionId.indexOf(".");
-    if (separator < 1) fail("invalid_action", `Rule ${id} has a malformed action ID.`);
-    validateAction(target.actionId.slice(0, separator), target.actionId);
-  }
-  if (target.riskLevel !== undefined && !RISKS.has(target.riskLevel)) fail("unknown_risk", `Rule ${id} has an unknown risk level.`);
-}
-
+function validateTarget(id: string, target: CurrentPolicyTargetV1): void { const code = currentPolicyTargetIssueV1(target); if (code) fail(code, `Rule ${id} has an invalid target.`); }
 function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[]): { bytes: number; nodes: number } {
   const identities = new Set<string>();
   let bytes = 0;
@@ -391,33 +360,20 @@ function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[
     if (!MATCHER_OPS.has(matcher.op)) fail("unknown_matcher", `Rule ${id} matcher ${index} has an unknown operator.`);
     const path = parseMatcherPath(matcher.path);
     if (path.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPathSegments) fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the path segment limit.`);
-    const valueBearing = !["exists", "not_exists"].includes(matcher.op);
-    if (valueBearing !== Object.hasOwn(matcher, "value")) fail("matcher_value", `Rule ${id} matcher ${index} has an invalid value.`);
-    if (["in", "not_in"].includes(matcher.op) && !Array.isArray(matcher.value)) fail("matcher_value", `Rule ${id} matcher ${index} requires an array value.`);
-    if (["gt", "gte", "lt", "lte"].includes(matcher.op) && (typeof matcher.value !== "number" || !Number.isFinite(matcher.value))) fail("matcher_value", `Rule ${id} matcher ${index} requires a finite number.`);
-    if (matcher.op === "regex" && (typeof matcher.value !== "string" || !isLosslessRegexV1(matcher.value))) {
-      fail("non_lossless_regex", `Rule ${id} matcher ${index} cannot be translated losslessly by regex subset v1.`);
-    }
-    assertJsonValue(`${id}.paramMatchers[${index}].value`, matcher.value, !valueBearing);
-    if (valueBearing) {
-      const complexity = matcherValueComplexity(matcher.value);
-      bytes += complexity.bytes;
-      nodes += complexity.nodes;
-      if (complexity.bytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes) {
-        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value byte limit.`);
-      }
-      if (complexity.nodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes) {
-        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value node limit.`);
-      }
-      if (complexity.depth > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth) {
-        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value depth limit.`);
-      }
-    }
+    const matcherIssues = currentPolicyMatcherIssuesV1(matcher);
+    if (matcherIssues.length) fail(matcherIssues[0] === "unsafe_regex" ? "non_lossless_regex" : matcherIssues[0], `Rule ${id} matcher ${index} cannot be translated losslessly by the current input contract.`);
+    if (Object.hasOwn(matcher, "value")) { const complexity = currentPolicyValueComplexityV1(matcher.value)!; bytes += complexity.bytes; nodes += complexity.nodes; }
     const identity = canonicalJson(matcher);
     if (identities.has(identity)) fail("duplicate_matcher", `Rule ${id} matcher ${index} is duplicated.`);
     identities.add(identity);
   }
   return { bytes, nodes };
+}
+
+function parseMatcherPath(path: string): Array<string | number> {
+  const result = parseCurrentPolicyMatcherPathV1(path);
+  if (result === null) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} does not use the lossless path grammar.`);
+  return result;
 }
 
 function normalizeRule(
@@ -448,88 +404,6 @@ function normalizeRule(
     createdAtMs: row.createdAtMs,
     updatedAtMs: row.updatedAtMs,
   };
-}
-
-// Pinned Regorus round-trips ASCII identifier segments and canonical decimal array indexes.
-const SAFE_PATH_SEGMENT_V1 = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SAFE_ARRAY_INDEX_V1 = /^(?:0|[1-9][0-9]*)$/;
-
-function parseMatcherPath(path: string): Array<string | number> {
-  const result: Array<string | number> = [];
-  let index = 0;
-  while (index < path.length) {
-    let end = index;
-    while (end < path.length && path[end] !== "." && path[end] !== "[") end += 1;
-    const segment = path.slice(index, end);
-    if (!SAFE_PATH_SEGMENT_V1.test(segment)) {
-      fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unsafe segment.`);
-    }
-    if (["__proto__", "constructor", "prototype"].includes(segment)) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} depends on JavaScript prototype lookup.`);
-    result.push(segment);
-    index = end;
-    while (index < path.length && path[index] === "[") {
-      const close = path.indexOf("]", index);
-      if (close === -1) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unterminated index.`);
-      const text = path.slice(index + 1, close);
-      const arrayIndex = Number(text);
-      if (!SAFE_ARRAY_INDEX_V1.test(text) || !Number.isSafeInteger(arrayIndex)) {
-        fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unsafe index.`);
-      }
-      result.push(arrayIndex);
-      index = close + 1;
-    }
-    if (index === path.length) break;
-    if (path[index] !== ".") fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} requires a separator.`);
-    index += 1;
-  }
-  if (result.length === 0 || path.endsWith(".")) {
-    fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an empty segment.`);
-  }
-  return result;
-}
-
-// This ASCII grammar has the same match language in JavaScript and the pinned Regorus regex engine.
-function isLosslessRegexV1(pattern: string): boolean {
-  if (pattern.length === 0 || pattern.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexLength) return false;
-  if ([...pattern].some((char) => char.codePointAt(0)! < 0x20 || char.codePointAt(0)! > 0x7e)) return false;
-  let index = pattern.startsWith("^") ? 1 : 0;
-  const end = pattern.endsWith("$") && !pattern.endsWith("\\$") ? pattern.length - 1 : pattern.length;
-  let atoms = 0;
-  while (index < end) {
-    const char = pattern[index];
-    if (char === "\\") {
-      if (index + 1 >= end || !"\\.^$*+?()[]{}|-".includes(pattern[index + 1])) return false;
-      index += 2;
-    } else if (char === "[") {
-      const close = pattern.indexOf("]", index + 1);
-      if (close === -1 || close >= end || !validAsciiClass(pattern.slice(index + 1, close))) return false;
-      index = close + 1;
-    } else {
-      if (".^$*+?()[]{}|".includes(char)) return false;
-      index += 1;
-    }
-    atoms += 1;
-    if (index < end && "*+?".includes(pattern[index])) index += 1;
-  }
-  return atoms > 0 && index === end;
-}
-
-function validAsciiClass(content: string): boolean {
-  if (content.startsWith("^")) return false;
-  const body = content;
-  if (body.length === 0) return false;
-  for (let index = 0; index < body.length;) {
-    const first = body[index];
-    if (!/[A-Za-z0-9]/.test(first)) return false;
-    if (body[index + 1] !== "-") {
-      index += 1;
-      continue;
-    }
-    const last = body[index + 2];
-    if (last === undefined || !/[A-Za-z0-9]/.test(last) || first.charCodeAt(0) > last.charCodeAt(0)) return false;
-    index += 3;
-  }
-  return true;
 }
 
 type NormalizedRule = ReturnType<typeof normalizeRule> & { precedenceRank?: number };
@@ -680,41 +554,6 @@ function canonicalJson(value: unknown): string {
   fail("non_json_value", "Canonical policy data contains a non-JSON value.");
 }
 
-function matcherValueComplexity(value: unknown): { bytes: number; nodes: number; depth: number } {
-  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
-  let nodes = 0;
-  let depth = 0;
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    nodes += 1;
-    depth = Math.max(depth, current.depth);
-    if (nodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes
-      || depth > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth) {
-      return { bytes: 0, nodes, depth };
-    }
-    if (Array.isArray(current.value)) {
-      for (const entry of current.value) stack.push({ value: entry, depth: current.depth + 1 });
-    } else if (current.value !== null && typeof current.value === "object") {
-      for (const entry of Object.values(current.value as Record<string, unknown>)) {
-        stack.push({ value: entry, depth: current.depth + 1 });
-      }
-    }
-  }
-  return { bytes: Buffer.byteLength(canonicalJson(value)), nodes, depth };
-}
-
-function assertJsonValue(path: string, value: unknown, allowUndefined: boolean): void {
-  if (value === undefined && allowUndefined) return;
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (Number.isFinite(value)) return;
-    fail("non_json_value", `${path} contains a non-finite number.`);
-  }
-  if (Array.isArray(value)) { value.forEach((entry, index) => assertJsonValue(`${path}[${index}]`, entry, false)); return; }
-  if (typeof value === "object") { Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => assertJsonValue(`${path}.${key}`, entry, false)); return; }
-  fail("non_json_value", `${path} contains a non-JSON value.`);
-}
-
 function bundleFile(path: string, mediaType: string, bytes: string): { path: string; mediaType: string; bytes: string } { return { path, mediaType, bytes }; }
 function sha256(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function compareById<T extends { id: string }>(a: T, b: T): number { return utf8Compare(a.id, b.id); }
@@ -761,8 +600,8 @@ function matchersAreDisjoint(left: readonly CurrentPolicyMatcherV1[], right: rea
   return left.some((a) => a.op === "eq" && right.some((b) => b.op === "eq" && a.path === b.path && canonicalJson(a.value) !== canonicalJson(b.value)));
 }
 function validateMode(id: string, mode: string): void { if (!MODES.has(mode)) fail("unknown_mode", `Rule ${id} has an unknown mode.`); }
-function validateService(service: string): void { if (!SERVICE_ID.test(service)) fail("invalid_service", `Service ID ${JSON.stringify(service)} is malformed.`); }
-function validateAction(service: string, action: string): void { validateService(service); const prefix = `${service}.`; if (!action.startsWith(prefix) || !LOCAL_ACTION_ID.test(action.slice(prefix.length))) fail("invalid_action", `Action ID ${JSON.stringify(action)} is not qualified by service ${JSON.stringify(service)}.`); }
+function validateService(service: string): void { if (!isCurrentPolicyServiceV1(service)) fail("invalid_service", `Service ID ${JSON.stringify(service)} is malformed.`); }
+function validateAction(service: string, action: string): void { validateService(service); const prefix = `${service}.`; if (!isCurrentPolicyActionV1(action) || !action.startsWith(prefix)) fail("invalid_action", `Action ID ${JSON.stringify(action)} is not qualified by service ${JSON.stringify(service)}.`); }
 function validTimestamp(path: string, value: number): void { if (!Number.isSafeInteger(value) || value < 0) fail("invalid_timestamp", `${path} must be a non-negative integer timestamp.`); }
 function nonEmpty(path: string, value: string): void { if (value.length === 0) fail("empty_identity", `${path} must not be empty.`); }
 function nonBlank(value: string | undefined): value is string { return value !== undefined && value.length > 0; }

@@ -28,7 +28,7 @@ function rotateRight(value: number, count: number): number {
   return (value >>> count) | (value << (32 - count));
 }
 
-function sha256Hex(input: string): string {
+export function authorizationSha256Hex(input: string): string {
   const bytes = new TextEncoder().encode(input);
   const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
   const padded = new Uint8Array(paddedLength);
@@ -98,7 +98,7 @@ function canonicalJson(value: unknown): string {
 }
 
 function digest(value: unknown): string {
-  return sha256Hex(canonicalJson(value));
+  return authorizationSha256Hex(canonicalJson(value));
 }
 
 interface RequestIdentityInput {

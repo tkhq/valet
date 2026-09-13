@@ -1,15 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { PoliciesSection } from "~/components/settings/policies-section";
+import { useOrg } from "~/api/settings";
+import { PolicyBuilder } from "~/components/settings/policy-builder/policy-builder";
 
-/**
- * `/settings/organization/policies` — Organization · Policies
- * (action-policies plan, Task 5). Renders inside `/settings/organization`'s
- * `OrgRouteGuard` — no per-page admin re-check.
- */
 export const Route = createFileRoute("/settings/organization/policies")({
   component: OrganizationPoliciesPage,
 });
 
 export function OrganizationPoliciesPage() {
-  return <PoliciesSection />;
+  const org = useOrg();
+  if (!org.data)
+    return (
+      <p role="status" className="text-sm text-muted">
+        Loading policy context…
+      </p>
+    );
+  return <PolicyBuilder owner={{ kind: "org", id: org.data.id }} />;
 }

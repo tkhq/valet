@@ -1,0 +1,120 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { AuthorizationRequest } from "@valet/engine/authorization";
+import { buildCurrentPolicySource } from "../bundles/current-policy-source.js";
+import { SourceBundleHost } from "../bundles/host.js";
+import { InMemorySourceBundleStorage } from "../bundles/in-memory-storage.js";
+import { LocalValetEvaluator } from "../evaluators/local-valet.js";
+import { WasmPolicyRuntime } from "../evaluators/wasm-runtime.js";
+import { normalizePolicyDraft } from "./model.js";
+import { projectActionDraftToCurrentSnapshot } from "./current-action-projection.js";
+import type { CurrentOrganizationPolicyV1 } from "../bundles/current-policy-types.js";
+import type { JsonValue, PolicyDraftV1, PolicyRuleDraftV1 } from "./types.js";
+
+let runtime: WasmPolicyRuntime;
+beforeAll(() => {
+  runtime = new WasmPolicyRuntime();
+});
+afterAll(async () => runtime.close());
+const draft: PolicyDraftV1 = {
+  schemaVersion: 1,
+  draftId: "draft-1",
+  rules: [
+    {
+      ruleId: "rule-1",
+      context: "tool.action",
+      authority: "organization",
+      owner: { kind: "org", id: "org-1" },
+      subjects: ["org"],
+      target: { "action.id": "gmail.send_email" },
+      matcherGroups: [
+        {
+          id: "group-1",
+          mode: "all",
+          matchers: [
+            {
+              id: "matcher-1",
+              field: "parameters.to",
+              operator: "eq",
+              value: "a@example.com",
+            },
+          ],
+        },
+      ],
+      effect: "deny",
+      appliesIn: "any",
+      obligations: [],
+      description: "",
+      metadata: {},
+    },
+  ],
+};
+const request: AuthorizationRequest = {
+  schemaVersion: 1,
+  requestId: "request-1",
+  idempotencyKey: "invocation-1",
+  kind: "tool.action",
+  subject: {
+    orgId: "org-1",
+    principal: { type: "user", id: "user-1" },
+    invocation: { type: "interactive", id: "invocation-1" },
+    sessionId: "session-1",
+  },
+  action: {
+    service: "gmail",
+    id: "gmail.send_email",
+    riskLevel: "high",
+    parameters: { to: "a@example.com" },
+  },
+  context: { evaluationTimeMs: 100 },
+  facts: {},
+};
+
+describe("browser draft to current source contract", () => {
+  it("maps losslessly, validates the bundle, and evaluates through LocalValetEvaluator", async () => {
+    const normalized = normalizePolicyDraft(draft);
+    const snapshot = projectActionDraftToCurrentSnapshot(normalized, "org-1");
+    expect(snapshot.organizationPolicies[0]).toEqual({ id: "rule-1", organizationId: "org-1", actionId: "gmail.send_email", mode: "deny", paramMatchers: [{ path: "to", op: "eq", value: "a@example.com" }], createdAtMs: 1, updatedAtMs: 1, principalType: "org", principalId: "org-1", appliesIn: "any", expiresAtMs: null, revokedAtMs: null, sourceTable: "action_policies", sourcePath: "builder/draft-1/rule-1" });
+    const built = buildCurrentPolicySource(snapshot);
+    const provenance = JSON.parse(Buffer.from(built.bundle.files.find((file) => file.path.startsWith("provenance/"))!.contentBase64, "base64").toString("utf8"));
+    expect(provenance.entries.find((entry: { rule_id: string }) => entry.rule_id === "rule-1")).toMatchObject({
+      rule_id: "rule-1",
+      start_line: expect.any(Number),
+      end_line: expect.any(Number),
+    });
+    const host = new SourceBundleHost(new InMemorySourceBundleStorage(), runtime),
+      identity = await host.publish(built.bundle);
+    await host.activate("org-1", undefined, identity.sourceBundleDigest);
+    const evaluator = await LocalValetEvaluator.create(host, runtime),
+      result = await evaluator.evaluate(request);
+    expect(result.decision).toMatchObject({
+      effect: "deny",
+      matchedRuleIds: ["rule-1"],
+    });
+    expect(result.policyDigest).toBe(identity.policyDigest);
+  });
+  it.each(["workflow.action", "approval", "description", "obligations", "subjects"] as const)("rejects lossy %s projection", field => {
+    const patch: Partial<PolicyRuleDraftV1> = field === "workflow.action" ? { context: field } : field === "approval" ? { approval: { tier: "human", replay: "once" } } : field === "description" ? { description: "lost" } : field === "obligations" ? { obligations: [{ type: "redact" }] } : { subjects: ["user"] };
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], ...patch }] };
+    expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action/i);
+  });
+
+  it.each(PROJECTABLE_TARGETS)("projects every browser-valid target %j", target => {
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], target }] }, snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
+    expect(() => buildCurrentPolicySource(snapshot)).not.toThrow(); expect(snapshot.organizationPolicies).toHaveLength(1);
+  });
+
+  it("projects a bare approval mode without custom approval fields", () => {
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], effect: "require_approval", approval: undefined }] }, snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
+    expect(snapshot.organizationPolicies[0].mode).toBe("require_approval"); expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
+  });
+
+  it.each(INVALID_SOURCE_TARGETS)("source rejects target grammar %j", (patch, code) => {
+    const current = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(draft), "org-1"), row = { ...current.organizationPolicies[0], actionId: undefined, ...patch };
+    expect(() => buildCurrentPolicySource({ ...current, organizationPolicies: [row] })).toThrow(expect.objectContaining({ code }));
+  });
+
+});
+
+const PROJECTABLE_TARGETS: readonly Readonly<Record<string, JsonValue>>[] = [{ "action.service": "gmail" }, { "action.id": "gmail.send_email" }, { "action.riskLevel": "high" }];
+
+const INVALID_SOURCE_TARGETS: readonly (readonly [Partial<CurrentOrganizationPolicyV1>, string])[] = [[{ service: "Gmail" }, "invalid_service"], [{ actionId: "gmail" }, "invalid_action"], [{ actionId: "gmail.Send" }, "invalid_action"], [{ service: "gmail", actionId: "gmail.send" }, "invalid_target"]];
