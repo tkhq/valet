@@ -23,18 +23,21 @@ import type {
  * (origin/refs, and `context` as a whole — surfacing the raw bag would
  * commit us to a contract before we know what we want). Typed extraction keeps
  * the review facts stable: provenance explains why the gate opened and tool
- * details give the approver the requested action and full parameters.
+ * details give the approver the requested action and a bounded parameter preview.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
-  const approval = g.type === "approval" ? toolApprovalGateContext(g.context) : null;
+  const approval = g.type === "approval" ? gateApprovalDetails(g.context) : undefined;
+  const body = g.body && g.body.length > MAX_GATE_BODY_CHARS ? g.body.slice(0, MAX_GATE_BODY_CHARS) : g.body;
+  const bodyTruncated = g.body !== undefined && body !== g.body;
   return {
     id: g.id,
     sessionId: g.sessionId,
     threadId: g.threadId,
     type: g.type,
     title: g.title,
-    body: g.body,
+    body,
+    ...(bodyTruncated ? { bodyTruncated: true } : {}),
     actions: g.actions,
     expiresAt: g.expiresAt,
     status: g.status,
@@ -46,6 +49,42 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
 }
 
 const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
+const MAX_APPROVAL_ARGS_CHARS = 16_000;
+const MAX_GATE_BODY_CHARS = 32_000;
+
+/**
+ * Project only a valid tool approval. A malformed `args` value must leave the
+ * authoritative gate body visible instead of claiming that its arguments are
+ * empty. The JSON preview is capped before it reaches React, so a large tool
+ * call cannot make the approval card serialize the same payload again.
+ */
+function gateApprovalDetails(context: Record<string, unknown> | undefined): WireDecisionGate["approval"] | undefined {
+  const approval = toolApprovalGateContext(context);
+  if (!approval) return undefined;
+  const rawArgs = context?.args;
+  if (rawArgs !== undefined && (rawArgs === null || typeof rawArgs !== "object" || Array.isArray(rawArgs))) {
+    return undefined;
+  }
+  let argsPreview: string | undefined;
+  let argsTruncated = false;
+  try {
+    const json = JSON.stringify(approval.args ?? {});
+    if (json !== undefined) {
+      argsPreview = json.length > MAX_APPROVAL_ARGS_CHARS ? json.slice(0, MAX_APPROVAL_ARGS_CHARS) : json;
+      argsTruncated = json.length > MAX_APPROVAL_ARGS_CHARS;
+    }
+  } catch {
+    return undefined;
+  }
+  return {
+    toolId: approval.toolId,
+    riskLevel: approval.riskLevel,
+    service: approval.service,
+    summary: approval.summary,
+    ...(argsPreview !== undefined ? { argsPreview } : {}),
+    ...(argsTruncated ? { argsTruncated: true } : {}),
+  };
+}
 
 /** Narrow the engine gate's untyped `context.provenance` into the wire's
  * `DecisionGateProvenance`. Fail-soft: any shape surprise → undefined (the

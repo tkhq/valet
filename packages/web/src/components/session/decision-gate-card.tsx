@@ -8,6 +8,7 @@ import { cn } from "~/lib/cn";
 
 const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
+const MAX_APPROVAL_PREVIEW_CHARS = 16_000;
 
 export function DecisionGateCard({
   sessionId,
@@ -25,6 +26,7 @@ export function DecisionGateCard({
   const Icon = ICON_FOR_TYPE[gate.type];
   const tone = TONE_FOR_TYPE[gate.type];
   const approval = gate.approval;
+  const dismissLabel = DISMISS_LABEL[gate.type];
 
   async function pickAction(actionId: string) {
     if (busy) return;
@@ -58,7 +60,7 @@ export function DecisionGateCard({
   return (
     <section
       className={cn(
-        "mx-3 mt-3 flex min-h-0 flex-col overflow-hidden rounded-md border",
+        "mx-3 mt-3 flex min-h-0 max-h-[calc(100dvh-1.5rem)] flex-col overflow-hidden rounded-md border",
         "border-amber-300 bg-amber-50/70 dark:border-amber-700/60 dark:bg-amber-950/40",
       )}
       aria-labelledby={`gate-${gate.id}-title`}
@@ -78,7 +80,7 @@ export function DecisionGateCard({
           <p className={cn("text-[10px] font-semibold uppercase tracking-wider", tone.label)}>
             {LABEL_FOR_TYPE[gate.type]} · agent paused
           </p>
-          <h3 id={`gate-${gate.id}-title`} className="mt-0.5 break-words text-sm font-semibold text-[--fg]">
+          <h3 id={`gate-${gate.id}-title`} className="mt-0.5 max-h-12 overflow-y-auto break-all text-sm font-semibold text-[--fg]">
             {gate.title}
           </h3>
         </div>
@@ -86,18 +88,18 @@ export function DecisionGateCard({
           type="button"
           onClick={cancel}
           disabled={busy}
-          aria-label="Cancel and dismiss approval"
+          aria-label={dismissLabel}
           className="-mr-1 mt-0.5 shrink-0 text-muted hover:text-[--fg] disabled:opacity-50"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
       </header>
 
-      <div className="min-h-0 max-h-[min(22rem,45dvh)] overflow-y-auto overscroll-contain px-3.5 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-3">
         {approval ? (
           <ApprovalReview approval={approval} provenance={gate.provenance} />
         ) : (
-          <GenericGateReview body={gate.body} provenance={gate.provenance} />
+          <GenericGateReview body={gate.body} bodyTruncated={gate.bodyTruncated} provenance={gate.provenance} />
         )}
       </div>
 
@@ -116,7 +118,7 @@ export function DecisionGateCard({
           </Button>
         </div>
       ) : (
-        <div className="flex shrink-0 flex-wrap gap-2 border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
+        <div className="flex max-h-[35dvh] shrink-0 flex-wrap gap-2 overflow-y-auto border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
           {gate.actions.map((action) => {
             const isAlwaysAllow = action.id === GATE_ACTION_ALWAYS_ALLOW;
             const disabled = busy || (isAlwaysAllow && !isAdmin);
@@ -128,7 +130,7 @@ export function DecisionGateCard({
                 variant={action.style === "primary" ? "primary" : action.style === "danger" ? "danger" : "secondary"}
               >
                 {busy && resolve.variables?.gateId === gate.id ? <Spinner size={14} /> : null}
-                <span>{action.label}</span>
+                <span className="max-w-full break-all text-center">{action.label}</span>
               </Button>
             );
             if (isAlwaysAllow && !isAdmin) {
@@ -149,6 +151,8 @@ function ApprovalReview({
   approval: NonNullable<DecisionGate["approval"]>;
   provenance?: DecisionGate["provenance"];
 }) {
+  const argsPreview = boundedPreview(approval.argsPreview);
+  const argsTruncated = approval.argsTruncated || argsPreview.truncated;
   const facts = [
     ["Tool", approval.toolId],
     ["Service", approval.service],
@@ -175,29 +179,30 @@ function ApprovalReview({
         <div className="border-t border-amber-300/70 p-3 dark:border-amber-700/50">
           <p className="mb-2 text-xs text-muted">Parameters</p>
           <pre className="max-h-52 overflow-auto overscroll-contain whitespace-pre-wrap break-all rounded bg-ink-wash p-2 text-xs text-[--fg]" tabIndex={0} aria-label="Approval request parameters">
-            {formatApprovalArgs(approval.args)}
+            {argsPreview.text}
           </pre>
+          {argsTruncated && <p className="mt-2 text-xs text-muted">The parameter preview is truncated.</p>}
         </div>
       </details>
     </div>
   );
 }
 
-function GenericGateReview({ body, provenance }: Pick<DecisionGate, "body" | "provenance">) {
+function boundedPreview(preview: string | undefined): { text: string; truncated: boolean } {
+  if (preview === undefined) return { text: "{}", truncated: false };
+  return preview.length > MAX_APPROVAL_PREVIEW_CHARS
+    ? { text: preview.slice(0, MAX_APPROVAL_PREVIEW_CHARS), truncated: true }
+    : { text: preview, truncated: false };
+}
+
+function GenericGateReview({ body, bodyTruncated, provenance }: Pick<DecisionGate, "body" | "bodyTruncated" | "provenance">) {
   return (
     <div className="space-y-2">
       {body && <p className="whitespace-pre-wrap break-all text-sm text-muted">{body}</p>}
+      {bodyTruncated && <p className="text-xs text-muted">The request details are truncated.</p>}
       {provenance && <p className="text-xs text-muted" data-testid="gate-provenance">{provenanceLine(provenance)}</p>}
     </div>
   );
-}
-
-function formatApprovalArgs(args: Record<string, unknown> | undefined): string {
-  try {
-    return JSON.stringify(args ?? {}, null, 2);
-  } catch {
-    return "The request parameters cannot be displayed.";
-  }
 }
 
 function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
@@ -214,6 +219,11 @@ function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
 }
 
 const ICON_FOR_TYPE = { approval: AlertTriangle, question: HelpCircle, credential_request: KeyRound } as const;
+const DISMISS_LABEL: Record<DecisionGate["type"], string> = {
+  approval: "Cancel and dismiss approval",
+  question: "Cancel and dismiss question",
+  credential_request: "Cancel and dismiss credential request",
+};
 const LABEL_FOR_TYPE: Record<DecisionGate["type"], string> = { approval: "Approval needed", question: "Question", credential_request: "Credential needed" };
 const TONE_FOR_TYPE: Record<DecisionGate["type"], { iconBg: string; iconFg: string; label: string }> = {
   approval: { iconBg: "bg-amber-200 dark:bg-amber-900/60", iconFg: "text-amber-800 dark:text-amber-300", label: "text-amber-800 dark:text-amber-300" },

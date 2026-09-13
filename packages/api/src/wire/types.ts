@@ -1350,7 +1350,9 @@ export interface DecisionGateApprovalDetails {
   toolId: string;
   riskLevel?: string;
   service?: string;
-  args?: Record<string, unknown>;
+  /** A bounded JSON preview. The complete body remains the gate record. */
+  argsPreview?: string;
+  argsTruncated?: true;
   summary?: string;
 }
 
@@ -1361,6 +1363,8 @@ export interface DecisionGate {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** The gate body exceeded the safe live-review payload limit. */
+  bodyTruncated?: true;
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;

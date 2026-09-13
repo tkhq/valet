@@ -88,9 +88,29 @@ describe("engineGateToWire", () => {
     });
     expect(wire.approval).toEqual({
       toolId: "github.create_issue", service: "github", riskLevel: "high",
-      summary: "Create an issue in the public repository.", args: { title: "Fix the bug" },
+      summary: "Create an issue in the public repository.", argsPreview: "{\"title\":\"Fix the bug\"}",
     });
     expect(Object.keys(wire)).not.toContain("context");
+  });
+
+  it("keeps the body when tool context has malformed arguments", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve issue?", body: "tool_id=github.create_issue\nargs=[bad]", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: { tool_id: "github.create_issue", args: ["bad"] },
+    });
+    expect(wire.approval).toBeUndefined();
+    expect(wire.body).toBe("tool_id=github.create_issue\nargs=[bad]");
+  });
+
+  it("caps the live parameter preview and marks it truncated", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: { tool_id: "github.create_issue", args: { content: "x".repeat(20_000) } },
+    });
+    expect(wire.approval?.argsPreview).toHaveLength(16_000);
+    expect(wire.approval?.argsTruncated).toBe(true);
   });
 });
 

@@ -656,10 +656,6 @@ export function Composer({
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    // On the phone layout Return always enters text. This uses the same
-    // responsive breakpoint as the layout, not browser or user-agent sniffing.
-    if (e.key === "Enter" && isMobileComposerViewport()) return;
-
     // While the popup is open, intercept navigation keys. IME composition
     // guard applies here too — composition events must not trigger navigation.
     if (popupOpen && !e.nativeEvent.isComposing) {
@@ -693,6 +689,10 @@ export function Composer({
         return;
       }
     }
+
+    // On the phone layout, Return enters text unless the popup claimed it.
+    // This uses the responsive breakpoint, not browser or user-agent sniffing.
+    if (e.key === "Enter" && isMobileComposerViewport()) return;
 
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of

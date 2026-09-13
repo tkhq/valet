@@ -583,6 +583,18 @@ describe("Composer — Enter behavior", () => {
     expect(textarea.value).toBe("First\nSecond");
     expect(sendMutateAsync).not.toHaveBeenCalled();
   });
+
+  it("selects an open command popup on the mobile layout", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer();
+    const textarea = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "/sta");
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    await userEvent.keyboard("{Enter}");
+    expect(textarea.value).toBe("/status ");
+    expect(sendMutateAsync).not.toHaveBeenCalled();
+  });
 });
 
 describe("Composer — slash-command keyboard handling", () => {

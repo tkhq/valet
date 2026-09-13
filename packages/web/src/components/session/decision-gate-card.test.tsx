@@ -82,7 +82,8 @@ describe("DecisionGateCard — reviewable tool requests", () => {
         service: "github",
         riskLevel: "high",
         summary: "Create an issue in the external repository.",
-        args: { callbackUrl: longUrl, source: "x".repeat(2000) },
+        argsPreview: JSON.stringify({ callbackUrl: longUrl, source: "x".repeat(2000) }),
+        argsTruncated: true,
       },
     }));
 
@@ -92,8 +93,45 @@ describe("DecisionGateCard — reviewable tool requests", () => {
     const details = screen.getByTestId("approval-details");
     expect(details.querySelector("pre")?.className).toContain("max-h-52");
     expect(details.querySelector("pre")?.className).toContain("break-all");
+    expect(screen.getByText("The parameter preview is truncated.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+
+  it("caps an oversized preview from an older server before it mounts", () => {
+    renderCard(gate({ approval: { toolId: "github.create_issue", argsPreview: "x".repeat(20_000) } }));
+    expect(screen.getByLabelText("Approval request parameters").textContent).toHaveLength(16_000);
+    expect(screen.getByText("The parameter preview is truncated.")).toBeTruthy();
+  });
+
+  it("shows the authoritative body when typed approval details are unavailable", () => {
+    renderCard(gate({ body: "tool_id=github.create_issue\nargs=[malformed]" }));
+    expect(screen.getByText(/tool_id=github\.create_issue/).textContent).toContain("args=[malformed]");
+    expect(screen.queryByTestId("approval-details")).toBeNull();
+  });
+});
+
+describe("DecisionGateCard — bounded card layout", () => {
+  it("bounds the card, title, and action footer on a small viewport", () => {
+    renderCard(gate({
+      title: "x".repeat(500),
+      actions: [{ id: "approve", label: `Approve ${"x".repeat(500)}` }],
+    }));
+    expect(screen.getByLabelText("Cancel and dismiss approval").closest("section")?.className).toContain("max-h-[calc(100dvh-1.5rem)]");
+    expect(screen.getByRole("heading").className).toContain("max-h-12");
+    expect(screen.getByRole("button", { name: /Approve/ }).querySelector("span")?.className).toContain("break-all");
+    expect(screen.getByRole("button", { name: /Approve/ }).parentElement?.className).toContain("max-h-[35dvh]");
+  });
+});
+
+describe("DecisionGateCard — dismissal labels", () => {
+  it.each([
+    ["approval", "Cancel and dismiss approval"],
+    ["question", "Cancel and dismiss question"],
+    ["credential_request", "Cancel and dismiss credential request"],
+  ] as const)("uses a specific close label for %s", (type, label) => {
+    renderCard(gate({ type }));
+    expect(screen.getByLabelText(label)).toBeTruthy();
   });
 });
 
