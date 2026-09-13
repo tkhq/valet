@@ -21,6 +21,10 @@ import type { AppDb } from "../lib/drizzle.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { workflowDefinitions } from "../schema/index.js";
 
+export function workflowApprovalHref(runId: string, nodeId: string): string {
+  return `/workflows?tab=action-required&run=${encodeURIComponent(runId)}&gate=${encodeURIComponent(nodeId)}`;
+}
+
 export interface RunSettledAttentionDeps {
   db: AppDb;
   store: Pick<WorkflowStore, "getCheckpoints">;

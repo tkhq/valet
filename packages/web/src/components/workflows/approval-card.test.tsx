@@ -31,7 +31,7 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(mutate).toHaveBeenCalledWith({
       nodeId: "deploy",
-      body: { approved: true, note: undefined },
+      body: { approved: true, note: undefined, iteration: undefined },
     });
   });
 
@@ -41,7 +41,7 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
     expect(mutate).toHaveBeenCalledWith({
       nodeId: "deploy",
-      body: { approved: false, note: undefined },
+      body: { approved: false, note: undefined, iteration: undefined },
     });
   });
 
@@ -54,7 +54,7 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(mutate).toHaveBeenCalledWith({
       nodeId: "deploy",
-      body: { approved: true, note: "looks good" },
+      body: { approved: true, note: "looks good", iteration: undefined },
     });
   });
 });

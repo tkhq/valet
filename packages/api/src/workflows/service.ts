@@ -58,6 +58,7 @@ import type {
   GetWorkflowRunResponse,
   GlobalWorkflowRunSummary,
   ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
   WorkflowDefinitionSummary,
   WorkflowPendingGate,
@@ -1381,6 +1382,60 @@ export async function listRunsForOwner(
   return { runs, nextCursor: result.nextCursor };
 }
 
+/** Lists every active approval or policy gate the calling principal can resolve. */
+export async function listWorkflowActionRequired(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+): Promise<ListWorkflowActionRequiredResponse> {
+  const summaries: GlobalWorkflowRunSummary[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await listRunsForOwner(deps, owner, {
+      status: ["parked"],
+      limit: RUN_PAGE_LIMIT_MAX,
+      cursor,
+    });
+    if (page === null) break;
+    summaries.push(...page.runs.filter((run) => run.needsApproval));
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+
+  const items: ListWorkflowActionRequiredResponse["items"] = [];
+  for (const summary of summaries) {
+    const detail = await getWorkflowRunDetail(deps, owner, summary.runId);
+    if (detail === null) continue;
+    const trigger = workflowActionTrigger(detail.run.params);
+    for (const gate of detail.pendingGates) {
+      const iteration = gate.iteration ?? 0;
+      items.push({
+        id: `${summary.runId}:${gate.nodeId}:${iteration}`,
+        runId: summary.runId,
+        workflowId: summary.workflowId,
+        workflowName: summary.workflowName,
+        runCreatedAt: summary.createdAt,
+        owner: detail.owner,
+        trigger,
+        gate,
+      });
+    }
+  }
+  items.sort((a, b) => (a.gate.waitingSince ?? a.runCreatedAt) - (b.gate.waitingSince ?? b.runCreatedAt));
+  return { items, count: items.length };
+}
+
+function workflowActionTrigger(params: unknown): ListWorkflowActionRequiredResponse["items"][number]["trigger"] {
+  if (typeof params !== "object" || params === null) return { type: "unknown" };
+  const input = (params as Record<string, unknown>).input;
+  if (typeof input !== "object" || input === null) return { type: "unknown" };
+  const value = input as Record<string, unknown>;
+  const allowed = ["manual", "schedule", "webhook", "event", "workflow"] as const;
+  const type = allowed.find((candidate) => candidate === value.type) ?? "unknown";
+  return {
+    type,
+    ...(typeof value.triggerId === "string" ? { triggerId: value.triggerId } : {}),
+  };
+}
+
 /**
  * Projects one checkpoint for the wire. The interpreter records a session
  * node's `sessionId` and a workflow node's `childRunId` in the checkpoint's
@@ -1739,6 +1794,7 @@ export async function getWorkflowRunDetail(
       const gate: WorkflowPendingGate = {
         nodeId,
         kind: "policy_gate",
+        waitingSince: intentCp?.createdAt ?? run.updatedAt,
       };
       if (iteration !== undefined) gate.iteration = iteration;
       if (typeof node.service === "string") gate.service = node.service;
@@ -1771,12 +1827,17 @@ export async function getWorkflowRunDetail(
       pendingGates.push(gate);
     } else {
       // Approval node (non-tool).
+      const intentCp = checkpoints.find(
+        (cp) => cp.nodeId === nodeId && cp.iteration === (iteration ?? 0) && cp.status === "intent",
+      );
       const gate: WorkflowPendingGate = {
         nodeId,
         kind: "approval",
+        waitingSince: intentCp?.createdAt ?? run.updatedAt,
       };
       if (iteration !== undefined) gate.iteration = iteration;
       if (node && typeof node.prompt === "string") gate.prompt = node.prompt;
+      if (node && (node.onDeny === "fail" || node.onDeny === "skip")) gate.onDeny = node.onDeny;
       if (typeof w.timeoutAt === "number") gate.timeoutAt = w.timeoutAt;
       pendingGates.push(gate);
     }

@@ -1,13 +1,19 @@
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Clock, Trash2, Zap } from "lucide-react";
-import type { WorkflowDefinitionSummary, WorkflowTriggerItem } from "@valet/api/wire";
+import { Clock, ShieldAlert, Trash2, Zap } from "lucide-react";
+import type {
+  ListWorkflowActionRequiredResponse,
+  WorkflowActionRequiredItem,
+  WorkflowDefinitionSummary,
+  WorkflowTriggerItem,
+} from "@valet/api/wire";
 import { triggerDataSchema, visibleTriggerFields } from "@valet/workflow";
 import {
   useAllWorkflowRuns,
   useDeleteWorkflow,
   useStartRun,
   useWorkflowRuns,
+  useWorkflowActionRequired,
   useWorkflowTriggers,
   useWorkflows,
 } from "~/api/workflows";
@@ -20,10 +26,13 @@ import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TemplateGallery } from "~/components/workflows/template-gallery";
 import { TriggerList } from "~/components/workflows/trigger-list";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
+import { ApprovalCard } from "~/components/workflows/approval-card";
+import { PolicyGateCard } from "~/components/workflows/policy-gate-card";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useListOwner } from "~/lib/use-list-owner";
+import { relativeTime } from "~/lib/relative-time";
 
 /**
  * `/workflows` — tabbed hub (Workflows | Runs | Triggers | Templates). The
@@ -45,20 +54,26 @@ import { useListOwner } from "~/lib/use-list-owner";
  * Tab state lives in the `?tab=` search param so each tab is linkable.
  */
 
-type HubTab = "workflows" | "runs" | "triggers" | "templates";
+type HubTab = "workflows" | "action-required" | "runs" | "triggers" | "templates";
 
 export const Route = createFileRoute("/workflows/")({
   component: WorkflowsIndexPage,
-  validateSearch: (search: Record<string, unknown>): { tab?: HubTab } => ({
+  validateSearch: (search: Record<string, unknown>): { tab?: HubTab; run?: string; gate?: string } => ({
     tab:
-      search.tab === "runs" || search.tab === "triggers" || search.tab === "templates"
+      search.tab === "action-required" ||
+      search.tab === "runs" ||
+      search.tab === "triggers" ||
+      search.tab === "templates"
         ? search.tab
         : undefined,
+    run: typeof search.run === "string" ? search.run : undefined,
+    gate: typeof search.gate === "string" ? search.gate : undefined,
   }),
 });
 
 const TABS: { id: HubTab; label: string }[] = [
   { id: "workflows", label: "Workflows" },
+  { id: "action-required", label: "Needs your approval" },
   { id: "runs", label: "Runs" },
   { id: "triggers", label: "Triggers" },
   { id: "templates", label: "Templates" },
@@ -67,11 +82,16 @@ const TABS: { id: HubTab; label: string }[] = [
 export function WorkflowsIndexPage() {
   // Use the top-level useSearch hook so the test mock works without
   // Route.useSearch() requiring a real router context.
-  const search = useSearch({ strict: false }) as { tab?: HubTab };
+  const search = useSearch({ strict: false }) as {
+    tab?: HubTab;
+    run?: string;
+    gate?: string;
+  };
   const navigate = useNavigate();
   const tab: HubTab = search.tab ?? "workflows";
   const [newOpen, setNewOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const actionRequired = useWorkflowActionRequired();
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -111,6 +131,11 @@ export function WorkflowsIndexPage() {
               }`}
             >
               {t.label}
+              {t.id === "action-required" && (actionRequired.data?.count ?? 0) > 0 && (
+                <span className="ml-1.5 rounded-full bg-warning-wash px-1.5 py-0.5 text-xs text-warning-fg">
+                  {actionRequired.data!.count}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -120,14 +145,132 @@ export function WorkflowsIndexPage() {
       <ImportWorkflowDialog open={importOpen} onOpenChange={setImportOpen} />
 
       <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
-        {tab === "workflows" && (
-          <WorkflowsTab onNew={() => setNewOpen(true)} onImport={() => setImportOpen(true)} />
+        {tab === "workflows" && <WorkflowsTab onNew={() => setNewOpen(true)} onImport={() => setImportOpen(true)} />}
+        {tab === "action-required" && (
+          <ActionRequiredTab
+            data={actionRequired.data}
+            isLoading={actionRequired.isLoading}
+            error={actionRequired.error}
+            focusRun={search.run}
+            focusGate={search.gate}
+          />
         )}
         {tab === "runs" && <RunsTab />}
         {tab === "triggers" && <TriggersTab />}
         {tab === "templates" && <TemplateGallery />}
       </div>
     </div>
+  );
+}
+
+function ActionRequiredTab({
+  data,
+  isLoading,
+  error,
+  focusRun,
+  focusGate,
+}: {
+  data?: ListWorkflowActionRequiredResponse;
+  isLoading: boolean;
+  error: unknown;
+  focusRun?: string;
+  focusGate?: string;
+}) {
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-muted">
+        <Spinner size={14} /> Loading approvals…
+      </div>
+    );
+  }
+  if (error) return <div className="text-sm text-danger-500">Failed to load approvals. Try again.</div>;
+  if (!data || data.items.length === 0) {
+    return (
+      <div className="rounded border border-line bg-paper p-6 text-sm text-muted">
+        No workflow runs need your approval.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted">These runs are paused. The oldest request appears first.</p>
+      <ul className="space-y-4">
+        {data.items.map((item) => (
+          <ActionRequiredRow
+            key={item.id}
+            item={item}
+            focused={item.runId === focusRun && (!focusGate || item.gate.nodeId === focusGate)}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ActionRequiredRow({ item, focused }: { item: WorkflowActionRequiredItem; focused: boolean }) {
+  const { gate } = item;
+  const policy = gate.kind === "policy_gate";
+  const action = policy && gate.service && gate.action ? `${gate.service}.${gate.action}` : gate.nodeId;
+  const reason = policy
+    ? gate.provenance === "resolver_error"
+      ? "The policy check failed. Valet paused the action for a safe decision."
+      : "Your tool policy requires permission before Valet can run this action."
+    : (gate.prompt ?? "This workflow includes a human approval step.");
+  const denyEffect = gate.onDeny === "skip" ? "skips this step" : "stops this run";
+  return (
+    <li
+      data-testid="action-required-item"
+      className={`min-w-0 rounded-lg border bg-paper p-3 sm:p-4 ${focused ? "border-warning-fg ring-2 ring-warning-fg/20" : "border-line"}`}
+    >
+      <div className="mb-3 flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1 rounded-full bg-warning-wash px-2 py-0.5 text-xs font-medium text-warning-fg">
+              <ShieldAlert className="h-3 w-3" aria-hidden />
+              {policy ? "Tool permission" : "Workflow approval"}
+            </span>
+            <OwnerBadge ownerType={item.owner.type} ownerId={item.owner.id} />
+          </div>
+          <Link
+            to="/workflows/$workflowId"
+            params={{ workflowId: item.workflowId }}
+            className="block break-words text-sm font-semibold text-ink hover:underline"
+          >
+            {item.workflowName}
+          </Link>
+          <p className="break-all font-mono text-xs text-muted">Blocked step: {action}</p>
+        </div>
+        <div className="shrink-0 text-left text-xs text-muted sm:text-right">
+          <div>Waiting {relativeTime(gate.waitingSince ?? item.runCreatedAt)}</div>
+          <div>
+            Started by {item.trigger.type}
+            {item.trigger.triggerId ? ` (${item.trigger.triggerId})` : ""}
+          </div>
+          <Link
+            to="/workflows/runs/$runId"
+            params={{ runId: item.runId }}
+            className="inline-flex min-h-11 items-center underline sm:min-h-0"
+          >
+            Open run
+          </Link>
+        </div>
+      </div>
+      <div className="mb-3 rounded bg-ink-wash px-3 py-2 text-xs text-ink">
+        <p>{reason}</p>
+        <p className="mt-1 text-muted">Approving continues the run and performs this step. Denying {denyEffect}.</p>
+      </div>
+      {policy ? (
+        <PolicyGateCard runId={item.runId} gate={gate} confirmActions />
+      ) : (
+        <ApprovalCard
+          runId={item.runId}
+          nodeId={gate.nodeId}
+          prompt={gate.prompt}
+          iteration={gate.iteration}
+          confirmActions
+        />
+      )}
+    </li>
   );
 }
 

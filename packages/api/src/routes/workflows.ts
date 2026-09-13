@@ -35,6 +35,7 @@ import {
   isRunOutcome,
   isRunStatus,
   listRunsForOwner,
+  listWorkflowActionRequired,
   listWorkflowDefinitions,
   listWorkflowRuns,
   listWorkflowVersions,
@@ -81,6 +82,7 @@ import type {
   GetWorkflowPermissionsResponse,
   GetWorkflowImportFileResponse,
   ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   CreateScheduleOnWorkflowRequest,
   CreateWorkflowScheduleResponse,
   DeleteWorkflowScheduleResponse,
@@ -308,6 +310,12 @@ workflowsRouter.get("/runs", async (c) => {
   // Rows carry `workflowName`: this list mixes workflows, so the hub's Runs
   // tab has no heading to name them from.
   const resp: ListAllWorkflowRunsResponse = page;
+  return c.json(resp);
+});
+
+workflowsRouter.get("/action-required", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const resp: ListWorkflowActionRequiredResponse = await listWorkflowActionRequired(deps, owner);
   return c.json(resp);
 });
 

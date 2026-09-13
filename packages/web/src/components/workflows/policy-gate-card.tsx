@@ -16,6 +16,7 @@ import { ApiError } from "~/api/client";
 import { apiErrorMessage } from "~/api/policies";
 import {
   Button,
+  ConfirmDialog,
   Spinner,
   DropdownMenu,
   DropdownMenuTrigger,
@@ -28,12 +29,14 @@ import { cn } from "~/lib/cn";
 export interface PolicyGateCardProps {
   runId: string;
   gate: WorkflowPendingGate; // kind === "policy_gate"
+  confirmActions?: boolean;
 }
 
-export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactElement {
+export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGateCardProps): ReactElement {
   const [note, setNote] = useState("");
   const [confirmAlways, setConfirmAlways] = useState(false);
   const [busyScope, setBusyScope] = useState<"once" | "run" | "always" | "deny" | null>(null);
+  const [confirmation, setConfirmation] = useState<"once" | "run" | "deny" | null>(null);
   const resolve = useResolveApproval(runId);
   const meQ = useMe();
   const isAdmin = meQ.data?.orgRole === "admin";
@@ -45,6 +48,14 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
   const busy = resolve.isPending;
 
   function fireApprove(scope: "once" | "run" | "always") {
+    if (confirmActions && scope !== "always") {
+      setConfirmation(scope);
+      return;
+    }
+    submitApprove(scope);
+  }
+
+  function submitApprove(scope: "once" | "run" | "always") {
     setBusyScope(scope);
     resolve.mutate({
       nodeId: gate.nodeId,
@@ -56,9 +67,18 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
       },
     });
     setConfirmAlways(false);
+    setConfirmation(null);
   }
 
   function handleDeny() {
+    if (confirmActions) {
+      setConfirmation("deny");
+      return;
+    }
+    submitDeny();
+  }
+
+  function submitDeny() {
     setBusyScope("deny");
     resolve.mutate({
       nodeId: gate.nodeId,
@@ -70,6 +90,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
       },
     });
     setConfirmAlways(false);
+    setConfirmation(null);
   }
 
   // `ApiError.message` is "{method} {path} → {status}" — the server's {error}
@@ -152,10 +173,7 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
         <div className="rounded border border-amber-400 bg-amber-100/80 dark:border-amber-600 dark:bg-amber-900/40 p-3 space-y-2">
           <div className="text-xs font-medium text-ink">
             Allows {serviceAction} for every user and run in this org.{" "}
-            <a
-              href="/settings/organization"
-              className="underline text-moss hover:opacity-80"
-            >
+            <a href="/settings/organization/policies" className="underline text-moss hover:opacity-80">
               Manage policies
             </a>
           </div>
@@ -236,6 +254,26 @@ export function PolicyGateCard({ runId, gate }: PolicyGateCardProps): ReactEleme
 
       {/* Deny microcopy */}
       <div className="text-[11px] text-muted">{denyMicrocopy}</div>
+
+      <ConfirmDialog
+        open={confirmation !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmation(null);
+        }}
+        title={confirmation === "deny" ? "Deny this tool action?" : "Allow this tool action?"}
+        description={
+          confirmation === "run"
+            ? `Valet runs ${serviceAction} now and allows later calls in this run.`
+            : confirmation === "deny"
+              ? denyMicrocopy
+              : `Valet runs ${serviceAction} once with the shown parameters.`
+        }
+        confirmLabel={confirmation === "deny" ? "Deny action" : "Allow action"}
+        onConfirm={() => {
+          if (confirmation === "deny") submitDeny();
+          else if (confirmation !== null) submitApprove(confirmation);
+        }}
+      />
 
       {/* Footer: timeout + error */}
       {(gate.timeoutAt != null || is409AlreadyResolved || errorMsg != null) && (

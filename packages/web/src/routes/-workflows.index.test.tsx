@@ -16,7 +16,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { WorkflowDefinitionSummary, ListAllWorkflowRunsResponse } from "@valet/api/wire";
+import type {
+  ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
+  WorkflowDefinitionSummary,
+} from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
 
 // Annotated rather than inferred: the empty-list case reassigns `workflows`
@@ -42,14 +46,25 @@ const workflowsData: { workflows: WorkflowDefinitionSummary[] } = {
       ownerType: "team",
       ownerId: "team_1",
       origin: "repo",
-      upstream: { repoFullName: "tkhq/automation", ref: "release/v2", path: ".valet/workflows/nightly.yaml" },
+      upstream: {
+        repoFullName: "tkhq/automation",
+        ref: "release/v2",
+        path: ".valet/workflows/nightly.yaml",
+      },
     },
   ],
 };
 
 const teamsData = {
   teams: [
-    { id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "admin" as const },
+    {
+      id: "team_1",
+      orgId: "org_1",
+      name: "Platform",
+      createdAt: 1,
+      memberCount: 2,
+      callerRole: "admin" as const,
+    },
   ],
 };
 
@@ -88,11 +103,53 @@ const allRunsData: ListAllWorkflowRunsResponse = {
   ],
 };
 
+const actionRequiredData: ListWorkflowActionRequiredResponse = {
+  count: 2,
+  items: [
+    {
+      id: "wfrun_approval:review:0",
+      runId: "wfrun_approval",
+      workflowId: "wf_1",
+      workflowName: "Deploy pipeline",
+      runCreatedAt: Date.now() - 20_000,
+      owner: { type: "user", id: "u-1" },
+      trigger: { type: "manual" },
+      gate: {
+        nodeId: "review",
+        kind: "approval",
+        prompt: "Ship this release?",
+        waitingSince: Date.now() - 10_000,
+      },
+    },
+    {
+      id: "wfrun_policy:send:0",
+      runId: "wfrun_policy",
+      workflowId: "wf_2",
+      workflowName: "Nightly digest",
+      runCreatedAt: Date.now() - 15_000,
+      owner: { type: "team", id: "team_1" },
+      trigger: { type: "schedule", triggerId: "sched_1" },
+      gate: {
+        nodeId: "send",
+        kind: "policy_gate",
+        service: "slack",
+        action: "send_message",
+        provenance: "org_policy",
+        riskLevel: "high",
+        gateParams: { channel: "#ops" },
+        onDeny: "skip",
+        waitingSince: Date.now() - 5_000,
+      },
+    },
+  ],
+};
+
 let searchState: Record<string, unknown> = {};
 
 const navigate = vi.fn();
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
 const deleteMutateAsync = vi.fn().mockResolvedValue(undefined);
+const resolveMutate = vi.fn();
 const createMutateAsync = vi.fn().mockResolvedValue({
   id: "wf_new",
   name: "My new workflow",
@@ -116,7 +173,11 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
-  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
+  useOrg: () => ({
+    data: { features: { organizations: true } },
+    isLoading: false,
+    error: null,
+  }),
   // `useListOwner` reads the caller's own id to address the personal
   // workspace: the workspace switcher holds a routing key, not a principal.
   useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
@@ -155,11 +216,33 @@ vi.mock("~/api/assistants", async (importOriginal) => {
 
 vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
+  useWorkflowActionRequired: () => ({
+    data: actionRequiredData,
+    isLoading: false,
+    error: null,
+  }),
+  useResolveApproval: () => ({
+    mutate: resolveMutate,
+    isPending: false,
+    isError: false,
+    error: null,
+  }),
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
-  useCreateWorkflow: () => ({ mutateAsync: createMutateAsync, isPending: false, error: null }),
-  useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
-  useWorkflowTriggers: () => ({ data: triggersData, isLoading: false, error: null }),
+  useCreateWorkflow: () => ({
+    mutateAsync: createMutateAsync,
+    isPending: false,
+    error: null,
+  }),
+  useDeleteWorkflow: () => ({
+    mutateAsync: deleteMutateAsync,
+    isPending: false,
+  }),
+  useWorkflowTriggers: () => ({
+    data: triggersData,
+    isLoading: false,
+    error: null,
+  }),
   useAllWorkflowRuns: (...args: unknown[]) => {
     runsQuery(...args);
     return { data: { ...allRunsData }, isLoading: false, error: null };
@@ -169,7 +252,11 @@ vi.mock("~/api/workflows", () => ({
   useDeleteSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useDeleteEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useRunScheduleNow: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useTriggerCatalog: () => ({ data: { catalog: [] }, isLoading: false, error: null }),
+  useTriggerCatalog: () => ({
+    data: { catalog: [] },
+    isLoading: false,
+    error: null,
+  }),
   useCreateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useCreateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
@@ -211,6 +298,7 @@ beforeEach(() => {
   navigate.mockClear();
   createMutateAsync.mockClear();
   deleteMutateAsync.mockClear();
+  resolveMutate.mockClear();
 });
 
 describe("WorkflowsIndexPage", () => {
@@ -236,7 +324,9 @@ describe("WorkflowsIndexPage", () => {
     try {
       fireEvent.click(screen.getByRole("button", { name: "Next" }));
       expect(screen.getByText(/No runs yet/)).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Previous" })).toMatchObject({ disabled: false });
+      expect(screen.getByRole("button", { name: "Previous" })).toMatchObject({
+        disabled: false,
+      });
       fireEvent.click(screen.getByRole("button", { name: "Previous" }));
       expect(runsQuery).toHaveBeenLastCalledWith({ ownerType: "user", ownerId: "u-1" }, undefined);
     } finally {
@@ -311,7 +401,10 @@ describe("WorkflowsIndexPage", () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const call = createMutateAsync.mock.calls[0]![0] as {
       name: string;
-      definition: { nodes: Array<{ id: string; type: string }>; edges: Array<{ from: string; to: string }> };
+      definition: {
+        nodes: Array<{ id: string; type: string }>;
+        edges: Array<{ from: string; to: string }>;
+      };
     };
     expect(call.name).toBe("My new workflow");
     expect(call.definition.nodes.map((n) => n.type)).toEqual(["trigger", "stop"]);
@@ -341,6 +434,51 @@ describe("WorkflowsIndexPage", () => {
     renderPage();
     expect(screen.getByText("Deploy pipeline")).toBeTruthy();
     expect(screen.getByLabelText(/1 schedule/)).toBeTruthy();
+  });
+
+  it("shows both gate classes in the action-required tab with a cross-workflow count", () => {
+    searchState = { tab: "action-required" };
+    renderPage();
+
+    expect(screen.getByRole("tab", { name: /Needs your approval 2/ })).toBeTruthy();
+    expect(screen.getByText("Workflow approval")).toBeTruthy();
+    expect(screen.getByText("Tool permission")).toBeTruthy();
+    expect(screen.getAllByText("Ship this release?")).toHaveLength(2);
+    expect(screen.getAllByText("slack.send_message").length).toBeGreaterThan(0);
+    expect(screen.getByText("Started by schedule (sched_1)")).toBeTruthy();
+  });
+
+  it("stacks action details at a narrow viewport without a minimum page width", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 390,
+    });
+    searchState = { tab: "action-required" };
+    renderPage();
+    const row = screen.getAllByTestId("action-required-item")[0];
+    expect(row.className).toContain("min-w-0");
+    expect(row.querySelector(".flex-col")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: /Needs your approval/ }).className).toContain("min-h-11");
+  });
+
+  it("uses the notification search target to focus one gate", () => {
+    searchState = { tab: "action-required", run: "wfrun_policy", gate: "send" };
+    renderPage();
+    const rows = screen.getAllByTestId("action-required-item");
+    expect(rows[0].className).not.toContain("ring-2");
+    expect(rows[1].className).toContain("ring-2");
+  });
+
+  it("confirms an explicit approval before it resolves", () => {
+    searchState = { tab: "action-required" };
+    renderPage();
+    fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]);
+    expect(resolveMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Approve step" }));
+    expect(resolveMutate).toHaveBeenCalledWith({
+      nodeId: "review",
+      body: { approved: true, note: undefined, iteration: undefined },
+    });
   });
 
   it("renders the Runs tab from the global runs feed", () => {
@@ -412,7 +550,10 @@ describe("WorkflowsIndexPage — team ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
-    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string; definition: { assistantId: string } };
+    const call = createMutateAsync.mock.calls.at(-1)![0] as {
+      teamId?: string;
+      definition: { assistantId: string };
+    };
     expect(call.teamId).toBe("team_1");
     expect(call.definition.assistantId).toBe("asst_team_1");
   });
@@ -423,7 +564,10 @@ describe("WorkflowsIndexPage — team ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalled());
-    const call = createMutateAsync.mock.calls.at(-1)![0] as { teamId?: string; definition: { assistantId: string } };
+    const call = createMutateAsync.mock.calls.at(-1)![0] as {
+      teamId?: string;
+      definition: { assistantId: string };
+    };
     expect(call.teamId).toBeUndefined();
     expect(call.definition.assistantId).toBe("asst_personal");
   });

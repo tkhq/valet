@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { NodeCheckpoint, RunSettledInfo } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable, type AppDb } from "../lib/drizzle.js";
 import { notifications, workflowDefinitions } from "../schema/index.js";
-import { buildRunSettledAttention, failedNodeSummary } from "./run-attention.js";
+import { buildRunSettledAttention, failedNodeSummary, workflowApprovalHref } from "./run-attention.js";
 
 function checkpoint(overrides: Partial<NodeCheckpoint> & { nodeId: string }): NodeCheckpoint {
   return {
@@ -154,5 +154,13 @@ describe("buildRunSettledAttention", () => {
 
     await expect(buildRunSettledAttention({ db, store: brokenStore })(settled())).resolves.toBeUndefined();
     expect(await db.select().from(notifications)).toHaveLength(0);
+  });
+});
+
+describe("workflowApprovalHref", () => {
+  it("deep-links to the action-required tab and encodes the gate target", () => {
+    expect(workflowApprovalHref("run/1", "approve me")).toBe(
+      "/workflows?tab=action-required&run=run%2F1&gate=approve%20me",
+    );
   });
 });
