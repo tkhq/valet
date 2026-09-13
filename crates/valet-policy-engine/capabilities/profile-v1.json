@@ -215,7 +215,7 @@
   "enabled_builtin_count": 104,
   "targets": [
     {"target":"native","status":"supported","evidence":"cargo test --workspace --locked"},
-    {"target":"wasm32-unknown-unknown","status":"supported","evidence":"Rust-to-WASM worker parity, 100 ms termination, 64 MiB linker cap, and post-failure recovery tests"}
+    {"target":"wasm32-unknown-unknown","status":"supported","evidence":"complete checked-in corpus parity; ready/start deadline protocol; 64 MiB unshared linear-memory inspection; fatal trap replacement; dist and compiled-binary packaging tests"}
   ],
   "ambient_capabilities": [
     {"name":"wall_clock","class":"fact_backed","status":"disabled","replacement":"canonical input fact"},
