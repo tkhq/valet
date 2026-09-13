@@ -255,6 +255,7 @@ describe("wireAttentionRouter", () => {
     if (event.event.type === "decision_gate") {
       event.event.gate.body = 'do it\n\ntool_id=fake.do_thing\nargs={"a":1}';
       event.event.gate.context = {
+        kind: "tool_approval",
         riskLevel: "high",
         service: "fake",
         tool_id: "fake.do_thing",

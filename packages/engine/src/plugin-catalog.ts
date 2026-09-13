@@ -820,8 +820,8 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     for (const action of plugin.actions) {
       const entry: CatalogEntry = { service: plugin.service, plugin, action };
       entries.push(entry);
-      const fqid = action.id.includes(".") ? action.id : `.`;
-      if (byId.has(fqid)) throw new Error(`duplicate plugin action id: `);
+      const fqid = action.id.includes(".") ? action.id : plugin.service + "." + action.id;
+      if (byId.has(fqid)) throw new Error("duplicate plugin action id: " + fqid);
       byId.set(fqid, entry);
       // Allow a bare id lookup when unambiguous.
       if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);

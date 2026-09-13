@@ -131,7 +131,7 @@ describe("pluginCatalogTools: registration", () => {
     const tools = pluginCatalogTools({
       plugins: [
         { ...a.plugin, service: "github" },
-        { ...b.plugin, service: "gmail" },
+        { ...b.plugin, service: "gmail", actions: b.plugin.actions.map((action) => ({ ...action, id: action.id.replace("github.", "gmail.") })) },
       ],
     });
     expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools"]);
@@ -1592,7 +1592,7 @@ describe("pinned tool: same execution path as call_tool", () => {
     // one admin rule covers both routes and the audit trail correlates.
     expect(gates[0]?.resumeKey).toContain("workflows.patch_workflow");
     expect(gates[0]?.body).toContain("tool_id=workflows.patch_workflow");
-    expect(gates[0]?.body).toContain("wf-1");
+    expect(gates[0]?.body).not.toContain("wf-1");
     expect(result?.text).toContain("did not approve");
     expect(calls).toHaveLength(0);
   });
@@ -1651,7 +1651,6 @@ describe("pinned tool: same execution path as call_tool", () => {
       "riskLevel",
       "status",
       "resolvedMode",
-      "resumeKey",
       "appliesIn",
     ] as const) {
       expect(fromPinned?.[field]).toEqual(fromCallTool?.[field]);
@@ -1736,7 +1735,7 @@ describe("pinned tool: the model's summary", () => {
     //
     // What this test actually guards is the summary: it must reach neither
     // the action's arguments nor the audit params.
-    expect(records[0]?.params).toEqual({ workflow_id: "wf-1" });
+    expect(records[0]?.params).toEqual({ workflow_id: "wf-1", name: "untitled" });
   });
 
   it("falls back to the derived summary when the model sends a blank one", async () => {

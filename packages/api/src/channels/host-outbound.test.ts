@@ -773,6 +773,7 @@ describe("ChannelHost outbound delivery", () => {
         { id: "deny", label: "Deny", style: "danger" },
       ],
       context: {
+        kind: "tool_approval",
         riskLevel: "high",
         service: "fake",
         tool_id: "fake.do_thing",
