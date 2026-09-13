@@ -2102,7 +2102,7 @@ export interface RetryWorkflowRunResponse {
 // `GET /api/workflows/:id/permissions` predicts, per tool node in the STORED
 // definition, how the policy ladder would resolve the node's action for the
 // calling user if a run started now. The prediction runs the same
-// `resolveActionPolicy` core as the run-time invoker, with `appliesIn:
+// canonical evaluator as the run-time invoker, with `appliesIn:
 // "workflow"` and no execution id (a run that has not started has no
 // exec-scoped grants). It is advisory: org policies with param matchers
 // evaluate against the node's static params, so a template value (`{{ ... }}`)
@@ -4398,7 +4398,7 @@ export interface EventSubscriptionWire {
 // ─── Action policies (action-policies plan, Task 4) ─────────────────────────
 //
 // `/api/org/policies` (admin CRUD + action log), `/api/me/policy-overrides`,
-// `/api/me/grants`. See `packages/api/src/policies/resolution.ts` for the
+// `/api/me/grants`. See the canonical authorization service for the
 // precedence semantics these rows feed and `packages/api/src/policies/
 // admin.ts` for the CRUD/pagination service layer backing these routes.
 

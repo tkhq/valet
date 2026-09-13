@@ -68,7 +68,7 @@ import {
 } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
+
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -378,39 +378,8 @@ async function computeResult(
     if (refusal) return refusal;
   }
 
-  // Policy enforcement (action-policies plan, Task 3): `deny` fails the
-  // node. `require_approval` does NOT — it returns `requiresApproval`, and
-  // the tool executor parks the run on an `approval:{nodeId}` signal until
-  // a person resolves it (`@valet/workflow`'s `nodes/tool.ts`). Read that
-  // as a warning for anything unattended: a scheduled run that reaches a
-  // gated action waits, without a deadline, unless the node declares
-  // `approvalTimeout`. An exec-scoped grant is consulted transparently by
-  // `resolveActionPolicy` (grant rung), so a covered action resolves
-  // straight to `allow`. The policy-facing actionId
-  // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
-  // canonical id matches both the session and workflow paths.
-  const policyActionId = qualifiedActionId(req.service, action);
-  // Set only when enforceWorkflowPolicy wrote a decision row (org + run
-  // context present); also the org scope for the outcome-stamp UPDATE.
-  const auditOrgId = ctx.orgId && ctx.workflowExecutionId ? ctx.orgId : undefined;
-  const denial = opts.canonicalAuthorizationService ? null : await enforceWorkflowPolicy(
-    opts,
-    req,
-    ctx,
-    action.riskLevel,
-    entry.actionPlugin.defaultApprovalMode,
-    policyActionId,
-  );
-  if (denial) return denial;
-
   const prepared = prepareActionArgs(action.parameters, req.params);
   if (!prepared.ok) {
-    if (auditOrgId) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
-        status: "error",
-        error: `invalid params: ${prepared.error}`,
-      });
-    }
     return { ok: false, error: prepared.error };
   }
 
@@ -436,13 +405,6 @@ async function computeResult(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: "failed", redactedError: "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
-    if (auditOrgId) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
-        status: "error",
-        error: message,
-        durationMs: (opts.clock ?? Date.now)() - startedAt,
-      });
-    }
     return { ok: false, error: message };
   }
 
@@ -451,14 +413,6 @@ async function computeResult(
   // fixed: workflow rows now carry the result, size-capped by the updater).
   // `result` is the full `PluginActionResult` — the same shape the session
   // path's `PolicyInvocationRecord.result` carries.
-  if (auditOrgId) {
-    await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
-      status: result.success ? "completed" : "error",
-      result,
-      error: result.success ? undefined : (result.error ?? "failed with no error detail"),
-      durationMs: (opts.clock ?? Date.now)() - startedAt,
-    });
-  }
 
   if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: result.success ? "completed" : "failed", redactedResult: result.success ? { completed: true } : null, redactedError: result.success ? null : "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
 
@@ -524,16 +478,19 @@ async function enforceCanonicalWorkflowPolicy(
   opts: ActionInvokerOpts, req: WorkflowInvokeActionRequest, ctx: ActionInvocationContext, action: PluginAction,
 ): Promise<WorkflowInvokeActionResult | PolicyDecisionEnvelope> {
   const service = opts.canonicalAuthorizationService;
-  if (!service || !ctx.workflowExecutionId || !ctx.workflowDefinitionId || !ctx.workflowVersion || !ctx.workflowNodeId)
-    return { ok: false, error: "Canonical workflow authorization context is incomplete." };
+  if (!service) return { ok: false, error: "Canonical authorization service is unavailable." };
+  const workflowExecutionId = ctx.workflowExecutionId ?? `route:${req.invocationId}`;
+  const workflowDefinitionId = ctx.workflowDefinitionId ?? "route-action";
+  const workflowVersion = ctx.workflowVersion ?? "1";
+  const workflowNodeId = ctx.workflowNodeId ?? "route";
   const now = (opts.clock ?? Date.now)();
   const actionId = qualifiedActionId(req.service, action);
   const common = {
     schemaVersion: 1 as const, organizationId: ctx.orgId, actor: { type: "user" as const, id: ctx.userId }, owner: ctx.owner,
     ...(ctx.owner.type === "team" ? { teamId: ctx.owner.id } : {}), requestId: req.invocationId,
-    workflowDefinitionId: ctx.workflowDefinitionId, workflowVersion: ctx.workflowVersion, workflowExecutionId: ctx.workflowExecutionId,
-    nodeId: ctx.workflowNodeId, invocationId: req.invocationId, evaluationTimeMs: now,
-    action: { service: req.service, actionId, catalogActionId: actionId, sourcePluginService: req.service, sourceActionId: actionId, sourceToolId: ctx.workflowNodeId, riskLevel: action.riskLevel, parameters: req.params, parameterProjection: actionProjection(actionId) },
+    workflowDefinitionId: workflowDefinitionId, workflowVersion: workflowVersion, workflowExecutionId: workflowExecutionId,
+    nodeId: workflowNodeId, invocationId: req.invocationId, evaluationTimeMs: now,
+    action: { service: req.service, actionId, catalogActionId: actionId, sourcePluginService: req.service, sourceActionId: actionId, sourceToolId: workflowNodeId, riskLevel: action.riskLevel, parameters: req.params, parameterProjection: actionProjection(actionId) },
   };
   const initial = adaptWorkflowAction({ ...common, dynamicFacts: {} });
   let adapted = initial;
@@ -541,8 +498,8 @@ async function enforceCanonicalWorkflowPolicy(
     const original = (await opts.db.select().from(authorizationDecisions).where(and(eq(authorizationDecisions.orgId, ctx.orgId), eq(authorizationDecisions.idempotencyKey, initial.request.idempotencyKey))).limit(1))[0];
     if (!original || original.effect !== "require_approval" || !original.evidence || !original.approvalRequirement) return { ok: false, error: "Canonical approval has no matching original decision." };
     const resolutionId = canonicalApprovalResolutionId(req, req.approval.resolvedBy);
-    await opts.db.insert(canonicalApprovalResolutions).values({ resolutionId, approvalId: original.decisionId, gateId: original.decisionId, orgId: ctx.orgId, requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest, approverId: req.approval.resolvedBy, verdict: "approved", appliesIn: "workflow", workflowExecutionId: ctx.workflowExecutionId, resolvedAt: now, expiresAt: original.approvalRequirement.expiresAtMs ?? now + 72 * 60 * 60 * 1000, resolutionVersion: 1 }).onConflictDoNothing();
-    const facts = await loadCanonicalDynamicFacts(opts.db, { organizationId: ctx.orgId, service: req.service, actionId, riskLevel: action.riskLevel, appliesIn: "workflow", scopeId: ctx.workflowExecutionId, evaluationTimeMs: now, requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest });
+    await opts.db.insert(canonicalApprovalResolutions).values({ resolutionId, approvalId: original.decisionId, gateId: original.decisionId, orgId: ctx.orgId, requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest, approverId: req.approval.resolvedBy, verdict: "approved", appliesIn: "workflow", workflowExecutionId: workflowExecutionId, resolvedAt: now, expiresAt: original.approvalRequirement.expiresAtMs ?? now + 72 * 60 * 60 * 1000, resolutionVersion: 1 }).onConflictDoNothing();
+    const facts = await loadCanonicalDynamicFacts(opts.db, { organizationId: ctx.orgId, service: req.service, actionId, riskLevel: action.riskLevel, appliesIn: "workflow", scopeId: workflowExecutionId, evaluationTimeMs: now, requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest });
     const post = adaptWorkflowAction({ ...common, dynamicFacts: { currentPolicy: facts }, approvalBindingContext: { requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest } });
     const invocationId = authorizationSha256Hex(canonicalAuthorizationJson({ original: post.request.subject.invocation.id, resolutionId }));
     adapted = { ...post, request: { ...post.request, subject: { ...post.request.subject, invocation: { ...post.request.subject.invocation, id: invocationId } }, idempotencyKey: `${post.request.subject.invocation.type}:${invocationId}` } };
@@ -563,154 +520,6 @@ function canonicalApprovalResolutionId(req: WorkflowInvokeActionRequest, approve
   return `resolution:${Buffer.from(`${req.invocationId}\0${approverId}`).toString("base64url").slice(0, 96)}`;
 }
 
-async function enforceWorkflowPolicy(
-  opts: ActionInvokerOpts,
-  req: WorkflowInvokeActionRequest,
-  ctx: ActionInvocationContext,
-  riskLevel: RiskLevel,
-  pluginDefault: ApprovalMode | undefined,
-  policyActionId: string,
-): Promise<WorkflowInvokeActionResult | null> {
-  if (!ctx.orgId || !ctx.workflowExecutionId) return null;
-  const now = (opts.clock ?? Date.now)();
-
-  let decision: Awaited<ReturnType<typeof resolveActionPolicy>>;
-  try {
-    decision = await resolveActionPolicy(opts.db, {
-      orgId: ctx.orgId,
-      teamId: ctx.owner.type === "team" ? ctx.owner.id : undefined,
-      userId: ctx.userId,
-      service: req.service,
-      actionId: policyActionId,
-      riskLevel,
-      params: req.params,
-      appliesIn: "workflow",
-      workflowExecutionId: ctx.workflowExecutionId,
-      pluginDefault,
-      now,
-    });
-  } catch (err) {
-    console.error("action-invoker: policy resolution failed:", err);
-    if (req.approval && ctx.owner.type !== "team") {
-      // Team actions must re-check team denies even after approval.
-      // Human approval is the authorization — proceed even though the
-      // resolver could not be consulted. The signal is the authority.
-      // Write a best-effort audit row so the approved execution is
-      // auditable even when the policy store was unreachable.
-      await persistInvocationAudit(opts.db, {
-        invocationId: `pol:wf:${req.invocationId}`,
-        service: req.service,
-        actionId: policyActionId,
-        riskLevel,
-        resolvedMode: "require_approval",
-        baseMode: "require_approval",
-        matchedPolicyId: null,
-        matchedGrantId: null,
-        matchedOverrideId: null,
-        status: "approved",
-        workflowExecutionId: ctx.workflowExecutionId,
-        userId: ctx.userId,
-        orgId: ctx.orgId,
-        params: req.params,
-        createdAt: now,
-      });
-      return null;
-    }
-    return { ok: false, requiresApproval: true, provenance: "resolver_error" };
-  }
-
-  if (decision.mode === "allow") {
-    await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
-      service: req.service,
-      actionId: policyActionId,
-      riskLevel,
-      resolvedMode: decision.mode,
-      baseMode: decision.provenance.baseMode,
-      matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
-      matchedGrantId: decision.provenance.matchedGrantId ?? null,
-      matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
-      status: "allowed",
-      workflowExecutionId: ctx.workflowExecutionId,
-      userId: ctx.userId,
-      orgId: ctx.orgId,
-      params: req.params,
-      createdAt: now,
-    });
-    return null;
-  }
-
-  if (decision.mode === "deny") {
-    await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
-      service: req.service,
-      actionId: policyActionId,
-      riskLevel,
-      resolvedMode: decision.mode,
-      baseMode: decision.provenance.baseMode,
-      matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
-      matchedGrantId: decision.provenance.matchedGrantId ?? null,
-      matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
-      status: "denied",
-      workflowExecutionId: ctx.workflowExecutionId,
-      userId: ctx.userId,
-      orgId: ctx.orgId,
-      params: req.params,
-      createdAt: now,
-    });
-    const policyScope = decision.provenance.source === "team_policy" ? "team" : decision.provenance.source === "org_policy" ? "org" : "authorization";
-    return { ok: false, error: `${req.service}.${req.action} is blocked by ${policyScope} policy` };
-  }
-
-  // decision.mode === "require_approval"
-  if (req.approval) {
-    // The tool executor holds an approved, unconsumed signal — treat as authorized.
-    await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
-      service: req.service,
-      actionId: policyActionId,
-      riskLevel,
-      resolvedMode: decision.mode,
-      baseMode: decision.provenance.baseMode,
-      matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
-      matchedGrantId: decision.provenance.matchedGrantId ?? null,
-      matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
-      status: "approved",
-      workflowExecutionId: ctx.workflowExecutionId,
-      userId: ctx.userId,
-      orgId: ctx.orgId,
-      params: req.params,
-      createdAt: now,
-    });
-    return null;
-  }
-
-  // Park: write a "pending" audit row so the gate is visible in the audit log,
-  // then return the requiresApproval signal. This row must NOT live in the
-  // dedup table — the approved retry must reach enforcement fresh.
-  await persistInvocationAudit(opts.db, {
-    invocationId: `pol:wf:${req.invocationId}`,
-    service: req.service,
-    actionId: policyActionId,
-    riskLevel,
-    resolvedMode: decision.mode,
-    baseMode: decision.provenance.baseMode,
-    matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
-    matchedGrantId: decision.provenance.matchedGrantId ?? null,
-    matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
-    status: "pending",
-    workflowExecutionId: ctx.workflowExecutionId,
-    userId: ctx.userId,
-    orgId: ctx.orgId,
-    params: req.params,
-    createdAt: now,
-  });
-  return { ok: false, requiresApproval: true, riskLevel, provenance: decision.provenance.source };
-}
-
-export { qualifiedActionId };
-
-/** Matches a bare or service-qualified `PluginAction.id` against `(service, action)`, mirroring `@valet/engine`'s `plugin-catalog.ts` fqid convention. */
 export function findAction(actions: PluginAction[], service: string, actionId: string): PluginAction | undefined {
   return actions.find((a) => {
     if (a.id === actionId) return true;

@@ -30,13 +30,18 @@ export class CanonicalAuthorizationService implements AuthorizationService {
     }, now);
   }
 
+  async preview(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> {
+    const envelope = assertEnvelope(request, await this.evaluator.evaluate(request));
+    buildActionObligationPlan(envelope.decision);
+    return envelope;
+  }
+
   async authorize(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> {
     const subjectDigest = requestSubjectDigest(request);
     const existing = await this.find(request.subject.orgId, request.idempotencyKey);
     if (existing) return this.replay(existing, subjectDigest);
 
-    const envelope = assertEnvelope(request, await this.evaluator.evaluate(request));
-    buildActionObligationPlan(envelope.decision);
+    const envelope = await this.preview(request);
     const plan = buildDecisionAuditPlan({
       decisionId: canonicalDecisionId(request.subject.orgId, request.idempotencyKey),
       request, envelope, ...this.evidence,

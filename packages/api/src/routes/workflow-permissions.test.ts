@@ -10,7 +10,6 @@ import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionPolicies, actionPolicyOverrides, workflowDefinitions, workflowVersions } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
-import { resolveActionPolicy } from "../policies/service.js";
 import { isRiskLevel } from "../policies/admin.js";
 import type {
   AllowWorkflowPermissionsResponse,
@@ -35,16 +34,16 @@ function widgetAction(id: string, riskLevel: PluginAction["riskLevel"]): PluginA
   };
 }
 
-/** One service, two static actions: `deploy` (high risk → gates by risk
- * default) and `list` (low risk → allows by risk default). */
-function widgetsPlugin(): ValetPlugin {
+/** One service, three static actions: `create_issue` (high risk → gates by risk
+ * default) and `list_issues` (low risk → allows by risk default). */
+function githubPlugin(): ValetPlugin {
   return {
-    name: "widgets",
+    name: "github-fixture",
     version: "0.0.1",
     actions: [
       {
-        service: "widgets",
-        actions: [widgetAction("deploy", "high"), widgetAction("list", "low"), widgetAction("purge", "critical")],
+        service: "github",
+        actions: [widgetAction("create_issue", "high"), widgetAction("list_issues", "low"), widgetAction("delete_branch", "critical")],
       },
     ],
   };
@@ -54,8 +53,8 @@ const DEFINITION = {
   version: "dag/v1",
   nodes: [
     { id: "trigger", type: "trigger" },
-    { id: "ship", type: "tool", service: "widgets", action: "deploy", params: {} },
-    { id: "inventory", type: "tool", service: "widgets", action: "list", params: {} },
+    { id: "ship", type: "tool", service: "github", action: "create_issue", params: {} },
+    { id: "inventory", type: "tool", service: "github", action: "list_issues", params: {} },
     { id: "mystery", type: "tool", service: "unplugged", action: "thing", params: {} },
     // A foreach whose body is a gating tool action: the run gates on it
     // exactly like a top-level tool node, so the analysis must report it —
@@ -64,7 +63,7 @@ const DEFINITION = {
       id: "fanout",
       type: "foreach",
       items: "{{ trigger.data.items }}",
-      body: { id: "fanout-body", type: "tool", service: "widgets", action: "purge", params: {} },
+      body: { id: "fanout-body", type: "tool", service: "github", action: "delete_branch", params: {} },
     },
     { id: "human", type: "approval", prompt: "ok to continue?" },
     { id: "stop", type: "stop" },
@@ -112,7 +111,7 @@ function byNodeId(resp: GetWorkflowPermissionsResponse): Map<string, GetWorkflow
 
 describe("GET /api/workflows/:id/permissions", () => {
   it("predicts per tool node; approval nodes are absent", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api);
 
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
@@ -122,25 +121,25 @@ describe("GET /api/workflows/:id/permissions", () => {
 
     expect(body.nodes).toHaveLength(4);
     expect(nodes.get("ship")).toMatchObject({
-      service: "widgets",
-      action: "deploy",
-      actionId: "widgets.deploy",
+      service: "github",
+      action: "create_issue",
+      actionId: "github.create_issue",
       riskLevel: "high",
       mode: "require_approval",
       provenance: "risk_default",
     });
     // The foreach body's tool action, attributed to the foreach node's id.
     expect(nodes.get("fanout")).toMatchObject({
-      service: "widgets",
-      action: "purge",
-      actionId: "widgets.purge",
+      service: "github",
+      action: "delete_branch",
+      actionId: "github.delete_branch",
       riskLevel: "critical",
       mode: "require_approval",
       provenance: "risk_default",
     });
     expect(nodes.has("fanout-body")).toBe(false);
     expect(nodes.get("inventory")).toMatchObject({
-      actionId: "widgets.list",
+      actionId: "github.list_issues",
       riskLevel: "low",
       mode: "allow",
       provenance: "risk_default",
@@ -155,14 +154,13 @@ describe("GET /api/workflows/:id/permissions", () => {
   });
 
   it("an org deny surfaces as mode deny with org_policy provenance", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api);
-    await api.providers.db.insert(actionPolicies).values({
-      id: "pol_deny_deploy", orgId: "local-org", principalType: "org", principalId: "local-org",
-      service: null, actionId: "widgets.deploy", riskLevel: null, mode: "deny",
-      paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
-      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    const policy = await fetch(`${api.baseUrl}/api/org/policies`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "deny" }),
     });
+    expect(policy.status).toBe(201);
 
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
     const body = (await res.json()) as GetWorkflowPermissionsResponse;
@@ -170,7 +168,7 @@ describe("GET /api/workflows/:id/permissions", () => {
   });
 
   it("another user's workflow → 404", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api, { ownerId: "someone-else" });
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
     expect(res.status).toBe(404);
@@ -179,18 +177,20 @@ describe("GET /api/workflows/:id/permissions", () => {
 
 describe("team workflow permissions", () => {
   it("matches runtime team decisions and ignores personal overrides", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Permissions team", creatorUserId: "local-user" });
     const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id });
-    await api.providers.db.insert(actionPolicies).values([
-      { id: "team-deny", orgId: "local-org", principalType: "team", principalId: team.id,
-        actionId: "widgets.deploy", mode: "deny", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1 },
-      { id: "team-approval", orgId: "local-org", principalType: "team", principalId: team.id,
-        actionId: "widgets.list", mode: "require_approval", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1 },
-    ]);
-    await api.providers.db.insert(actionPolicyOverrides).values({
-      id: "personal-allow", orgId: "local-org", userId: "local-user", service: "widgets",
-      mode: "allow", paramMatchers: [], createdAt: 1, updatedAt: 1,
+    await api.providers.canonicalPolicyManager.mutateAndActivate("local-org", { actorId: "local-user", operation: "test_team_rules", idempotencyKey: "test-team-rules" }, async (tx) => {
+      await tx.insert(actionPolicies).values([
+        { id: "team-deny", orgId: "local-org", principalType: "team", principalId: team.id,
+          actionId: "github.create_issue", mode: "deny", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1 },
+        { id: "team-approval", orgId: "local-org", principalType: "team", principalId: team.id,
+          actionId: "github.list_issues", mode: "require_approval", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1 },
+      ]);
+      await tx.insert(actionPolicyOverrides).values({
+        id: "personal-allow", orgId: "local-org", userId: "local-user", service: "github",
+        mode: "allow", paramMatchers: [], createdAt: 1, updatedAt: 1,
+      });
     });
 
     const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
@@ -200,16 +200,6 @@ describe("team workflow permissions", () => {
     expect(nodes.get("ship")).toMatchObject({ mode: "deny", provenance: "team_policy" });
     expect(nodes.get("inventory")).toMatchObject({ mode: "require_approval", provenance: "team_policy" });
     expect(nodes.get("fanout")).toMatchObject({ mode: "require_approval", provenance: "risk_default" });
-    for (const node of preview.nodes) {
-      if (!node.actionId) continue;
-      if (!isRiskLevel(node.riskLevel)) throw new Error(`Invalid risk level for ${node.actionId}`);
-      const runtime = await resolveActionPolicy(api.providers.db, {
-        orgId: "local-org", teamId: team.id, userId: "local-user", service: node.service,
-        actionId: node.actionId, riskLevel: node.riskLevel, params: {}, appliesIn: "workflow",
-        workflowExecutionId: "team-preview-run", pluginDefault: undefined, now: Date.now(),
-      });
-      expect({ mode: node.mode, source: node.provenance }).toEqual({ mode: runtime.mode, source: runtime.provenance.source });
-    }
     const personalId = await insertWorkflow(api);
     const personalResponse = await fetch(`${api.baseUrl}/api/workflows/${personalId}/permissions`);
     const personal = (await personalResponse.json()) as GetWorkflowPermissionsResponse;
@@ -217,15 +207,15 @@ describe("team workflow permissions", () => {
   });
 
   it("rejects team bulk approval without creating or changing personal overrides", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "No personal writes", creatorUserId: "local-user" });
     const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id });
     await api.providers.db.insert(actionPolicyOverrides).values({
-      id: "keep-personal", orgId: "local-org", userId: "local-user", actionId: "widgets.deploy",
+      id: "keep-personal", orgId: "local-org", userId: "local-user", actionId: "github.create_issue",
       mode: "require_approval", paramMatchers: [], createdAt: 1, updatedAt: 1,
     });
     const before = await api.providers.db.select().from(actionPolicyOverrides);
-    for (const body of [undefined, { actionIds: ["widgets.deploy"] }, { actionIds: [] }]) {
+    for (const body of [undefined, { actionIds: ["github.create_issue"] }, { actionIds: [] }]) {
       const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
       });
@@ -246,17 +236,17 @@ describe("team workflow permissions", () => {
 
 describe("POST /api/workflows/:id/permissions/allow", () => {
   it("writes one allow override per gating action; the next preview allows", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api);
 
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as AllowWorkflowPermissionsResponse;
-    expect(body).toEqual({ allowed: ["widgets.deploy", "widgets.purge"], blocked: [] });
+    expect(body).toEqual({ allowed: ["github.create_issue", "github.delete_branch"], blocked: [] });
 
     const rows = await api.providers.db.select().from(actionPolicyOverrides);
     expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.actionId).sort()).toEqual(["widgets.deploy", "widgets.purge"]);
+    expect(rows.map((r) => r.actionId).sort()).toEqual(["github.create_issue", "github.delete_branch"]);
     expect(rows.every((r) => r.userId === "local-user" && r.mode === "allow")).toBe(true);
 
     const preview = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
@@ -266,7 +256,7 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
   });
 
   it("is idempotent — a second call updates the same override row", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api);
 
     const first = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
@@ -282,13 +272,13 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
   });
 
   it("an actionId outside the gating set → 400", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api);
 
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ actionIds: ["widgets.list"] }),
+      body: JSON.stringify({ actionIds: ["github.list_issues"] }),
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("not a gating action") });
@@ -297,32 +287,31 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
   });
 
   it("an org require_approval policy blocks the override (bounds check)", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api);
-    await api.providers.db.insert(actionPolicies).values({
-      id: "pol_gate_deploy", orgId: "local-org", principalType: "org", principalId: "local-org",
-      service: null, actionId: "widgets.deploy", riskLevel: null, mode: "require_approval",
-      paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
-      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    const policy = await fetch(`${api.baseUrl}/api/org/policies`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "require_approval" }),
     });
+    expect(policy.status).toBe(201);
 
     const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as AllowWorkflowPermissionsResponse;
-    // The org policy pins widgets.deploy; widgets.purge stays self-serviceable.
-    expect(body.allowed).toEqual(["widgets.purge"]);
+    // The org policy pins github.create_issue; github.delete_branch stays self-serviceable.
+    expect(body.allowed).toEqual(["github.delete_branch"]);
     expect(body.blocked).toHaveLength(1);
-    expect(body.blocked[0].actionId).toBe("widgets.deploy");
+    expect(body.blocked[0].actionId).toBe("github.create_issue");
     const rows = await api.providers.db.select().from(actionPolicyOverrides);
     expect(rows).toHaveLength(1);
-    expect(rows[0].actionId).toBe("widgets.purge");
+    expect(rows[0].actionId).toBe("github.delete_branch");
   });
 
   it("a null body → 400, a bare-array body → 400, nothing written", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const wfId = await insertWorkflow(api);
 
-    for (const raw of ["null", '["widgets.deploy"]']) {
+    for (const raw of ["null", '["github.create_issue"]']) {
       const res = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -336,7 +325,7 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
   });
 
   it("unknown workflow → 404", async () => {
-    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    api = await bootTestApi({ plugins: [githubPlugin()] });
     const res = await fetch(`${api.baseUrl}/api/workflows/wf_nope/permissions/allow`, { method: "POST" });
     expect(res.status).toBe(404);
   });

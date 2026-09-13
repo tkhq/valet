@@ -1426,7 +1426,7 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
 // rows remain reserved; personal overrides use `action_policy_overrides`.
 // `runtime_grants` (ephemeral "allow for this session/run" quiets, always
 // `mode: "allow"`), `action_policy_overrides` (durable per-user overrides).
-// All three feed `policies/resolution.ts`'s pure `resolvePolicyDecision` —
+// All three feed the canonical policy bundle evaluator.
 // see that module's doc comment for the full precedence order. The
 // "exactly one of service/actionId/riskLevel" and "exactly one of
 // sessionId/workflowExecutionId" CHECK constraints below are the DB-level
@@ -1472,7 +1472,7 @@ export const actionPolicies = pgTable(
 // transition of the parent context (no FK cascade — matches the sibling
 // tables' convention of "cascade by code, not by constraint"). `policyKey`
 // is the exact `service.actionId` idempotency/match key computed by
-// `policies/resolution.ts`'s `grantPolicyKey` — grants quiet ONE exact
+// `grantPolicyKey` identifies one exact action. Grants quiet one exact
 // action, not a broader service/risk-level target.
 export const runtimeGrants = pgTable(
   "runtime_grants",

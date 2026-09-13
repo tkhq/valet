@@ -7,6 +7,7 @@ import {
   policyAuthoringAudit,
   policyAuthoringDocuments,
   policyAuthoringOperations,
+  policyActiveBundles,
   policyAuthoringReviews,
   policyAuthoringRevisions,
   teamMembers,
@@ -75,7 +76,7 @@ async function setup() {
 }
 
 describe("canonical policy authoring routes", () => {
-  it("binds a reviewed immutable candidate without changing live policy", async () => {
+  it("activates a reviewed immutable candidate without changing structured rows", async () => {
     const app = await setup();
     const created = await post("/org/policy-drafts", {
       ...mutation("create-key-0001", 0, 0),
@@ -153,9 +154,10 @@ describe("canonical policy authoring routes", () => {
       reviewer,
     );
     expect(prepared.status).toBe(200);
-    expect(await prepared.json()).toMatchObject({
-      notice: expect.stringContaining("no enforcement effect"),
-    });
+    const publication = await prepared.json() as { notice: string; document: { sourceBundleDigest: string } };
+    expect(publication.notice).toContain("active canonical policy bundle");
+    const active = (await app.providers.db.select().from(policyActiveBundles).where(eq(policyActiveBundles.orgId, "local-org")))[0];
+    expect(active.digest).toBe(publication.document.sourceBundleDigest);
     expect(await app.providers.db.select().from(actionPolicies)).toEqual([]);
     expect(await app.providers.db.select().from(policyAuthoringRevisions)).toHaveLength(1);
     expect(await app.providers.db.select().from(policyAuthoringReviews)).toHaveLength(1);

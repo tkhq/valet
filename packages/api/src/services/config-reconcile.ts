@@ -12,6 +12,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, isNull, like, lte, notLike, sql } from "drizzle-orm";
+import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   actionPolicies,
@@ -60,6 +61,7 @@ export interface ReconcileDeps {
    */
   configPath?: string;
   sourceService?: SourceService;
+  canonicalPolicyManager?: CanonicalPolicyBundleManager;
 }
 
 /**
@@ -839,16 +841,19 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
  *
  * Runs only when `cfg.toolPolicies` is defined; absent = unmanaged.
  */
-async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
-  if (!cfg.toolPolicies) return;
+async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig, manager?: CanonicalPolicyBundleManager): Promise<void> {
+  const toolPolicies = cfg.toolPolicies;
+  if (!toolPolicies) return;
 
   const org = await ensureOrg(db);
   const orgId = org.id;
+  if (!manager) throw new InstanceConfigError("toolPolicies require the canonical policy manager.");
+  await manager.mutateAndActivate(orgId, { actorId: "config", operation: "config_reconcile", idempotencyKey: createHash("sha256").update(JSON.stringify(toolPolicies)).digest("hex") }, async (tx) => {
   const now = Date.now();
 
   const desiredIds = new Set<string>();
 
-  for (const rule of cfg.toolPolicies) {
+  for (const rule of toolPolicies) {
     // Exactly one target dimension (validator-guaranteed). `action` maps to the
     // `actionId` column; the value is the fully-qualified `service.action` id.
     let id: string;
@@ -872,53 +877,35 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig): Promis
     }
     desiredIds.add(id);
 
-    await db
-      .insert(actionPolicies)
-      .values({
-        id,
-        orgId,
-        principalType: "org",
-        principalId: orgId,
-        service,
-        actionId,
-        riskLevel,
-        mode: rule.mode,
-        paramMatchers: [],
-        appliesIn: rule.appliesIn ?? "any",
-        origin: "admin",
-        managedBy: "config",
-        expiresAt: null,
-        revokedAt: null,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: actionPolicies.id,
-        set: {
-          mode: rule.mode,
-          appliesIn: rule.appliesIn ?? "any",
-          // Re-declaring a previously removed rule resurrects it.
-          revokedAt: null,
-          updatedAt: now,
-        },
+    const existing = (await tx.select().from(actionPolicies).where(eq(actionPolicies.id, id)).limit(1))[0];
+    const appliesIn = rule.appliesIn ?? "any";
+    if (!existing) {
+      await tx.insert(actionPolicies).values({
+        id, orgId, principalType: "org", principalId: orgId, service, actionId, riskLevel,
+        mode: rule.mode, paramMatchers: [], appliesIn, origin: "admin", managedBy: "config",
+        expiresAt: null, revokedAt: null, createdAt: now, updatedAt: now,
       });
+    } else if (existing.mode !== rule.mode || existing.appliesIn !== appliesIn || existing.revokedAt !== null) {
+      await tx.update(actionPolicies).set({ mode: rule.mode, appliesIn, revokedAt: null, updatedAt: now }).where(eq(actionPolicies.id, id));
+    }
   }
 
   // Sweep: soft-revoke managed rows whose target is no longer declared. Never
   // touch rows without the `pol:config:` prefix (UI-created policies).
-  const managedRows = await db
+  const managedRows = await tx
     .select({ id: actionPolicies.id, revokedAt: actionPolicies.revokedAt })
     .from(actionPolicies)
     .where(and(eq(actionPolicies.orgId, orgId), like(actionPolicies.id, "pol:config:%")));
 
   for (const row of managedRows) {
     if (!desiredIds.has(row.id) && row.revokedAt === null) {
-      await db
+      await tx
         .update(actionPolicies)
         .set({ revokedAt: now, updatedAt: now })
         .where(eq(actionPolicies.id, row.id));
     }
   }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -947,5 +934,5 @@ export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: Instance
   await reconcileSkillSourcesPass(db, cfg);
 
   // Pass 5: toolPolicies → action_policies
-  await reconcileToolPoliciesPass(db, cfg);
+  await reconcileToolPoliciesPass(db, cfg, deps.canonicalPolicyManager);
 }

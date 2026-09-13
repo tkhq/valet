@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
-import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, teams } from "../schema/index.js";
+import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
+import { canonicalJson } from "../lib/canonical-json.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, teams } from "../schema/index.js";
 import { buildCurrentPolicySource, standardNewOrganizationPolicySnapshot } from "./bundles/current-policy-source.js";
 import type { CurrentPolicySourceSnapshotV1 } from "./bundles/current-policy-types.js";
 import { SourceBundleHost } from "./bundles/host.js";
@@ -18,7 +19,9 @@ export async function currentPolicySnapshot(db: AppQueryable, organizationId: st
     db.select().from(actionPolicyOverrides).where(eq(actionPolicyOverrides.orgId, organizationId)),
     db.select({ id: teams.id }).from(teams).where(eq(teams.orgId, organizationId)),
   ]);
-  const teamIds = teamRows.map((row) => row.id).sort();
+  const existingTeamIds = new Set(teamRows.map((row) => row.id));
+  const teamIds = [...new Set(policyRows.filter((row) => row.principalType === "team").map((row) => row.principalId))].sort();
+  if (teamIds.some((id) => !existingTeamIds.has(id))) throw new Error("Canonical policy source references a missing team.");
   const common = (row: typeof policyRows[number]) => ({
     id: row.id, organizationId, principalType: row.principalType as "org" | "team", principalId: row.principalId,
     ...(row.service ? { service: row.service } : row.actionId ? { actionId: row.actionId } : { riskLevel: row.riskLevel! }),
@@ -26,11 +29,7 @@ export async function currentPolicySnapshot(db: AppQueryable, organizationId: st
     revokedAtMs: row.revokedAt, createdAtMs: row.createdAt, updatedAtMs: row.updatedAt,
     sourceTable: "action_policies" as const, sourcePath: `action_policies/${row.id}`,
   });
-  const pluginDefaults = [...plugins.values()].map(({ actionPlugin }) => ({
-    id: `plugin:${actionPlugin.service}`, service: actionPlugin.service,
-    mode: actionPlugin.defaultApprovalMode ?? "require_approval" as const,
-    sourcePath: `plugins/${actionPlugin.service}`,
-  })).sort((a, b) => a.id.localeCompare(b.id));
+  const pluginDefaults = canonicalPluginDefaults(plugins);
   const base = standardNewOrganizationPolicySnapshot(organizationId);
   const source = {
     teamIds,
@@ -69,12 +68,60 @@ export class CanonicalPolicyBundleManager {
       return;
     }
     const loaded = await this.host.load(pointer.sourceBundleDigest);
-    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest) {
+    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && !(await isRecordedCandidate(this.db, organizationId, pointer.sourceBundleDigest))) {
       throw new Error(`Canonical policy pointer for ${organizationId} is stale. Publish the exact current policy before startup.`);
     }
   }
+  async activateCandidate(organizationId: string, expected: ValidatedBundleIdentity, bundle: CanonicalSourceBundle, audit: { actorId: string; operation: string; idempotencyKey: string }): Promise<void> {
+    const validated = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle });
+    if (validated.sourceBundleDigest !== expected.sourceBundleDigest || validated.policyDigest !== expected.policyDigest || validated.engineDigest !== expected.engineDigest) throw new Error("Canonical policy candidate identity changed.");
+    await this.db.transaction(async (tx) => {
+      const pointer = (await tx.select().from(policyActiveBundles).where(eq(policyActiveBundles.orgId, organizationId)).for("update").limit(1))[0];
+      if (!pointer) throw new Error(`Canonical policy pointer for ${organizationId} is missing.`);
+      await putBundle(tx, validated.sourceBundleDigest, bundle, this.now());
+      const changed = await tx.update(policyActiveBundles).set({ digest: validated.sourceBundleDigest, generation: pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, organizationId), eq(policyActiveBundles.digest, pointer.digest), eq(policyActiveBundles.generation, pointer.generation))).returning({ orgId: policyActiveBundles.orgId });
+      if (!changed[0]) throw new Error("Canonical policy candidate activation lost its compare-and-swap.");
+      const invocationId = activationAuditId(organizationId, pointer.digest, audit);
+      await tx.insert(actionInvocations).values({ invocationId, service: "canonical-policy", actionId: audit.operation, status: "completed", userId: audit.actorId, orgId: organizationId, params: { priorDigest: pointer.digest, sourceBundleDigest: validated.sourceBundleDigest, generation: pointer.generation + 1, canonicalCandidate: true }, createdAt: this.now() });
+    });
+    await this.runtime.loadBundle(validated.sourceBundleDigest, bundle);
+  }
+
+  async mutateAndActivate<T>(organizationId: string, audit: { actorId: string; operation: string; idempotencyKey: string }, mutate: (tx: AppTx) => Promise<T>): Promise<T> {
+    let completed = false;
+    let activated: { digest: string; bundle: CanonicalSourceBundle } | undefined;
+    const result = await this.db.transaction(async (tx) => {
+      const pointer = (await tx.select().from(policyActiveBundles).where(eq(policyActiveBundles.orgId, organizationId)).for("update").limit(1))[0];
+      if (!pointer) throw new Error(`Canonical policy pointer for ${organizationId} is missing.`);
+      const before = await currentPolicySnapshot(tx, organizationId, this.plugins);
+      const beforeBuilt = buildCurrentPolicySource(before);
+      const beforeIdentity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: beforeBuilt.bundle });
+      if (beforeIdentity.sourceBundleDigest !== pointer.digest) throw new Error(`Canonical policy pointer for ${organizationId} is stale.`);
+      const value = await mutate(tx);
+      const after = await currentPolicySnapshot(tx, organizationId, this.plugins);
+      const built = buildCurrentPolicySource(after);
+      const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: built.bundle });
+      if (identity.sourceBundleDigest === pointer.digest) { completed = true; return value; }
+      await putBundle(tx, identity.sourceBundleDigest, built.bundle, this.now());
+      const changed = await tx.update(policyActiveBundles).set({ digest: identity.sourceBundleDigest, generation: pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, organizationId), eq(policyActiveBundles.digest, pointer.digest), eq(policyActiveBundles.generation, pointer.generation))).returning({ orgId: policyActiveBundles.orgId });
+      if (!changed[0]) throw new Error("Canonical policy activation lost its compare-and-swap.");
+      await tx.insert(actionInvocations).values({ invocationId: activationAuditId(organizationId, pointer.digest, audit), service: "canonical-policy", actionId: audit.operation, status: "completed", userId: audit.actorId, orgId: organizationId, params: { priorDigest: pointer.digest, sourceBundleDigest: identity.sourceBundleDigest, generation: pointer.generation + 1 }, createdAt: this.now() });
+      activated = { digest: identity.sourceBundleDigest, bundle: built.bundle };
+      completed = true;
+      return value;
+    });
+    if (!completed) throw new Error("Canonical policy activation did not complete.");
+    if (activated) await this.runtime.loadBundle(activated.digest, activated.bundle);
+    return result;
+  }
+
   async provisionOrganization(id: string, name = "My organization"): Promise<{ id: string }> {
-    const built = buildCurrentPolicySource(standardNewOrganizationPolicySnapshot(id));
+    const pluginDefaults = canonicalPluginDefaults(this.plugins);
+    const built = buildCurrentPolicySource({
+      ...standardNewOrganizationPolicySnapshot(id),
+      pluginDefaults,
+      sourceRevision: revision({ teamIds: [], organizationPolicies: [], teamPolicies: [], personalOverrides: [], pluginDefaults }),
+    });
     const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: built.bundle });
     await this.db.transaction(async (tx) => {
       await tx.insert(orgs).values({ id, name, createdAt: this.now() });
@@ -101,7 +148,7 @@ export async function ensureCanonicalPolicyReadiness(manager: CanonicalPolicyBun
       continue;
     }
     const loaded = await manager.host.load(pointer.sourceBundleDigest);
-    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest) {
+    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && !(await isRecordedCandidate(manager.db, row.id, pointer.sourceBundleDigest))) {
       throw new Error(`Canonical policy pointer for ${row.id} is stale. Publish the exact current policy before startup.`);
     }
   }
@@ -122,9 +169,24 @@ async function putBundle(db: AppQueryable, digest: string, bundle: CanonicalSour
   const inserted = await db.insert(policySourceBundles).values({ digest, bundle, createdAt: now }).onConflictDoNothing().returning({ digest: policySourceBundles.digest });
   if (!inserted[0]) {
     const row = (await db.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, digest)).limit(1))[0];
-    if (!row || JSON.stringify(row.bundle) !== JSON.stringify(bundle)) throw new Error("Canonical source bundle digest collision.");
+    if (!row || canonicalJson(row.bundle) !== canonicalJson(bundle)) throw new Error("Canonical source bundle digest collision.");
   }
+}
+function activationAuditId(organizationId: string, priorDigest: string, audit: { operation: string; idempotencyKey: string }): string {
+  const digest = createHash("sha256").update(`${organizationId}\0${priorDigest}\0${audit.operation}\0${audit.idempotencyKey}`).digest("hex");
+  return `policy:activation:${digest}`;
+}
+function canonicalPluginDefaults(plugins: ReadonlyMap<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>) {
+  return [...plugins.values()].filter(({ actionPlugin }) => actionPlugin.defaultApprovalMode !== undefined).map(({ actionPlugin }) => ({
+    id: `plugin:${actionPlugin.service}`, service: actionPlugin.service, mode: actionPlugin.defaultApprovalMode!,
+    sourcePath: `plugins/${actionPlugin.service}`,
+  })).sort((a, b) => a.id.localeCompare(b.id));
 }
 function revision(value: unknown): string {
   return `current-policy:${createHash("sha256").update(JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item)).digest("hex")}`;
+}
+
+async function isRecordedCandidate(db: AppQueryable, organizationId: string, digest: string): Promise<boolean> {
+  const rows = await db.select({ params: actionInvocations.params }).from(actionInvocations).where(and(eq(actionInvocations.orgId, organizationId), eq(actionInvocations.service, "canonical-policy"), eq(actionInvocations.actionId, "policy_authoring_publish")));
+  return rows.some((row) => row.params && typeof row.params === "object" && !Array.isArray(row.params) && (row.params as Record<string, unknown>).canonicalCandidate === true && (row.params as Record<string, unknown>).sourceBundleDigest === digest);
 }

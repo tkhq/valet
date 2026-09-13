@@ -16,18 +16,19 @@ import { requireOrgAdmin } from "./_org-admin.js";
 import {
   ACTION_LOG_DEFAULT_LIMIT,
   ACTION_LOG_MAX_LIMIT,
-  createOrgPolicy,
+  createPolicy,
   decodeActionLogCursor,
   isApprovalMode,
   isRiskLevel,
   listActionLog,
   listOrgPolicies,
-  revokeOrgPolicy,
-  updateOrgPolicy,
+  revokePolicy,
+  updatePolicy,
   validateTarget,
   type ActionLogFilters,
 } from "../policies/admin.js";
-import { resolveActionPolicy } from "../policies/service.js";
+import { adaptInteractiveAction, adaptWorkflowAction } from "@valet/engine/authorization";
+import { actionProjection } from "../authorization/action-projections.js";
 import { validateParamMatchers } from "../policies/matchers.js";
 import type { ActionInvocationRow, ActionPolicyRow } from "../schema/index.js";
 import type {
@@ -98,7 +99,7 @@ policiesRouter.get("/", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db } = c.var.providers;
+  const { db, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
   const rows = await listOrgPolicies(db, user.orgId);
   const resp: ListOrgPoliciesResponse = { policies: rows.map(toPolicyWire) };
@@ -111,7 +112,7 @@ policiesRouter.post("/", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db } = c.var.providers;
+  const { db, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
 
   let body: CreateOrgPolicyRequest;
@@ -150,7 +151,7 @@ policiesRouter.post("/", async (c) => {
   }
 
   const now = Date.now();
-  const row = await createOrgPolicy(db, user.orgId, {
+  const row = await canonicalPolicyManager.mutateAndActivate(user.orgId, policyWriteAudit(c, user.id, "create"), (tx) => createPolicy(tx, { orgId: user.orgId, type: "org", id: user.orgId }, {
     service: body.service,
     actionId: body.actionId,
     riskLevel: body.riskLevel,
@@ -160,7 +161,7 @@ policiesRouter.post("/", async (c) => {
     expiresAt: body.expiresAt,
     managedBy: user.id,
     now,
-  });
+  }));
   const resp: CreateOrgPolicyResponse = toPolicyWire(row);
   return c.json(resp, 201);
 });
@@ -171,7 +172,7 @@ policiesRouter.patch("/:id", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db } = c.var.providers;
+  const { db, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
 
@@ -201,13 +202,13 @@ policiesRouter.patch("/:id", async (c) => {
     }
   }
 
-  const updated = await updateOrgPolicy(db, user.orgId, id, {
+  const updated = await canonicalPolicyManager.mutateAndActivate(user.orgId, policyWriteAudit(c, user.id, "update"), (tx) => updatePolicy(tx, { orgId: user.orgId, type: "org", id: user.orgId }, id, {
     mode: body.mode,
     paramMatchers,
     appliesIn: body.appliesIn,
     expiresAt: body.expiresAt,
     now: Date.now(),
-  });
+  }));
   if (!updated) return c.json(POLICY_NOT_FOUND, 404);
   const resp: PatchOrgPolicyResponse = toPolicyWire(updated);
   return c.json(resp);
@@ -219,11 +220,11 @@ policiesRouter.delete("/:id", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db } = c.var.providers;
+  const { db, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
 
-  const revoked = await revokeOrgPolicy(db, user.orgId, id, Date.now());
+  const revoked = await canonicalPolicyManager.mutateAndActivate(user.orgId, policyWriteAudit(c, user.id, "revoke"), (tx) => revokePolicy(tx, { orgId: user.orgId, type: "org", id: user.orgId }, id, Date.now()));
   if (!revoked) return c.json(POLICY_NOT_FOUND, 404);
   const resp: DeleteOrgPolicyResponse = toPolicyWire(revoked);
   return c.json(resp);
@@ -235,7 +236,7 @@ policiesRouter.post("/preview", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db, actionPluginByService } = c.var.providers;
+  const { actionPluginByService, canonicalAuthorizationService } = c.var.providers;
   const user = c.var.user;
 
   let body: PreviewOrgPolicyRequest;
@@ -264,22 +265,28 @@ policiesRouter.post("/preview", async (c) => {
     return c.json({ error: "workflowExecutionId is required when appliesIn is workflow" }, 400);
   }
 
-  const decision = await resolveActionPolicy(db, {
-    orgId: user.orgId,
-    userId: body.userId,
-    service: body.service,
-    actionId: body.actionId,
-    riskLevel: body.riskLevel,
-    params: body.params,
-    appliesIn: body.appliesIn,
-    sessionId: body.sessionId,
-    workflowExecutionId: body.workflowExecutionId,
-    // Resolve the real plugin default (rung 4) so the preview matches live
-    // resolution when the plugin declares a `defaultApprovalMode` that differs
-    // from the risk default (I4) — same lookup me-policies bounds use.
-    pluginDefault: actionPluginByService.get(body.service)?.actionPlugin.defaultApprovalMode,
-    now: Date.now(),
-  });
+  const entry = actionPluginByService.get(body.service);
+  const action = entry?.actionPlugin.actions.find((item) => (item.id.includes(".") ? item.id : `${body.service}.${item.id}`) === body.actionId);
+  if (!action || action.riskLevel !== body.riskLevel) return c.json({ error: "Action metadata does not match the static catalog." }, 400);
+  const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
+  const commonAction = { service: body.service, actionId: body.actionId, catalogActionId: body.actionId, sourcePluginService: body.service, sourceActionId: body.actionId, sourceToolId: "policy_preview", riskLevel: body.riskLevel, parameters: body.params ?? {}, parameterProjection: actionProjection(body.actionId) };
+  const adapted = body.appliesIn === "session"
+    ? adaptInteractiveAction({ schemaVersion: 1, organizationId: user.orgId, actor: { type: "user", id: user.id }, owner: { type: "user", id: body.userId ?? user.id }, requestId: idempotencyKey, sessionId: body.sessionId!, threadId: `preview:${idempotencyKey}`, queueItemId: idempotencyKey, resumeKey: idempotencyKey, gateOrdinal: 0, action: commonAction, evaluationTimeMs: Date.now(), dynamicFacts: {} })
+    : adaptWorkflowAction({ schemaVersion: 1, organizationId: user.orgId, actor: { type: "user", id: user.id }, owner: { type: "user", id: body.userId ?? user.id }, requestId: idempotencyKey, workflowDefinitionId: "policy-preview", workflowVersion: "preview", workflowExecutionId: body.workflowExecutionId!, nodeId: "preview", invocationId: idempotencyKey, action: commonAction, evaluationTimeMs: Date.now(), dynamicFacts: {} });
+  const envelope = await canonicalAuthorizationService.preview(adapted.request);
+  const matchedId = envelope.decision.matchedRuleIds[0];
+  const source = envelope.decision.reasonCode === "organization_policy" ? "org_policy" : envelope.decision.reasonCode;
+  const decision = {
+    mode: envelope.decision.effect,
+    provenance: {
+      baseMode: envelope.decision.effect,
+      source,
+      ...(source === "org_policy" && matchedId ? { matchedPolicyId: matchedId } : {}),
+      ...(source === "team_policy" && matchedId ? { matchedPolicyId: matchedId } : {}),
+      ...(source === "personal_override" && matchedId ? { matchedOverrideId: matchedId } : {}),
+      ...(source === "dynamic_grant" && matchedId ? { matchedGrantId: matchedId } : {}),
+    },
+  };
   const resp: PreviewOrgPolicyResponse = decision;
   return c.json(resp);
 });
@@ -354,3 +361,8 @@ actionLogRouter.get("/", async (c) => {
   };
   return c.json(resp);
 });
+
+function policyWriteAudit(c: Parameters<typeof requireOrgAdmin>[0], actorId: string, operation: string) {
+  const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
+  return { actorId, operation, idempotencyKey };
+}

@@ -4,7 +4,7 @@
  * `routes/me-policies.ts` doc comment); the write-time bounds check on
  * overrides is what stops a member self-granting past an org policy —
  * across EVERY org-policy dimension the override could be outranked by at
- * real invocation time (`resolvePolicyDecision` puts a per-user override at
+ * real invocation time (the canonical policy puts a per-user override at
  * rung 2, above org allow/require_approval at rung 3 — see
  * `policies/admin.ts`'s `validateOverrideBounds` doc comment), not just the
  * override's own target dimension.
@@ -364,7 +364,7 @@ describe("PUT /api/me/policy-overrides — cross-dimension bounds", () => {
 // rung 2 whenever the params DID match at real invocation. The fix strips
 // `paramMatchers` from org rows ("might match" ⇒ treat as matching) before
 // resolving. These pin that a matcher-carrying org policy still blocks the
-// override; a refactor back to the matcher-blind resolveActionPolicy path
+// override; a refactor back to the matcher-blind policy resolution path
 // would fail here instead of silently reopening the bypass.
 
 describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C1)", () => {

@@ -82,7 +82,7 @@ export function assertApprovalBinding(expected: CanonicalApprovalBindingV1, resu
 }
 
 export interface CanonicalAuthorizationServiceLike { authorize(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> }
-/** Adapts only the canonical service. It never invokes or falls back to the legacy evaluator. */
+/** Adapts only the canonical service. It has no alternate evaluator. */
 export function authorizationServicePolicyResolver(service: CanonicalAuthorizationServiceLike, requestFor: (input: PolicyResolveInput) => AuthorizationRequest): PolicyResolver {
   return { async resolve(input): Promise<PolicyDecision> {
     try {

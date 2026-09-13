@@ -741,6 +741,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     plugins,
     credentials: engineCredentials,
+    canonicalAuthorizationService,
+    canonicalPolicyManager,
   };
 
   // Workflow schedule loop — cron-driven run starts (time-based counterpart

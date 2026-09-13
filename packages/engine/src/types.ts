@@ -1000,7 +1000,7 @@ export interface PolicyResolveInput {
  * forward) so the host resolver + audit sink share one closed vocabulary:
  * `resolver_error` is the synthetic fail-closed source the engine stamps when
  * a host `resolve()` throws (see `call_tool`); every other member is produced
- * by the host's pure precedence core (`policies/resolution.ts`). This is a
+ * by the host's canonical policy evaluator. This is a
  * type-narrowing only — the runtime string values are unchanged.
  */
 export type PolicyProvenanceSource =

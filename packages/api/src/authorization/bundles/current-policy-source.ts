@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { validateCurrentPolicyDynamicFactsV2, type CurrentPolicyDynamicFactsV2, type JsonValue } from "@valet/engine/authorization";
 import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, isCurrentPolicyActionV1, isCurrentPolicyRiskV1, isCurrentPolicyServiceV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
 export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
-import { grantPolicyKey } from "../../policies/resolution.js";
+import { grantPolicyKey } from "../../policies/service.js";
 import type { CanonicalSourceBundle } from "./types.js";
 import type {
   CurrentApprovalResolutionSourceV1,

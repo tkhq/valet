@@ -1,7 +1,7 @@
 /**
  * Action-policies Task 3: host resolver, grant/policy writes, audit sink.
  * Real PGlite + migrations — these tests exercise the impure edges the pure
- * `resolution.test.ts` can't: fresh row loads, grant upsert idempotence under
+ * Canonical evaluator tests cover decisions. These tests cover grant idempotence,
  * replay, the admin-gated always-allow write, deterministic audit dedup, and
  * the DB-level constraints T2 shipped (one-of CHECK + partial unique index).
  *
@@ -11,26 +11,21 @@ import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pgDbFromPglite } from "@valet/store-postgres";
-import type { DecisionResolution, PolicyInvocationRecord, PolicyResolveInput } from "@valet/engine";
+import type { PolicyInvocationRecord } from "@valet/engine";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, users } from "../schema/index.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, users } from "../schema/index.js";
 import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
-  buildPolicyResolver,
   gatedAuditId,
-  loadPolicyRows,
   persistInvocationAudit,
   POLICY_AUDIT_FIELD_CAP,
-  resolveActionPolicy,
   revokeExecutionGrants,
   revokeSessionGrants,
   updateInvocationOutcome,
   writeAlwaysAllowPolicy,
   writeExecutionGrant,
   writeSessionGrant,
-  GATE_ACTION_ALWAYS_ALLOW,
-  GATE_ACTION_APPROVE_SESSION,
 } from "./service.js";
 
 const ORG = "org_test";
@@ -118,57 +113,6 @@ describe("writeExecutionGrant / revokeExecutionGrants", () => {
     await revokeExecutionGrants(db, RUN, 99); // idempotent second call
     rows = await db.select().from(runtimeGrants).where(eq(runtimeGrants.workflowExecutionId, RUN));
     expect(rows.every((r) => r.revokedAt === 99)).toBe(true);
-  });
-});
-
-// ── resolveActionPolicy over real rows ─────────────────────────────
-
-describe("resolveActionPolicy", () => {
-  const base = {
-    orgId: ORG, userId: MEMBER, service: "github", actionId: "create_issue",
-    riskLevel: "high" as const, params: undefined, appliesIn: "session" as const,
-    sessionId: SESSION, pluginDefault: undefined, now: 5000,
-  };
-
-  it("falls to risk default when no rows match (high → require_approval)", async () => {
-    const d = await resolveActionPolicy(db, base);
-    expect(d.mode).toBe("require_approval");
-    expect(d.provenance.source).toBe("risk_default");
-  });
-
-  it("a live session grant quiets a require_approval to allow with matchedGrantId", async () => {
-    await writeSessionGrant(db, SESSION, { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1 });
-    const d = await resolveActionPolicy(db, base);
-    expect(d.mode).toBe("allow");
-    expect(d.provenance.source).toBe("runtime_grant");
-    expect(d.provenance.matchedGrantId).toBeDefined();
-  });
-
-  it("an org deny is absolute (grant cannot loosen it)", async () => {
-    await db.insert(actionPolicies).values({
-      id: "p_deny", orgId: ORG, principalType: "org", principalId: ORG,
-      service: null, actionId: "create_issue", riskLevel: null, mode: "deny",
-      paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
-      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
-    });
-    await writeSessionGrant(db, SESSION, { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1 });
-    const d = await resolveActionPolicy(db, base);
-    expect(d.mode).toBe("deny");
-    expect(d.provenance.source).toBe("org_policy");
-  });
-
-  it("reads rows fresh each call (a policy added between calls applies immediately)", async () => {
-    const first = await resolveActionPolicy(db, base);
-    expect(first.mode).toBe("require_approval");
-    await db.insert(actionPolicies).values({
-      id: "p_allow", orgId: ORG, principalType: "org", principalId: ORG,
-      service: null, actionId: "create_issue", riskLevel: null, mode: "allow",
-      paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
-      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
-    });
-    const second = await resolveActionPolicy(db, base);
-    expect(second.mode).toBe("allow");
-    expect(second.provenance.source).toBe("org_policy");
   });
 });
 
@@ -314,176 +258,5 @@ describe("updateInvocationOutcome", () => {
     expect(row).toBeDefined();
     expect(row.status).toBe("cancelled");
     expect(row.resolvedBy).toBe("u2");
-  });
-});
-
-// ── buildPolicyResolver end-to-end (resolve + onResolution) ────────
-
-describe("buildPolicyResolver", () => {
-  const resolver = buildPolicyResolver({ db, actionPluginByService: new Map(), clock: () => 7000 });
-
-  const input: PolicyResolveInput = {
-    service: "github", actionId: "create_issue", riskLevel: "high", params: { title: "x" },
-    userId: MEMBER, orgId: ORG, sessionId: SESSION, threadId: "t1", appliesIn: "session",
-  };
-
-  it("offers approve_session + always_allow on a require_approval decision", async () => {
-    const d = await resolver.resolve(input);
-    expect(d.mode).toBe("require_approval");
-    const ids = (d.extraGateActions ?? []).map((a) => a.id);
-    expect(ids).toEqual([GATE_ACTION_APPROVE_SESSION, GATE_ACTION_ALWAYS_ALLOW]);
-    expect((d.extraGateActions ?? []).every((a) => a.approves)).toBe(true);
-  });
-
-  it("approve_session resolution writes a session grant; the next resolve runs grant-clean", async () => {
-    const d = await resolver.resolve(input);
-    const resolution: DecisionResolution = { actionId: GATE_ACTION_APPROVE_SESSION, resolvedBy: MEMBER, resolvedAt: 1, gateOrdinal: 0 };
-    await resolver.onResolution?.(input, d, resolution);
-    const grants = await db.select().from(runtimeGrants).where(eq(runtimeGrants.sessionId, SESSION));
-    expect(grants).toHaveLength(1);
-    const next = await resolver.resolve(input);
-    expect(next.mode).toBe("allow");
-    expect(next.provenance.source).toBe("runtime_grant");
-  });
-
-  it("always_allow by an admin writes the org policy; by a member fails closed (throws)", async () => {
-    const d = await resolver.resolve(input);
-    await resolver.onResolution?.(input, d, { actionId: GATE_ACTION_ALWAYS_ALLOW, resolvedBy: ADMIN, resolvedAt: 1, gateOrdinal: 0 });
-    const rows = await db.select().from(actionPolicies).where(eq(actionPolicies.actionId, "create_issue"));
-    expect(rows).toHaveLength(1);
-    await reset();
-    const d2 = await resolver.resolve(input);
-    await expect(
-      resolver.onResolution?.(input, d2, { actionId: GATE_ACTION_ALWAYS_ALLOW, resolvedBy: MEMBER, resolvedAt: 1, gateOrdinal: 0 }),
-    ).rejects.toBeInstanceOf(AlwaysAllowNotAdminError);
-    expect(await db.select().from(actionPolicies)).toHaveLength(0);
-  });
-
-  it("always_allow supersedes a pre-existing action-scope require_approval (I1 effectiveness)", async () => {
-    // A standing admin require_approval gate on the exact action.
-    await db.insert(actionPolicies).values({
-      id: "p_req", orgId: ORG, principalType: "org", principalId: ORG,
-      service: null, actionId: "create_issue", riskLevel: null, mode: "require_approval",
-      paramMatchers: [], appliesIn: "any", origin: "admin", managedBy: ADMIN,
-      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
-    });
-    const d = await resolver.resolve(input);
-    expect(d.mode).toBe("require_approval");
-    await resolver.onResolution?.(input, d, { actionId: GATE_ACTION_ALWAYS_ALLOW, resolvedBy: ADMIN, resolvedAt: 1, gateOrdinal: 0 });
-
-    // Next resolve for the identical action returns allow, sourced from the
-    // always-allow row — not a require_approval tie against the stale gate row.
-    const next = await resolveActionPolicy(db, {
-      orgId: ORG, userId: MEMBER, service: "github", actionId: "create_issue",
-      riskLevel: "high", params: undefined, appliesIn: "session", sessionId: SESSION,
-      pluginDefault: undefined, now: 8000,
-    });
-    expect(next.mode).toBe("allow");
-    expect(next.provenance.source).toBe("org_policy");
-    expect(next.provenance.matchedPolicyId).toBe(alwaysAllowPolicyId(ORG, "create_issue"));
-
-    // The competing require_approval row was soft-revoked (its cause is gone).
-    const req = (await db.select().from(actionPolicies).where(eq(actionPolicies.id, "p_req")))[0];
-    expect(req.revokedAt).not.toBeNull();
-  });
-
-  it("always_allow never touches a competing action-scope deny", async () => {
-    await db.insert(actionPolicies).values({
-      id: "p_deny", orgId: ORG, principalType: "org", principalId: ORG,
-      service: null, actionId: "create_issue", riskLevel: null, mode: "deny",
-      paramMatchers: [], appliesIn: "any", origin: "admin", managedBy: ADMIN,
-      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
-    });
-    await writeAlwaysAllowPolicy(db, { orgId: ORG, actionId: "create_issue", grantedBy: ADMIN, now: 9000 });
-    const deny = (await db.select().from(actionPolicies).where(eq(actionPolicies.id, "p_deny")))[0];
-    expect(deny.revokedAt).toBeNull();
-    // Org deny stays absolute regardless of the new always-allow row.
-    const next = await resolveActionPolicy(db, {
-      orgId: ORG, userId: MEMBER, service: "github", actionId: "create_issue",
-      riskLevel: "high", params: undefined, appliesIn: "session", sessionId: SESSION,
-      pluginDefault: undefined, now: 9500,
-    });
-    expect(next.mode).toBe("deny");
-  });
-
-  it("onResolution is a NO-OP for a synthetic resolver_error decision", async () => {
-    const synthetic = {
-      mode: "require_approval" as const,
-      provenance: { baseMode: "require_approval" as const, source: "resolver_error" as const },
-    };
-    await resolver.onResolution?.(input, synthetic, {
-      actionId: GATE_ACTION_APPROVE_SESSION, resolvedBy: ADMIN, resolvedAt: 1, gateOrdinal: 0,
-    });
-    expect(await db.select().from(runtimeGrants)).toHaveLength(0);
-  });
-
-  it("onInvocation persists an audit row keyed on the gate ordinal for a gated record", async () => {
-    const record: PolicyInvocationRecord = {
-      service: "github", actionId: "create_issue", toolId: "github.create_issue", riskLevel: "high",
-      sessionId: SESSION, threadId: "t1", userId: MEMBER, orgId: ORG, appliesIn: "session",
-      status: "completed", resolvedMode: "require_approval",
-      provenance: { baseMode: "require_approval", source: "risk_default" },
-      resumeKey: "github.create_issue:{}", gateOrdinal: 3, durationMs: 12, queueItemId: "qi-1",
-    };
-    await resolver.onInvocation?.(record);
-    await resolver.onInvocation?.(record); // replay same ordinal → dedup
-    const rows = await db.select().from(actionInvocations).where(eq(actionInvocations.sessionId, SESSION));
-    expect(rows).toHaveLength(1);
-    expect(rows[0].invocationId).toBe(gatedAuditId(SESSION, "qi-1", "github.create_issue:{}", 3));
-
-    // A LATER turn gating on the identical (tool, args) pair — same
-    // resumeKey, gateOrdinal reset to 0 — is a DIFFERENT decision and gets
-    // its own row (the pre-fix collision: spec Deviations T6 #4).
-    await resolver.onInvocation?.({ ...record, queueItemId: "qi-2", gateOrdinal: 0, status: "rejected" });
-    const rowsAfter = await db.select().from(actionInvocations).where(eq(actionInvocations.sessionId, SESSION));
-    expect(rowsAfter).toHaveLength(2);
-    expect(rows[0].resolvedMode).toBe("require_approval");
-    expect(rows[0].baseMode).toBe("require_approval");
-  });
-});
-
-// ── loadPolicyRows shape ───────────────────────────────────────────
-
-describe("loadPolicyRows", () => {
-  it("loads org policies + session grants + user overrides for the scope", async () => {
-    await db.insert(actionPolicies).values({
-      id: "p1", orgId: ORG, principalType: "org", principalId: ORG,
-      service: "github", actionId: null, riskLevel: null, mode: "allow",
-      paramMatchers: [], appliesIn: "any", origin: "settings", managedBy: null,
-      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
-    });
-    await writeSessionGrant(db, SESSION, { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1 });
-    await db.insert(actionPolicyOverrides).values({
-      id: "o1", orgId: ORG, userId: MEMBER, service: null, actionId: "create_issue", riskLevel: null,
-      mode: "deny", paramMatchers: [], createdAt: 1, updatedAt: 1,
-    });
-    const rows = await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION });
-    expect(rows.policies).toHaveLength(1);
-    expect(rows.grants).toHaveLength(1);
-    expect(rows.overrides).toHaveLength(1);
-  });
-});
-
-
-describe("team policy ownership", () => {
-  async function seedTeamRule() {
-    await db.insert(actionPolicies).values({ id: "team-rule", orgId: ORG, principalType: "team", principalId: "team-a", service: "gmail", mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
-    await db.insert(actionPolicyOverrides).values({ id: "admin-personal", orgId: ORG, userId: ADMIN, service: "gmail", mode: "allow", createdAt: 1, updatedAt: 1 });
-  }
-  const input: PolicyResolveInput = { service: "gmail", actionId: "gmail.send_email", riskLevel: "low", params: {}, userId: ADMIN, orgId: ORG, sessionId: SESSION, threadId: "thread", appliesIn: "session" };
-
-  it("uses persisted team ownership without inheriting the creator's personal override", async () => {
-    await seedTeamRule();
-    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "team", ownerId: "team-a", createdAt: 1, updatedAt: 1 });
-    const resolver = buildPolicyResolver({ db, actionPluginByService: new Map() });
-    expect(await resolver.resolve(input)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
-    expect(await resolver.resolve({ ...input, sessionId: "personal" })).toMatchObject({ mode: "allow", provenance: { source: "override" } });
-  });
-
-  it("carries trusted team ownership for workflow agent sessions with no app row", async () => {
-    await seedTeamRule();
-    const resolver = buildPolicyResolver({ db, actionPluginByService: new Map() });
-    expect(await resolver.resolve({ ...input, sessionId: "wf:run:triage", teamId: "team-a" })).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
-    expect(await resolver.resolve({ ...input, sessionId: "wf:other:triage", teamId: "team-b" })).toMatchObject({ mode: "allow", provenance: { source: "risk_default" } });
   });
 });

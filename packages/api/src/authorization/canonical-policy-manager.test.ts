@@ -64,6 +64,22 @@ describe("canonical policy readiness", () => {
       expect(await db.select().from(orgs).where(eq(orgs.id, "org-new"))).toHaveLength(1);
       expect(await db.select().from(policySourceBundles)).toHaveLength(1);
       expect(await db.select().from(policyActiveBundles)).toMatchObject([{ orgId: "org-new", generation: 1 }]);
+      await manager.ensureOrganizationReady("org-new");
     } finally { await manager.close(); }
   }, 120_000);
+
+  it("activates static writes atomically and rolls back invalid candidates", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const before = (await manager.host.activePointer("org-a"))!;
+      await manager.mutateAndActivate("org-a", { actorId: "admin", operation: "create", idempotencyKey: "one" }, (tx) => tx.insert(actionPolicies).values({ id: "rule", orgId: "org-a", principalType: "org", principalId: "org-a", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 }));
+      const after = (await manager.host.activePointer("org-a"))!; expect(after.generation).toBe(before.generation + 1); expect(after.sourceBundleDigest).not.toBe(before.sourceBundleDigest);
+      await expect(manager.mutateAndActivate("org-a", { actorId: "admin", operation: "create", idempotencyKey: "two" }, (tx) => tx.insert(actionPolicies).values({ id: "conflict", orgId: "org-a", principalType: "team", principalId: "missing-team", actionId: "gmail.send", mode: "allow", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 }))).rejects.toThrow();
+      expect(await db.select().from(actionPolicies).where(eq(actionPolicies.id, "conflict"))).toHaveLength(0);
+      expect(await manager.host.activePointer("org-a")).toEqual(after);
+    } finally { await manager.close(); }
+  }, 120_000);
+
 });

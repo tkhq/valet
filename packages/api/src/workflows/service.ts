@@ -26,6 +26,8 @@ import {
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
+import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
@@ -83,6 +85,8 @@ export interface WorkflowServiceDeps {
   /** Full plugin list — trigger tools need the event catalogs
    * (`plugin.triggers`) for event-key validation and discovery. */
   plugins?: ValetPlugin[];
+  canonicalAuthorizationService?: CanonicalAuthorizationService;
+  canonicalPolicyManager?: CanonicalPolicyBundleManager;
 }
 
 export interface WorkflowOwner {
@@ -1661,7 +1665,8 @@ export async function resolveWorkflowApproval(
       // AlwaysAllowNotAdminError should not fire here, but re-throw defensively
       // for unexpected cases.
       try {
-        await writeAlwaysAllowPolicy(deps.db, { orgId, actionId, grantedBy: owner.userId, now });
+        if (!deps.canonicalPolicyManager) throw new Error("Canonical policy manager is unavailable.");
+        await deps.canonicalPolicyManager.mutateAndActivate(orgId, { actorId: owner.userId, operation: "workflow_always_allow", idempotencyKey: signalId }, (tx) => writeAlwaysAllowPolicy(tx, { orgId, actionId, grantedBy: owner.userId, now }));
       } catch (err) {
         if (err instanceof AlwaysAllowNotAdminError) return "forbidden_always";
         throw err;

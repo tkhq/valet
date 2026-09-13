@@ -556,13 +556,13 @@ teamsRouter.patch("/:id", async (c) => {
 teamsRouter.delete("/:id", async (c) => {
   const refused = refuseTeamApiKey(c);
   if (refused) return refused;
-  const { db, engineHost } = c.var.providers;
+  const { db, engineHost, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
 
   let sessionIds: string[];
   try {
-    sessionIds = await deleteTeamResources(db, { orgId: user.orgId, userId: user.id }, id);
+    sessionIds = await deleteTeamResources(db, { orgId: user.orgId, userId: user.id }, id, canonicalPolicyManager);
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);

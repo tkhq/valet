@@ -89,7 +89,7 @@ export const deletionResourceRegistry: Record<DeletionResourceType, ResourceAdap
       if (row.origin === "config") throw new ConfigManagedTeamError(row.name);
       return row.name;
     },
-    async delete(deps, a, id) { return deleteTeamResources(deps.db, a, id); },
+    async delete(deps, a, id) { return deleteTeamResources(deps.db, a, id, deps.canonicalPolicyManager); },
   },
 };
 export function isDeletionResourceType(value: unknown): value is DeletionResourceType {

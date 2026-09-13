@@ -32,7 +32,7 @@ function session(c: RouteContext) {
       organizationId: user.orgId,
       ...(teamId ? { teamId } : {}),
     } satisfies PolicyAuthoringScope,
-    service: new PolicyAuthoringService({ db: c.var.providers.db, authorizer }),
+    service: new PolicyAuthoringService({ db: c.var.providers.db, authorizer, canonicalPolicyManager: c.var.providers.canonicalPolicyManager }),
   };
 }
 async function body(c: RouteContext): Promise<unknown> {

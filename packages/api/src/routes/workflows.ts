@@ -148,9 +148,9 @@ function serviceCtx(c: {
     principal?: RequestPrincipal;
   };
 }): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
-  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials } = c.var.providers;
+  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials, canonicalAuthorizationService, canonicalPolicyManager } = c.var.providers;
   return {
-    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials },
+    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials, canonicalAuthorizationService, canonicalPolicyManager },
     owner: { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
     env: buildValidateEnvironment(actionPluginByService),
   };

@@ -16,35 +16,18 @@
  *  - the fire-and-forget audit sink over `action_invocations`, with 8KB field
  *    caps + truncation flags and PK-level dedup for gated (replayable) rows.
  *
- * `buildPolicyResolver` assembles these into the engine's `PolicyResolver`
+ * The canonical interactive resolver assembles these into the engine's policy flow
  * port; the workflow invoker (`plugins/action-invoker.ts`) reuses
- * `resolveActionPolicy` + the grant/audit writers directly for its
+ * the canonical service and the grant/audit writers for its
  * non-interactive `appliesIn: "workflow"` enforcement path.
  */
+
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
-import type {
-  ActionPlugin,
-  ApprovalMode,
-  DecisionResolution,
-  PolicyDecision,
-  PolicyInvocationRecord,
-  PolicyResolveInput,
-  PolicyResolver,
-  RiskLevel,
-  ValetPlugin,
-} from "@valet/engine";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import type { ApprovalMode, PolicyInvocationRecord, RiskLevel } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
+import { actionInvocations, actionPolicies, runtimeGrants } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
-import {
-  grantPolicyKey,
-  resolvePolicyDecision,
-  type ActionPolicyOverrideRow,
-  type ActionPolicyRow,
-  type PolicyResolutionRows,
-  type RuntimeGrantRow,
-} from "./resolution.js";
 
 /** Per-field cap for the audit sink's `params`/`result` jsonb columns. A
  *  field whose canonical JSON exceeds this is replaced by a truncated preview
@@ -83,159 +66,11 @@ export function alwaysAllowPolicyId(orgId: string, actionId: string): string {
   return `pol:approval:${orgId}:${actionId}`;
 }
 
-export interface PolicyRowScope {
-  orgId: string;
-  teamId?: string;
-  userId?: string;
-  sessionId?: string;
-  workflowExecutionId?: string;
-}
-
-/**
- * Load the three row sets `resolvePolicyDecision` needs, FRESH from the db
- * (no caching — pin). Only rows that could possibly match the given scope are
- * fetched: all of the org's live `action_policies`, the grants scoped to this
- * session/execution, and the user's overrides. Filtering/precedence is the
- * pure core's job; this only narrows the query.
- */
-export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
-  // Session ownership comes from the durable row, never the acting member.
-  let teamId = scope.teamId;
-  if (scope.sessionId) {
-    const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
-      .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
-    if (session) teamId = session.ownerType === "team" ? session.ownerId ?? undefined : undefined;
-  }
-  const principalFilter = teamId
-    ? or(and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId)), and(eq(actionPolicies.principalType, "team"), eq(actionPolicies.principalId, teamId)))
-    : and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId));
-  const policyRows = await db
-    .select()
-    .from(actionPolicies)
-    .where(and(eq(actionPolicies.orgId, scope.orgId), principalFilter, isNull(actionPolicies.revokedAt)));
-
-  const policies: ActionPolicyRow[] = policyRows.map((r) => ({
-    id: r.id,
-    principalType: r.principalType,
-    service: r.service,
-    actionId: r.actionId,
-    riskLevel: r.riskLevel,
-    mode: r.mode,
-    paramMatchers: r.paramMatchers,
-    appliesIn: r.appliesIn,
-    expiresAt: r.expiresAt,
-    revokedAt: r.revokedAt,
-    updatedAt: r.updatedAt,
-  }));
-
-  let grants: RuntimeGrantRow[] = [];
-  if (scope.sessionId) {
-    const rows = await db
-      .select()
-      .from(runtimeGrants)
-      .where(
-        and(
-          eq(runtimeGrants.orgId, scope.orgId),
-          eq(runtimeGrants.sessionId, scope.sessionId),
-          isNull(runtimeGrants.revokedAt),
-        ),
-      );
-    grants = rows.map(toGrantRow);
-  } else if (scope.workflowExecutionId) {
-    const rows = await db
-      .select()
-      .from(runtimeGrants)
-      .where(
-        and(
-          eq(runtimeGrants.orgId, scope.orgId),
-          eq(runtimeGrants.workflowExecutionId, scope.workflowExecutionId),
-          isNull(runtimeGrants.revokedAt),
-        ),
-      );
-    grants = rows.map(toGrantRow);
-  }
-
-  let overrides: ActionPolicyOverrideRow[] = [];
-  if (scope.userId && !teamId) {
-    const rows = await db
-      .select()
-      .from(actionPolicyOverrides)
-      .where(and(eq(actionPolicyOverrides.orgId, scope.orgId), eq(actionPolicyOverrides.userId, scope.userId)));
-    overrides = rows.map((r) => ({
-      id: r.id,
-      service: r.service,
-      actionId: r.actionId,
-      riskLevel: r.riskLevel,
-      mode: r.mode,
-      paramMatchers: r.paramMatchers,
-      updatedAt: r.updatedAt,
-    }));
-  }
-
-  return { policies, grants, overrides };
-}
-
-function toGrantRow(r: {
-  id: string;
-  sessionId: string | null;
-  workflowExecutionId: string | null;
-  policyKey: string;
-  revokedAt: number | null;
-}): RuntimeGrantRow {
-  return {
-    id: r.id,
-    sessionId: r.sessionId,
-    workflowExecutionId: r.workflowExecutionId,
-    policyKey: r.policyKey,
-    revokedAt: r.revokedAt,
-  };
-}
-
-export interface ResolveActionPolicyInput {
-  orgId: string;
-  teamId?: string;
-  userId?: string;
-  service: string;
-  actionId: string;
-  riskLevel: RiskLevel;
-  params: Record<string, unknown> | undefined;
-  appliesIn: "session" | "workflow";
-  sessionId?: string;
-  workflowExecutionId?: string;
-  pluginDefault: ApprovalMode | undefined;
-  now: number;
-}
-
-/**
- * Load rows + run the pure precedence core. Shared by the engine
- * `PolicyResolver` (session path) and the workflow invoker (workflow path) so
- * both enforce identical precedence.
- */
-export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyInput): Promise<PolicyDecision> {
-  const rows = await loadPolicyRows(db, {
-    orgId: input.orgId,
-    teamId: input.teamId,
-    userId: input.userId,
-    sessionId: input.sessionId,
-    workflowExecutionId: input.workflowExecutionId,
-  });
-  return resolvePolicyDecision(
-    rows,
-    {
-      service: input.service,
-      actionId: input.actionId,
-      riskLevel: input.riskLevel,
-      params: input.params,
-      appliesIn: input.appliesIn,
-      sessionId: input.sessionId,
-      workflowExecutionId: input.workflowExecutionId,
-      now: input.now,
-    },
-    input.pluginDefault,
-  );
-}
-
 // ── Grant writes ────────────────────────────────────────────────────
+
+export function grantPolicyKey(service: string, actionId: string): string {
+  return actionId.startsWith(`${service}.`) ? actionId : `${service}.${actionId}`;
+}
 
 export interface GrantWrite {
   orgId: string;
@@ -359,7 +194,7 @@ export class AlwaysAllowNotAdminError extends Error {
  * tie-break. Deny rows are never touched — an org deny is absolute and a
  * non-admin-overridable kill switch, not something an approval prompt clears.
  */
-export async function writeAlwaysAllowPolicy(db: AppDb, write: AlwaysAllowWrite): Promise<void> {
+export async function writeAlwaysAllowPolicy(db: AppQueryable, write: AlwaysAllowWrite): Promise<void> {
   const admin = await isOrgAdmin(db, write.orgId, write.grantedBy);
   if (!admin) throw new AlwaysAllowNotAdminError(write.orgId, write.grantedBy);
 
@@ -548,150 +383,4 @@ export function gatedAuditId(
   gateOrdinal: number,
 ): string {
   return `pol:gate:${sessionId}:${queueItemId ?? ""}:${resumeKey}:${gateOrdinal}`;
-}
-
-// ── Engine PolicyResolver ──────────────────────────────────────────
-
-export interface PolicyResolverDeps {
-  db: AppDb;
-  actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
-  clock?: () => number;
-}
-
-/**
- * Assemble the engine's `PolicyResolver` port (session/interactive path). One
- * instance is shared across every session build — all per-invocation context
- * (org/user/session/service) rides in on `PolicyResolveInput`, so the resolver
- * holds no session state of its own.
- */
-export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
-  const clock = deps.clock ?? Date.now;
-
-  const pluginDefaultFor = (service: string): ApprovalMode | undefined =>
-    deps.actionPluginByService.get(service)?.actionPlugin.defaultApprovalMode;
-
-  return {
-    async resolve(input: PolicyResolveInput): Promise<PolicyDecision> {
-      // Without an org context there are no org policies/grants/overrides to
-      // consult — fall through to the pure core with empty rows so the plugin
-      // default / risk default still applies (byte-identical to a real load
-      // that returns nothing).
-      if (!input.orgId) {
-        return resolvePolicyDecision(
-          { policies: [], grants: [], overrides: [] },
-          {
-            service: input.service,
-            actionId: input.actionId,
-            riskLevel: input.riskLevel,
-            params: input.params,
-            appliesIn: input.appliesIn,
-            sessionId: input.sessionId,
-            now: clock(),
-          },
-          pluginDefaultFor(input.service),
-        );
-      }
-
-      const decision = await resolveActionPolicy(deps.db, {
-        orgId: input.orgId,
-        teamId: input.teamId,
-        userId: input.userId,
-        service: input.service,
-        actionId: input.actionId,
-        riskLevel: input.riskLevel,
-        params: input.params,
-        appliesIn: input.appliesIn,
-        sessionId: input.sessionId,
-        pluginDefault: pluginDefaultFor(input.service),
-        now: clock(),
-      });
-
-      if (decision.mode !== "require_approval") return decision;
-
-      // Offer the two escalation actions on the gate. `onResolution`
-      // enforces the admin check for `always_allow`; the engine strips the
-      // `approves` flag before opening the gate.
-      return {
-        ...decision,
-        extraGateActions: [
-          { id: GATE_ACTION_APPROVE_SESSION, label: "Approve for this session", approves: true },
-          { id: GATE_ACTION_ALWAYS_ALLOW, label: "Always allow (org)", approves: true },
-        ],
-      };
-    },
-
-    async onResolution(
-      input: PolicyResolveInput,
-      decision: PolicyDecision,
-      resolution: DecisionResolution,
-    ): Promise<void> {
-      // Binding carry-forward #2: a `resolver_error` decision is synthetic —
-      // the engine minted it when `resolve()` threw; the resolver never
-      // produced it, so it carries no real provenance to act on. NO-OP (log).
-      if (decision.provenance.source === "resolver_error") {
-        console.warn(
-          `policy onResolution: skipping side effects for synthetic resolver_error decision (${input.service}.${input.actionId})`,
-        );
-        return;
-      }
-      if (!input.orgId) return;
-
-      const now = clock();
-      if (resolution.actionId === GATE_ACTION_APPROVE_SESSION) {
-        if (!input.sessionId) return;
-        await writeSessionGrant(deps.db, input.sessionId, {
-          orgId: input.orgId,
-          service: input.service,
-          actionId: input.actionId,
-          grantedBy: resolution.resolvedBy,
-          now,
-        });
-      } else if (resolution.actionId === GATE_ACTION_ALWAYS_ALLOW) {
-        // Throws (AlwaysAllowNotAdminError) for a non-admin resolver — the
-        // engine catches it and fails the approval closed.
-        await writeAlwaysAllowPolicy(deps.db, {
-          orgId: input.orgId,
-          actionId: input.actionId,
-          grantedBy: resolution.resolvedBy,
-          now,
-        });
-      }
-      // Plain "approve" (or any other resolution) is a one-shot allow — no
-      // durable write.
-    },
-
-    async onInvocation(record: PolicyInvocationRecord): Promise<void> {
-      const createdAt = clock();
-      const durationMs = record.durationMs ?? null;
-      const startedAt = durationMs != null ? createdAt - durationMs : null;
-      await persistInvocationAudit(deps.db, {
-        createdAt,
-        // Gated rows (a gate opened → gateOrdinal present) dedup on
-        // (sessionId, resumeKey, gateOrdinal); every other emission gets a
-        // fresh id so genuine repeats are all recorded.
-        invocationId:
-          record.gateOrdinal !== undefined
-            ? gatedAuditId(record.sessionId, record.queueItemId, record.resumeKey, record.gateOrdinal)
-            : `pol:call:${randomUUID()}`,
-        service: record.service,
-        actionId: record.actionId,
-        riskLevel: record.riskLevel,
-        resolvedMode: record.resolvedMode,
-        baseMode: record.provenance.baseMode,
-        matchedPolicyId: record.provenance.matchedPolicyId ?? null,
-        matchedGrantId: record.provenance.matchedGrantId ?? null,
-        matchedOverrideId: record.provenance.matchedOverrideId ?? null,
-        status: record.status,
-        sessionId: record.sessionId,
-        workflowExecutionId: null,
-        userId: record.userId ?? null,
-        orgId: record.orgId ?? null,
-        params: record.params,
-        result: record.result,
-        error: record.error ?? null,
-        durationMs,
-        startedAt,
-      });
-    },
-  };
 }

@@ -9,7 +9,8 @@ import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionPolicies, invites, llmProviders, orgMembers, orgs, contentSources, skills, teams, teamMembers, users } from "../schema/index.js";
-import { ensureOrg } from "./org.js";
+import { configureCanonicalOrganizationProvisioner, ensureOrg } from "./org.js";
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import {
   reconcileInstanceConfig,
   configInviteId,
@@ -30,8 +31,18 @@ async function seedUser(db: AppDb, id: string, email: string) {
   await db.insert(users).values({ id, email, name: id, role: "member" });
 }
 
+const managers = new WeakMap<AppDb, CanonicalPolicyBundleManager>();
+
+async function freshConfigDb(): Promise<AppDb> {
+  const { appDb } = await freshTestPgDb();
+  const manager = new CanonicalPolicyBundleManager(appDb, new Map());
+  managers.set(appDb, manager);
+  configureCanonicalOrganizationProvisioner((id, name) => manager.provisionOrganization(id, name));
+  return appDb;
+}
+
 function deps(db: AppDb): ReconcileDeps {
-  return { db };
+  return { db, canonicalPolicyManager: managers.get(db) };
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +87,7 @@ describe("reconcileInstanceConfig — org pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("empty org section (no org key) is a no-op — ensureOrg creates the org", async () => {
@@ -427,7 +438,7 @@ describe("reconcileInstanceConfig — teams pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("marks a team it creates as config-owned", async () => {
@@ -645,7 +656,7 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("creates a known-kind provider row on first run", async () => {
@@ -761,7 +772,7 @@ describe("reconcileInstanceConfig — contentSources pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("inserts a declared source with org ownership and pending status", async () => {
@@ -1191,7 +1202,7 @@ describe("reconcileInstanceConfig — conflict guards", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("succeeds when an org_members row for a declared member already exists (partial prior run)", async () => {
@@ -1282,7 +1293,7 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   async function orgId(): Promise<string> {
@@ -1409,7 +1420,7 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
     const org = await orgId();
     const now = Date.now();
     const uiId = randomUUID();
-    await db.insert(actionPolicies).values({
+    await managers.get(db)!.mutateAndActivate(org, { actorId: "admin", operation: "ui_create", idempotencyKey: uiId }, (tx) => tx.insert(actionPolicies).values({
       id: uiId,
       orgId: org,
       principalType: "org",
@@ -1426,7 +1437,7 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
       revokedAt: null,
       createdAt: now,
       updatedAt: now,
-    });
+    }));
 
     // A config run declaring a different target must not revoke the UI row.
     await reconcileInstanceConfig(deps(db), {
