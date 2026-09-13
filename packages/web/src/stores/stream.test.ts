@@ -70,6 +70,33 @@ function idleModelState(threadId: string): WireEvent {
 describe("stream store reducer", () => {
   beforeEach(reset);
 
+  it("applies optimistic and handshake compaction state", () => {
+    const { ingest, setCompacting } = useStreamStore.getState();
+    setCompacting(SESSION, THREAD, true);
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBe(true);
+
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      type: "compaction.state",
+      threadId: THREAD,
+      active: false,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBeUndefined();
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "compaction.state",
+      threadId: THREAD,
+      active: true,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBe(true);
+
+    ingest(SESSION, { seq: 3, ts: Date.now(), type: "compaction_end", threadId: THREAD });
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBeUndefined();
+  });
+
   it("preserves store identity for an offset-free ping", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));

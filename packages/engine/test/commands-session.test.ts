@@ -81,6 +81,118 @@ describe("Session.prompt command interception", () => {
     expect(events.some((e) => e.event.type === "command_result")).toBe(true);
   });
 
+  it("returns /compact before summarization and joins a duplicate", async () => {
+    let releaseSummary!: () => void;
+    let summaryStarted!: () => void;
+    const summaryStartedPromise = new Promise<void>((resolve) => { summaryStarted = resolve; });
+    const summaryRelease = new Promise<void>((resolve) => { releaseSummary = resolve; });
+    let summaryCalls = 0;
+    const faux = registerFauxProvider({
+      provider: "s-compact-async",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      async () => {
+        summaryCalls++;
+        summaryStarted();
+        await summaryRelease;
+        return fauxAssistantMessage(
+          "## Goal\n- test\n\n## Progress\n### Done\n- prior turns\n\n## Next Steps\n- continue",
+        );
+      },
+    ]);
+    cleanups.push(() => faux.unregister());
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "u-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
+      { id: "a-1", sessionId: session.id, threadId: thread.id, parentId: "u-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "u-2", sessionId: session.id, threadId: thread.id, parentId: "a-1", type: "message", role: "user", content: "second prompt", createdAt: 3 },
+      { id: "a-2", sessionId: session.id, threadId: thread.id, parentId: "u-2", type: "message", role: "assistant", content: "second response", createdAt: 4 },
+    ]);
+
+    const first = await session.prompt("/compact");
+    expect(first.command).toEqual({ name: "compact", source: "builtin", status: "started" });
+    await summaryStartedPromise;
+    expect(thread.isCompacting()).toBe(true);
+    expect((await store.getEntries(session.id, thread.id)).some((e) => e.type === "command_result")).toBe(false);
+
+    const second = await session.prompt("/compact keep decisions");
+    expect(second.command?.status).toBe("started");
+    expect(summaryCalls).toBe(1);
+    expect(events.filter((e) => e.event.type === "compaction_start")).toHaveLength(1);
+
+    releaseSummary();
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const results = (await store.getEntries(session.id, thread.id)).filter(
+        (e) => e.type === "command_result",
+      );
+      if (results.length === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const entries = await store.getEntries(session.id, thread.id);
+    expect(entries.filter((e) => e.type === "compaction")).toHaveLength(1);
+    expect(entries.filter((e) => e.type === "command_result")).toHaveLength(2);
+    expect(events.filter((e) => e.event.type === "compaction_end")).toHaveLength(1);
+    expect(thread.isCompacting()).toBe(false);
+  });
+
+  it("persists an actionable /compact failure and clears lifecycle state", async () => {
+    const faux = registerFauxProvider({
+      provider: "s-compact-failure",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer unavailable" }),
+    ]);
+    cleanups.push(() => faux.unregister());
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "u-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
+      { id: "a-1", sessionId: session.id, threadId: thread.id, parentId: "u-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "u-2", sessionId: session.id, threadId: thread.id, parentId: "a-1", type: "message", role: "user", content: "second prompt", createdAt: 3 },
+      { id: "a-2", sessionId: session.id, threadId: thread.id, parentId: "u-2", type: "message", role: "assistant", content: "second response", createdAt: 4 },
+    ]);
+
+    const receipt = await session.prompt("/compact");
+    expect(receipt.command?.status).toBe("started");
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await store.getEntries(session.id, thread.id)).some((e) => e.type === "command_result")) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const entries = await store.getEntries(session.id, thread.id);
+    const result = entries.find((e) => e.type === "command_result");
+    expect(result?.type === "command_result" && result.ok).toBe(false);
+    expect(result?.type === "command_result" && result.output).toContain("summarizer unavailable");
+    expect(result?.type === "command_result" && result.output).toContain("Retry /compact");
+    const error = events.find(
+      (e) => e.event.type === "error" && e.event.code === "compaction_failed",
+    );
+    expect(error?.event.type === "error" && error.event.error).toContain("Retry /compact");
+    expect(events.filter((e) => e.event.type === "compaction_start")).toHaveLength(1);
+    expect(events.filter((e) => e.event.type === "compaction_end")).toHaveLength(1);
+    expect(thread.isCompacting()).toBe(false);
+    expect(entries.filter((e) => e.type === "message" && e.role === "assistant")).toHaveLength(2);
+  });
+
   it("the echo carries the submitting author — an authorless echo renders as 'You' to every member of a shared session", async () => {
     const faux = registerFauxProvider({ provider: "s-echo-author" });
     cleanups.push(() => faux.unregister());

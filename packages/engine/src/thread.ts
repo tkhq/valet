@@ -437,6 +437,8 @@ export class Thread {
    * every turn.
    */
   private consecutiveCompactionFailures = 0;
+  /** One owner for any manual, proactive, or reactive compaction on this thread. */
+  private compactionInFlight: Promise<CompactionOutcome> | null = null;
   /**
    * Content hashes from the model's file reads, backing the
    * read-before-write staleness gate (TKAI-318). In-memory only: after a
@@ -4136,18 +4138,60 @@ export class Thread {
      */
     autoContinue?: false;
   }): Promise<CompactionOutcome> {
-    const cfg = this.session.options.compaction;
-    if (cfg?.enabled === false) return "noop";
-    await this.ensureTranscript();
-    return withSpan(
-      "compaction",
-      {
-        "valet.session.id": this.session.id,
-        "valet.thread.id": this.id,
-        "valet.compaction.mode": opts.mode,
-      },
-      (span) => this.compactThreadInner(opts, span),
-    );
+    // Join the current pass instead of starting a second summarizer and DAG
+    // rewrite. This lock covers every caller, not only the HTTP command path.
+    if (this.compactionInFlight) return this.compactionInFlight;
+
+    const pending = Promise.resolve().then(() => this.compactThreadOwned(opts));
+    this.compactionInFlight = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.compactionInFlight === pending) this.compactionInFlight = null;
+    }
+  }
+
+  /** Current in-process state for the WebSocket handshake snapshot. */
+  isCompacting(): boolean {
+    return this.compactionInFlight !== null;
+  }
+
+  private async compactThreadOwned(opts: {
+    mode: "proactive" | "reactive" | "manual";
+    instructions?: string;
+    autoContinue?: false;
+  }): Promise<CompactionOutcome> {
+    const manual = opts.mode === "manual";
+    if (manual) {
+      await this.session.emit({ type: "compaction_start", threadId: this.id });
+    }
+    try {
+      const cfg = this.session.options.compaction;
+      if (cfg?.enabled === false) return "noop";
+      await this.ensureTranscript();
+      return await withSpan(
+        "compaction",
+        {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.compaction.mode": opts.mode,
+        },
+        (span) => this.compactThreadInner(opts, span),
+      );
+    } catch (err) {
+      if (manual) {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.emitError(
+          "compaction_failed",
+          `Compaction failed: ${reason}. Retry /compact, or start a new thread if the failure continues.`,
+        );
+      }
+      throw err;
+    } finally {
+      if (manual) {
+        await this.session.emit({ type: "compaction_end", threadId: this.id });
+      }
+    }
   }
 
   private async compactThreadInner(
@@ -4241,11 +4285,14 @@ export class Thread {
       return "insufficient";
     }
 
-    // Step 3: summarize.
-    await session.emit(
-      { type: "compaction_start", threadId: this.id },
-      { queueItemId: this.runningItem?.id },
-    );
+    // Step 3: summarize. Manual compaction owns its lifecycle in the outer
+    // wrapper so pruning-only and no-op results also clear optimistic state.
+    if (opts.mode !== "manual") {
+      await session.emit(
+        { type: "compaction_start", threadId: this.id },
+        { queueItemId: this.runningItem?.id },
+      );
+    }
     let summaryResult: SummarizeResult;
     // Everything between compaction_start and here MUST balance the pair —
     // the wire contract promises "compaction_end fires on failure too", and
@@ -4347,10 +4394,12 @@ export class Thread {
       // drop is not counted as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
     } finally {
-      await session.emit(
-        { type: "compaction_end", threadId: this.id },
-        { queueItemId: this.runningItem?.id },
-      );
+      if (opts.mode !== "manual") {
+        await session.emit(
+          { type: "compaction_end", threadId: this.id },
+          { queueItemId: this.runningItem?.id },
+        );
+      }
     }
 
     // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each

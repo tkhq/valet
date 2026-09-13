@@ -188,6 +188,8 @@ export interface StreamStore {
   // ── actions ────────────────────────────────────────────────────────────
   setConnection(sessionId: string, conn: ConnectionStatus): void;
   ingest(sessionId: string, ev: WireEvent): void;
+  /** Set optimistic or handshake compaction state for one thread. */
+  setCompacting(sessionId: string, threadId: string, active: boolean): void;
   /**
    * Optimistically append a user-authored message to the local view. Engine
    * doesn't emit a wire event when a user prompt is enqueued — without this
@@ -546,6 +548,16 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "compaction.state": {
+      if (ev.active) {
+        next.compactingByThread = { ...slice.compactingByThread, [ev.threadId]: true };
+      } else {
+        const { [ev.threadId]: _, ...rest } = slice.compactingByThread;
+        next.compactingByThread = rest;
+      }
+      return next;
+    }
+
     case "compaction_end": {
       // `compaction_end` fires on failure too (the engine balances the
       // pair), so the flag always clears. The nonce bump cues the
@@ -773,6 +785,20 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const updated = reduce(slice, ev, sessionId);
       if (updated === slice) return state;
       return { bySession: { ...state.bySession, [sessionId]: updated } };
+    }),
+
+  setCompacting: (sessionId, threadId, active) =>
+    set((state) => {
+      const slice = ensure(state, sessionId);
+      const compactingByThread = { ...slice.compactingByThread };
+      if (active) compactingByThread[threadId] = true;
+      else delete compactingByThread[threadId];
+      return {
+        bySession: {
+          ...state.bySession,
+          [sessionId]: { ...slice, compactingByThread },
+        },
+      };
     }),
 
   addUserMessage: (sessionId, text, threadId, attachments) => {

@@ -1314,6 +1314,12 @@ export interface SendPromptResponse {
    */
   messageId: string | null;
   threadId: string;
+  /** Present for slash commands. Started commands continue after this response. */
+  command?: {
+    name: string;
+    source: "builtin" | "plugin";
+    status?: "started";
+  };
 }
 
 // ── REST: decision gates ──────────────────────────────────────────────────
@@ -1517,6 +1523,15 @@ export type WireEvent =
       threadId: string;
       queueItemId: null;
       model: null;
+    }
+  | {
+      /** Authoritative in-process compaction state sent during each handshake. */
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "compaction.state";
+      threadId: string;
+      active: boolean;
     }
   | {
       /**
