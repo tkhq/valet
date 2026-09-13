@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AuthorizationRequest, PolicyDecisionV1 } from "@valet/engine/authorization";
+import type { AuthorizationRequest, JsonValue, PolicyDecisionV1 } from "@valet/engine/authorization";
 import { resolvePolicyDecision, type ActionPolicyRow } from "../../policies/resolution.js";
 import { InMemorySourceBundleStorage } from "./in-memory-storage.js";
 import { SourceBundleHost } from "./host.js";
 import { WasmPolicyRuntime } from "../evaluators/wasm-runtime.js";
+import { testBundle } from "../test-bundle.js";
 import {
   buildCurrentPolicyDynamicFacts,
   buildCurrentPolicySource,
@@ -73,7 +74,7 @@ function overrideRule(index: number): CurrentPolicySourceSnapshotV1["personalOve
   };
 }
 
-function request(parameters?: Record<string, string | number | boolean | null>): AuthorizationRequest {
+function request(parameters?: NonNullable<AuthorizationRequest["action"]["parameters"]>): AuthorizationRequest {
   return {
     schemaVersion: 1,
     requestId: "review-request",
@@ -108,6 +109,20 @@ async function evaluate(source: CurrentPolicySourceSnapshotV1, input = request()
   });
 }
 
+async function wasmRegexMatches(pattern: string, value: string): Promise<boolean> {
+  const source = `package valet.authz\nimport rego.v1\ndecision := {"effect":"allow","reasonCode":"regex_match","matchedRuleIds":[],"obligations":[],"redactions":[]} if { regex.match(${JSON.stringify(pattern)}, input.value) }\nelse := {"effect":"deny","reasonCode":"regex_no_match","matchedRuleIds":[],"obligations":[],"redactions":[]} if { true }\n`;
+  const bundle = testBundle(source, "{}");
+  const identity = await runtime.run<{ sourceBundleDigest: string }>({ operation: "validate_bundle", bundle });
+  await runtime.loadBundle(identity.sourceBundleDigest, bundle);
+  const result = await runtime.run<{ decision: PolicyDecisionV1 }>({
+    operation: "evaluate",
+    sourceBundleDigest: identity.sourceBundleDigest,
+    input: { value },
+    explain: "off",
+  });
+  return result.decision.effect === "allow";
+}
+
 function scaleSnapshot(ruleCount: number): CurrentPolicySourceSnapshotV1 {
   const organizationCount = Math.ceil(ruleCount * 0.4);
   const teamCount = Math.ceil(ruleCount * 0.35);
@@ -129,6 +144,9 @@ function scaleSnapshot(ruleCount: number): CurrentPolicySourceSnapshotV1 {
 describe("current policy source review regressions", () => {
   it("evaluates worst-case scale snapshots with deterministic headroom", async () => {
     const source = scaleSnapshot(50);
+    const generated = buildCurrentPolicySource(source).policySource;
+    expect(generated).toContain('input.action.parameters["selector"]');
+    expect(generated).not.toMatch(/object\.(get|keys)\(/);
     const noMatch = await evaluate(source, request({ selector: "absent" }));
     const lateMatch = await evaluate(source, request({ selector: "value-0" }));
     expect(noMatch.decision.effect).toBe("require_approval");
@@ -144,6 +162,31 @@ describe("current policy source review regressions", () => {
       riskDefaults: [...source.riskDefaults].reverse(),
     });
     expect(buildCurrentPolicySource(permuted).bundle).toEqual(buildCurrentPolicySource(source).bundle);
+  });
+
+  it.each([
+    ["1 KB body", { selector: "absent", body: "x".repeat(1_024) }],
+    ["4 KB body", { selector: "absent", body: "x".repeat(4_096) }],
+    ["128-item list", { selector: "absent", values: Array.from({ length: 128 }, (_, index) => index) }],
+  ])("evaluates reviewer parameter-size repro: %s", async (_name, parameters) => {
+    const result = await evaluate(scaleSnapshot(50), request(parameters));
+    expect(result.decision.effect).toBe("require_approval");
+    expect(result.usage.work_units).toBeLessThan(100_000);
+  });
+
+  it("ignores realistic unrelated parameter data within the fuel budget", async () => {
+    const metadata = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [`field-${index}`, index]));
+    const source = scaleSnapshot(CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules);
+    for (const selector of ["absent", "value-0"]) {
+      const result = await evaluate(source, request({ selector, body: "x".repeat(200_000), metadata }));
+      expect(result.decision.effect).toBe(selector === "value-0" ? "allow" : "require_approval");
+      expect(result.usage.work_units).toBeLessThan(100_000);
+    }
+  });
+
+  it("keeps the engine input document profile limit", async () => {
+    await expect(evaluate(scaleSnapshot(50), request({ selector: "absent", values: Array.from({ length: 100_001 }, () => 0) })))
+      .rejects.toMatchObject({ code: "limit" });
   });
 
   it("accepts the maximum rule complexity and rejects one more", async () => {
@@ -221,10 +264,69 @@ describe("current policy source review regressions", () => {
     })).toThrow(expect.objectContaining({ code: "complexity_limit" }));
   });
 
+  it("bounds matcher value bytes, nodes, depth, and aggregate complexity", async () => {
+    const valueAtByteLimit = "x".repeat(CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes - 2);
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "value", op: "eq", value: valueAtByteLimit }] })],
+    }))).not.toThrow();
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "value", op: "eq", value: `${valueAtByteLimit}x` }] })],
+    }))).toThrow(expect.objectContaining({ code: "complexity_limit" }));
+
+    const valueAtNodeLimit = Array.from({ length: CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes - 1 }, () => 0);
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "value", op: "in", value: valueAtNodeLimit }] })],
+    }))).not.toThrow();
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "value", op: "in", value: [...valueAtNodeLimit, 256] }] })],
+    }))).toThrow(expect.objectContaining({ code: "complexity_limit" }));
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "value", op: "in", value: Array.from({ length: 120_000 }, (_, index) => index) }] })],
+    }))).toThrow(expect.objectContaining({ code: "complexity_limit" }));
+
+    const nested = (depth: number): JsonValue => {
+      let value: JsonValue = 0;
+      for (let index = 1; index < depth; index++) value = { value };
+      return value;
+    };
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "value", op: "eq", value: nested(CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth) }] })],
+    }))).not.toThrow();
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "value", op: "eq", value: nested(CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth + 1) }] })],
+    }))).toThrow(expect.objectContaining({ code: "complexity_limit" }));
+
+    const byteMatchers = Array.from({ length: CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueBytes / CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes }, (_, index) => ({
+      path: `value${index}`,
+      op: "eq" as const,
+      value: valueAtByteLimit,
+    }));
+    const maximum = snapshot({ organizationPolicies: [orgRule(1, { actionId: "gmail.read_email", paramMatchers: byteMatchers })] });
+    const maximumResult = await evaluate(maximum);
+    expect(maximumResult.decision.effect).toBe("require_approval");
+    expect(maximumResult.usage.work_units).toBeLessThan(750_000);
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [
+        orgRule(1, { actionId: "gmail.read_email", paramMatchers: byteMatchers }),
+        orgRule(2, { paramMatchers: [{ path: "over", op: "eq", value: "x" }] }),
+      ],
+    }))).toThrow(expect.objectContaining({ code: "complexity_limit" }));
+
+    const nodeMatchers = Array.from({ length: CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueNodes / CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes }, (_, index) => ({
+      path: `list${index}`,
+      op: "in" as const,
+      value: valueAtNodeLimit,
+    }));
+    expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule(1, { paramMatchers: nodeMatchers })] }))).not.toThrow();
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [...nodeMatchers, { path: "over", op: "eq", value: 1 }] })],
+    }))).toThrow(expect.objectContaining({ code: "complexity_limit" }));
+  });
+
   it.each([
     ["^admin@example\\.com$", "admin@example.com", "user@example.com"],
     ["[a-z]+", "abc", "123"],
-    ["^[^0-9]+$", "letters", "letter1"],
+    ["^[A-Za-z]+$", "letters", "letter1"],
     ["foo?", "fo", "bar"],
     ["a\\+b", "a+b", "ab"],
   ])("matches lossless regex %s identically in JS and Regorus", async (pattern, matching, nonmatching) => {
@@ -235,7 +337,29 @@ describe("current policy source review regressions", () => {
     }
   });
 
-  it.each(["\\d", "\\w", "\\s", "\\p{L}", "[]", "[^]", "\\n", ".", "\\x41", "é", "\\a"])(
+  it.each([
+    ["^[^x]$", "💥"],
+    ["a[^x]b", "a💥b"],
+  ])("rejects astral-divergent negated class %s", async (pattern, value) => {
+    expect(new RegExp(pattern).test(value)).toBe(false);
+    expect(await wasmRegexMatches(pattern, value)).toBe(true);
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "selector", op: "regex", value: pattern }] })],
+    }))).toThrow(expect.objectContaining({ code: "non_lossless_regex" }));
+  });
+
+  it.each([
+    ["^[x]$", "💥"],
+    ["a[x]b", "a💥b"],
+  ])("keeps positive class %s in JS and WASM agreement", async (pattern, value) => {
+    expect(new RegExp(pattern).test(value)).toBe(false);
+    expect(await wasmRegexMatches(pattern, value)).toBe(false);
+    expect(() => buildCurrentPolicySource(snapshot({
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "selector", op: "regex", value: pattern }] })],
+    }))).not.toThrow();
+  });
+
+  it.each(["\\d", "\\w", "\\s", "\\p{L}", "[]", "[^]", "[^x]", "\\n", ".", "\\x41", "é", "\\a"])(
     "rejects non-lossless regex %s before engine evaluation",
     (pattern) => {
       expect(() => buildCurrentPolicySource(snapshot({
@@ -261,8 +385,11 @@ describe("current policy source review regressions", () => {
       expect(result.decision.effect).toBe("deny");
     }
     for (const value of [null, false, 0] as const) expect(await effect("exists", { value })).toBe("deny");
+  });
+
+  it.each(["", ".", "..", ". .", "   ", "a..b", "a."])("rejects zero-segment matcher path %j", (path) => {
     expect(() => buildCurrentPolicySource(snapshot({
-      organizationPolicies: [orgRule(1, { paramMatchers: [{ path: "", op: "exists" }] })],
+      organizationPolicies: [orgRule(1, { paramMatchers: [{ path, op: "exists" }] })],
     }))).toThrow(expect.objectContaining({ code: "non_lossless_path" }));
   });
 

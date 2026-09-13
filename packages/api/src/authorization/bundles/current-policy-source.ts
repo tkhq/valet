@@ -29,6 +29,11 @@ export const CURRENT_POLICY_COMPLEXITY_LIMITS_V1 = Object.freeze({
   maxTotalMatchers: 128,
   maxPathSegments: 8,
   maxRegexLength: 128,
+  maxMatcherValueBytes: 768,
+  maxMatcherValueNodes: 256,
+  maxMatcherValueDepth: 16,
+  maxTotalMatcherValueBytes: 12_288,
+  maxTotalMatcherValueNodes: 2_048,
   maxPluginDefaults: 32,
   maxDynamicGrants: 32,
   maxDynamicApprovals: 32,
@@ -229,6 +234,8 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules} rules.`);
   }
   let matcherCount = 0;
+  let matcherValueBytes = 0;
+  let matcherValueNodes = 0;
   for (const row of rules) {
     unique(ids, row.id);
     if (row.organizationId !== snapshot.organizationId) fail("cross_organization", `Rule ${row.id} belongs to another organization.`);
@@ -237,14 +244,22 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     validTimestamp(`${row.id}.createdAtMs`, row.createdAtMs);
     validTimestamp(`${row.id}.updatedAtMs`, row.updatedAtMs);
     if (row.updatedAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} was updated before it was created.`);
-    validateMatchers(row.id, row.paramMatchers);
+    const valueComplexity = validateMatchers(row.id, row.paramMatchers);
     if (row.paramMatchers.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) {
       fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} matchers.`);
     }
     matcherCount += row.paramMatchers.length;
+    matcherValueBytes += valueComplexity.bytes;
+    matcherValueNodes += valueComplexity.nodes;
   }
   if (matcherCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers) {
     fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers} matchers.`);
+  }
+  if (matcherValueBytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueBytes) {
+    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueBytes} matcher value bytes.`);
+  }
+  if (matcherValueNodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueNodes) {
+    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueNodes} matcher value nodes.`);
   }
   for (const row of snapshot.organizationPolicies) {
     if (row.principalType !== "org" || row.principalId !== snapshot.organizationId || row.sourceTable !== "action_policies") {
@@ -361,12 +376,11 @@ function validateTarget(id: string, target: CurrentPolicyTargetV1): void {
   if (target.riskLevel !== undefined && !RISKS.has(target.riskLevel)) fail("unknown_risk", `Rule ${id} has an unknown risk level.`);
 }
 
-function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[]): void {
+function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[]): { bytes: number; nodes: number } {
   const identities = new Set<string>();
+  let bytes = 0;
+  let nodes = 0;
   for (const [index, matcher] of matchers.entries()) {
-    const identity = canonicalJson(matcher);
-    if (identities.has(identity)) fail("duplicate_matcher", `Rule ${id} matcher ${index} is duplicated.`);
-    identities.add(identity);
     if (!MATCHER_OPS.has(matcher.op)) fail("unknown_matcher", `Rule ${id} matcher ${index} has an unknown operator.`);
     const path = parseMatcherPath(matcher.path);
     if (path.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPathSegments) fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the path segment limit.`);
@@ -374,13 +388,29 @@ function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[
     if (valueBearing !== Object.hasOwn(matcher, "value")) fail("matcher_value", `Rule ${id} matcher ${index} has an invalid value.`);
     if (["in", "not_in"].includes(matcher.op) && !Array.isArray(matcher.value)) fail("matcher_value", `Rule ${id} matcher ${index} requires an array value.`);
     if (["gt", "gte", "lt", "lte"].includes(matcher.op) && (typeof matcher.value !== "number" || !Number.isFinite(matcher.value))) fail("matcher_value", `Rule ${id} matcher ${index} requires a finite number.`);
-    if (matcher.op === "regex") {
-      if (typeof matcher.value !== "string" || !isLosslessRegexV1(matcher.value)) {
-        fail("non_lossless_regex", `Rule ${id} matcher ${index} cannot be translated losslessly by regex subset v1.`);
-      }
+    if (matcher.op === "regex" && (typeof matcher.value !== "string" || !isLosslessRegexV1(matcher.value))) {
+      fail("non_lossless_regex", `Rule ${id} matcher ${index} cannot be translated losslessly by regex subset v1.`);
     }
     assertJsonValue(`${id}.paramMatchers[${index}].value`, matcher.value, !valueBearing);
+    if (valueBearing) {
+      const complexity = matcherValueComplexity(matcher.value);
+      bytes += complexity.bytes;
+      nodes += complexity.nodes;
+      if (complexity.bytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes) {
+        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value byte limit.`);
+      }
+      if (complexity.nodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes) {
+        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value node limit.`);
+      }
+      if (complexity.depth > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth) {
+        fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the matcher value depth limit.`);
+      }
+    }
+    const identity = canonicalJson(matcher);
+    if (identities.has(identity)) fail("duplicate_matcher", `Rule ${id} matcher ${index} is duplicated.`);
+    identities.add(identity);
   }
+  return { bytes, nodes };
 }
 
 function normalizeRule(
@@ -415,27 +445,30 @@ function normalizeRule(
 
 function parseMatcherPath(path: string): Array<string | number> {
   const result: Array<string | number> = [];
-  if (path === "") fail("non_lossless_path", "Empty matcher paths are not lossless when action parameters are absent.");
   let index = 0;
   while (index < path.length) {
-    if (path[index] === ".") { index += 1; continue; }
-    if (path[index] === "[") {
+    let end = index;
+    while (end < path.length && path[end] !== "." && path[end] !== "[") end += 1;
+    const segment = path.slice(index, end);
+    if (segment.trim().length === 0) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an empty segment.`);
+    if (["__proto__", "constructor", "prototype"].includes(segment)) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} depends on JavaScript prototype lookup.`);
+    result.push(segment);
+    index = end;
+    while (index < path.length && path[index] === "[") {
       const close = path.indexOf("]", index);
       if (close === -1) fail("matcher_path", `Matcher path ${JSON.stringify(path)} has an unterminated index.`);
       const text = path.slice(index + 1, close);
       const arrayIndex = Number(text);
-      if (!Number.isSafeInteger(arrayIndex) || arrayIndex < 0) fail("matcher_path", `Matcher path ${JSON.stringify(path)} has an invalid index.`);
+      if (text.trim() === "" || !Number.isSafeInteger(arrayIndex) || arrayIndex < 0) fail("matcher_path", `Matcher path ${JSON.stringify(path)} has an invalid index.`);
       result.push(arrayIndex);
       index = close + 1;
-      continue;
     }
-    let end = index;
-    while (end < path.length && path[end] !== "." && path[end] !== "[") end += 1;
-    const segment = path.slice(index, end);
-    if (segment.length === 0) fail("matcher_path", `Matcher path ${JSON.stringify(path)} has an empty segment.`);
-    if (["__proto__", "constructor", "prototype"].includes(segment)) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} depends on JavaScript prototype lookup.`);
-    result.push(segment);
-    index = end;
+    if (index === path.length) break;
+    if (path[index] !== ".") fail("matcher_path", `Matcher path ${JSON.stringify(path)} requires a separator.`);
+    index += 1;
+  }
+  if (result.length === 0 || path.endsWith(".")) {
+    fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an empty segment.`);
   }
   return result;
 }
@@ -467,7 +500,8 @@ function isLosslessRegexV1(pattern: string): boolean {
 }
 
 function validAsciiClass(content: string): boolean {
-  const body = content.startsWith("^") ? content.slice(1) : content;
+  if (content.startsWith("^")) return false;
+  const body = content;
   if (body.length === 0) return false;
   for (let index = 0; index < body.length;) {
     const first = body[index];
@@ -585,7 +619,7 @@ function matcherCondition(matcher: NormalizedRule["matchers"][number], rowIndex:
 }
 
 function regoPath(segments: readonly (string | number)[]): string {
-  return `params${segments.map((segment) => `[${canonicalJson(segment)}]`).join("")}`;
+  return `input.action.parameters${segments.map((segment) => `[${canonicalJson(segment)}]`).join("")}`;
 }
 
 function regoRow(row: NormalizedRule): string {
@@ -607,6 +641,29 @@ function canonicalJson(value: unknown): string {
     return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(",")}}`;
   }
   fail("non_json_value", "Canonical policy data contains a non-JSON value.");
+}
+
+function matcherValueComplexity(value: unknown): { bytes: number; nodes: number; depth: number } {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
+  let nodes = 0;
+  let depth = 0;
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    nodes += 1;
+    depth = Math.max(depth, current.depth);
+    if (nodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueNodes
+      || depth > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueDepth) {
+      return { bytes: 0, nodes, depth };
+    }
+    if (Array.isArray(current.value)) {
+      for (const entry of current.value) stack.push({ value: entry, depth: current.depth + 1 });
+    } else if (current.value !== null && typeof current.value === "object") {
+      for (const entry of Object.values(current.value as Record<string, unknown>)) {
+        stack.push({ value: entry, depth: current.depth + 1 });
+      }
+    }
+  }
+  return { bytes: Buffer.byteLength(canonicalJson(value)), nodes, depth };
 }
 
 function assertJsonValue(path: string, value: unknown, allowUndefined: boolean): void {
@@ -699,11 +756,11 @@ input_valid if {
   supported_kind
 }
 
-params := object.get(input.action, "parameters", {})
-dynamic := object.get(input.facts, "currentPolicy", {"schemaVersion":1,"grants":[],"approvals":[]})
+current_policy_present if { _ = input.facts.currentPolicy }
+dynamic := input.facts.currentPolicy if { current_policy_present }
+else := {"schemaVersion":1,"grants":[],"approvals":[]} if { true }
 
 dynamic_valid if {
-  count(object.keys(dynamic)) == 3
   dynamic.schemaVersion == 1
   is_array(dynamic.grants)
   is_array(dynamic.approvals)
@@ -722,17 +779,22 @@ approval_shape_valid(approval) if {
   approval.organizationId == input.subject.orgId
 }
 
+workflow_id_absent(fact) if { not fact.workflowExecutionId }
+workflow_id_absent(fact) if { fact.workflowExecutionId == null }
+session_id_absent(fact) if { not fact.sessionId }
+session_id_absent(fact) if { fact.sessionId == null }
+
 scope_matches(fact) if {
   applies_in == "session"
   fact.appliesIn == "session"
   fact.sessionId == input.subject.sessionId
-  object.get(fact, "workflowExecutionId", null) == null
+  workflow_id_absent(fact)
 }
 scope_matches(fact) if {
   applies_in == "workflow"
   fact.appliesIn == "workflow"
   fact.workflowExecutionId == input.subject.workflowExecutionId
-  object.get(fact, "sessionId", null) == null
+  session_id_absent(fact)
 }
 `;
 
