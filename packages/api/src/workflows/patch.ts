@@ -32,6 +32,47 @@ export type PatchResult =
   | { ok: true; definition: WorkflowDefinition }
   | { ok: false; errors: string[] };
 
+export type ModelPatchResult =
+  | { ok: true; definition: WorkflowDefinition; nodeIds: string[] }
+  | { ok: false; errors: string[] };
+
+/**
+ * Set the model on `llm` and `session` nodes, including a `foreach` body.
+ * Orchestrator nodes use their assistant's model and have no per-node model.
+ */
+export function applyWorkflowModelPatch(
+  definition: WorkflowDefinition,
+  model: string,
+  nodeIds?: string[],
+): ModelPatchResult {
+  const next = structuredClone(definition);
+  const requested = nodeIds === undefined ? undefined : new Set(nodeIds);
+  const changed: string[] = [];
+
+  const apply = (node: WorkflowNode): void => {
+    if ((node.type === "llm" || node.type === "session") && (requested === undefined || requested.has(node.id))) {
+      node.model = model;
+      changed.push(node.id);
+      requested?.delete(node.id);
+    }
+    if (node.type === "foreach") apply(node.body);
+  };
+  for (const node of next.nodes) apply(node);
+
+  if (requested && requested.size > 0) {
+    return {
+      ok: false,
+      errors: [...requested].map(
+        (id) => `node ${JSON.stringify(id)} is not an llm or session node. Choose a model-capable node.`,
+      ),
+    };
+  }
+  if (changed.length === 0) {
+    return { ok: false, errors: ["workflow has no llm or session nodes. Add a model-capable node first."] };
+  }
+  return { ok: true, definition: next, nodeIds: changed };
+}
+
 export function applyWorkflowPatch(definition: WorkflowDefinition, patch: WorkflowPatch): PatchResult {
   const errors: string[] = [];
   const next: WorkflowDefinition = structuredClone(definition);

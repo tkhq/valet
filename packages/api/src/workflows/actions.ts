@@ -37,7 +37,13 @@ import {
 } from "./service.js";
 import type { TeamServiceReadinessDeps } from "./team-service-readiness.js";
 import { buildValidateEnvironment } from "./validation-env.js";
-import { appendRemovedEdgeHint, applyWorkflowPatch, type WorkflowEdgeRef } from "./patch.js";
+import {
+  appendRemovedEdgeHint,
+  applyWorkflowModelPatch,
+  applyWorkflowPatch,
+  type WorkflowEdgeRef,
+} from "./patch.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import {
   createWorkflowTrigger,
   deleteWorkflowTrigger,
@@ -636,6 +642,55 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const updateModel = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      model: Type.String({ description: "An approved catalog model id or a size tier: xs, s, m, l, xl." }),
+      node_ids: Type.Optional(Type.Array(Type.String(), {
+        description: "Only these llm or session nodes. Omit to update all model-capable nodes.",
+      })),
+    }),
+  )({
+    id: "workflows.update_model",
+    name: "Update workflow model",
+    description:
+      "Change the model on selected llm or session nodes without replacing the workflow definition. " +
+      "Omit node_ids to update all such nodes, including foreach bodies. Orchestrator nodes use their " +
+      "assistant's saved model and are not changed. The model must be an approved active catalog model " +
+      "or an org model tier.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, model, node_ids }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const catalog = await buildOrgCatalog(deps.db, deps.credentials, owner.orgId);
+      if (!catalogValidIds(catalog).has(model)) {
+        return {
+          success: false,
+          error: `unknown or inactive model: ${model}. Pick an approved model from GET /api/models, or use xs, s, m, l, or xl.`,
+        };
+      }
+      const concrete = catalog.find((entry) =>
+        entry.id === model || (entry.id.startsWith("anthropic/") && entry.id.slice("anthropic/".length) === model),
+      );
+      if (concrete && !concrete.approved) {
+        return { success: false, error: `model ${model} is not approved. Choose an approved model or an org model tier.` };
+      }
+
+      const wf = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!wf) return { success: false, error: `workflow not found: ${workflow_id}` };
+      const stored = validateDefinitionInput(wf.definition);
+      if (!stored.ok) return { success: false, error: formatLintErrors(stored.errors) };
+      const patched = applyWorkflowModelPatch(stored.definition, model, node_ids);
+      if (!patched.ok) return { success: false, error: formatLintErrors(patched.errors) };
+      const validation = validateDefinitionInput(patched.definition, buildValidateEnvironment(deps.actionPluginByService));
+      if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
+      const updated = await updateWorkflowDefinition(deps, owner, workflow_id, { definition: patched.definition });
+      if (!updated) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: updated.id, model, nodeIds: patched.nodeIds } };
+    },
+  });
+
   const addAggregate = action(
     Type.Object({
       workflow_id: Type.String(),
@@ -1092,6 +1147,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       getWorkflow,
       saveWorkflow,
       patchWorkflow,
+      updateModel,
       addAggregate,
       deleteWorkflow,
       startRun,

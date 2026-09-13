@@ -36,8 +36,8 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { definitionVersionId } from "./definition-version.js";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Usage } from "@earendil-works/pi-ai/compat";
 import { bundledModel } from "@valet/engine/model-catalog";
-import type { Api, Model, Usage } from "@earendil-works/pi-ai/compat";
 import {
   parseAssistantSessionId,
   parsePrincipal,
@@ -74,8 +74,7 @@ import {
 } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { workflowAssistantId } from "./service.js";
-
-type PiModel = Model<Api>;
+import { resolveModelSpec } from "../services/model-resolution.js";
 
 export interface WorkflowEngineDepsOpts {
   host: EngineHost;
@@ -397,14 +396,33 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     },
 
     async llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult> {
-      const model = resolveWorkflowModel(req.model);
+      const ctx = await resolveRunContext(opts, req.runId);
+      let resolved = await resolveModelSpec(opts.db, opts.credentials, ctx.orgId, req.model);
+      // Legacy workflow definitions could save a bare OpenAI or Google id.
+      // The catalog now writes namespaced ids, but old runs must keep working.
+      if (!resolved && !req.model.includes("/")) {
+        for (const provider of ["openai", "google"] as const) {
+          if (!bundledModel(provider, req.model)) continue;
+          resolved = await resolveModelSpec(
+            opts.db,
+            opts.credentials,
+            ctx.orgId,
+            `${provider}/${req.model}`,
+          );
+          if (resolved) break;
+        }
+      }
+      if (!resolved) {
+        throw new Error(`workflow engine-deps: unknown or unavailable model "${req.model}"`);
+      }
       const result = await completeSimple(
-        model,
+        resolved.model,
         {
           systemPrompt: req.system,
           messages: [{ role: "user", content: [{ type: "text", text: req.prompt }], timestamp: Date.now() }],
         },
         {
+          apiKey: resolved.apiKey,
           temperature: req.temperature,
           maxTokens: req.maxOutputTokens,
         },
@@ -537,16 +555,6 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
   };
 }
 
-/**
- * Resolves an `LlmNode.model` string to a pi-ai `Model` — `provider/model`
- * form used as-is; a bare id tried under a small set of common providers
- * (anthropic first, matching the engine's own anthropic-default
- * convention in `thread.ts#resolveModelId` / `EngineHost.resolveModel`).
- * Throws descriptively on no match — the `llm` executor treats any throw
- * from `llmComplete` as a node failure, so an unknown model surfaces as a
- * readable per-node error instead of a generic crash.
- */
-
 /** Pure so it's unit-testable without a live completion — the network
  * boundary this maps across (pi-ai's `completeSimple`) isn't itself worth
  * mocking, but the mapping logic is. Exported for that test. */
@@ -559,25 +567,6 @@ export function mapPiAiUsage(usage: Usage): WorkflowLlmUsage {
     totalTokens: usage.totalTokens,
     costUsd: usage.cost.total,
   };
-}
-
-function resolveWorkflowModel(spec: string): PiModel {
-  const slash = spec.indexOf("/");
-  if (slash > 0) {
-    const provider = spec.slice(0, slash);
-    const modelId = spec.slice(slash + 1);
-    const model = bundledModel(provider, modelId);
-    if (model) return model;
-    throw new Error(`workflow engine-deps: unknown model "${spec}"`);
-  }
-  const tryProviders = ["anthropic", "openai", "google"] as const;
-  for (const provider of tryProviders) {
-    const model = bundledModel(provider, spec);
-    if (model) return model;
-  }
-  throw new Error(
-    `workflow engine-deps: unknown model "${spec}" (tried bare id under ${tryProviders.join(", ")}; use "provider/model" for anything else)`,
-  );
 }
 
 /**

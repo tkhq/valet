@@ -424,6 +424,12 @@ The existing poller consumes persisted invalidations after a restart. Credential
 Explicit IdP joins invalidate team workflow sources in the membership insert transaction. Duplicate and denied joins do not invalidate sources. Eligibility snapshots alone change no membership and need no refresh. The retired login-time membership writer and its readiness hooks are removed; SSO claim parsing remains. If invalidation fails, the join rolls back. An older sync cannot consume the join refresh.
 
 
+### Workflow model selection (2026-09-13)
+
+The creation dialog recommends a size tier for each starter shape and saves that tier on its `llm` and `session` nodes. A user override stops preset changes from replacing the selection. The editor uses the org model catalog for later node edits.
+
+`PATCH /api/workflows/:id/model` and `workflows.update_model` provide focused updates. Both validate active and approved catalog choices. They also accept org size tiers. They update `llm` and `session` nodes, including `foreach` bodies. An `orchestrator` node keeps the selected assistant's model because it has no per-node model field. Existing explicit model values remain unchanged until a user calls an edit path.
+
 ### Workflow hub on narrow screens (2026-09-11)
 
 The hub header and row actions wrap when space is limited. Tabs can scroll horizontally without widening the page. Template columns follow the available content width. Service labels, cadence, and setup actions remain readable without clipping. Template descriptions state the outcome briefly; steps and operational limits remain in the details dialog.

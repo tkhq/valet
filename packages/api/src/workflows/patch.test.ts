@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowDefinition } from "@valet/workflow";
-import { appendRemovedEdgeHint, applyWorkflowPatch } from "./patch.js";
+import { appendRemovedEdgeHint, applyWorkflowModelPatch, applyWorkflowPatch } from "./patch.js";
 
 function base(): WorkflowDefinition {
   return {
@@ -115,6 +115,43 @@ describe("applyWorkflowPatch", () => {
     const snapshot = JSON.parse(JSON.stringify(original));
     applyWorkflowPatch(original, { removeNodeIds: ["greet"], upsertNodes: [{ id: "x", type: "stop" }] });
     expect(original).toEqual(snapshot);
+  });
+});
+
+describe("applyWorkflowModelPatch", () => {
+  const definition: WorkflowDefinition = {
+    version: "dag/v1",
+    nodes: [
+      { id: "start", type: "trigger" },
+      { id: "one", type: "llm", model: "old", prompt: "one" },
+      { id: "agent", type: "session", mode: "start", model: "legacy", prompt: "two" },
+      { id: "orch", type: "orchestrator", prompt: "three" },
+      { id: "done", type: "stop" },
+    ],
+    edges: [],
+  };
+
+  it("updates all llm and session nodes without changing orchestrators", () => {
+    const result = applyWorkflowModelPatch(definition, "m");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.nodeIds).toEqual(["one", "agent"]);
+    expect(result.definition.nodes.find((node) => node.id === "one")).toMatchObject({ model: "m" });
+    expect(result.definition.nodes.find((node) => node.id === "agent")).toMatchObject({ model: "m" });
+    expect(result.definition.nodes.find((node) => node.id === "orch")).toEqual(definition.nodes[3]);
+  });
+
+  it("updates only selected nodes and preserves legacy explicit models", () => {
+    const result = applyWorkflowModelPatch(definition, "xs", ["one"]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.definition.nodes.find((node) => node.id === "agent")).toMatchObject({ model: "legacy" });
+  });
+
+  it("rejects a selected node that has no per-node model", () => {
+    const result = applyWorkflowModelPatch(definition, "s", ["orch"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors[0]).toContain("not an llm or session node");
   });
 });
 

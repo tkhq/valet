@@ -38,6 +38,8 @@ export interface WorkflowAwaitResultOptions {
 }
 
 export interface WorkflowLlmCompleteRequest {
+  /** Identifies the run whose org model catalog resolves the model spec. */
+  runId: string;
   model: string;
   system?: string;
   prompt: string;

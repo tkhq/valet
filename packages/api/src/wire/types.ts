@@ -1923,6 +1923,18 @@ export interface UpdateWorkflowRequest {
   definition?: unknown;
 }
 
+/** Focused model update. Omit nodeIds to update every llm and session node. */
+export interface UpdateWorkflowModelRequest {
+  model: string;
+  nodeIds?: string[];
+}
+
+export interface UpdateWorkflowModelResponse {
+  workflowId: string;
+  model: string;
+  nodeIds: string[];
+}
+
 export interface ListWorkflowsResponse {
   workflows: WorkflowDefinitionSummary[];
 }

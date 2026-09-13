@@ -8,6 +8,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ForeachNode, LlmNode, SessionNode, ToolNode, TriggerNode, WorkflowNode } from "@valet/workflow";
+vi.mock("~/api/settings", () => ({
+  useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
+  useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
+}));
+
 import { Inspector } from "./inspector";
 
 function noop() {}

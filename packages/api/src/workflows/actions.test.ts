@@ -61,6 +61,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.resolve_approval",
       "workflows.save_workflow",
       "workflows.start_run",
+      "workflows.update_model",
       "workflows.update_schedule",
       "workflows.update_trigger",
     ]);
@@ -225,6 +226,68 @@ describe("DB-backed actions", () => {
     );
     return created.id;
   }
+
+  it("updates selected workflow models through the focused assistant action", async () => {
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "model-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "draft", type: "llm", model: "s", prompt: "Draft" },
+            { id: "review", type: "session", mode: "start", model: "m", prompt: "Review" },
+            { id: "stop", type: "stop" },
+          ],
+          edges: [
+            { from: "trigger", to: "draft" },
+            { from: "draft", to: "review" },
+            { from: "review", to: "stop" },
+          ],
+        },
+      },
+    );
+    const update = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+
+    const result = await update.execute(
+      { workflow_id: created.id, model: "l", node_ids: ["review"] },
+      ctx(),
+    );
+    expect(result).toEqual({
+      success: true,
+      data: { workflowId: created.id, model: "l", nodeIds: ["review"] },
+    });
+    const saved = await getWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, created.id);
+    const definition = saved?.definition as WorkflowDefinition | undefined;
+    expect(definition?.nodes
+      .filter((node) => node.type === "llm" || node.type === "session")
+      .map((node) => [node.id, node.model])).toEqual([["draft", "s"], ["review", "l"]]);
+  });
+
+  it("rejects invalid model choices and node targets through the focused assistant action", async () => {
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "invalid-model-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [{ id: "trigger", type: "trigger" }, { id: "stop", type: "stop" }],
+          edges: [{ from: "trigger", to: "stop" }],
+        },
+      },
+    );
+    const workflowId = created.id;
+    const update = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+    expect(await update.execute({ workflow_id: workflowId, model: "not-a-model" }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("unknown or inactive model") });
+    expect(await update.execute({ workflow_id: workflowId, model: "l", node_ids: ["stop"] }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("not an llm or session node") });
+  });
 
   it("copies a personal graph to a team through the agent action and rejects team assistant context", async () => {
     const workflowId = await seedWorkflow();

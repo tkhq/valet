@@ -48,6 +48,10 @@ const createMutateAsync = vi.fn();
 let teamId: string | undefined;
 let assistantsResult: { data?: ListAssistantsResponse; isLoading: boolean; error: Error | null };
 vi.mock("~/api/assistants", () => ({ useAssistants: () => ({ ...assistantsResult, refetch: vi.fn() }) }));
+vi.mock("~/api/settings", () => ({
+  useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
+  useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
+}));
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
@@ -74,7 +78,7 @@ import { NewWorkflowDialog, WORKFLOW_PRESETS } from "./new-workflow-dialog";
  * decision, not an accident: adding it here is the moment somebody confirms
  * the runtime really offers it.
  */
-const KNOWN_MODELS = new Set(["claude-sonnet-4-5", "claude-haiku-4-5"]);
+const KNOWN_MODELS = new Set(["xs", "s", "m", "l", "xl"]);
 const KNOWN_ACTIONS = new Set(["github.search_issues"]);
 
 const env: ValidateEnvironment = {
@@ -361,6 +365,22 @@ describe("NewWorkflowDialog", () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const body = createMutateAsync.mock.calls[0]![0] as { name: string; definition: WorkflowDefinition };
     expect(body.definition).toEqual({ ...WORKFLOW_PRESETS.find((p) => p.id === "parallel")!.build(), assistantId: "personal" });
+  });
+
+  it("shows a recommendation and keeps an explicit model override across preset changes", async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole("radio", { name: /Simple/ }));
+    const model = screen.getByRole("combobox", { name: "Default model" });
+    expect((model as HTMLInputElement).value).toContain("Medium");
+
+    fireEvent.focus(model);
+    fireEvent.click(screen.getByRole("option", { name: "Large" }));
+    fireEvent.click(screen.getByRole("radio", { name: /API automation/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const definition = (createMutateAsync.mock.calls[0]![0] as { definition: WorkflowDefinition }).definition;
+    expect(definition.nodes.filter((node) => node.type === "llm").map((node) => node.model)).toEqual(["l"]);
   });
 
   it("suggests the preset's name, and keeps a name that was typed", () => {

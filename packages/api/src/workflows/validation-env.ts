@@ -7,6 +7,7 @@
 import { bundledModel } from "@valet/engine/model-catalog";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { ValidateEnvironment } from "@valet/workflow";
+import { TIER_SET } from "../services/model-tiers.js";
 
 /**
  * Mirrors `engine-deps.ts`'s `resolveWorkflowModel` matching rules:
@@ -15,6 +16,7 @@ import type { ValidateEnvironment } from "@valet/workflow";
  * convention).
  */
 export function isKnownModelSpec(spec: string): boolean {
+  if (TIER_SET.has(spec.trim().toLowerCase())) return true;
   const slash = spec.indexOf("/");
   if (slash > 0) {
     const provider = spec.slice(0, slash);
