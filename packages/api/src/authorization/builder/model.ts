@@ -1,5 +1,5 @@
 import { authorizationSha256Hex, type JsonValue } from "@valet/engine/authorization";
-import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, canonicalCurrentPolicyJsonV1, containsSensitiveTextV1, currentPolicyMatcherIssuesV1, currentPolicyValueComplexityV1, utf16CodeUnitCompare } from "../bundles/current-policy-input-contract.js";
+import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, canonicalCurrentPolicyJsonV1, containsSensitiveTextV1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, utf16CodeUnitCompare } from "../bundles/current-policy-input-contract.js";
 import { POLICY_CONTEXTS } from "./contexts.js";
 import type { DraftValidationIssue, NormalizedPolicyDraftV1, PolicyDraftV1, PolicyFieldDescriptor, PolicyPreviewRequestV1, PolicyRuleDraftV1 } from "./types.js";
 
@@ -62,7 +62,7 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     issues.push(issue("invalid_authority", `${path}.authority`, "Match the owner kind to the selected authority scope."));
   if (!Array.isArray(value.subjects) || !dense(value.subjects) || value.subjects.length === 0 || value.subjects.some((subject) => !descriptor.subjectKinds.includes(subject))) issues.push(issue("invalid_subject", `${path}.subjects`, "Select only subject kinds allowed by this context."));
   if (!descriptor.effects.includes(value.effect as never)) issues.push(issue("invalid_effect", `${path}.effect`, "Select an effect allowed by this context."));
-  if (value.effect === "require_approval" && (!descriptor.humanApproval || !record(value.approval) || typeof value.approval.tier !== "string" || !["once", "session", "workflow"].includes(String(value.approval.replay)))) issues.push(issue("unsupported_approval", `${path}.approval`, "Choose an approval-capable context and add an approval tier."));
+  if (value.effect === "require_approval" && (!descriptor.humanApproval || (descriptor.publishable ? value.approval !== undefined : !record(value.approval) || typeof value.approval.tier !== "string" || !["once", "session", "workflow"].includes(String(value.approval.replay))))) issues.push(issue("unsupported_approval", `${path}.approval`, "Choose an approval-capable context and add an approval tier."));
   if (value.effect !== "require_approval" && value.approval !== undefined) issues.push(issue("unexpected_approval", `${path}.approval`, "Remove approval settings or require approval."));
   if (descriptor.appliesIn ? !["any", "session", "workflow"].includes(String(value.appliesIn)) : value.appliesIn !== undefined) issues.push(issue("invalid_applies_in", `${path}.appliesIn`, "Use appliesIn only for action and workflow contexts."));
   if (value.expiresAtMs !== undefined && (!Number.isSafeInteger(value.expiresAtMs) || Number(value.expiresAtMs) <= 0)) issues.push(issue("invalid_expiry", `${path}.expiresAtMs`, "Enter a valid future expiry timestamp."));
@@ -83,7 +83,7 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
       }
       unknownKeys(group, ["id", "mode", "matchers"], `${path}.matcherGroups[${groupIndex}]`, issues);
       nestedIds.add(group.id as string);
-      if ((value.matcherGroups as unknown[]).filter(record).reduce((count, item) => count + (Array.isArray(item.matchers) ? item.matchers.length : 0), 0) > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) issues.push(issue("complexity_limit", `${path}.matcherGroups[${groupIndex}]`, "Remove conditions until the group has at most 16 rows."));
+      if (groupIndex === 0 && (value.matcherGroups as unknown[]).filter(record).reduce((count, item) => count + (Array.isArray(item.matchers) ? item.matchers.length : 0), 0) > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) issues.push(issue("complexity_limit", `${path}.matcherGroups[${groupIndex}]`, "Remove conditions until the group has at most 16 rows."));
       group.matchers.forEach((matcher, matcherIndex) => {
         if (record(matcher) && nestedIds.has(String(matcher.id))) issues.push(issue("duplicate_or_invalid_id", `${path}.matcherGroups[${groupIndex}].matchers[${matcherIndex}].id`, "Use a unique stable row ID."));
         else if (record(matcher)) nestedIds.add(String(matcher.id));
@@ -91,8 +91,8 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
       });
     });
   if (descriptor.publishable) {
-    const targetCount = ["action.service", "action.id", "action.riskLevel"].filter((key) => record(value.target) && typeof value.target[key] === "string" && value.target[key] !== "").length;
-    if (targetCount !== 1) issues.push(issue("contradictory_scope", `${path}.target`, "Choose exactly one service, action, or risk target."));
+    const targetIssue = record(value.target) ? currentPolicyTargetIssueV1({ service: value.target["action.service"], actionId: value.target["action.id"], riskLevel: value.target["action.riskLevel"] }) : "invalid_target";
+    if (targetIssue) issues.push(issue(targetIssue, `${path}.target`, "Use one valid service, qualified action ID, or risk level."));
     if (Array.isArray(value.matcherGroups) && value.matcherGroups.some((group) => record(group) && (group.mode !== "all" || (Array.isArray(group.matchers) && group.matchers.some((matcher) => record(matcher) && typeof matcher.field === "string" && !matcher.field.startsWith("parameters.")))))) issues.push(issue("unsupported_action_matcher", `${path}.matcherGroups`, "Use all groups and action parameter fields for the current source builder."));
     if (value.approval !== undefined || (Array.isArray(value.obligations) && value.obligations.length) || value.description !== "" || (record(value.metadata) && Object.keys(value.metadata).length)) issues.push(issue("projection_loss", path, "Remove fields that the current source preview cannot preserve."));
   }

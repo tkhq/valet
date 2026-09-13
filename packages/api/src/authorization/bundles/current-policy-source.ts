@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { JsonValue } from "@valet/engine/authorization";
-import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyValueComplexityV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
+import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, isCurrentPolicyActionV1, isCurrentPolicyRiskV1, isCurrentPolicyServiceV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
 export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
 import { grantPolicyKey } from "../../policies/resolution.js";
 import type { CanonicalSourceBundle } from "./types.js";
@@ -14,11 +14,8 @@ import type {
 } from "./current-policy-types.js";
 
 const MODES = new Set(["allow", "require_approval", "deny"]);
-const RISKS = new Set(["low", "medium", "high", "critical"]);
 const APPLIES_IN = new Set(["any", "session", "workflow"]);
 const MATCHER_OPS = new Set(["eq", "neq", "regex", "in", "not_in", "gt", "gte", "lt", "lte", "exists", "not_exists"]);
-const SERVICE_ID = /^[a-z][a-z0-9_-]*$/;
-const LOCAL_ACTION_ID = /^[a-z0-9][a-z0-9_.:-]*$/;
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
 const POLICY_PATH = "policies/current-action-policy.rego";
 const DATA_PATH = "data/current-action-policy.json";
@@ -290,7 +287,7 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   }
   for (const row of snapshot.riskDefaults) {
     unique(ids, row.id);
-    if (!RISKS.has(row.riskLevel)) fail("unknown_risk", `Risk default ${row.id} has an unknown risk level.`);
+    if (!isCurrentPolicyRiskV1(row.riskLevel)) fail("unknown_risk", `Risk default ${row.id} has an unknown risk level.`);
     validateMode(row.id, row.mode);
     nonEmpty(`${row.id}.sourcePath`, row.sourcePath);
   }
@@ -322,7 +319,7 @@ function validateGrant(grant: CurrentRuntimeGrantSourceV1, organizationId: strin
   if (grant.organizationId !== organizationId) fail("cross_organization", `Grant ${grant.id} belongs to another organization.`);
   validateService(grant.service);
   validateAction(grant.service, grant.actionId);
-  if (!RISKS.has(grant.riskLevel)) fail("unknown_risk", `Grant ${grant.id} has an unknown risk level.`);
+  if (!isCurrentPolicyRiskV1(grant.riskLevel)) fail("unknown_risk", `Grant ${grant.id} has an unknown risk level.`);
   if (grant.policyKey !== grantPolicyKey(grant.service, grant.actionId)) fail("invalid_policy_key", `Grant ${grant.id} has an invalid policy key.`);
   validateScope(grant.id, grant.appliesIn, grant.sessionId, grant.workflowExecutionId);
   nonEmpty(`${grant.id}.issuerId`, grant.issuerId);
@@ -354,18 +351,7 @@ function validateScope(id: string, appliesIn: string, sessionId: string | undefi
   fail("invalid_scope", `Fact ${id} has a scope that does not match appliesIn.`);
 }
 
-function validateTarget(id: string, target: CurrentPolicyTargetV1): void {
-  const count = Number(target.service !== undefined) + Number(target.actionId !== undefined) + Number(target.riskLevel !== undefined);
-  if (count !== 1) fail("invalid_target", `Rule ${id} must have exactly one target.`);
-  if (target.service !== undefined) validateService(target.service);
-  if (target.actionId !== undefined) {
-    const separator = target.actionId.indexOf(".");
-    if (separator < 1) fail("invalid_action", `Rule ${id} has a malformed action ID.`);
-    validateAction(target.actionId.slice(0, separator), target.actionId);
-  }
-  if (target.riskLevel !== undefined && !RISKS.has(target.riskLevel)) fail("unknown_risk", `Rule ${id} has an unknown risk level.`);
-}
-
+function validateTarget(id: string, target: CurrentPolicyTargetV1): void { const code = currentPolicyTargetIssueV1(target); if (code) fail(code, `Rule ${id} has an invalid target.`); }
 function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[]): { bytes: number; nodes: number } {
   const identities = new Set<string>();
   let bytes = 0;
@@ -614,8 +600,8 @@ function matchersAreDisjoint(left: readonly CurrentPolicyMatcherV1[], right: rea
   return left.some((a) => a.op === "eq" && right.some((b) => b.op === "eq" && a.path === b.path && canonicalJson(a.value) !== canonicalJson(b.value)));
 }
 function validateMode(id: string, mode: string): void { if (!MODES.has(mode)) fail("unknown_mode", `Rule ${id} has an unknown mode.`); }
-function validateService(service: string): void { if (!SERVICE_ID.test(service)) fail("invalid_service", `Service ID ${JSON.stringify(service)} is malformed.`); }
-function validateAction(service: string, action: string): void { validateService(service); const prefix = `${service}.`; if (!action.startsWith(prefix) || !LOCAL_ACTION_ID.test(action.slice(prefix.length))) fail("invalid_action", `Action ID ${JSON.stringify(action)} is not qualified by service ${JSON.stringify(service)}.`); }
+function validateService(service: string): void { if (!isCurrentPolicyServiceV1(service)) fail("invalid_service", `Service ID ${JSON.stringify(service)} is malformed.`); }
+function validateAction(service: string, action: string): void { validateService(service); const prefix = `${service}.`; if (!isCurrentPolicyActionV1(action) || !action.startsWith(prefix)) fail("invalid_action", `Action ID ${JSON.stringify(action)} is not qualified by service ${JSON.stringify(service)}.`); }
 function validTimestamp(path: string, value: number): void { if (!Number.isSafeInteger(value) || value < 0) fail("invalid_timestamp", `${path} must be a non-negative integer timestamp.`); }
 function nonEmpty(path: string, value: string): void { if (value.length === 0) fail("empty_identity", `${path} must not be empty.`); }
 function nonBlank(value: string | undefined): value is string { return value !== undefined && value.length > 0; }

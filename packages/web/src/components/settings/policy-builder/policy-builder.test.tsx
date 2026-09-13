@@ -7,8 +7,8 @@ import { PolicyBuilder } from "./policy-builder";
 describe("canonical policy builder", () => {
   it("uses labeled controls, resets context state, and fails unsupported contexts closed", async () => {
     render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} />);
-    expect(screen.getByLabelText("Authorization context")).toBeTruthy();
-    expect(screen.getByText(/not saved or active/i)).toBeTruthy();
+    expect(screen.getByLabelText("Authorization context").tagName).toBe("SELECT");
+    expect(screen.getByText(/not saved or active/i).textContent).toContain("not saved or active");
     fireEvent.change(screen.getByLabelText("id"), {
       target: { value: "gmail.send_email" },
     });
@@ -39,15 +39,16 @@ describe("canonical policy builder", () => {
     fireEvent.change(screen.getByLabelText("Condition 1 value"), {
       target: { value: "safe@example.com" },
     });
+    fireEvent.change(screen.getByLabelText("Effect"), { target: { value: "require_approval" } }); expect(screen.getByText(/Approval requirement:/).textContent).toContain("current policy mode");
     fireEvent.click(screen.getByRole("button", { name: "Preview and validate" }));
     await waitFor(() => expect(preview).toHaveBeenCalledOnce());
     const request = preview.mock.calls[0][0];
-    expect(request.draft.normalizedIdentity).toContain("policy-draft-v1:");
+    expect(request.draft.normalizedIdentity).toContain("policy-draft-v1:"); expect(request.draft.rules[0].effect).toBe("require_approval"); expect(request.draft.rules[0].approval).toBeUndefined();
     expect(JSON.stringify(request)).not.toMatch(/secret|token|credential/i);
     fireEvent.click(await screen.findByRole("button", { name: "Show rule-provider" }));
     const source = screen.getByLabelText("Generated Rego source");
     expect(source.querySelectorAll('[data-highlighted="true"]')).toHaveLength(1);
-    expect(source.textContent).toContain("No browser evaluator".slice(0, 0));
+    expect(screen.getByText(/No browser evaluator/).textContent).toContain("No browser evaluator");
   });
 
   it("never renders provider-external sensitive values", () => {
@@ -56,6 +57,9 @@ describe("canonical policy builder", () => {
     fireEvent.change(screen.getByLabelText("Authorization context"), {
       target: { value: "credential.use" },
     });
+    expect(screen.getByText(/Approval requirement:/).textContent).toContain("human / once");
+    fireEvent.change(screen.getByLabelText("Effect"), { target: { value: "allow" } }); expect(screen.queryByText(/Approval requirement:/)).toBeNull();
+    fireEvent.change(screen.getByLabelText("Effect"), { target: { value: "require_approval" } }); expect(screen.getByText(/Approval requirement:/).textContent).toContain("human / once");
     expect(container.textContent).not.toContain("do-not-render");
     fireEvent.change(screen.getByLabelText("Condition 1 field"), {
       target: { value: "credential.secret" },
@@ -99,6 +103,10 @@ describe("canonical policy builder", () => {
     fireEvent.change(screen.getByLabelText("id"), { target: { value: "gmail.send" } });
     fireEvent.change(screen.getByLabelText("service"), { target: { value: "gmail" } });
     expect(screen.queryByDisplayValue("gmail.send")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Authorization context"), { target: { value: "egress.connect" } });
+    fireEvent.change(screen.getByLabelText("scheme"), { target: { value: "https" } }); fireEvent.change(screen.getByLabelText("host"), { target: { value: "example.com" } }); fireEvent.change(screen.getByLabelText("port"), { target: { value: "443" } });
+    expect(["https", "example.com", "443"].every(value => screen.getByDisplayValue(value))).toBe(true);
+    fireEvent.change(screen.getByLabelText("Authorization context"), { target: { value: "tool.action" } });
     const operator = screen.getByLabelText("Condition 1 operator"), value = screen.getByLabelText("Condition 1 value") as HTMLInputElement;
     fireEvent.change(operator, { target: { value: "in" } }); fireEvent.change(value, { target: { value: '["safe",{"nested":true}]' } }); expect(value.value).toContain("nested");
     fireEvent.change(operator, { target: { value: "exists" } }); expect((screen.getByLabelText("Condition 1 value") as HTMLInputElement).disabled).toBe(true);

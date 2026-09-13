@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { authorizationSha256Hex, type AuthorizationKind } from "@valet/engine/authorization";
+import { currentPolicyTargetIssueV1 } from "../bundles/current-policy-input-contract.js";
 import { AUTHORIZATION_CONTEXT_KINDS, POLICY_CONTEXTS } from "./contexts.js";
 import { createPreviewRequest, normalizePolicyDraft, sanitizeSampleFacts, validatePolicyDraft } from "./model.js";
-import type { PolicyDraftV1 } from "./types.js";
+import type { JsonValue, PolicyDraftV1 } from "./types.js";
 
 const ALL: AuthorizationKind[] = ["tool.action", "workflow.action", "tool.builtin", "plugin.entitlement", "route.access", "resource.access", "delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate", "egress.connect"];
 function draft(): PolicyDraftV1 {
@@ -96,68 +97,12 @@ describe("policy draft validation", () => {
     ["bad authority", (_value: Record<string, unknown>, rule: Record<string, unknown>) => (rule.owner = { kind: "team", id: "team-1" }), "invalid_authority"],
     ["duplicate id", (value: Record<string, unknown>) => (value.rules as unknown[]).push((value.rules as unknown[])[0]), "duplicate_or_invalid_id"],
     ["cross-context target", (_value: Record<string, unknown>, rule: Record<string, unknown>) => (rule.target = { "egress.host": "example.com" }), "unknown_field"],
-    [
-      "number regex",
-      (_value: Record<string, unknown>, rule: Record<string, unknown>) =>
-        (rule.matcherGroups = [
-          {
-            id: "g",
-            mode: "all",
-            matchers: [
-              {
-                id: "m",
-                field: "parameters.count",
-                operator: "gt",
-                value: "one",
-              },
-            ],
-          },
-        ]),
-      "invalid_operator",
-    ],
-    [
-      "unsafe path",
-      (_value: Record<string, unknown>, rule: Record<string, unknown>) =>
-        (rule.matcherGroups = [
-          {
-            id: "g",
-            mode: "all",
-            matchers: [
-              {
-                id: "m",
-                field: "parameters.__proto__.x",
-                operator: "eq",
-                value: "x",
-              },
-            ],
-          },
-        ]),
-      "unsafe_path",
-    ],
-    [
-      "unsafe regex",
-      (_value: Record<string, unknown>, rule: Record<string, unknown>) =>
-        (rule.matcherGroups = [
-          {
-            id: "g",
-            mode: "all",
-            matchers: [
-              {
-                id: "m",
-                field: "parameters.x",
-                operator: "regex",
-                value: "(?=x)",
-              },
-            ],
-          },
-        ]),
-      "unsafe_regex",
-    ],
+    ["number regex", (_value: Record<string, unknown>, rule: Record<string, unknown>) => setMatcher(rule, { field: "parameters.count", operator: "gt", value: "one" }), "invalid_operator"],
+    ["unsafe path", (_value: Record<string, unknown>, rule: Record<string, unknown>) => setMatcher(rule, { field: "parameters.__proto__.x", operator: "eq", value: "x" }), "unsafe_path"],
+    ["unsafe regex", (_value: Record<string, unknown>, rule: Record<string, unknown>) => setMatcher(rule, { field: "parameters.x", operator: "regex", value: "(?=x)" }), "unsafe_regex"],
   ])("rejects %s", (_name, mutate, code) => {
-    const value: Record<string, unknown> = { ...structuredClone(draft()) },
-      rule = (value.rules as Record<string, unknown>[])[0];
-    mutate(value, rule);
-    expect(validatePolicyDraft(value).map((issue) => issue.code)).toContain(code);
+    const value: Record<string, unknown> = { ...structuredClone(draft()) }, rule = (value.rules as Record<string, unknown>[])[0];
+    mutate(value, rule); expect(validatePolicyDraft(value).map(issue => issue.code)).toContain(code);
   });
   it("blocks sensitive literals and strips them from deterministic sample facts", () => {
     const value = draft(),
@@ -197,4 +142,22 @@ describe("policy draft validation", () => {
       }),
     ).toEqual({ "subject.principalId": "user-1" });
   });
+  it.each(TARGET_CASES)("validates current target %j", (target, expected) => {
+    expect(currentPolicyTargetIssueV1({ service: target["action.service"], actionId: target["action.id"], riskLevel: target["action.riskLevel"] })).toBe(expected);
+    const value = draft(), changed: PolicyDraftV1 = { ...value, rules: [{ ...value.rules[0], target }] }, issues = validatePolicyDraft(changed);
+    if (expected) expect(issues.map(issue => issue.code)).toContain(expected); else expect(issues).toEqual([]);
+  });
+  it("models approval defaults and reports rule matcher complexity once", () => {
+    const value = draft(), rule = value.rules[0], tool: PolicyDraftV1 = { ...value, rules: [{ ...rule, effect: "require_approval", approval: undefined }] };
+    const credential: PolicyDraftV1 = { ...value, rules: [{ ...rule, context: "credential.use", target: { "credential.service": "github" }, matcherGroups: [{ id: "g", mode: "all", matchers: [{ id: "m", field: "credential.use", operator: "eq", value: "read" }] }], appliesIn: undefined, effect: "require_approval", approval: { tier: "human", replay: "once" } }] };
+    expect(validatePolicyDraft(tool)).toEqual([]); expect(validatePolicyDraft(credential)).toEqual([]); expect(validatePolicyDraft({ ...credential, rules: [{ ...credential.rules[0], effect: "allow" }] }).map(issue => issue.code)).toContain("unexpected_approval");
+    const groups = Array.from({ length: 2 }, (_, group) => ({ id: "g" + group, mode: "all" as const, matchers: Array.from({ length: 9 }, (_, row) => ({ id: "m" + group + "-" + row, field: "parameters.x", operator: "eq" as const, value: row })) }));
+    expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: groups }] }).filter(issue => issue.code === "complexity_limit" && issue.path.includes("matcherGroups"))).toHaveLength(1);
+    expect(POLICY_CONTEXTS["tool.action"]).toMatchObject({ publishable: true, humanApproval: true, obligations: [] }); expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(1);
+  });
+
 });
+
+function setMatcher(rule: Record<string, unknown>, matcher: Record<string, unknown>): void { rule.matcherGroups = [{ id: "g", mode: "all", matchers: [{ id: "m", ...matcher }] }]; }
+
+const TARGET_CASES: readonly (readonly [Readonly<Record<string, JsonValue>>, string | null])[] = [[{ "action.service": "gmail" }, null], [{ "action.id": "gmail.send_email" }, null], [{ "action.riskLevel": "critical" }, null], [{ "action.service": "Gmail" }, "invalid_service"], [{ "action.id": "gmail" }, "invalid_action"], [{ "action.id": "gmail.Send" }, "invalid_action"], [{ "action.riskLevel": "severe" }, "unknown_risk"], [{ "action.service": "gmail", "action.id": "gmail.send" }, "invalid_target"]];

@@ -7,7 +7,8 @@ import { LocalValetEvaluator } from "../evaluators/local-valet.js";
 import { WasmPolicyRuntime } from "../evaluators/wasm-runtime.js";
 import { normalizePolicyDraft } from "./model.js";
 import { projectActionDraftToCurrentSnapshot } from "./current-action-projection.js";
-import type { PolicyDraftV1, PolicyRuleDraftV1 } from "./types.js";
+import type { CurrentOrganizationPolicyV1 } from "../bundles/current-policy-types.js";
+import type { JsonValue, PolicyDraftV1, PolicyRuleDraftV1 } from "./types.js";
 
 let runtime: WasmPolicyRuntime;
 beforeAll(() => {
@@ -97,4 +98,23 @@ describe("browser draft to current source contract", () => {
     expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action/i);
   });
 
+  it.each(PROJECTABLE_TARGETS)("projects every browser-valid target %j", target => {
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], target }] }, snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
+    expect(() => buildCurrentPolicySource(snapshot)).not.toThrow(); expect(snapshot.organizationPolicies).toHaveLength(1);
+  });
+
+  it("projects a bare approval mode without custom approval fields", () => {
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], effect: "require_approval", approval: undefined }] }, snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
+    expect(snapshot.organizationPolicies[0].mode).toBe("require_approval"); expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
+  });
+
+  it.each(INVALID_SOURCE_TARGETS)("source rejects target grammar %j", (patch, code) => {
+    const current = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(draft), "org-1"), row = { ...current.organizationPolicies[0], actionId: undefined, ...patch };
+    expect(() => buildCurrentPolicySource({ ...current, organizationPolicies: [row] })).toThrow(expect.objectContaining({ code }));
+  });
+
 });
+
+const PROJECTABLE_TARGETS: readonly Readonly<Record<string, JsonValue>>[] = [{ "action.service": "gmail" }, { "action.id": "gmail.send_email" }, { "action.riskLevel": "high" }];
+
+const INVALID_SOURCE_TARGETS: readonly (readonly [Partial<CurrentOrganizationPolicyV1>, string])[] = [[{ service: "Gmail" }, "invalid_service"], [{ actionId: "gmail" }, "invalid_action"], [{ actionId: "gmail.Send" }, "invalid_action"], [{ service: "gmail", actionId: "gmail.send" }, "invalid_target"]];

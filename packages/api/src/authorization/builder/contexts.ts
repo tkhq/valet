@@ -39,7 +39,7 @@ export const POLICY_CONTEXTS = {
     publishable: true,
     humanApproval: true,
     appliesIn: true,
-    obligations: ["approval_tier", "target_idempotency", "redact"],
+    obligations: [],
   }),
   "tool.builtin": descriptor("tool.builtin", "Tool and action", [field("action.id", "string", "target"), field("action.toolClass", "string", "target")], { humanApproval: true }),
   "workflow.action": descriptor("workflow.action", "Workflow", [field("action.service", "string", "target"), field("action.id", "string", "target"), field("action.riskLevel", "string", "target"), field("parameters.*", "string"), field("workflow.definitionId", "string"), field("workflow.nodeId", "string"), field("workflow.executionId", "string", "fact", "sensitive"), field("workflow.trigger", "string")], { humanApproval: true, appliesIn: true }),

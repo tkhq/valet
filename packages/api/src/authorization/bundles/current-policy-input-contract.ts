@@ -7,6 +7,16 @@ export const CURRENT_POLICY_COMPLEXITY_LIMITS_V1 = Object.freeze({
   maxTotalMatcherValueBytes: 12_288, maxTotalMatcherValueNodes: 2_048,
   maxPluginDefaults: 32, maxDynamicGrants: 8, maxDynamicApprovals: 8,
 });
+const SERVICE = /^[a-z][a-z0-9_-]*$/, ACTION = /^[a-z0-9][a-z0-9_.:-]*$/, RISKS = new Set(["low", "medium", "high", "critical"]);
+export const isCurrentPolicyRiskV1 = (value: string): boolean => RISKS.has(value);
+export const isCurrentPolicyServiceV1 = (value: string): boolean => SERVICE.test(value);
+export const isCurrentPolicyActionV1 = (value: string): boolean => { const at = value.indexOf("."); return at > 0 && isCurrentPolicyServiceV1(value.slice(0, at)) && ACTION.test(value.slice(at + 1)); };
+export function currentPolicyTargetIssueV1(target: { service?: unknown; actionId?: unknown; riskLevel?: unknown }): string | null {
+  const entries = [target.service, target.actionId, target.riskLevel].filter(value => value !== undefined); if (entries.length !== 1) return "invalid_target";
+  if (target.service !== undefined) return typeof target.service === "string" && isCurrentPolicyServiceV1(target.service) ? null : "invalid_service";
+  if (target.actionId !== undefined) return typeof target.actionId === "string" && isCurrentPolicyActionV1(target.actionId) ? null : "invalid_action";
+  return typeof target.riskLevel === "string" && isCurrentPolicyRiskV1(target.riskLevel) ? null : "unknown_risk";
+}
 export const utf16CodeUnitCompare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 const SEGMENT = /^[A-Za-z_][A-Za-z0-9_]*$/, INDEX = /^(?:0|[1-9][0-9]*)$/;
 export function parseCurrentPolicyMatcherPathV1(path: string): Array<string | number> | null {

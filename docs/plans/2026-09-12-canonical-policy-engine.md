@@ -617,4 +617,4 @@ The stack is complete when:
 
 ### PR 7 implementation boundary
 
-PR 7 implements the typed context registry, normalized in-memory draft, action projection contract, and accessible preview-only web surface. It adds no draft API, persistence, review, publish, rollback, or activation path. Only `tool.action` can use the current source projection. The other registered contexts remain visible but unsupported and fail closed. The web uses an injected deterministic fixture provider. API contract tests use the PR 6 source builder and local Valet evaluator.
+PR 7 implements the typed context registry, normalized in-memory draft, action projection contract, and accessible preview-only web surface. It adds no draft API, persistence, review, publish, rollback, or activation path. Only `tool.action` can use the current source projection. It shares target grammar and matcher limits with the source builder. The other registered contexts remain visible but unsupported and fail closed. The web uses an injected deterministic fixture provider. API contract tests use the PR 6 source builder and local Valet evaluator.

@@ -150,7 +150,7 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
                     value={String(rule.target[field.path] ?? "")}
                     onChange={(event) =>
                       update({
-                        target: event.target.value ? { [field.path]: field.type === "number" ? Number(event.target.value) : event.target.value } : {},
+                        target: updateTarget(rule.target, field.path, field.type === "number" && event.target.value !== "" ? Number(event.target.value) : event.target.value, descriptor.publishable),
                       })
                     }
                   />
@@ -303,9 +303,9 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
                 id="policy-effect"
                 className={SELECT}
                 value={rule.effect}
-                onChange={(event) => update({ effect: event.target.value as typeof rule.effect, approval: undefined })}
+                onChange={(event) => { const effect = event.target.value as typeof rule.effect; update({ effect, approval: effect === "require_approval" && !descriptor.publishable ? { tier: "human", replay: "once" } : undefined }); }}
               >
-                {descriptor.effects.filter(effect => !descriptor.publishable || effect !== "require_approval").map((effect) => (
+                {descriptor.effects.map((effect) => (
                   <option key={effect}>{effect}</option>
                 ))}
               </select>
@@ -329,6 +329,7 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
               </Field>
             )}
           </div>
+          {rule.effect === "require_approval" && <p className="text-sm text-muted">Approval requirement: {rule.approval ? `${rule.approval.tier} / ${rule.approval.replay}` : "current policy mode"}</p>}
           <Field label="Expiry (UTC)" id="policy-expiry">
             <Input
               id="policy-expiry"
@@ -438,3 +439,5 @@ function defaultMatcherValue(type: string | undefined, operator: string): string
 function parseMatcherValue(type: string | undefined, operator: string, raw: string): JsonValue { if (["in", "not_in"].includes(operator) || type === "string_set") { try { const value: unknown = JSON.parse(raw); return Array.isArray(value) ? value as JsonValue : []; } catch { return []; } } if (type === "number" || type === "timestamp") return Number(raw); if (type === "boolean") return raw === "true"; return raw; }
 
 function fieldFor(fields: readonly { path: string; type: string; sensitivity: string; operators: readonly ComparisonOperator[] }[], path: string) { return fields.find(field => field.path === path || (field.path.endsWith(".*") && path.startsWith(field.path.slice(0, -1)))); }
+
+function updateTarget(target: Readonly<Record<string, JsonValue>>, path: string, value: JsonValue, exclusive: boolean): Record<string, JsonValue> { const next = exclusive ? {} : { ...target }; if (value === "" || (typeof value === "number" && !Number.isFinite(value))) delete next[path]; else next[path] = value; return next; }
