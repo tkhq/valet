@@ -197,3 +197,23 @@ Two credentials, one file, both independent of better-auth:
 - The in-sandbox auth gateway itself (v1's :9000 proxy) and any in-sandbox services consuming the service JWTs — this pass ships the tested token/JWT contract only.
 - Multi-org.
 - Per-service integration OAuth connect flows (Linear, Notion, Google APIs, etc. beyond the login-doubles-as-connect hook above) — specified in `2026-07-20-integration-oauth-design.md`.
+
+## Memory tools on the MCP mount (TKAI-252)
+
+The authenticated `/mcp` mount also exposes `mem_capture`, `mem_search`, and
+`mem_read` from the memory plugin. It does not expose other memory mutations.
+The API builds a personal `MemoryScope` only from the verified OAuth token.
+Reads include the caller's current team memberships. A team path resolves only
+after a live membership check.
+
+`mem_capture` creates one new personal file at
+`90-inbox/YYYY-MM-DD-<slug>.md`. It refuses an existing path. The caller cannot
+set the path or owner. The memory service removes embedded frontmatter and sets
+`origin` to `mcp:external`.
+
+Every executed MCP tool writes to `action_invocations`. The row records its
+timestamp, user id, tool name, filtered arguments, outcome, duration, and source
+IP. Capture content is replaced with a redaction marker before the audit write.
+The source IP trusts `x-forwarded-for` only when `VALET_TRUST_PROXY=1`; otherwise
+it uses the socket peer address. The mount keeps the Better Auth challenge and
+stateless JSON transport behavior.

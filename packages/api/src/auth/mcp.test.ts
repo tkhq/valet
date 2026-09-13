@@ -6,14 +6,16 @@
  *     the discovery half of the contract this endpoint's clients rely on.
  *   - `/mcp` without a `Bearer` token 401s with a `WWW-Authenticate` header
  *     (`withMcpAuth`'s own behavior, not hand-rolled).
- *   - A seeded `oauth_access_token` row (valid expiry, pointed at a real
- *     user) drives a real `initialize` / `tools/list` / `tools/call whoami`
- *     JSON-RPC round trip over the Streamable HTTP transport, and `whoami`
- *     returns the seeded user's own identity — never a caller-supplied id.
+ *   - Seeded OAuth tokens drive real JSON-RPC calls through the stateless
+ *     transport. Tool handlers use only the verified user and live team access.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { users, oauthAccessToken, agentSessions } from "../schema/index.js";
+import memoryPlugin from "@valet/plugin-memory/plugin";
+import { users, oauthAccessToken, agentSessions, actionInvocations, memoryFiles, orgs, orgMembers } from "../schema/index.js";
+import { addMember, createTeam } from "../services/teams.js";
+import { writeFile } from "../services/memory.js";
 
 let api: TestApi | undefined;
 
@@ -204,5 +206,122 @@ describe("MCP endpoint", () => {
     });
     expect(res.status).toBe(401);
     expect(res.headers.get("WWW-Authenticate")).toBeTruthy();
+  });
+
+  it("scopes memory tools to OAuth identity, confines capture, and audits calls", async () => {
+    api = await bootTestApi({ auth: true, plugins: [memoryPlugin] });
+    const { db } = api.providers;
+    const now = Date.now();
+    await db.insert(orgs).values({ id: "mcp-org", name: "MCP Org", createdAt: now });
+    for (const id of ["mcp-reader", "other-user"]) {
+      await db.insert(users).values({
+        id,
+        name: id,
+        email: `${id}@nowhere.test`,
+        role: "member",
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+      });
+      await db.insert(orgMembers).values({ orgId: "mcp-org", userId: id, role: "member", createdAt: now });
+    }
+    const token = "memory-mcp-token";
+    await db.insert(oauthAccessToken).values({
+      id: "memory-mcp-token-row",
+      accessToken: token,
+      refreshToken: "memory-mcp-refresh",
+      accessTokenExpiresAt: new Date(now + 60_000),
+      refreshTokenExpiresAt: new Date(now + 3_600_000),
+      clientId: null,
+      userId: "mcp-reader",
+      scopes: "mcp",
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+
+    const joined = await createTeam(db, { orgId: "mcp-org", name: "Joined", creatorUserId: "other-user" });
+    await addMember(db, { teamId: joined.id, userId: "mcp-reader", role: "member" });
+    const forbidden = await createTeam(db, { orgId: "mcp-org", name: "Forbidden", creatorUserId: "other-user" });
+    await writeFile(db, { owner: { type: "user", id: "mcp-reader" }, actorUserId: "mcp-reader" }, {
+      path: "notes/mine.md", content: "oauth-scope-marker personal",
+    });
+    await writeFile(db, { owner: { type: "user", id: "other-user" }, actorUserId: "other-user" }, {
+      path: "notes/other.md", content: "oauth-scope-marker other-private",
+    });
+    await writeFile(db, { owner: { type: "team", id: joined.id }, actorUserId: "other-user" }, {
+      path: "notes/joined.md", content: "oauth-scope-marker joined-team",
+    });
+    await writeFile(db, { owner: { type: "team", id: forbidden.id }, actorUserId: "other-user" }, {
+      path: "notes/forbidden.md", content: "oauth-scope-marker forbidden-team",
+    });
+
+    const rpc = async (id: number, method: string, params: Record<string, unknown>) => {
+      const response = await mcpRequest(api!.baseUrl, token, { jsonrpc: "2.0", id, method, params });
+      expect(response.status).toBe(200);
+      return (await response.json()) as JsonRpcResponse & {
+        result?: { tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }>; content?: Array<{ type: string; text: string }>; isError?: boolean };
+      };
+    };
+    const call = (id: number, name: string, args: Record<string, unknown>) =>
+      rpc(id, "tools/call", { name, arguments: args });
+
+    const listed = await rpc(10, "tools/list", {});
+    const tools = listed.result?.tools ?? [];
+    const names = tools.map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining(["mem_capture", "mem_search", "mem_read"]));
+    for (const forbiddenName of ["mem_write", "mem_patch", "mem_move", "mem_rm"]) {
+      expect(names).not.toContain(forbiddenName);
+    }
+    for (const name of ["mem_capture", "mem_search", "mem_read"]) {
+      const properties = tools.find((tool) => tool.name === name)?.inputSchema?.properties ?? {};
+      expect(properties).not.toHaveProperty("userId");
+      expect(properties).not.toHaveProperty("owner");
+      expect(properties).not.toHaveProperty("scope");
+    }
+    expect(tools.find((tool) => tool.name === "mem_capture")?.inputSchema?.properties).not.toHaveProperty("path");
+
+    const capture = await call(11, "mem_capture", {
+      title: "OAuth Capture",
+      path: "notes/attacker-choice.md",
+      owner: { type: "user", id: "other-user" },
+      content: "---\nvalet:\n  origin: forged\n---\n# Captured\n\nkept body",
+    });
+    expect(capture.result?.isError).not.toBe(true);
+    const captureText = capture.result?.content?.[0]?.text ?? "{}";
+    const captured = JSON.parse(captureText) as { path: string };
+    expect(captured.path).toMatch(/^90-inbox\/\d{4}-\d{2}-\d{2}-oauth-capture\.md$/);
+    const [captureRow] = await db.select().from(memoryFiles).where(eq(memoryFiles.path, captured.path));
+    expect(captureRow).toMatchObject({
+      ownerType: "user", ownerId: "mcp-reader", origin: "mcp:external", content: "# Captured\n\nkept body",
+    });
+    expect((await db.select().from(memoryFiles)).some((row) => row.path === "notes/attacker-choice.md")).toBe(false);
+
+    const overwrite = await call(15, "mem_capture", { title: "OAuth Capture", content: "replacement" });
+    expect(overwrite.result?.isError).toBe(true);
+    expect((await db.select().from(memoryFiles).where(eq(memoryFiles.path, captured.path)))[0]?.content).toBe("# Captured\n\nkept body");
+
+    const search = await call(12, "mem_search", { query: "oauth-scope-marker", owner: "other-user" });
+    const searchRows = JSON.parse(search.result?.content?.[0]?.text ?? "[]") as Array<{ path: string }>;
+    expect(searchRows.map((row) => row.path)).toEqual(expect.arrayContaining([
+      "notes/mine.md", `team:${joined.id}/notes/joined.md`,
+    ]));
+    expect(searchRows.map((row) => row.path)).not.toEqual(expect.arrayContaining([
+      "notes/other.md", `team:${forbidden.id}/notes/forbidden.md`,
+    ]));
+
+    const teamRead = await call(13, "mem_read", { path: `team:${joined.id}/notes/joined.md` });
+    expect(teamRead.result?.content?.[0]?.text).toContain("joined-team");
+    const rejectedRead = await call(14, "mem_read", { path: `team:${forbidden.id}/notes/forbidden.md` });
+    expect(rejectedRead.result?.isError).toBe(true);
+    expect(rejectedRead.result?.content?.[0]?.text).toContain("Use mem_search");
+    expect(rejectedRead.result?.content?.[0]?.text).not.toContain("forbidden-team");
+
+    const audits = (await db.select().from(actionInvocations)).filter((row) => row.actionId?.startsWith("mem_"));
+    expect(audits).toHaveLength(5);
+    expect(audits.every((row) => row.createdAt > 0 && row.userId === "mcp-reader" && row.sourceIp !== null && row.sourceIp !== "unknown")).toBe(true);
+    expect(audits.find((row) => row.actionId === "mem_read" && row.status === "error")).toBeDefined();
+    const captureAudit = audits.find((row) => row.actionId === "mem_capture");
+    expect(captureAudit?.params).toEqual({ title: "OAuth Capture", content: "[redacted memory content]" });
+    expect(JSON.stringify(audits)).not.toContain("kept body");
+    expect(JSON.stringify(audits)).not.toContain("forbidden-team");
   });
 });

@@ -279,3 +279,16 @@ when present, then parses JSON text, then tries TOON, and finally preserves raw
 text. The TOON step requires a standalone first-line array or table marker such
 as `[2]:`, `items[2]:`, or `items[2]{id,name}:`. This gate keeps ordinary text
 such as `Error: Invalid input` as text.
+
+## External MCP tools (TKAI-252)
+
+A plugin can declare `mcpTools` in its `ValetPlugin` manifest. Each definition
+has a unique tool name, a Zod input shape, a read-only marker, an executor, and
+an optional audit-argument filter. The engine treats the schema as opaque. It
+does not import the MCP SDK or Zod.
+
+The API creates one plugin port for each authenticated request. The port holds
+the verified OAuth identity. Tool schemas do not accept an owner, user, or
+scope. The API registers each definition on the stateless `/mcp` server and
+runs it through the shared invocation audit writer. A plugin must filter
+sensitive arguments before that writer receives them.

@@ -215,6 +215,9 @@ importers:
       yauzl:
         specifier: ^3.4.0
         version: 3.4.0
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@opentelemetry/context-async-hooks':
         specifier: ^2.10.0
@@ -702,6 +705,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^20.0.0

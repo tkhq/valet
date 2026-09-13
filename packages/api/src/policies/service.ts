@@ -431,6 +431,7 @@ export interface AuditInvocationRow {
   sessionId?: string | null;
   workflowExecutionId?: string | null;
   userId?: string | null;
+  sourceIp?: string | null;
   orgId?: string | null;
   params?: unknown;
   result?: unknown;
@@ -473,6 +474,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         sessionId: row.sessionId ?? null,
         workflowExecutionId: row.workflowExecutionId ?? null,
         userId: row.userId ?? null,
+        sourceIp: row.sourceIp ?? null,
         orgId: row.orgId ?? null,
         params: params ? params.value : null,
         paramsTruncated: params ? params.truncated : null,

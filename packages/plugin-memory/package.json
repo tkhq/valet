@@ -12,6 +12,10 @@
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"
+    },
+    "./mcp-tools": {
+      "types": "./dist/mcp-tools.d.ts",
+      "default": "./dist/mcp-tools.js"
     }
   },
   "scripts": {
@@ -20,7 +24,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@valet/engine": "workspace:*"
+    "@valet/engine": "workspace:*",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

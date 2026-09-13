@@ -1551,6 +1551,7 @@ export const actionInvocations = pgTable(
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
     userId: text("user_id"),
+    sourceIp: text("source_ip"),
     orgId: text("org_id"),
     params: jsonb("params"),
     paramsTruncated: boolean("params_truncated"),

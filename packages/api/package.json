@@ -112,7 +112,8 @@
     "typebox": "^1.1.24",
     "ws": "^8.18.0",
     "yaml": "^2.9.0",
-    "yauzl": "^3.4.0"
+    "yauzl": "^3.4.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@opentelemetry/context-async-hooks": "^2.10.0",

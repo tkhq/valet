@@ -884,6 +884,7 @@ CREATE TABLE "action_invocations" (
 	"session_id" text,
 	"workflow_execution_id" text,
 	"user_id" text,
+	"source_ip" text,
 	"org_id" text,
 	"params" jsonb,
 	"params_truncated" boolean,
