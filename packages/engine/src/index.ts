@@ -159,6 +159,7 @@ export {
   type PinRejectedHandler,
   type InvokeActionResult,
 } from "./plugin-catalog.js";
+export { adaptPluginCatalogAction } from "./plugin-catalog-authorization.js";
 export {
   validateValetPlugin,
   canStream,

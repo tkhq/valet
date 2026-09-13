@@ -1,4 +1,5 @@
 export type { AuthorizationEvaluator, AuthorizationService } from "./contracts.js";
+export * from "./action-audit.js";
 export * from "./bundles/index.js";
 export { LocalEvaluatorError, type LocalEvaluatorErrorCode } from "./evaluators/errors.js";
 export { LocalValetEvaluator } from "./evaluators/local-valet.js";

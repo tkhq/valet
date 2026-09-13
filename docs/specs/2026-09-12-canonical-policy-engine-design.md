@@ -940,3 +940,15 @@ Every mutation uses database compare-and-swap and a tenant, scope, actor, operat
 `approved_for_publication` has no enforcement effect. Prepare-publication only revalidates and returns the immutable candidate. PR 7b does not write a bundle host, active pointer, current policy row, or live resolver. PR 9 owns publication, activation, and active rollback. The API is intentionally ahead of the UI. PR 7a keeps its fixture provider until a later UI slice can add complete save and review controls.
 
 The authoring authorizer uses existing organization and team administrator state as a bootstrap boundary. It exposes separate view, edit, submit-review, review, prepare-publication, and restore-draft operations. It does not call the live policy evaluator because policy administration cannot depend recursively on the candidate it administers. A future canonical request projection must preserve these operation names and tenant scope when PR 11 moves route access to `AuthorizationService`.
+
+### PR 8 inert action adapter boundary
+
+PR 8 adds version 1 interactive and workflow action adapters. The host supplies evaluation time and all identities. The adapters use the existing `AuthorizationRequest` and identity helpers. They do not read a clock, resolve a credential, load a bundle, or call an evaluator.
+
+Action parameters require an explicit version 1 safe projection. The projection uses RFC 6901 pointers and `*` for array items. An empty pointer explicitly selects the complete caller-visible input. A missing projection fails closed. The adapter rejects accessors, proxies, cycles, sparse arrays, exotic prototypes, non-JSON values, excess depth, excess nodes, and projected values over 64 KiB. Credential material and credential handles are not valid projection inputs. A policy-relevant credential reference must be an opaque stable ID.
+
+The current action obligation plan supports only credential-owner requirements, target idempotency, and post-execution redaction. Other obligations remain unsupported for action cutover and fail closed. Approval plans bind the request, subject, input, policy, decision, action, principal, actor, session or workflow, replay rule, approver, and expiry. Dynamic approval facts remain separate request facts.
+
+Pure audit builders produce the existing decision and execution row shapes. A decision plan carries profile, interpreter, contract, decision, and obligation digests beside its row because PR 8 cannot change the database schema. PR 9 must preserve this evidence when it adds persistence. An execution plan links one stored decision and stores only result digests and fixed error summaries.
+
+All PR 8 adapters are inert. Production plugin catalog, tool bridge, action invoker, workflow execution, approval dispatch, and audit persistence do not import or call them. PR 9 owns construction, injection, evaluator calls, durable reservation, and cutover.

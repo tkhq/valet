@@ -318,6 +318,8 @@ pnpm typecheck
 - Add request adapters for workflow actions in `packages/api/src/plugins/action-invoker.ts`.
 - Add the compatibility adapter from engine `PolicyResolver` to `AuthorizationService`.
 - Add common obligation, approval, and audit helpers.
+- Use RFC 6901 safe-parameter projections. Reject an action when the projection is absent.
+- Build profile, interpreter, contract, decision, and obligation evidence beside the existing audit row shape.
 - Do not wire the adapters into live production enforcement.
 - Do not invoke the old or new evaluator on live requests.
 
