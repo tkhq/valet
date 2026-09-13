@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { JsonValue } from "@valet/engine/authorization";
+import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, isLosslessRegexV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
+export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
 import { grantPolicyKey } from "../../policies/resolution.js";
 import type { CanonicalSourceBundle } from "./types.js";
 import type {
@@ -21,25 +23,6 @@ const HEX_DIGEST = /^[0-9a-f]{64}$/;
 const POLICY_PATH = "policies/current-action-policy.rego";
 const DATA_PATH = "data/current-action-policy.json";
 const PROVENANCE_PATH = "provenance/current-action-policy.json";
-
-export const CURRENT_POLICY_COMPLEXITY_LIMITS_V1 = Object.freeze({
-  schemaVersion: 1 as const,
-  maxRules: 64,
-  maxMatchersPerRule: 16,
-  maxTotalMatchers: 128,
-  maxPathSegments: 8,
-  maxRegexLength: 64,
-  maxRegexMatchers: 2,
-  maxRegexTargetCodeUnits: 256,
-  maxMatcherValueBytes: 768,
-  maxMatcherValueNodes: 256,
-  maxMatcherValueDepth: 16,
-  maxTotalMatcherValueBytes: 12_288,
-  maxTotalMatcherValueNodes: 2_048,
-  maxPluginDefaults: 32,
-  maxDynamicGrants: 8,
-  maxDynamicApprovals: 8,
-});
 
 export interface BuiltCurrentPolicySourceV1 {
   readonly bundle: CanonicalSourceBundle;
@@ -420,6 +403,12 @@ function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[
   return { bytes, nodes };
 }
 
+function parseMatcherPath(path: string): Array<string | number> {
+  const result = parseCurrentPolicyMatcherPathV1(path);
+  if (result === null) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} does not use the lossless path grammar.`);
+  return result;
+}
+
 function normalizeRule(
   row: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number] | CurrentPersonalOverrideV1,
   ownerType: "organization" | "team" | "personal",
@@ -448,88 +437,6 @@ function normalizeRule(
     createdAtMs: row.createdAtMs,
     updatedAtMs: row.updatedAtMs,
   };
-}
-
-// Pinned Regorus round-trips ASCII identifier segments and canonical decimal array indexes.
-const SAFE_PATH_SEGMENT_V1 = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SAFE_ARRAY_INDEX_V1 = /^(?:0|[1-9][0-9]*)$/;
-
-function parseMatcherPath(path: string): Array<string | number> {
-  const result: Array<string | number> = [];
-  let index = 0;
-  while (index < path.length) {
-    let end = index;
-    while (end < path.length && path[end] !== "." && path[end] !== "[") end += 1;
-    const segment = path.slice(index, end);
-    if (!SAFE_PATH_SEGMENT_V1.test(segment)) {
-      fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unsafe segment.`);
-    }
-    if (["__proto__", "constructor", "prototype"].includes(segment)) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} depends on JavaScript prototype lookup.`);
-    result.push(segment);
-    index = end;
-    while (index < path.length && path[index] === "[") {
-      const close = path.indexOf("]", index);
-      if (close === -1) fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unterminated index.`);
-      const text = path.slice(index + 1, close);
-      const arrayIndex = Number(text);
-      if (!SAFE_ARRAY_INDEX_V1.test(text) || !Number.isSafeInteger(arrayIndex)) {
-        fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an unsafe index.`);
-      }
-      result.push(arrayIndex);
-      index = close + 1;
-    }
-    if (index === path.length) break;
-    if (path[index] !== ".") fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} requires a separator.`);
-    index += 1;
-  }
-  if (result.length === 0 || path.endsWith(".")) {
-    fail("non_lossless_path", `Matcher path ${JSON.stringify(path)} has an empty segment.`);
-  }
-  return result;
-}
-
-// This ASCII grammar has the same match language in JavaScript and the pinned Regorus regex engine.
-function isLosslessRegexV1(pattern: string): boolean {
-  if (pattern.length === 0 || pattern.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexLength) return false;
-  if ([...pattern].some((char) => char.codePointAt(0)! < 0x20 || char.codePointAt(0)! > 0x7e)) return false;
-  let index = pattern.startsWith("^") ? 1 : 0;
-  const end = pattern.endsWith("$") && !pattern.endsWith("\\$") ? pattern.length - 1 : pattern.length;
-  let atoms = 0;
-  while (index < end) {
-    const char = pattern[index];
-    if (char === "\\") {
-      if (index + 1 >= end || !"\\.^$*+?()[]{}|-".includes(pattern[index + 1])) return false;
-      index += 2;
-    } else if (char === "[") {
-      const close = pattern.indexOf("]", index + 1);
-      if (close === -1 || close >= end || !validAsciiClass(pattern.slice(index + 1, close))) return false;
-      index = close + 1;
-    } else {
-      if (".^$*+?()[]{}|".includes(char)) return false;
-      index += 1;
-    }
-    atoms += 1;
-    if (index < end && "*+?".includes(pattern[index])) index += 1;
-  }
-  return atoms > 0 && index === end;
-}
-
-function validAsciiClass(content: string): boolean {
-  if (content.startsWith("^")) return false;
-  const body = content;
-  if (body.length === 0) return false;
-  for (let index = 0; index < body.length;) {
-    const first = body[index];
-    if (!/[A-Za-z0-9]/.test(first)) return false;
-    if (body[index + 1] !== "-") {
-      index += 1;
-      continue;
-    }
-    const last = body[index + 2];
-    if (last === undefined || !/[A-Za-z0-9]/.test(last) || first.charCodeAt(0) > last.charCodeAt(0)) return false;
-    index += 3;
-  }
-  return true;
 }
 
 type NormalizedRule = ReturnType<typeof normalizeRule> & { precedenceRank?: number };

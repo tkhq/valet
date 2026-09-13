@@ -922,3 +922,11 @@ The active bundle is incompatible, invalid, or unavailable to the Valet engine. 
 11. **Attested execution and TKMS:** Select attested action families and any key provider, co-signer, or consensus role for TKMS.
 
 The login-gated Valet artifact at `https://valet.dev.agents.turnkey.engineering/a/mfhW_E7IpUksh-W0CpMNBw` was inaccessible during research. Treat it as an internal follow-up reference. This design does not claim to incorporate its contents.
+
+#### Implemented inert browser boundary (PR 7)
+
+The frontend-safe registry covers all 12 `AuthorizationKind` values in the table above. The registry marks only `tool.action` and `workflow.action` as source-preview capable. All other contexts stay visible and return `unsupported_authorization_context`. They cannot produce a publishable preview.
+
+`PolicyDraftV1` is an in-memory authoring projection. The browser normalizes it and sends `PolicyPreviewRequestV1` to an injected provider. This change adds no network route, persistence, activation, or browser evaluator. The development provider returns a deterministic source fixture and declared source ranges. It does not return an execution trace. The API-side contract test projects normalized action drafts into `CurrentPolicySourceSnapshotV1`, then uses the canonical source builder and `LocalValetEvaluator`.
+
+The source builder exports only its matcher path, regex, and complexity input restrictions through a browser-safe module. Production Rego generation remains in the API package. A future authoring API must implement `PolicyPreviewProvider` and must revalidate the full draft and sanitized sample facts.

@@ -36,6 +36,10 @@
     "./providers-node": {
       "types": "./src/providers/node.ts",
       "import": "./src/providers/node.ts"
+    },
+    "./policy-builder": {
+      "types": "./src/authorization/builder/index.ts",
+      "import": "./src/authorization/builder/index.ts"
     }
   },
   "scripts": {
