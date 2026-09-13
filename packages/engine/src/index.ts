@@ -140,6 +140,7 @@ export {
 export {
   pluginCatalogTools,
   buildPluginCatalog,
+  searchCatalog,
   invokeAction,
   prepareActionArgs,
   approvalModeForAction,
@@ -149,6 +150,8 @@ export {
   MAX_PINNED_ACTIONS,
   RESOLVE_TTL_MS,
   type ActionPlugin,
+  type CatalogActionSummary,
+  type CatalogDiscoveryRequest,
   type ApprovalMode,
   type PluginAction,
   type PluginActionContext,
@@ -158,6 +161,7 @@ export {
   type PinnedActionSpec,
   type PinRejectedHandler,
   type InvokeActionResult,
+  type InvokeActionOptions,
 } from "./plugin-catalog.js";
 export {
   validateValetPlugin,
@@ -217,6 +221,7 @@ export {
   isDecisionGateExpired,
   GATE_EXPIRY_DEFAULT_MS,
   deterministicGateId,
+  fromRequest,
   findStickyTerminalGate,
 } from "./decision-gate.js";
 export {

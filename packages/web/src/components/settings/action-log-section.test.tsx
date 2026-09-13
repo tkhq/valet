@@ -49,6 +49,9 @@ function entry(overrides: Partial<ActionLogEntryWire> = {}): ActionLogEntryWire 
   return {
     invocationId: "inv_1",
     createdAt: 0,
+    source: null,
+    clientInvocationId: null,
+    updatedAt: null,
     service: "gmail",
     actionId: "gmail.send_email",
     riskLevel: "medium",
@@ -60,6 +63,8 @@ function entry(overrides: Partial<ActionLogEntryWire> = {}): ActionLogEntryWire 
     status: "completed",
     sessionId: "sess_1",
     workflowExecutionId: null,
+    orchestratorId: null,
+    threadId: null,
     userId: "u1",
     params: { to: "a@b.com" },
     paramsTruncated: false,
@@ -141,6 +146,15 @@ describe("ActionLogSection — filters", () => {
     expect(lastCall[0]).toEqual({ service: "gmail", resolvedMode: "deny" });
     expect((screen.getByLabelText("Service") as HTMLInputElement).value).toBe("gmail");
     expect((screen.getByLabelText("Resolved mode") as HTMLSelectElement).value).toBe("deny");
+  });
+
+  it("offers executing and indeterminate status filters", () => {
+    renderSection();
+    const statuses = Array.from((screen.getByLabelText("Status") as HTMLSelectElement).options)
+      .map((option) => option.value);
+    expect(statuses).toEqual(expect.arrayContaining(["executing", "indeterminate"]));
+    expect(parseActionLogSearch({ status: "executing" }).status).toBe("executing");
+    expect(parseActionLogSearch({ status: "indeterminate" }).status).toBe("indeterminate");
   });
 
   it("Apply filters resets the pager to the first page", async () => {

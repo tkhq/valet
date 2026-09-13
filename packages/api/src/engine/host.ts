@@ -140,7 +140,7 @@ import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
-import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
+import { mergedSkillSources, pluginSessionExtras, withCredentialRequirement, type PluginSessionExtras } from "../plugins/assemble.js";
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
@@ -1357,6 +1357,21 @@ export class EngineHost {
    * `undefined` without a db — the session then keeps its construction-time
    * skill set, the same graceful degradation `sessionExtras` applies.
    */
+  /** Returns the same governed actions used to build this assistant's model tools. */
+  async actionPluginsForAssistant(assistant: {
+    orgId: string;
+    ownerType: Principal["type"];
+    ownerId: string;
+    behavior: string | null;
+    id: string;
+  }): Promise<ActionPlugin[]> {
+    const owner: Principal = { type: assistant.ownerType, id: assistant.ownerId };
+    const behavior = parseAssistantBehavior(assistant.behavior, assistant.id);
+    const pins = owner.type === "user" ? PINNED_ACTIONS : [];
+    return (await this.sessionPlugins(owner, assistant.orgId, [], behavior, pins))
+      .flatMap(withCredentialRequirement);
+  }
+
   /** Returns the exact current skill assembly for one assistant. External
    * read-only surfaces use this seam so availability, behavior, precedence,
    * and selected revisions cannot diverge from the orchestrator runtime. */

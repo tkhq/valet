@@ -29,7 +29,7 @@ export interface McpHandlerOpts {
   auth: ValetAuth;
   db: AppDb;
   plugins: ValetPlugin[];
-  portForPlugin: (pluginName: string, userId: string) => McpToolPort | undefined;
+  portForPlugin: (pluginName: string, userId: string, sourceIp: string) => McpToolPort | undefined;
   listSessions: (userId: string) => Promise<Array<{ id: string; title: string | null; status: string }>>;
   auditStore?: McpAuditStore;
 }
@@ -101,12 +101,14 @@ async function toolAttempts(req: Request, tools: Map<string, McpToolDef>): Promi
     const tool = typeof params?.name === "string" ? params.name : INVALID_TOOL_NAME;
     const definition = tools.get(tool);
     const values = record(params?.arguments);
+    const dispatchable = BUILTIN_TOOLS.has(tool)
+      || (definition !== undefined && values !== undefined && z.object(inputSchema(definition)).safeParse(values).success);
+    if (definition?.audit === "owned" && dispatchable) continue;
     attempts.push({
       requestKey: lifecycleKey(request.id, tool),
       tool,
       args: BUILTIN_TOOLS.has(tool) ? {} : auditArguments(definition, values),
-      dispatchable: BUILTIN_TOOLS.has(tool)
-        || (definition !== undefined && values !== undefined && z.object(inputSchema(definition)).safeParse(values).success),
+      dispatchable,
     });
   }
   return attempts;
@@ -212,10 +214,15 @@ function registerPluginTool(
         idempotentHint: tool.readOnly,
       },
     },
-    async (args, extra) => runAudited(auditStore, takeLifecycle(lifecycles, extra.requestId, tool.name), async () => {
-      const result = await tool.execute(args, port);
-      return { content: [{ type: "text", text: result.text }] };
-    }),
+    async (args, extra) => {
+      const run = async () => {
+        const result = await tool.execute(args, port);
+        return { content: [{ type: "text" as const, text: result.text }] };
+      };
+      return tool.audit === "owned"
+        ? run()
+        : runAudited(auditStore, takeLifecycle(lifecycles, extra.requestId, tool.name), run);
+    },
   );
 }
 
@@ -286,7 +293,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request, sourceIp?: stri
     for (const plugin of opts.plugins) {
       const tools = plugin.mcpTools ?? [];
       if (tools.length === 0) continue;
-      const port = opts.portForPlugin(plugin.name, session.userId);
+      const port = opts.portForPlugin(plugin.name, session.userId, sourceIp);
       if (!port) throw new Error(`MCP plugin "${plugin.name}" lost its host port. Restart the API after restoring the port factory.`);
       for (const tool of tools) registerPluginTool(server, tool, port, lifecycleQueues, auditStore);
     }

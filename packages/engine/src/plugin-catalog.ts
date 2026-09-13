@@ -277,6 +277,90 @@ export function prepareActionArgs(
  */
 export type PluginCatalog = Catalog;
 
+export interface CatalogDiscoveryRequest {
+  service?: string;
+  query?: string;
+  actionId?: string;
+  limit?: number;
+  includeSchemas?: boolean;
+}
+
+export interface CatalogActionSummary {
+  service: string;
+  toolId: string;
+  name: string;
+  description: string;
+  riskLevel: RiskLevel;
+  parameters?: TSchema;
+}
+
+/** Discover actions from the same static and dynamic catalog used for execution. */
+export async function searchCatalog(
+  catalog: PluginCatalog,
+  request: CatalogDiscoveryRequest,
+  ctx: ToolContext,
+): Promise<{ actions: CatalogActionSummary[]; total: number; warnings: Array<{ service: string; reason: string }> }> {
+  const query = parseSearchQuery(request.query ?? "");
+  const fields = (action: PluginAction): string[] => [action.id, action.name, action.description];
+  let entries = catalog.entries;
+  if (request.service) entries = entries.filter((entry) => entry.service === request.service);
+  if (request.actionId) entries = entries.filter((entry) => qualifiedId(entry) === request.actionId);
+  if (query.hasInput) entries = entries.filter((entry) => matchesSearchQuery(query, fields(entry.action)));
+  const warnings: Array<{ service: string; reason: string }> = [];
+  const dynamicServicesConsidered = new Set<string>();
+  for (const plugin of catalog.dynamicPlugins) {
+    if (request.service && plugin.service !== request.service) continue;
+    if (request.actionId && !request.actionId.startsWith(
+      plugin.service + ".",
+    )) continue;
+    dynamicServicesConsidered.add(plugin.service);
+    try {
+      let dynamic = (await resolveDynamic(catalog, plugin, ctx)).entries;
+      if (request.actionId) dynamic = dynamic.filter((entry) => qualifiedId(entry) === request.actionId);
+      if (query.hasInput) dynamic = dynamic.filter((entry) => matchesSearchQuery(query, fields(entry.action)));
+      entries = entries.concat(dynamic);
+    } catch (error) {
+      warnings.push({ service: plugin.service, reason: `action discovery failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+  const services = new Set(entries.map((entry) => entry.service));
+  for (const service of dynamicServicesConsidered) services.add(service);
+  for (const service of services) {
+    const plugin = catalog.entries.find((entry) => entry.service === service)?.plugin ??
+      catalog.dynamicPlugins.find((candidate) => candidate.service === service);
+    if (!plugin?.requiresCredential) continue;
+    const credentialService = plugin.credentialService ?? service;
+    let connected = false;
+    let reason = "no credential connected";
+    try {
+      connected = (await ctx.credentials.get(credentialService)) !== null;
+    } catch (error) {
+      reason = error instanceof Error ? error.message : String(error);
+    }
+    if (connected) continue;
+    if (request.service === service || request.actionId?.startsWith(service + ".")) {
+      warnings.push({ service, reason });
+    } else {
+      entries = entries.filter((entry) => entry.service !== service);
+      warnings.push({ service, reason: `not connected — tools hidden. ${reason === "no credential connected" ? "Connect the integration in Settings, or list with service filter to inspect schemas." : reason}` });
+    }
+  }
+  if (query.hasInput) entries = rankSearchResults(query, entries, (entry) => fields(entry.action));
+  const limit = clamp(request.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
+  return {
+    total: entries.length,
+    warnings,
+    actions: entries.slice(0, limit).map((entry) => ({
+      service: entry.service,
+      toolId: qualifiedId(entry),
+      name: entry.action.name,
+      description: entry.action.description,
+      riskLevel: entry.action.riskLevel,
+      ...(request.actionId || request.includeSchemas ? { parameters: entry.action.parameters } : {}),
+    })),
+  };
+}
+
 /**
  * Assemble an in-memory catalog from every ActionPlugin in `plugins`.
  * Both the LLM `call_tool` path and the slash-command path route through
@@ -419,12 +503,18 @@ function approvalGateRequest(
   };
 }
 
+export interface InvokeActionOptions {
+  /** Awaited after validation and approval, immediately before action.execute. */
+  claimExecution?: () => Promise<void>;
+}
+
 export async function invokeAction(
   catalog: PluginCatalog,
   actionId: string,
   args: Record<string, unknown> | undefined,
   ctx: ToolContext,
   summary: string,
+  options?: InvokeActionOptions,
 ): Promise<InvokeActionResult> {
   let entry = catalog.byId.get(actionId);
   if (!entry) {
@@ -477,7 +567,7 @@ export async function invokeAction(
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
     }
-    return executeAction(entry, actionId, args, summary, ctx);
+    return executeAction(entry, actionId, args, summary, ctx, options);
   }
 
   // Present resolver: consult the host policy port. The policy-facing
@@ -624,7 +714,7 @@ export async function invokeAction(
   }
 
   // allow, or an approved require_approval → execute with audit.
-  return executeAction(entry, actionId, args, summary, ctx, {
+  return executeAction(entry, actionId, args, summary, ctx, options, {
     resolver,
     record: {
       ...baseRecord,
@@ -782,110 +872,22 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
     }),
     execute: async (args, ctx): Promise<ToolResult> => {
       const a = args as { service?: string; query?: string; limit?: number };
-      const limit = clamp(a.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
-      const query = parseSearchQuery(a.query ?? "");
-      const actionFields = (action: PluginAction): string[] => [
-        action.id,
-        action.name,
-        action.description,
-      ];
-      const matchesQuery = (action: PluginAction): boolean =>
-        matchesSearchQuery(query, actionFields(action));
-
-      let entries = catalog.entries;
-      if (a.service) entries = entries.filter((e) => e.service === a.service);
-      if (query.hasInput) entries = entries.filter((e) => matchesQuery(e.action));
-
-      const warnings: Array<{ service: string; reason: string }> = [];
-
-      // Merge in dynamic (resolveActions-backed) plugins whose service
-      // passes the filter. Discovery failures become warnings, not throws.
-      const dynamicServicesConsidered = new Set<string>();
-      for (const plugin of catalog.dynamicPlugins) {
-        if (a.service && plugin.service !== a.service) continue;
-        dynamicServicesConsidered.add(plugin.service);
-        try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
-          const dynEntries =
-            query.hasInput
-              ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
-              : resolvedDyn.entries;
-          entries = entries.concat(dynEntries);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          warnings.push({ service: plugin.service, reason: `action discovery failed: ${message}` });
-        }
-      }
-
-      // Per-service auth handling — only services whose plugin declares
-      // `requiresCredential` are probed (credential-less plugins like
-      // workflows would otherwise produce "no credential connected"
-      // noise). Unconnected services' tools are HIDDEN from unfiltered
-      // listings: advertising tools that can only fail wastes the agent's
-      // turn. An explicit `service:` filter still returns them alongside
-      // the warning, so schemas stay inspectable.
-      const services = new Set(entries.map((e) => e.service));
-      for (const service of dynamicServicesConsidered) services.add(service);
-      for (const service of services) {
-        const plugin =
-          catalog.entries.find((e) => e.service === service)?.plugin ??
-          catalog.dynamicPlugins.find((p) => p.service === service);
-        if (!plugin?.requiresCredential) continue;
-        const credService = plugin.credentialService ?? service;
-        let cred: Awaited<ReturnType<typeof ctx.credentials.get>>;
-        let probeReason: string | undefined;
-        try {
-          cred = await ctx.credentials.get(credService);
-        } catch (err) {
-          // A resolver may throw instead of returning null (e.g. a
-          // GitHubAuthError when the org has no installation). Treat that
-          // the same as "no credential connected" so one throwing probe
-          // can't abort discovery for every other service — but surface
-          // the resolver's own message: it names the actual fix (e.g.
-          // "App created but not installed — Install on GitHub").
-          cred = null;
-          probeReason = err instanceof Error ? err.message : String(err);
-        }
-        if (!cred) {
-          if (a.service === service) {
-            warnings.push({ service, reason: probeReason ?? "no credential connected" });
-          } else {
-            entries = entries.filter((e) => e.service !== service);
-            warnings.push({
-              service,
-              reason: `not connected — tools hidden. ${
-                probeReason ?? "Connect the integration in Settings, or list with service filter to inspect schemas."
-              }`,
-            });
-          }
-        }
-      }
-
-      if (query.hasInput) {
-        entries = rankSearchResults(query, entries, (entry) => actionFields(entry.action));
-      }
-
-      const tools = entries.slice(0, limit).map((e) => {
-        const toolId = qualifiedId(e);
-        const directTool = pinnedNames.get(toolId);
-        return {
-          service: e.service,
-          tool_id: toolId,
-          name: e.action.name,
-          description: e.action.description,
-          riskLevel: e.action.riskLevel,
-          params: e.action.parameters,
-          ...(directTool ? { direct_tool: directTool } : {}),
-        };
-      });
-
-      const total = entries.length;
+      const found = await searchCatalog(catalog, { ...a, includeSchemas: true }, ctx);
+      const tools = found.actions.map((action) => ({
+        service: action.service,
+        tool_id: action.toolId,
+        name: action.name,
+        description: action.description,
+        riskLevel: action.riskLevel,
+        params: action.parameters,
+        ...(pinnedNames.has(action.toolId) ? { direct_tool: pinnedNames.get(action.toolId) } : {}),
+      }));
       return {
         text: encodeToolOutput({
           tools,
-          total,
-          ...(total > limit ? { truncated: total - limit } : {}),
-          ...(warnings.length > 0 ? { warnings } : {}),
+          total: found.total,
+          ...(found.total > tools.length ? { truncated: found.total - tools.length } : {}),
+          ...(found.warnings.length > 0 ? { warnings: found.warnings } : {}),
         }),
       };
     },
@@ -1208,6 +1210,7 @@ async function executeAction(
   args: Record<string, unknown> | undefined,
   summary: string,
   ctx: ToolContext,
+  options?: InvokeActionOptions,
   audit?: { resolver: PolicyResolver; record: BaseAuditedRecord },
 ): Promise<InvokeActionResult> {
   // Validate (and apply schema defaults to) LLM-supplied params before they
@@ -1243,6 +1246,7 @@ async function executeAction(
   };
 
   const startedAt = Date.now();
+  await options?.claimExecution?.();
   try {
     const result = await entry.action.execute(
       prepared.args as Static<typeof entry.action.parameters>,

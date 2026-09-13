@@ -229,3 +229,47 @@ An authenticated MCP tool attempt inserts an organization-scoped pending row
 before dispatch and strictly updates its outcome. Unknown tools and invalid
 arguments are error rows. Audit failures fail MCP calls closed; internal writes
 stay best-effort. Filters redact memory content and all unvalidated arguments.
+## MCP call safety (TKAI-457)
+
+External `call_tool` uses one canonical `action_invocations` row. Its primary
+key binds the OAuth user to the client invocation ID. A key-sorted binding
+hash covers the public orchestrator ID, optional thread ID, fully qualified
+action ID, and raw client parameters. A mismatched reuse fails before policy,
+credential, dynamic provider, or action access.
+
+The state machine is `created -> pending_approval -> executing ->
+completed|denied|failed|indeterminate`. Deterministic request, schema, reserved
+action, and policy outcomes become terminal. Infrastructure failures before the
+execution claim keep the row re-drivable. Their response tells the client to
+retry with the same invocation ID. Only a compare-and-set from `created` or
+`pending_approval` can claim `executing`. No retry can claim an `executing` row.
+
+The engine calls the claim hook after dynamic action resolution, policy,
+approval, and parameter validation. It calls the hook immediately before
+`action.execute`. Dynamic action resolution can read credentials and remote
+tool metadata before the claim. This read-only exception cannot perform the
+selected action's side effect. Credential reads and provider calls made by
+the selected action occur after the claim.
+
+An `executing` row means the provider might have started. A concurrent or
+later retry returns `in_progress_or_interrupted` and reconciliation guidance.
+Valet does not use a lease or timeout to execute it again. An operator can
+mark an abandoned row `indeterminate` after investigation.
+
+If the provider throws after the claim, Valet records `indeterminate` unless
+the action contract proves that no external effect occurred. A structured
+`success: false` response is a definitive provider result, so Valet records
+`failed` with its bounded result. A missing credential also records `failed`
+because credential lookup proves that the selected action had no provider
+effect. If the process dies after provider success but before terminal
+persistence, the row remains `executing`. The caller must inspect the provider
+or ask an operator to reconcile it. This contract prevents repeated side
+effects. It does not promise provider-independent exactly-once completion or
+recovery of a lost provider result.
+
+Approval uses a deterministic durable `DecisionGate` with the canonical row
+key as its queue item identity. Pending approval does not execute the action.
+A same-ID retry reads the stored gate. Approval permits one execution claim.
+Denial and expiry become replayable terminal denials. Canonical parameters and
+results use the existing audit JSON cap, so durable replay envelopes remain bounded.
+The action-log reader exposes the public orchestrator and client invocation IDs.

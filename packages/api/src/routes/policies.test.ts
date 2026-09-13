@@ -661,6 +661,23 @@ describe("GET /api/org/action-log — keyset pagination", () => {
     expect(body.entries.map((e) => e.invocationId)).toContain("inv_pending");
   });
 
+  it("exposes canonical MCP invocation identity and state", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(actionInvocations).values({
+      invocationId: "mcp:call:visible", createdAt: 4_100_000, updatedAt: 4_100_001,
+      source: "mcp_call_tool", clientInvocationId: "client-visible", orchestratorId: "asst_visible",
+      threadId: "thread-visible", service: "demo", actionId: "demo.deploy", status: "executing",
+      sessionId: "assistant:asst_visible", userId: "local-user", orgId: "local-org",
+    });
+    const res = await fetch(`${api.baseUrl}/api/org/action-log?status=executing`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListActionLogResponse;
+    expect(body.entries).toEqual([expect.objectContaining({
+      source: "mcp_call_tool", clientInvocationId: "client-visible", orchestratorId: "asst_visible",
+      threadId: "thread-visible", status: "executing", updatedAt: 4_100_001,
+    })]);
+  });
+
   it("invalid status value returns 400", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/action-log?status=invalid_status`, { headers: HEADERS });

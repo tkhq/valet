@@ -229,3 +229,24 @@ arguments, never a skill body.
 as `asst_...`. It is not the assistant session address. A normal session ID
 never resolves through this MCP contract. The host uses one plugin filtering
 path for initial orchestrator assembly, skill refresh, and MCP reads.
+## Governed MCP tool catalog (TKAI-457)
+
+The authenticated `/mcp` mount exposes `list_tools` and `call_tool`. It does
+not register plugin actions as top-level MCP tools. The public
+`orchestratorId` is the assistant row ID and starts with `asst_`. The server
+uses the assistant's internal session ID only for runtime and gate storage.
+
+`list_tools` uses the orchestrator's production entitlement, availability,
+connection, and behavior filters. Its default response omits parameter
+schemas. A request for one action returns that action's authoritative schema.
+Service and query filters narrow static and dynamic actions.
+
+`call_tool` derives the actor only from the verified OAuth token. It rejects
+native controls, recursive catalog calls, memory controls, thread controls,
+and skill controls. An optional thread must belong to the selected assistant.
+Missing, archived, inaccessible, and wrong-thread targets return the same
+unavailable error.
+
+The response is stateless JSON. It always includes the client invocation ID,
+a bounded status, and a corrective action. It never returns an internal
+session ID or decision gate ID.

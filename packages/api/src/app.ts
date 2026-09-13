@@ -24,6 +24,7 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth 
 import { mcpHandler, validateMcpToolConfiguration, type McpAuditStore } from "./auth/mcp.js";
 import { MemoryMcpPort } from "./services/memory-mcp-port.js";
 import { SkillMcpPort } from "./services/skill-mcp-port.js";
+import { ToolMcpPort } from "./services/tool-mcp-port.js";
 import type { AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
 import { VALET_VERSION } from "./version.js";
@@ -167,9 +168,15 @@ export function createApp(
 ): CreatedApp {
   const app = new Hono<AppEnv>();
   const { auth, authConfig } = authWiring;
-  const mcpPortFactories = new Map<string, (userId: string) => McpToolPort>([
+  const mcpPortFactories = new Map<string, (userId: string, sourceIp: string) => McpToolPort>([
     ["memory", (userId: string) => new MemoryMcpPort(providers.db, userId)],
-    ["valet", (userId: string) => new SkillMcpPort(providers.db, providers.engineHost, userId)],
+    ["valet", (userId: string, sourceIp: string) => {
+      const skills = new SkillMcpPort(providers.db, providers.engineHost, userId);
+      const tools = new ToolMcpPort(providers.db, providers.engineStore, providers.engineHost, userId, sourceIp);
+      return { call: (operation, args) => operation === "list_skills" || operation === "skill"
+        ? skills.call(operation, args)
+        : tools.call(operation, args) };
+    }],
   ]);
   validateMcpToolConfiguration(providers.plugins, new Set(mcpPortFactories.keys()));
 
@@ -304,7 +311,7 @@ export function createApp(
       auth,
       db: providers.db,
       plugins: providers.plugins,
-      portForPlugin: (pluginName, userId) => mcpPortFactories.get(pluginName)?.(userId),
+      portForPlugin: (pluginName, userId, sourceIp) => mcpPortFactories.get(pluginName)?.(userId, sourceIp),
       listSessions: async (userId) => {
         const rows = await listStandaloneSessions(providers.db, userId);
         return rows.map((r) => ({ id: r.id, title: r.title, status: r.status }));

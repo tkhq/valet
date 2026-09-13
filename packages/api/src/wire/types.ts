@@ -4752,7 +4752,7 @@ export interface PreviewOrgPolicyResponse {
   };
 }
 
-export type ActionInvocationStatusWire = "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed" | "cancelled" | "timeout";
+export type ActionInvocationStatusWire = "pending" | "allowed" | "denied" | "approved" | "rejected" | "error" | "completed" | "cancelled" | "timeout" | "created" | "pending_approval" | "executing" | "failed" | "indeterminate";
 
 export interface ActionLogEntryWire {
   invocationId: string;
@@ -4770,6 +4770,11 @@ export interface ActionLogEntryWire {
   status: ActionInvocationStatusWire | null;
   sessionId: string | null;
   workflowExecutionId: string | null;
+  source: string | null;
+  clientInvocationId: string | null;
+  orchestratorId: string | null;
+  threadId: string | null;
+  updatedAt: number | null;
   userId: string | null;
   params: unknown;
   paramsTruncated: boolean | null;
