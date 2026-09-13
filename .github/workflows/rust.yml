@@ -11,6 +11,7 @@ on:
       - "crates/**"
       - "packages/api/src/authorization/evaluators/wasm/**"
       - "scripts/build-policy-wasm.sh"
+      - "scripts/strip-wasm-custom-sections.mjs"
       - "scripts/verify-policy-wasm.mjs"
       - ".github/workflows/rust.yml"
   # Do not filter by base branch. Stacked PRs target feature branches.
@@ -23,6 +24,7 @@ on:
       - "crates/**"
       - "packages/api/src/authorization/evaluators/wasm/**"
       - "scripts/build-policy-wasm.sh"
+      - "scripts/strip-wasm-custom-sections.mjs"
       - "scripts/verify-policy-wasm.mjs"
       - ".github/workflows/rust.yml"
 

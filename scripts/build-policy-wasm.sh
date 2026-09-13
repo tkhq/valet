@@ -18,4 +18,6 @@ wasm-bindgen --target nodejs --out-dir "$out" \
   "$root/target/wasm32-unknown-unknown/release/valet_policy_engine_wasm.wasm"
 mv "$out/valet_policy_engine_wasm.js" "$out/valet_policy_engine_wasm.cjs"
 rm "$out"/*.d.ts
+node "$root/scripts/strip-wasm-custom-sections.mjs" \
+  "$out/valet_policy_engine_wasm_bg.wasm"
 node "$root/scripts/verify-policy-wasm.mjs"
