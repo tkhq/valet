@@ -74,4 +74,3 @@ function file(path: string, mediaType: string, bytes: string) {
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
-
