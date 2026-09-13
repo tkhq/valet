@@ -13,6 +13,7 @@ enum Token {
     RightBrace,
     LeftBracket,
     RightBracket,
+    StringKey(String),
     Newline,
     Other,
 }
@@ -60,7 +61,6 @@ pub(crate) fn analyze(
             Token::Name(name) => {
                 let line_start = at_line_start(&tokens, index);
                 let (path, next) = name_path(&tokens, index);
-                max_reference_depth = max_reference_depth.max(path.split('.').count());
 
                 if nesting_depth == 0 && line_start && name == "package" {
                     let (value, after) = name_path(&tokens, index.saturating_add(1));
@@ -85,14 +85,12 @@ pub(crate) fn analyze(
                     continue;
                 }
 
-                let call_end = skip_newlines(&tokens, next);
-                if let Some(after_bracket) = bracket_end(&tokens, call_end) {
-                    let after_bracket = skip_newlines(&tokens, after_bracket);
-                    if matches!(tokens.get(after_bracket), Some(Token::LeftParen)) {
-                        return Err(EngineError::UnsupportedCallableSyntax(path));
-                    }
-                }
+                let (path, call_end, bracketed) = callable_path(&tokens, path, next);
+                max_reference_depth = max_reference_depth.max(path.split('.').count());
                 let followed_by_paren = matches!(tokens.get(call_end), Some(Token::LeftParen));
+                if bracketed && followed_by_paren {
+                    return Err(EngineError::UnsupportedCallableSyntax(path));
+                }
                 let declaration = nesting_depth == 0 && line_start && followed_by_paren;
                 if declaration {
                     declared_functions.insert(path);
@@ -212,10 +210,55 @@ fn skip_newlines(tokens: &[Token], mut index: usize) -> usize {
     index
 }
 
-fn bracket_end(tokens: &[Token], start: usize) -> Option<usize> {
-    if !matches!(tokens.get(start), Some(Token::LeftBracket)) {
-        return None;
+fn callable_path(tokens: &[Token], mut path: String, mut index: usize) -> (String, usize, bool) {
+    let mut bracketed = false;
+    loop {
+        let after_trivia = skip_newlines(tokens, index);
+        match tokens.get(after_trivia) {
+            Some(Token::Dot) => {
+                let Some(Token::Name(segment)) = tokens.get(after_trivia.saturating_add(1)) else {
+                    return (path, after_trivia, bracketed);
+                };
+                path.push('.');
+                path.push_str(segment);
+                index = after_trivia.saturating_add(2);
+            }
+            Some(Token::LeftBracket) => {
+                let content = skip_newlines(tokens, after_trivia.saturating_add(1));
+                let Some(Token::StringKey(segment)) = tokens.get(content) else {
+                    let end = dynamic_callable_end(tokens, after_trivia);
+                    return (path, end, true);
+                };
+                let end = skip_newlines(tokens, content.saturating_add(1));
+                if !matches!(tokens.get(end), Some(Token::RightBracket)) {
+                    return (path, end, true);
+                }
+                path.push('.');
+                path.push_str(segment);
+                bracketed = true;
+                index = end.saturating_add(1);
+            }
+            _ => return (path, after_trivia, bracketed),
+        }
     }
+}
+
+fn dynamic_callable_end(tokens: &[Token], start: usize) -> usize {
+    let mut index = bracket_end(tokens, start).unwrap_or(start);
+    loop {
+        match tokens.get(index) {
+            Some(Token::LeftBracket) => index = bracket_end(tokens, index).unwrap_or(index),
+            Some(Token::Dot)
+                if matches!(tokens.get(index.saturating_add(1)), Some(Token::Name(_))) =>
+            {
+                index = index.saturating_add(2);
+            }
+            _ => return index,
+        }
+    }
+}
+
+fn bracket_end(tokens: &[Token], start: usize) -> Option<usize> {
     let mut depth = 0_usize;
     for (index, token) in tokens.iter().enumerate().skip(start) {
         match token {
@@ -282,12 +325,19 @@ fn tokenize(source: &str) -> Vec<Token> {
                 }
             }
             '"' => {
+                let start = index;
                 index = skip_quoted(&chars, index.saturating_add(1), '"', true);
-                tokens.push(Token::Other);
+                let literal: String = chars[start..index.min(chars.len())].iter().collect();
+                match serde_json::from_str(&literal) {
+                    Ok(value) => tokens.push(Token::StringKey(value)),
+                    Err(_) => tokens.push(Token::Other),
+                }
             }
             '`' => {
-                index = skip_quoted(&chars, index.saturating_add(1), '`', false);
-                tokens.push(Token::Other);
+                let start = index.saturating_add(1);
+                index = skip_quoted(&chars, start, '`', false);
+                let end = index.saturating_sub(1).min(chars.len());
+                tokens.push(Token::StringKey(chars[start..end].iter().collect()));
             }
             '\n' => {
                 tokens.push(Token::Newline);

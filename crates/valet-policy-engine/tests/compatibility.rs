@@ -175,13 +175,19 @@ fn package_qualified_builtin_declarations_collide() {
 #[test]
 fn bracket_callable_syntax_fails_validation() {
     for (imports, call, path) in [
-        ("", "time[\"now_ns\"](1)", "time"),
-        ("", "data.time[\"now_ns\"](1)", "data.time"),
+        ("", "time[\"now_ns\"](1)", "time.now_ns"),
+        ("", "data.time[\"now_ns\"](1)", "data.time.now_ns"),
         (
             "import data.time as clock\n",
             "clock[\"now_ns\"](1)",
-            "clock",
+            "clock.now_ns",
         ),
+        (
+            "",
+            "azure[\"policy\"] # comment\n [\"fn\"]\n[\"add_days\"] (1, 2)",
+            "azure.policy.fn.add_days",
+        ),
+        ("", "azure[input.key](1)", "azure"),
     ] {
         let policy = format!(
             "package valet.authz\nimport rego.v1\n{imports}decision := {DECISION} if {call} == 0\n"
@@ -191,6 +197,30 @@ fn bracket_callable_syntax_fails_validation() {
             Err(EngineError::UnsupportedCallableSyntax(name)) if name == path
         ));
     }
+}
+
+#[test]
+fn numeric_index_before_a_new_parenthesized_statement_is_not_a_call() {
+    let policy = format!(
+        r#"
+package valet.authz
+import rego.v1
+decision := {DECISION} if {{
+    arr := [1]
+    v := arr[0]
+    (v + 1) == 2
+}}
+"#
+    );
+    let loaded = load(vec![module("numeric-index.rego", &policy)])
+        .expect("numeric indexing must not become a callable reference");
+    let result = evaluate_bundle(
+        &loaded,
+        &CanonicalJson::parse("{}").unwrap(),
+        EvaluationOptions::default(),
+    )
+    .expect("numeric indexing must evaluate");
+    assert_eq!(result.decision.effect, AuthorizationEffect::Allow);
 }
 
 #[test]
