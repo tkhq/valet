@@ -697,7 +697,7 @@ export class ChildWatcher {
       .limit(1);
     const title = appRows[0]?.title ?? undefined;
     const continuationCheckpoint =
-      result.outcome === "failed"
+      result.outcome === "failed" || result.outcome === "aborted"
         ? await this.latestContinuationCheckpoint(
             watch.childSessionId,
             childSession.thread().id,
@@ -735,9 +735,15 @@ export class ChildWatcher {
     childSessionId: string,
     childThreadId: string,
   ): Promise<CompactionEntry | undefined> {
-    const entries = await this.deps.engineStore.getEntries(childSessionId, childThreadId);
-    const thread = await this.deps.engineStore.getThread(childSessionId, childThreadId);
-    const activeEntries = walkTranscriptDag(entries, thread?.activeLeafEntryId);
+    const snapshot = await this.deps.engineStore.getThreadSnapshot(
+      childSessionId,
+      childThreadId,
+    );
+    if (!snapshot) return undefined;
+    const activeEntries = walkTranscriptDag(
+      snapshot.entries,
+      snapshot.thread.activeLeafEntryId,
+    );
     for (let index = activeEntries.length - 1; index >= 0; index--) {
       const entry = activeEntries[index];
       if (entry.type === "compaction") return entry;

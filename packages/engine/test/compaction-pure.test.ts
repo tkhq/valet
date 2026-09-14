@@ -11,12 +11,14 @@ import {
   extractFileContext,
   planPrune,
   selectCutPoint,
+  selectSummaryCheckpointTail,
   storedToolResultText,
   stripAnalysisScratchpad,
   tailBudget,
   turns,
   usableTokens,
   walkTranscriptDag,
+  type CompactionEntry,
   type MessageEntry,
   type SessionEntry,
 } from "../src/index.js";
@@ -185,12 +187,56 @@ describe("compaction: transcript DAG", () => {
     ).toEqual([oldUser.id, oldAssistant.id, continued.id]);
   });
 
+  it("keeps a legacy compaction and its chronological null-parent suffix", () => {
+    const e1 = user("e1", "covered request");
+    const e2 = assistant("e2", "covered answer");
+    const c1: CompactionEntry = {
+      id: "c1",
+      sessionId: "s",
+      threadId: "t",
+      parentId: e2.id,
+      type: "compaction",
+      summary: "LEGACY-SUMMARY",
+      coveredEntryIds: [e1.id, e2.id],
+      tokenCountBefore: 20,
+      tokenCountAfter: 5,
+      createdAt: 3,
+    };
+    const inactive = user("inactive", "inactive linked branch");
+    inactive.parentId = e1.id;
+    const e3 = user("e3", "post-compaction instruction");
+    const e4 = assistant("e4", "post-compaction detail");
+
+    const active = walkTranscriptDag([e1, e2, c1, inactive, e3, e4], e4.id);
+    expect(active.map((entry) => entry.id)).toEqual([c1.id, e3.id, e4.id]);
+    const messages = entriesToAgentMessages(active, MODEL, { activeLeafEntryId: e4.id });
+    expect(JSON.stringify(messages)).toContain("LEGACY-SUMMARY");
+    expect(JSON.stringify(messages)).toContain("post-compaction instruction");
+    expect(JSON.stringify(messages)).not.toContain("inactive linked branch");
+  });
+
   it("rejects a broken active path instead of silently dropping context", () => {
     const leaf = assistant("leaf", "answer");
     leaf.parentId = "missing-parent";
     expect(() => walkTranscriptDag([leaf], leaf.id)).toThrow(
       "Transcript DAG is missing entry missing-parent.",
     );
+  });
+});
+
+describe("compaction: summary checkpoint tail", () => {
+  it("keeps the newest evidence within a bounded token suffix", () => {
+    const old = user("old-tail", "x".repeat(20_000));
+    const recent = user("recent-tail", "recent checkpoint evidence");
+    const latest = assistant("latest-tail", "latest state");
+    expect(
+      selectSummaryCheckpointTail([old, recent, latest], 100).map((entry) => entry.id),
+    ).toEqual([recent.id, latest.id]);
+  });
+
+  it("keeps the newest entry even when it alone exceeds the budget", () => {
+    const latest = user("large-latest", "x".repeat(20_000));
+    expect(selectSummaryCheckpointTail([latest], 100)).toEqual([latest]);
   });
 });
 

@@ -381,17 +381,27 @@ Transient provider failures show the provider, retry delay, and attempt count. T
 
 The transcript store is a DAG. Each new entry now points to the thread's active
 leaf. The thread serializes entry appends, so a command cannot race an agent
-message and create two accidental leaves. The reader follows parent links from
-the durable active leaf. It excludes entries from inactive branches. For old
-transcripts with null parents, the reader keeps the chronological root prefix.
-V1 had no branch controls, so insertion order is the durable path for those
-entries.
+message and create two accidental leaves. Only entry append operations can
+advance the durable leaf. A general thread settings save cannot rewind it.
+
+The store returns the thread row and entries as one coherent snapshot. The
+Postgres store locks the thread row before it reads entries. An append updates
+that row after it inserts entries, so the snapshot is wholly before or wholly
+after the append. The reader follows parent links from the snapshot's active
+leaf and excludes inactive branches.
+
+For old transcripts, the reader keeps the latest legacy compaction entry and
+the chronological null-parent suffix that follows it. Legacy compaction entries
+pointed to their covered head while later entries still had null parents. This
+rule preserves the checkpoint and post-compaction work without admitting linked
+inactive branches.
 
 Compaction now selects, prunes, and summarizes entries from the active path.
 The compaction entry points to the prior active leaf. Its `coveredEntryIds`
-contains the compacted path prefix. The summarizer also reads the bounded tail.
-This lets the persisted summary record the current task state and prior tool
-results.
+contains the compacted path prefix. The summarizer input has a 64,000-token
+limit. It includes up to 8,000 estimated tokens from the recent tail before it
+keeps the newest head entries that fit. Existing per-block limits still apply.
+This keeps current task evidence without resending the full active path.
 
 The summary has a `Continuation Checkpoint` section. It records the branch,
 commit, changed files, worktree status, last command, failure output, next
@@ -402,5 +412,6 @@ commands or enforce repository policy.
 A proactive compaction continues inside the same queue item. The engine appends
 the hidden continuation prompt to the active path, then runs the agent again.
 It does not admit a second queue item. The original submission settles only
-after this continuation ends. A child watcher therefore cannot report
+after this continuation ends. A stale fenced prompt append stops the
+continuation before another model call. A child watcher therefore cannot report
 `child.settled` at the compaction boundary.

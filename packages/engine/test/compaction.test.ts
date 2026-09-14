@@ -7,6 +7,7 @@ import {
   Engine,
   InMemoryEventStream,
   InMemorySessionStore,
+  StaleAttemptError,
   VirtualSandboxProvider,
   type BusEvent,
   type CompactionEntry,
@@ -456,6 +457,56 @@ describe("compaction: auto-continue", () => {
       ),
     ).toBe(true);
 
+    faux.unregister();
+  });
+
+  it("does not run continuation after its fenced prompt append goes stale", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-stale-continuation",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("implementation reached the boundary"),
+      fauxAssistantMessage(SUMMARY_RESPONSE),
+      fauxAssistantMessage("must not run"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1 },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "u-before-stale", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "start", createdAt: 1 },
+      { id: "a-before-stale", sessionId: session.id, threadId: thread.id, parentId: "u-before-stale", type: "message", role: "assistant", content: "working", createdAt: 2 },
+    ]);
+    const append = store.appendEntries.bind(store);
+    store.appendEntries = async (sessionId, threadId, entries, fence) => {
+      if (entries.some((entry) => entry.metadata?.compaction_continue === true)) {
+        throw new StaleAttemptError(fence?.itemId ?? "missing", fence?.attemptId ?? "missing");
+      }
+      await append(sessionId, threadId, entries, fence);
+    };
+
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+    await waitFor(() =>
+      events.some(
+        (event) =>
+          event.event.type === "error" &&
+          event.event.code === "stale_fence",
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(faux.getPendingResponseCount()).toBe(1);
+    expect(
+      (await store.getEntries(session.id, thread.id)).some(
+        (entry) => entry.type === "message" && entry.content === "must not run",
+      ),
+    ).toBe(false);
     faux.unregister();
   });
 
@@ -1127,6 +1178,50 @@ describe("compaction: proactive trigger rehydration (restart)", () => {
     // it simply had nothing to do — the flag is only armed with a follow-up).
     const unsettled = await store.listUnsettledSubmissions(session1.id);
     expect(unsettled.filter((i) => i.metadata?.compaction_continue)).toHaveLength(0);
+    faux.unregister();
+  });
+
+  it("restores a legacy compaction with its null-parent suffix", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-legacy-restore",
+      models: [{ id: "large", name: "large", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const engine1 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const options = {
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("large")!,
+    };
+    const session1 = await engine1.createSession(options);
+    const thread = session1.thread();
+    await store.appendEntries(session1.id, thread.id, [
+      { id: "e1", sessionId: session1.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "covered request", createdAt: 1 },
+      { id: "e2", sessionId: session1.id, threadId: thread.id, parentId: null, type: "message", role: "assistant", content: "covered answer", createdAt: 2 },
+      { id: "c1", sessionId: session1.id, threadId: thread.id, parentId: "e2", type: "compaction", summary: "LEGACY-SUMMARY", coveredEntryIds: ["e1", "e2"], tokenCountBefore: 20, tokenCountAfter: 5, createdAt: 3 },
+      { id: "e3", sessionId: session1.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "POST-COMPACTION-INSTRUCTION", createdAt: 4 },
+      { id: "e4", sessionId: session1.id, threadId: thread.id, parentId: null, type: "message", role: "assistant", content: "post-compaction detail", createdAt: 5 },
+    ]);
+    faux.setResponses([
+      (context) => {
+        const rendered = JSON.stringify(context.messages);
+        expect(rendered).toContain("LEGACY-SUMMARY");
+        expect(rendered).toContain("POST-COMPACTION-INSTRUCTION");
+        return fauxAssistantMessage("continued after restore");
+      },
+    ]);
+
+    const engine2 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const restored = await engine2.restoreSession({ sessionId: session1.id, options });
+    const receipt = await restored.prompt("continue");
+    expect(await restored.thread().awaitResult(receipt.queueItemId)).toMatchObject({
+      outcome: "completed",
+      text: "continued after restore",
+    });
     faux.unregister();
   });
 
