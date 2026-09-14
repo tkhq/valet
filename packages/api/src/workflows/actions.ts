@@ -149,17 +149,47 @@ export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
   if (typeof userId !== "string" || userId.length === 0) return null;
   if (typeof orgId !== "string" || orgId.length === 0) return null;
-  const owner: WorkflowOwner = { userId: ctx.actor?.id ?? userId, orgId };
-  if (ctx.owner?.type === "team") {
-    owner.principal = { type: "team", id: ctx.owner.id };
+  const actorUserId = ctx.actor?.id ?? userId;
+  const principal = ctx.owner;
+  if (principal?.type === "user") {
+    if (principal.id !== actorUserId) return null;
+    return { userId: actorUserId, orgId, principal: { type: "user", id: principal.id } };
   }
-  return owner;
+  if (principal?.type === "team") {
+    return {
+      userId: actorUserId,
+      orgId,
+      principal: { type: "team", id: principal.id },
+      requireTeamMembership: ctx.sessionPurpose !== "workflow",
+    };
+  }
+  return { userId: actorUserId, orgId };
 }
 
 const NO_OWNER: PluginActionResult = {
   success: false,
   error: "no authenticated principal in tool context",
 };
+
+/** Return an origin only for a direct call from the effective owner's active assistant. */
+async function workflowOriginFromContext(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  ctx: PluginActionContext,
+) {
+  if (!ctx.sessionId || !ctx.threadId) return undefined;
+  const [assistant] = await deps.db.select().from(assistants)
+    .where(and(eq(assistants.sessionId, ctx.sessionId), eq(assistants.orgId, owner.orgId)))
+    .limit(1);
+  const effectiveOwner = owner.principal?.type === "team"
+    ? owner.principal
+    : { type: "user" as const, id: owner.userId };
+  if (!assistant || assistant.archivedAt !== null ||
+      assistant.ownerType !== effectiveOwner.type || assistant.ownerId !== effectiveOwner.id) {
+    return undefined;
+  }
+  return { assistantSessionId: assistant.sessionId, threadId: ctx.threadId };
+}
 
 /**
  * Curried action builder (same shape as plugin-github's): the first call
@@ -220,7 +250,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const listWorkflows = action(Type.Object({}))({
     id: "workflows.list_workflows",
     name: "List workflows",
-    description: "List the user's workflow definitions (id, name, timestamps).",
+    description: "List the assistant owner's workflow definitions (id, name, timestamps).",
     riskLevel: "low",
     execute: async (_args, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -271,7 +301,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     id: "workflows.save_workflow",
     name: "Save workflow",
     description:
-      "Create a workflow (omit workflow_id) or update one (pass workflow_id). " +
+      "Create a workflow for the assistant owner (omit workflow_id) or update one (pass workflow_id). " +
       "`definition` MUST be a dag/v1 object: { version: 'dag/v1', nodes: [...], edges: [...] } " +
       "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
@@ -322,7 +352,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const created = await createWorkflowDefinition(getDeps(), owner, {
         name: name ?? "Untitled workflow",
         definition: routedDefinition,
-        ...(ctx.owner?.type === "team" ? { teamId: ctx.owner.id, skipMembershipCheck: true } : {}),
+        ...(owner.principal?.type === "team" ? { teamId: owner.principal.id } : {}),
       });
       return {
         success: true,
@@ -346,7 +376,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const started = await startWorkflowRun(getDeps(), owner, workflow_id, input);
+      const deps = getDeps();
+      const origin = await workflowOriginFromContext(deps, owner, ctx);
+      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
         return {
@@ -935,7 +967,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await createWorkflowSchedule(
         armDepsFrom(getDeps()),
         owner,
-        { workflowId: workflow_id, prompt, name, cron, timezone, input },
+        {
+          workflowId: workflow_id,
+          prompt,
+          name,
+          cron,
+          timezone,
+          input,
+          teamId: owner.principal?.type === "team" ? owner.principal.id : undefined,
+        },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.schedule };

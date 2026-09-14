@@ -10,6 +10,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
+import type { WorkflowRunOrigin } from "@valet/workflow";
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage } from "@valet/engine/test-helpers";
@@ -28,7 +29,12 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<void> {
+async function seedRun(
+  a: TestApi,
+  runId: string,
+  workflowId: string,
+  origin?: WorkflowRunOrigin,
+): Promise<void> {
   const { db, workflowStore } = a.providers;
   const now = Date.now();
   await db
@@ -45,7 +51,7 @@ async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<v
     });
   await workflowStore.createRun(
     runId,
-    { workflowId, definitionVersionId: "v1" },
+    { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}) },
     { version: "dag/v1", nodes: [], edges: [] },
     "v1",
     { ownerType: "user", ownerId: LOCAL_USER.id },
@@ -319,6 +325,110 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       attributes: { runId: "wfrun_orch_unit" },
       tagName: "signal",
     });
+  });
+
+  it("routes a team-owned run to the team's default assistant", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, {
+      orgId: LOCAL_ORG.id,
+      name: "orchestrator-routing-team",
+      creatorUserId: LOCAL_USER.id,
+    });
+    const workflowId = "wf_orch_team";
+    const runId = "wfrun_orch_team";
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      orgId: LOCAL_ORG.id,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "team-orchestrator-routing",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id },
+    );
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+
+    const receipt = await deps.promptOrchestrator("review team work", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: team.id },
+    });
+
+    const teamDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "team", id: team.id });
+    const personalDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
+    expect(receipt.sessionId).toBe(teamDefault.sessionId);
+    expect(receipt.sessionId).not.toBe(personalDefault.sessionId);
+  });
+
+  it("reuses the exact assistant thread recorded as the run origin", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: LOCAL_USER.id });
+    const session = await engineHost.assistantSessionFor(
+      assistant.id,
+      { actorUserId: LOCAL_USER.id, orgId: "local-org" },
+      { sessionId: assistant.sessionId },
+    );
+    const originThread = await session.createThread("web:origin");
+    const runId = "wfrun_orch_origin";
+    await seedRun(api, runId, "wf_orch_origin", {
+      assistantSessionId: assistant.sessionId,
+      threadId: originThread.id,
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+
+    const receipt = await deps.promptOrchestrator("continue here", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    expect(receipt).toMatchObject({ sessionId: assistant.sessionId, threadId: originThread.id });
+  });
+
+  it("rejects a missing durable origin thread without creating a replacement", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: LOCAL_USER.id });
+    const session = await engineHost.assistantSessionFor(
+      assistant.id,
+      { actorUserId: LOCAL_USER.id, orgId: "local-org" },
+      { sessionId: assistant.sessionId },
+    );
+    const before = session.listThreads().length;
+    const runId = "wfrun_orch_missing_origin";
+    await seedRun(api, runId, "wf_orch_missing_origin", {
+      assistantSessionId: assistant.sessionId,
+      threadId: "th-missing-origin",
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+
+    await expect(deps.promptOrchestrator("continue here", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    })).rejects.toThrow("origin thread");
+    expect(session.listThreads()).toHaveLength(before);
   });
 
   it("is idempotent by dispatchId: a duplicate dispatch returns the original receipt", async () => {

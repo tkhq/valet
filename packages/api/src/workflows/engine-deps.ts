@@ -61,8 +61,10 @@ import type {
   WorkflowPromptOrchestratorOptions,
   WorkflowPromptOrchestratorResult,
   WorkflowPromptReceipt,
+  WorkflowRunOrigin,
   WorkflowStore,
 } from "@valet/workflow";
+import { isTeamMember } from "../services/teams.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
@@ -168,6 +170,7 @@ interface RunContext {
   actorUserId: string;
   owner: Principal;
   assistantId?: string;
+  origin?: WorkflowRunOrigin;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -193,7 +196,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   }
 
   return { workflowId: run.params.workflowId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
-    assistantId: workflowAssistantId(run.definition) };
+    assistantId: workflowAssistantId(run.definition), origin: run.params.origin };
 }
 
 /**
@@ -449,9 +452,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
      * `thread.submitPrompt` calls already have for the `session` node), so
      * it submits directly rather than waiting on that extension.
      *
-     * Reuse one thread per workflow definition within the selected assistant.
-     * Run-specific dispatch IDs and receipts keep submissions independent.
-     * Existing per-run threads remain readable; new runs do not add threads.
+     * Explicit assistant origins reuse their exact durable session and thread.
+     * Other runs reuse one thread per workflow definition. Old per-run receipts
+     * remain valid. A missing origin thread must not create a replacement.
      */
     async promptOrchestrator(
       promptText: string,
@@ -466,26 +469,46 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       }
       const ctx = await resolveRunContext(opts, runId);
 
-      // Explicit routing comes from the run snapshot. Older workflows use
-      // the owner's default assistant. No `agent_sessions` app row is written
-      // here: like the `wf:` sessions above, a workflow-woken session is
-      // owned by the run, and the app row is backfilled the first time a
-      // human opens the assistant (`POST /api/teams/:id/orchestrator`).
-      const assistant = ctx.assistantId
-        ? await loadAssistant(opts.db, ctx.assistantId)
-        : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
-      if (!assistant || assistant.orgId !== ctx.orgId || assistant.ownerType !== principal.type || assistant.ownerId !== principal.id) {
+      // An explicit conversation origin takes precedence over definition
+      // routing. Older and unattended runs keep the snapshot/default route.
+      const originAssistantId = ctx.origin
+        ? parseAssistantSessionId(ctx.origin.assistantSessionId)
+        : null;
+      if (ctx.origin && !originAssistantId) {
+        throw new Error(`workflow engine-deps: invalid origin assistant session: ${ctx.origin.assistantSessionId}`);
+      }
+      const assistant = originAssistantId
+        ? await loadAssistant(opts.db, originAssistantId)
+        : ctx.assistantId
+          ? await loadAssistant(opts.db, ctx.assistantId)
+          : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+      const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
+      const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
+      if (!assistant || assistant.orgId !== ctx.orgId ||
+          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor)) ||
+          (ctx.origin && assistant.sessionId !== ctx.origin.assistantSessionId)) {
         throw new Error("Workflow orchestrator is unavailable. Select an orchestrator owned by this workflow's workspace.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
+      if (ctx.origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
+          !(await isTeamMember(opts.db, principal.id, ctx.actorUserId))) {
+        throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
+      }
       const session = await opts.host.assistantSessionFor(
         assistant.id,
         { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
         { sessionId: assistant.sessionId },
       );
-      // Preserve receipts for runs admitted before the thread-key change.
-      const thread = await session.threadByKey(`signal:workflow:${runId}`)
-        ?? session.thread(`signal:workflow:definition:${ctx.workflowId}`);
+      const thread = ctx.origin
+        ? session.threadById(ctx.origin.threadId)
+        : await session.threadByKey(`signal:workflow:${runId}`)
+          ?? session.thread(`signal:workflow:definition:${ctx.workflowId}`);
+      if (!thread) {
+        throw new Error(
+          `Workflow origin thread ${ctx.origin?.threadId} is missing from session ${session.id}. ` +
+            "Start a new run from an active assistant thread.",
+        );
+      }
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
       // string-valued by contract (`SignalContent`), and nothing set it

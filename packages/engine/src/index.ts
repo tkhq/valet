@@ -269,6 +269,7 @@ export {
   entriesToAgentMessages,
   skillInvocationsInContext,
   buildSpilledInputMarker,
+  formatTransientRetryMessage,
   resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";

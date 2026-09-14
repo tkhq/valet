@@ -13,10 +13,12 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { setApprovedModels } from "../services/approved-models.js";
+import { resolveDefaultAssistant } from "../assistants/service.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import {
   actionInvocations,
+  assistants,
   actionPolicies,
   orgs,
   runtimeGrants,
@@ -865,6 +867,18 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     const stub = new StubRunHost();
     api = await bootTestApi({ workflowRunHost: stub });
     const created = await createWorkflow(api.baseUrl);
+    const assistant = await resolveDefaultAssistant(
+      api.providers.db,
+      "local-org",
+      { type: "user", id: "local-user" },
+    );
+    const session = await api.providers.engineHost.assistantSessionFor(
+      assistant.id,
+      { actorUserId: "local-user", orgId: "local-org" },
+      { sessionId: assistant.sessionId },
+    );
+    const thread = await session.createThread("web:retry-origin");
+    const origin = { assistantSessionId: assistant.sessionId, threadId: thread.id };
 
     const runId = "wfrun_retry_me";
     await api.providers.workflowStore.createRun(
@@ -878,6 +892,7 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
           data: { foo: "bar" },
           metadata: {},
         },
+        origin,
       },
       created.definition,
       "v1",
@@ -900,6 +915,22 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     // The retry's trigger payload must carry the original run's input data.
     const params = startedRetry?.params as { input?: { data?: unknown } };
     expect(params.input?.data).toEqual({ foo: "bar" });
+    expect((startedRetry?.params as { origin?: unknown }).origin).toEqual(origin);
+
+    const staleRunId = "wfrun_retry_stale_origin";
+    await api.providers.workflowStore.createRun(
+      staleRunId,
+      { workflowId: created.id, definitionVersionId: "v1", input: { type: "manual", data: {} }, origin },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await api.providers.workflowStore.settleRun(staleRunId, "failed");
+    await api.providers.db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, assistant.id));
+    const staleRetry = await fetch(`${api.baseUrl}/api/workflows/runs/${staleRunId}/retry`, { method: "POST" });
+    expect(staleRetry.status).toBe(201);
+    const { runId: staleRetryId } = await staleRetry.json() as RetryWorkflowRunResponse;
+    expect(stub.started.find((item) => item.runId === staleRetryId)?.params).not.toHaveProperty("origin");
 
     // A completed run is not retryable.
     const completedId = "wfrun_completed";

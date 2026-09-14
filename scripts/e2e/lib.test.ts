@@ -117,7 +117,7 @@ describe("partitionWaves", () => {
     // Steps that write files other steps read run alone, first: typecheck
     // (tsc --build re-emits shared/sdk dist) and registry-drift (temporarily
     // rewrites a tracked source file).
-    expect(waves.pre.map((s) => s.id)).toEqual(["typecheck", "registry-drift"]);
+    expect(waves.pre.map((s) => s.id)).toEqual(["typecheck", "web-build", "api-bundle", "registry-drift"]);
     // Every parallel step is static-group and flagged parallelSafe.
     for (const s of waves.parallel) {
       expect(s.group, s.id).toBe("static");
@@ -125,7 +125,8 @@ describe("partitionWaves", () => {
     }
     expect(waves.parallel.map((s) => s.id)).toContain("unit");
     expect(waves.parallel.map((s) => s.id)).toContain("plugins-unit");
-    expect(waves.parallel.map((s) => s.id)).toContain("web-build");
+    expect(waves.parallel.map((s) => s.id)).not.toContain("web-build");
+    expect(waves.parallel.map((s) => s.id)).not.toContain("api-bundle");
     // Everything with daemons, ports, keys, or clusters stays serial, in
     // table order.
     const serialIds = waves.serial.map((s) => s.id);
