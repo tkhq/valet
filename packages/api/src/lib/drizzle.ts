@@ -220,6 +220,11 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "session_threads.last_user_activity_at column",
+    probe: { kind: "column", table: "session_threads", column: "last_user_activity_at" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "last_user_activity_at" bigint',
+  },
+  {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
     sql: 'ALTER TABLE "session_repos" ADD COLUMN IF NOT EXISTS "resolved_ref" text',

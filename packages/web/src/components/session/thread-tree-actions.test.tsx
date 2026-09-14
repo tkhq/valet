@@ -110,6 +110,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     sessionId: "orchestrator:user-1",
     title: "Plan the launch",
     createdAt: Date.now(),
+    lastUserActivityAt: Date.now(),
     ...overrides,
   };
 }
@@ -533,5 +534,34 @@ describe("ThreadTree — thread rename", () => {
     renderTree();
     await user.click(screen.getByRole("button", { name: /thread menu/i }));
     expect(screen.getByRole("menuitem", { name: /rename thread/i })).toBeTruthy();
+  });
+});
+
+describe("ThreadTree — sort preference", () => {
+  it("uses Last user activity by default and persists Created", async () => {
+    const user = userEvent.setup();
+    threads = [
+      thread({ id: "newer", title: "Newer", createdAt: 2_000, lastUserActivityAt: 2_000 }),
+      thread({ id: "older", title: "Older", createdAt: 1_000, lastUserActivityAt: 3_000 }),
+    ];
+    const view = renderTree();
+
+    const older = screen.getByText("Older");
+    const newer = screen.getByText("Newer");
+    expect(older.compareDocumentPosition(newer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "Sort threads" }));
+    expect(screen.getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual([
+      "Last user activity",
+      "Created",
+    ]);
+    await user.click(screen.getByRole("menuitemradio", { name: "Created" }));
+    expect(window.localStorage.getItem("valet:thread-sort")).toBe("created");
+    view.unmount();
+
+    renderTree();
+    const restoredNewer = screen.getByText("Newer");
+    const restoredOlder = screen.getByText("Older");
+    expect(restoredNewer.compareDocumentPosition(restoredOlder) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 });

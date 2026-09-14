@@ -6,6 +6,7 @@
  * `?archived=1`, and comes back on unarchive. The engine thread is
  * untouched — no Anthropic key needed, virtual sandbox only.
  */
+import { sql } from "drizzle-orm";
 import { describe, it, expect } from "vitest";
 import { bootTestApi } from "./_setup.js";
 import type {
@@ -116,6 +117,64 @@ describe("api integration: thread archive", () => {
         },
       );
       expect(patch.status).toBe(400);
+    } finally {
+      await api.cleanup();
+    }
+  }, 30_000);
+});
+
+describe("api integration: thread user activity", () => {
+  it("derives thread activity from user submissions, not agent session activity", async () => {
+    const api = await bootTestApi();
+    try {
+      const created = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace: "/tmp" }),
+      });
+      const { id: sessionId } = (await created.json()) as CreateSessionResponse;
+      const initial = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads`)
+      ).json()) as ListThreadsResponse;
+      const threadA = initial.threads[0]!;
+
+      const createdThread = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const threadB = (await createdThread.json()) as CreateThreadResponse;
+
+      // Agent activity updates the session record, but cannot change a
+      // thread's user-activity timestamp.
+      await api.providers.db.execute(
+        sql`UPDATE agent_sessions SET last_activity_at = ${threadB.createdAt + 10_000} WHERE id = ${sessionId}`,
+      );
+      const afterAgentActivity = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads`)
+      ).json()) as ListThreadsResponse;
+      expect(afterAgentActivity.threads.find((t) => t.id === threadA.id)?.lastUserActivityAt).toBe(
+        threadA.createdAt,
+      );
+      expect(afterAgentActivity.threads.find((t) => t.id === threadB.id)?.lastUserActivityAt).toBe(
+        threadB.createdAt,
+      );
+
+      const sent = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threadId: threadB.id, text: "Sort this thread first." }),
+      });
+      expect(sent.status).toBe(202);
+      const afterUserMessage = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads`)
+      ).json()) as ListThreadsResponse;
+      expect(afterUserMessage.threads.find((t) => t.id === threadB.id)?.lastUserActivityAt).toBeGreaterThanOrEqual(
+        threadB.createdAt,
+      );
+      expect(afterUserMessage.threads.find((t) => t.id === threadA.id)?.lastUserActivityAt).toBe(
+        threadA.createdAt,
+      );
     } finally {
       await api.cleanup();
     }

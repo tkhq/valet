@@ -426,6 +426,8 @@ export const sessionThreads = pgTable(
     sessionId: text("session_id").notNull(),
     title: text("title"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Most recent user action on this thread. Agent events never update it.
+    lastUserActivityAt: bigint("last_user_activity_at", { mode: "number" }),
     // Display-state only: an archived thread leaves the default sidebar
     // list. The engine thread and its history are untouched.
     archivedAt: bigint("archived_at", { mode: "number" }),
