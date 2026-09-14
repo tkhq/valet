@@ -391,8 +391,9 @@ Compaction now selects, prunes, and summarizes entries from the active path.
 The compaction entry points to the prior active leaf. Its `coveredEntryIds`
 contains the compacted path prefix. The summarizer input has a 64,000-token
 limit. It includes up to 8,000 estimated tokens from the recent tail before it
-keeps the newest head entries that fit. Existing per-block limits still apply.
-This keeps current task evidence without resending the full active path.
+keeps the newest head entries that fit. If the cap cuts into a turn, the
+summarizer starts at the next user entry. Existing per-block limits still
+apply. This keeps current task evidence without resending the full active path.
 
 The summary has a `Continuation Checkpoint` section. It records the branch,
 commit, changed files, worktree status, last command, failure output, next
