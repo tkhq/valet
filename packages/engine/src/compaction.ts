@@ -269,7 +269,7 @@ export function walkTranscriptDag(
   return [...legacyPrefix, ...path];
 }
 
-/** Keep a recent suffix for checkpoint evidence without resending the full tail. */
+/** Keep a bounded, user-first suffix for checkpoint evidence. */
 export function selectSummaryCheckpointTail(
   entries: readonly SessionEntry[],
   maxTokens: number,
@@ -282,7 +282,17 @@ export function selectSummaryCheckpointTail(
     start--;
     tokens += next;
   }
-  return entries.slice(start);
+  const suffix = entries.slice(start);
+  const firstMessage = suffix.findIndex((entry) => entry.type === "message");
+  const firstEntry = suffix[firstMessage];
+  if (!firstEntry || firstEntry.type !== "message" || firstEntry.role === "user") {
+    return suffix;
+  }
+  const nextUser = suffix.findIndex(
+    (entry, index) =>
+      index > firstMessage && entry.type === "message" && entry.role === "user",
+  );
+  return nextUser < 0 ? [] : suffix.slice(nextUser);
 }
 
 // ── Turn segmentation ──────────────────────────────────────────────

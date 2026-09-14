@@ -7,6 +7,7 @@ import {
   estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
+  estimateTotalTokens,
   estimateEntryTokens,
   extractFileContext,
   planPrune,
@@ -232,6 +233,22 @@ describe("compaction: summary checkpoint tail", () => {
     expect(
       selectSummaryCheckpointTail([old, recent, latest], 100).map((entry) => entry.id),
     ).toEqual([recent.id, latest.id]);
+  });
+
+  it("aligns a capped suffix to the next user entry", () => {
+    const old = user("old-boundary", "x".repeat(20_000));
+    const boundaryAssistant = assistant("assistant-boundary", "x".repeat(40));
+    const checkpoint = user("checkpoint-user", "current checkpoint");
+    const evidence = assistant("checkpoint-evidence", "tests are green");
+
+    const selected = selectSummaryCheckpointTail(
+      [old, boundaryAssistant, checkpoint, evidence],
+      20,
+    );
+
+    expect(selected.map((entry) => entry.id)).toEqual([checkpoint.id, evidence.id]);
+    expect(selected[0]).toMatchObject({ type: "message", role: "user" });
+    expect(estimateTotalTokens(selected)).toBeLessThanOrEqual(20);
   });
 
   it("keeps the newest entry even when it alone exceeds the budget", () => {
