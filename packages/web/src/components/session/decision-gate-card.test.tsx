@@ -98,7 +98,7 @@ describe("DecisionGateCard — reviewable tool requests", () => {
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
 
-  it("blocks approval when the typed review has no tool identity", () => {
+  it("explains incomplete reviews and describes the disabled approval action", () => {
     renderCard(gate({
       approval: { argsPreview: "{\"amount\":10}", reviewIncomplete: true },
       actions: [
@@ -106,8 +106,13 @@ describe("DecisionGateCard — reviewable tool requests", () => {
         { id: "deny", label: "Reject", style: "danger", approves: false },
       ],
     }));
+
+    expect(screen.getByText("Approval is unavailable because the complete parameters could not be reviewed.")).toBeTruthy();
     expect(screen.getByText(/tool identity is unavailable/i)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    const approve = screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    expect(approve.parentElement?.getAttribute("tabindex")).toBe("0");
+    expect(approve.parentElement?.getAttribute("aria-describedby")).toBe("approval-review-unavailable");
     expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
