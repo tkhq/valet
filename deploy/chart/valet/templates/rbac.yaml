@@ -1,3 +1,4 @@
+{{- if .Values.sandbox.createNamespace }}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -5,6 +6,7 @@ metadata:
   labels:
     {{- include "valet.labels" . | nindent 4 }}
 ---
+{{- end }}
 # Namespaced Role only — deliberately NO cluster-scoped permissions. The
 # agent-sandbox controller owns PVC LIFECYCLE (create/delete, via owner
 # references to the Sandbox CR); the api's only PVC verbs are the get/patch
@@ -28,10 +30,12 @@ rules:
     # `patch` is required by hibernation: suspend/resume flip
     # spec.operatingMode via a JSON merge patch (setOperatingMode) — omitting
     # it 403s the idle sweep and the pause route.
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+    verbs: ["create", "get", "list", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    # The controller creates pods. The api reads them, resolves Job pods by
+    # label, and deletes a backing pod only to apply image or resource drift.
+    verbs: ["get", "list", "delete"]
   # Read eviction evidence after a sandbox pod has been deleted.
   - apiGroups: [""]
     resources: ["events"]
@@ -43,23 +47,23 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "patch"]
+  # Kubernetes authorizes a pods/exec connection as subresource creation.
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["create"]
+  # Build status reads the BuildKit pod log tail. It does not modify logs.
   - apiGroups: [""]
     resources: ["pods/log"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["get"]
   # Sandbox images v2 plan, Task 5: BuildKit-Job image builder. Kept on its
   # own rule (mirrors the "sandboxes:patch" precedent above) rather than
   # folded into an unrelated resource's verb list, so the grant this Job
   # lifecycle needs is auditable independent of the Sandbox-CR grant.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    # get/list/watch: poll a build Job's .status (active/succeeded/failed +
-    # conditions) for KubernetesImageBuilder.status(). create: dispatch a
-    # new BuildKit Job per prebuild. delete: cancel() / terminal cleanup —
-    # deletes with propagationPolicy Background so the Job's pod cascades.
-    verbs: ["create", "get", "list", "watch", "delete"]
+    # get: poll a build Job's status. create: dispatch one BuildKit Job.
+    # delete: cancel or clean up with background pod propagation.
+    verbs: ["create", "get", "delete"]
   # ConfigMap holds the generated Dockerfile per build (no secret material).
   # Kept minimal, mirroring the secrets rule below: the api only ever creates
   # and deletes these by name — it never reads a build ConfigMap back — so no

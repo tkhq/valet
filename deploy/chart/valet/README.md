@@ -45,12 +45,12 @@ existence for API groups it does not own.
   Grafana), a ClusterIP Service for OTLP ingest, a NodePort Service for
   Grafana (30300), a PVC for telemetry storage, and the provisioned
   "Valet — Agent Observability" dashboard.
-- **Sandbox namespace + RBAC**: a `Namespace`, a namespaced `Role`, and a
-  `RoleBinding` to the api's `ServiceAccount`. The Role grants sandbox
-  CRs, pods, pods/exec, and pods/log, plus `get`/`patch` on
-  persistentvolumeclaims for on-demand workspace growth. It grants no
-  cluster-scoped permissions and no PVC lifecycle verbs — the
-  agent-sandbox controller owns PVC create/delete.
+- **Sandbox namespace + RBAC**: an optional `Namespace`, a namespaced
+  `Role`, and a `RoleBinding` to the api's `ServiceAccount`. The Role
+  grants only the operations that the api calls. These include Sandbox CR
+  lifecycle, pod read/delete and exec, pod log reads, PVC growth, build Jobs,
+  build ConfigMaps, and credential Secrets. It grants no cluster-scoped
+  permissions. The agent-sandbox controller owns pod and PVC creation.
 - **App Secret** with a `lookup`-based retain guard. `BETTER_AUTH_SECRET`
   and `VALET_ENCRYPTION_KEY` are generated once when values do not supply
   them, then reused on every later `helm upgrade`. Regenerating them would
@@ -58,6 +58,34 @@ existence for API groups it does not own.
   master, because `VALET_SANDBOX_JWT_MASTER` falls back to
   `BETTER_AUTH_SECRET` when unset.
 - **`helm test`**: a Pod hook that curls the api Service's `/api/health`.
+
+## Resource ownership
+
+The default `sandbox.createNamespace: true` keeps local install behavior.
+The chart creates `sandbox.namespace` before it creates namespaced resources.
+Set `sandbox.createNamespace: false` when the platform owns that namespace.
+The namespace must exist before helm-controller installs the chart. The chart
+omits the Namespace manifest entirely in this mode.
+
+Do not switch an existing release directly to `false`. Helm can delete the
+Namespace that the previous release managed. First retain the old Namespace
+through the ownership migration. Then transfer it to the platform and set this
+value to `false`.
+
+Helm owns the api resources, sandbox Role, and sandbox RoleBinding. The Role
+uses only namespaced permissions. A restricted Helm reconciler does not need
+Namespace access or RBAC `escalate` and `bind`. Kubernetes requires the
+reconciler to hold each permission that it writes into a Role. The Sandbox CR
+verbs are the exceptional grant because the built-in namespaced `admin` role
+does not include that custom API group. Grant those exact verbs to the
+reconciler before installation. Do not grant `escalate` or `bind`.
+
+`api.instanceConfig` is chart content. When it is set, Helm owns the instance
+ConfigMap and its checksum rolls the api Deployment. Use `api.extraEnvFrom`
+for ConfigMaps and Secrets that the platform owns. An ExternalSecret can own a
+target Secret that this list references. The chart does not render or copy
+those external values. Their updates do not change a pod-template checksum,
+so restart the api Deployment after an external value changes.
 
 ## Registry filesystem health
 
