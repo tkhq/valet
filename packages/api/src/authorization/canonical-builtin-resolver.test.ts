@@ -68,4 +68,28 @@ describe("canonicalBuiltinPolicyResolver", () => {
       expect(await restart().reserveExecution!(request, decision)).toEqual({ kind: "failed", error: "bounded failure" });
     } finally { await manager.close(); }
   }, 120_000);
+
+  it("persists one-shot approval and arbitrates concurrent dispatch", async () => {
+    pg = await freshTestPgDb();
+    await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, new Map(), () => 10);
+    try {
+      await manager.ensureOrganizationReady("org-1");
+      const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const resolver = canonicalBuiltinPolicyResolver({ db: pg.appDb, service, clock: () => 30 });
+      const request = input("bash", { args: { command: "SECRET_COMMAND", timeout: 5 } });
+      const gated = await resolver.resolve(request);
+      expect(gated.mode).toBe("require_approval");
+      await resolver.onResolution!(request, gated, { actionId: "approve", resolvedBy: "approver-1", resolvedAt: 25, gateOrdinal: 0 });
+      const allowed = await resolver.resolve(request);
+      expect(allowed.mode).toBe("allow");
+      const reservations = await Promise.all([
+        resolver.reserveExecution!(request, allowed),
+        resolver.reserveExecution!(request, allowed),
+      ]);
+      expect(reservations.filter((item) => item.kind === "execute")).toHaveLength(1);
+      expect(reservations.filter((item) => item.kind === "indeterminate")).toHaveLength(1);
+      expect(JSON.stringify(await pg.appDb.select().from(authorizationDecisions))).not.toContain("SECRET_COMMAND");
+    } finally { await manager.close(); }
+  }, 120_000);
 });

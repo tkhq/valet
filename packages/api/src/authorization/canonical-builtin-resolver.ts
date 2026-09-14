@@ -22,7 +22,7 @@ export function canonicalBuiltinPolicyResolver(opts: { db: AppDb; service: Canon
     const original = await decisionRow(opts.db, input.orgId, initial.idempotencyKey);
     const binding = original?.effect === "require_approval" && original.evidence ? { requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest } : undefined;
     const facts = await loadCanonicalDynamicFacts(opts.db, { organizationId: input.orgId, service: "builtin", actionId: input.descriptor.actionId, riskLevel: input.descriptor.riskLevel, appliesIn: "session", scopeId: input.sessionId, evaluationTimeMs: now(), ...binding });
-    const request = adaptInteractiveBuiltin({ ...common, facts: { currentPolicy: facts } });
+    const request = adaptInteractiveBuiltin({ ...common, facts: { currentPolicy: facts }, ...(binding ? { approvalBindingContext: binding } : {}) });
     if (!binding) return request;
     const id = authorizationSha256Hex(canonicalAuthorizationJson({ invocation: request.subject.invocation.id, facts }));
     return { ...request, subject: { ...request.subject, invocation: { ...request.subject.invocation, id } }, idempotencyKey: `interactive:${id}` };

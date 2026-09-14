@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
-import { adaptInteractiveBuiltin, BuiltinAuthorizationError, builtinAuthorization, builtinTools, projectBuiltinArguments, type BuiltinPolicyResolver, type ToolContext, type ToolDef } from "../src/index.js";
+import { adaptInteractiveBuiltin, BUILTIN_TOOL_NAMES, BuiltinAuthorizationError, builtinAuthorization, builtinTools, projectBuiltinArguments, type BuiltinPolicyResolver, type ToolContext, type ToolDef } from "../src/index.js";
 import { toAgentTool } from "../src/tool-bridge.js";
+import { pluginCatalogTools } from "../src/plugin-catalog.js";
 
 function context(resolver: BuiltinPolicyResolver): ToolContext {
   return { userId: "user-1", orgId: "org-1", sessionId: "session-1", threadId: "thread-1", owner: { type: "user", id: "user-1" }, queueItemId: "queue-1", builtinPolicyResolver: resolver, signal: new AbortController().signal, sandbox: {} as ToolContext["sandbox"], credentials: {} as ToolContext["credentials"], requestDecision: vi.fn(), threadRead: vi.fn(), listThreads: vi.fn(), setModel: vi.fn() };
@@ -12,6 +13,30 @@ describe("canonical built-in authorization", () => {
   it("keeps the built-in registry exhaustive", () => {
     expect(builtinTools.map((tool) => tool.name).sort()).toEqual(["ask_approval", "bash", "child_read", "child_send", "child_status", "edit", "list_threads", "read", "switch_model", "task", "thread_read", "write"]);
     expect(builtinTools.every((tool) => tool.authorization?.actionId === `builtin.${tool.name}`)).toBe(true);
+  });
+  it("defines immutable canonical defaults for the complete built-in inventory", () => {
+    const names = builtinTools.map((tool) => tool.name);
+    const descriptors = BUILTIN_TOOL_NAMES.map((name) => builtinAuthorization(name));
+    expect(BUILTIN_TOOL_NAMES).toHaveLength(46);
+    expect(new Set(BUILTIN_TOOL_NAMES).size).toBe(46);
+    expect(names.every((name) => BUILTIN_TOOL_NAMES.includes(name))).toBe(true);
+    expect(descriptors.every((item) => Object.isFrozen(item) && Object.isFrozen(item.projection))).toBe(true);
+    expect(descriptors.every((item) => item.actionId.startsWith("builtin."))).toBe(true);
+    expect(() => builtinAuthorization("unregistered")).toThrow(/no canonical authorization metadata/);
+  });
+
+  it("composes wrapper and inner action policy without a bypass", async () => {
+    const implementation = vi.fn(async () => ({ success: true, data: "ran" }));
+    const [, callTool] = pluginCatalogTools({ plugins: [{ service: "fixture", actions: [{ id: "fixture.run", name: "run", description: "run", riskLevel: "low", parameters: Type.Object({ value: Type.String() }), execute: implementation }] }] });
+    const builtinResolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "canonical_service" as const }, canonical: { reasonCode: "allow", obligations: [], redactions: [] } }));
+    const actionResolve = vi.fn(async () => ({ mode: "deny" as const, provenance: { baseMode: "deny" as const, source: "canonical_service" as const } }));
+    const ctx = context({ resolve: builtinResolve });
+    ctx.policyResolver = { resolve: actionResolve };
+    const result = await toAgentTool(callTool, () => ctx).execute("call", { tool_id: "fixture.run", params: { value: "safe" }, summary: "run fixture" }, ctx.signal, vi.fn());
+    expect(builtinResolve).toHaveBeenCalledOnce();
+    expect(actionResolve).toHaveBeenCalledOnce();
+    expect(implementation).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).toContain("denied");
   });
   it("omits content-bearing arguments from projections and identity input", () => {
     expect(projectBuiltinArguments({ path: "a", content: "SECRET", command: "SECRET", prompt: "SECRET", message: "SECRET", body: "SECRET", params: { secret: "SECRET" } }, ["/path"])).toEqual({ path: "a" });
@@ -59,6 +84,13 @@ describe("canonical built-in authorization", () => {
     const def: ToolDef = { name: "probe", description: "probe", parameters: Type.Object({}), authorization: { ...builtinAuthorization("read"), actionId: "builtin.probe" }, execute };
     const result = await toAgentTool(def, () => context({ resolve: vi.fn(async () => decision) })).execute("call", {}, new AbortController().signal, vi.fn());
     expect(JSON.stringify(result)).not.toContain("secret");
+  });
+  it("denies unsupported obligations before implementation dispatch", async () => {
+    const execute = vi.fn(async () => ({ text: "ran" }));
+    const decision = { mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "canonical_service" as const }, canonical: { reasonCode: "allow", obligations: [{ type: "unsupported" } as never], redactions: [] } };
+    const def: ToolDef = { name: "probe", description: "probe", parameters: Type.Object({}), authorization: { ...builtinAuthorization("read"), actionId: "builtin.probe" }, execute };
+    await expect(toAgentTool(def, () => context({ resolve: vi.fn(async () => decision) })).execute("call", {}, new AbortController().signal, vi.fn())).rejects.toThrow("unsupported");
+    expect(execute).not.toHaveBeenCalled();
   });
   it("does not call a denied implementation", async () => {
     const execute = vi.fn(async () => ({ text: "ran" }));

@@ -63,14 +63,16 @@ export interface InteractiveBuiltinAdapterInputV1 {
   readonly schemaVersion: 1; readonly organizationId: string; readonly actor: { readonly type: "user"; readonly id: string }; readonly owner: AuthorizationPrincipal;
   readonly requestId: string; readonly sessionId: string; readonly threadId: string; readonly queueItemId: string; readonly toolCallId: string; readonly gateOrdinal: number;
   readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly evaluationTimeMs: number; readonly facts?: JsonObject;
+  readonly approvalBindingContext?: { readonly requestSubjectDigest: string; readonly originalDecisionDigest: string };
 }
 
 export function adaptInteractiveBuiltin(input: InteractiveBuiltinAdapterInputV1): AuthorizationRequest {
   if (input.schemaVersion !== 1 || !input.organizationId || !input.actor.id || !input.requestId || !input.sessionId || !input.threadId || !input.queueItemId || !input.toolCallId || !Number.isSafeInteger(input.gateOrdinal) || input.gateOrdinal < 0) throw new TypeError("Canonical built-in adapter rejected incomplete identity.");
+  if (input.approvalBindingContext && (!/^[a-f0-9]{64}$/.test(input.approvalBindingContext.requestSubjectDigest) || !/^[a-f0-9]{64}$/.test(input.approvalBindingContext.originalDecisionDigest))) throw new TypeError("Canonical built-in adapter rejected invalid approval binding.");
   const parameters = projectBuiltinArguments(input.arguments, input.descriptor.projection.pointers);
   const invocationId = authorizationSha256Hex(canonicalAuthorizationJson({ queueItemId: input.queueItemId, toolCallId: input.toolCallId, gateOrdinal: input.gateOrdinal }));
   const subject = interactiveAuthorizationSubject({ orgId: input.organizationId, principal: input.owner, actorUserId: input.actor.id, sessionId: input.sessionId, threadId: input.threadId, queueItemId: invocationId, resumeKey: input.descriptor.actionId, gateOrdinal: input.gateOrdinal });
-  const partial = { schemaVersion: 1 as const, requestId: input.requestId, kind: "tool.builtin" as const, subject, action: { id: input.descriptor.actionId, service: "builtin", riskLevel: input.descriptor.riskLevel, parameters }, context: { schemaVersion: 1, evaluationTimeMs: input.evaluationTimeMs, capability: input.descriptor.capability, projectionVersion: input.descriptor.projection.schemaVersion }, facts: input.facts ?? {} };
+  const partial = { schemaVersion: 1 as const, requestId: input.requestId, kind: "tool.builtin" as const, subject, action: { id: input.descriptor.actionId, service: "builtin", riskLevel: input.descriptor.riskLevel, parameters }, context: { schemaVersion: 1, evaluationTimeMs: input.evaluationTimeMs, capability: input.descriptor.capability, projectionVersion: input.descriptor.projection.schemaVersion, ...(input.approvalBindingContext ?? {}) }, facts: input.facts ?? {} };
   return Object.freeze({ ...partial, idempotencyKey: authorizationIdentity(partial).idempotencyKey });
 }
 

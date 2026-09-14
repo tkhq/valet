@@ -8,6 +8,7 @@ describe("canonical policy builder", () => {
   it("uses labeled controls, resets context state, and fails unsupported contexts closed", async () => {
     render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} />);
     expect(screen.getByLabelText("Authorization context").tagName).toBe("SELECT");
+    expect(screen.getByRole("option", { name: "Tool and action (tool.builtin)" })).toBeTruthy();
     expect(screen.getByText(/not saved or active/i).textContent).toContain("not saved or active");
     fireEvent.change(screen.getByLabelText("id"), {
       target: { value: "gmail.send_email" },
