@@ -282,6 +282,22 @@ describe("PUT /api/me/policy-overrides — cross-dimension bounds", () => {
     expect(body.error).toContain("deny");
   });
 
+  it("a service-scoped allow override is bounded for a future catalog risk", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const orgRes = await putOrgPolicy({ riskLevel: "critical", mode: "require_approval" });
+    expect(orgRes.status).toBe(201);
+
+    // Slack currently declares only a low-risk action. The service override
+    // must also cover a critical action added after this override is stored.
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ service: "slack", mode: "allow" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: expect.stringContaining("critical") });
+  });
+
   it("a service-scoped allow override is blocked by an org riskLevel require_approval policy", async () => {
     api = await bootTestApi({ plugins: PLUGINS });
     const orgRes = await putOrgPolicy({ riskLevel: "high", mode: "require_approval" });

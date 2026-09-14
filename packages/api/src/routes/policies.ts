@@ -50,6 +50,14 @@ export const actionLogRouter = new Hono<AppEnv>();
 
 const POLICY_NOT_FOUND = { error: "policy not found" } as const;
 
+/** Keeps canonical reason codes compatible with the existing preview wire. */
+export function previewProvenanceSource(reasonCode: string): string {
+  if (reasonCode === "organization_policy") return "org_policy";
+  if (reasonCode === "dynamic_grant") return "runtime_grant";
+  if (reasonCode === "personal_override") return "override";
+  return reasonCode;
+}
+
 export function toPolicyWire(row: ActionPolicyRow): ActionPolicyWire {
   return {
     id: row.id,
@@ -279,7 +287,7 @@ policiesRouter.post("/preview", async (c) => {
     : adaptWorkflowAction({ schemaVersion: 1, organizationId: user.orgId, actor: { type: "user", id: previewUserId }, owner: { type: "user", id: previewUserId }, requestId: idempotencyKey, workflowDefinitionId: "policy-preview", workflowVersion: "preview", workflowExecutionId: body.workflowExecutionId!, nodeId: "preview", invocationId: idempotencyKey, action: commonAction, evaluationTimeMs: Date.now(), dynamicFacts: {} });
   const envelope = await canonicalAuthorizationService.preview(adapted.request);
   const matchedId = envelope.decision.matchedRuleIds[0];
-  const source = envelope.decision.reasonCode === "organization_policy" ? "org_policy" : envelope.decision.reasonCode;
+  const source = previewProvenanceSource(envelope.decision.reasonCode);
   const decision = {
     mode: envelope.decision.effect,
     provenance: {

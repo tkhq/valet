@@ -13,6 +13,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionInvocations, actionPolicies } from "../schema/index.js";
+import { previewProvenanceSource } from "./policies.js";
 import type {
   ActionPolicyWire,
   CreateOrgPolicyResponse,
@@ -339,6 +340,18 @@ describe("DELETE /api/org/policies/:id — soft revoke", () => {
 // ── Preview endpoint ─────────────────────────────────────────────────────
 
 describe("POST /api/org/policies/preview", () => {
+  it.each([
+    ["organization_policy", "org_policy"],
+    ["team_policy", "team_policy"],
+    ["dynamic_grant", "runtime_grant"],
+    ["personal_override", "override"],
+    ["plugin_default", "plugin_default"],
+    ["risk_default", "risk_default"],
+    ["bundle_default", "bundle_default"],
+  ])("keeps reason code %s compatible as %s", (reasonCode, expected) => {
+    expect(previewProvenanceSource(reasonCode)).toBe(expected);
+  });
+
   it("dry-runs the resolver without writing anything", async () => {
     api = await bootTestApi({ plugins: [githubPolicyPlugin()] });
     await fetch(`${api.baseUrl}/api/org/policies`, {
