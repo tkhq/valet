@@ -1433,7 +1433,7 @@ describe("pinned tool: same execution path as call_tool", () => {
       policyResolver: { resolve: async () => { throw new Error("policy store unavailable"); } },
       requestDecision: async () => { approvalCalls++; return { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() }; },
     });
-    expect(result.viaCallTool).toContain("Could not check this team's action policies");
+    expect(result.viaCallTool).toContain("blocked by org policy");
     expect(result.viaPinned).toBe(result.viaCallTool);
     expect(approvalCalls).toBe(0);
     expect(calls).toHaveLength(0);
