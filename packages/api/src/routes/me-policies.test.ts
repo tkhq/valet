@@ -13,7 +13,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, RiskLevel, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { runtimeGrants } from "../schema/index.js";
+import { authorizationDecisions, authorizationExecutionAttempts, runtimeGrants } from "../schema/index.js";
 import type {
   DeleteGrantResponse,
   DeletePolicyOverrideResponse,
@@ -393,6 +393,26 @@ describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("require_approval");
+  });
+
+  it("a matcher-scoped session-only org policy blocks without persisting an authorization decision", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const orgRes = await putOrgPolicy({
+      actionId: "github.create_issue",
+      mode: "require_approval",
+      appliesIn: "session",
+      paramMatchers: [{ path: "repo", op: "eq", value: "prod" }],
+    });
+    expect(orgRes.status).toBe(201);
+
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(0);
+    expect(await api.providers.db.select().from(authorizationExecutionAttempts)).toHaveLength(0);
   });
 
   it("a matcher-scoped workflow-only org require_approval also blocks the allow override", async () => {

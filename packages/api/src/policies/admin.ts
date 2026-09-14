@@ -10,7 +10,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
-import type { ActionPlugin, ApprovalMode, RiskLevel, ValetPlugin } from "@valet/engine";
+import type { ApprovalMode, RiskLevel } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   agentSessions, workflowRuns, workflowDefinitions,
@@ -25,11 +25,6 @@ import {
 } from "../schema/index.js";
 import { type ParamMatcher } from "./matchers.js";
 
-
-/** Service→plugin index shape `validateOverrideBounds` needs to look up an
- *  actionId's `service`/`riskLevel`/plugin default — same map shape as
- *  `Providers.actionPluginByService` (`providers/types.ts`). */
-export type ActionPluginByService = Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
 
 /** One-of-three target shape shared by `action_policies` and
  *  `action_policy_overrides` — mirrors the DB CHECK constraint. */
@@ -203,99 +198,6 @@ export const createOrgPolicy = (db: AppDb, orgId: string, input: CreateOrgPolicy
 export const updateOrgPolicy = (db: AppDb, orgId: string, id: string, patch: UpdateOrgPolicyInput) => updatePolicy(db, { orgId, type: "org", id: orgId }, id, patch);
 export const revokeOrgPolicy = (db: AppDb, orgId: string, id: string, now: number) => revokePolicy(db, { orgId, type: "org", id: orgId }, id, now);
 
-interface OrgPolicyBoundRow {
-  id: string;
-  service: string | null;
-  actionId: string | null;
-  riskLevel: RiskLevel | null;
-  mode: ApprovalMode;
-  appliesIn: "any" | "workflow" | "session";
-  updatedAt: number;
-}
-
-async function liveOrgPolicyBounds(db: AppQueryable, orgId: string, now: number): Promise<OrgPolicyBoundRow[]> {
-  return db.select({
-    id: actionPolicies.id,
-    service: actionPolicies.service,
-    actionId: actionPolicies.actionId,
-    riskLevel: actionPolicies.riskLevel,
-    mode: actionPolicies.mode,
-    appliesIn: actionPolicies.appliesIn,
-    updatedAt: actionPolicies.updatedAt,
-  }).from(actionPolicies).where(and(
-    eq(actionPolicies.orgId, orgId),
-    eq(actionPolicies.principalType, "org"),
-    isNull(actionPolicies.revokedAt),
-    or(isNull(actionPolicies.expiresAt), sql`${actionPolicies.expiresAt} > ${now}`),
-  ));
-}
-
-function catalogAction(actionPluginByService: ActionPluginByService, actionId: string): { service: string; riskLevel: RiskLevel } | undefined {
-  for (const { actionPlugin } of actionPluginByService.values()) {
-    const action = actionPlugin.actions.find((item) => item.id === actionId || (!item.id.includes(".") && `${actionPlugin.service}.${item.id}` === actionId));
-    if (action) return { service: actionPlugin.service, riskLevel: action.riskLevel };
-  }
-  return undefined;
-}
-
-function targetSpecificity(row: OrgPolicyBoundRow): number {
-  return row.actionId !== null ? 3 : row.service !== null ? 2 : 1;
-}
-
-function modeRank(mode: ApprovalMode): number {
-  return mode === "deny" ? 3 : mode === "require_approval" ? 2 : 1;
-}
-
-function orgPolicyWinner(rows: OrgPolicyBoundRow[], action: { actionId: string; service: string; riskLevel: RiskLevel }, appliesIn: "session" | "workflow"): OrgPolicyBoundRow | undefined {
-  return rows.filter((row) =>
-    (row.appliesIn === "any" || row.appliesIn === appliesIn)
-    && (row.actionId === action.actionId || row.service === action.service || row.riskLevel === action.riskLevel)
-  ).sort((a, b) => targetSpecificity(a) - targetSpecificity(b)
-    || modeRank(a.mode) - modeRank(b.mode)
-    || a.updatedAt - b.updatedAt
-    || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id))
-  ).at(-1);
-}
-
-function blockedByOrgPolicy(row: OrgPolicyBoundRow): TargetValidation {
-  const target = row.actionId !== null ? `actionId="${row.actionId}"` : row.service !== null ? `service="${row.service}"` : `riskLevel="${row.riskLevel}"`;
-  return { ok: false, error: `cannot set override mode "allow": conflicts with org policy (${target}, mode="${row.mode}"); ask an org admin` };
-}
-
-export async function validateOverrideBounds(
-  db: AppQueryable,
-  orgId: string,
-  target: PolicyTarget,
-  mode: ApprovalMode,
-  now: number,
-  actionPluginByService: ActionPluginByService,
-): Promise<TargetValidation> {
-  if (mode !== "allow") return { ok: true };
-  const rows = await liveOrgPolicyBounds(db, orgId, now);
-  if (target.actionId !== undefined) {
-    const action = catalogAction(actionPluginByService, target.actionId);
-    if (!action) return { ok: false, error: `cannot set override mode "allow": action "${target.actionId}" is not in the plugin catalog and cannot be verified against org policy` };
-    for (const appliesIn of ["session", "workflow"] as const) {
-      const winner = orgPolicyWinner(rows, { ...action, actionId: target.actionId }, appliesIn);
-      if (winner && winner.mode !== "allow") return { ok: false, error: `cannot set override mode "allow": org policy for action "${target.actionId}" currently resolves "${winner.mode}" (appliesIn: "${appliesIn}")` };
-    }
-    return { ok: true };
-  }
-  for (const row of rows) {
-    if (row.mode === "allow") continue;
-    if (target.service !== undefined) {
-      if (row.service !== null && row.service !== target.service) continue;
-      if (row.actionId !== null && catalogAction(actionPluginByService, row.actionId)?.service !== target.service) continue;
-      return blockedByOrgPolicy(row);
-    }
-    if (target.riskLevel !== undefined) {
-      if (row.riskLevel !== null && row.riskLevel !== target.riskLevel) continue;
-      return blockedByOrgPolicy(row);
-    }
-  }
-  return { ok: true };
-}
-
 export interface UpsertOverrideInput extends PolicyTarget {
   mode: ApprovalMode;
   paramMatchers?: ParamMatcher[];
@@ -307,18 +209,15 @@ export type UpsertOverrideResult = { ok: true; row: ActionPolicyOverrideRow } | 
 /** Upsert-by-target (not by row id — see `routes/me-policies.ts` doc comment
  *  for why): finds the caller's existing override for this exact
  *  (org, user, target) triple and updates it in place, or inserts a fresh
- *  row. Enforces `validateOverrideBounds` before either path. */
+ *  row. The caller must enforce canonical override bounds first. */
 export async function upsertOverride(
   db: AppQueryable,
   orgId: string,
   userId: string,
   input: UpsertOverrideInput,
-  actionPluginByService: ActionPluginByService,
 ): Promise<UpsertOverrideResult> {
   const targetCheck = validateTarget(input);
   if (!targetCheck.ok) return targetCheck;
-  const boundsCheck = await validateOverrideBounds(db, orgId, input, input.mode, input.now, actionPluginByService);
-  if (!boundsCheck.ok) return boundsCheck;
 
   const existing = await db
     .select()

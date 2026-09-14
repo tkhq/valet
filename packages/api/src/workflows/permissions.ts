@@ -176,20 +176,21 @@ export async function allowWorkflowPermissions(
   }
 
   const manager = deps.canonicalPolicyManager;
-  if (!manager) throw new Error("Canonical policy manager is unavailable.");
+  const service = deps.canonicalAuthorizationService;
+  if (!manager || !service) throw new Error("Canonical authorization service is unavailable.");
   const idempotencyKey = authorizationSha256Hex(canonicalAuthorizationJson({ workflowId, owner: owner.userId, targets }));
-  const { allowed, blocked } = await manager.mutateAndActivate(owner.orgId, { actorId: owner.userId, operation: "workflow_preapproval", idempotencyKey }, async (tx) => {
+  const { allowed, blocked } = await manager.mutateAndActivate(owner.orgId, { actorId: owner.userId, operation: "workflow_preapproval", idempotencyKey }, async (tx, context) => {
+    const activeIdentity = await context.overrideBoundsIdentity();
     const now = Date.now();
     const allowed: string[] = [];
     const blocked: { actionId: string; reason: string }[] = [];
     for (const actionId of targets) {
-      const result = await upsertOverride(
-        tx,
-        owner.orgId,
-        owner.userId,
-        { actionId, mode: "allow", now },
-        deps.actionPluginByService ?? new Map(),
-      );
+      const bounds = await service.validateOverrideBounds(owner.orgId, owner.userId, { actionId }, "allow", activeIdentity);
+      if (!bounds.ok) {
+        blocked.push({ actionId, reason: bounds.error });
+        continue;
+      }
+      const result = await upsertOverride(tx, owner.orgId, owner.userId, { actionId, mode: "allow", now });
       if (result.ok) allowed.push(actionId);
       else blocked.push({ actionId, reason: result.error });
     }

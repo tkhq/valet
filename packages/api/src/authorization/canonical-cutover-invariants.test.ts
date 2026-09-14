@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "../../../..");
 const productionRoots = ["packages/engine/src", "packages/api/src", "packages/workflow/src"];
-const legacy = /resolveActionPolicy|resolvePolicyDecision|buildPolicyResolver|policies\/resolution/;
+const legacy = /resolveActionPolicy|resolvePolicyDecision|buildPolicyResolver|orgPolicyWinner|validateOverrideBounds\(db|policies\/resolution/;
 
 function productionFiles(path: string): string[] {
   const absolute = resolve(root, path);

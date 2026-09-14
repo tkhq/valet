@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionInvocations, actionPolicies, orgs, policyActiveBundles, policySourceBundles } from "../schema/index.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles } from "../schema/index.js";
 import { CanonicalPolicyBundleManager, ensureCanonicalPolicyReadiness } from "./canonical-policy-manager.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 
@@ -118,6 +118,50 @@ describe("canonical policy readiness", () => {
       })).rejects.toThrow(/compare-and-swap/);
       expect(await manager.host.activePointer("org-a")).toEqual(before);
       expect(await db.select().from(actionPolicies).where(eq(actionPolicies.id, "stale-rule"))).toHaveLength(0);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("builds the conservative bounds bundle only when the mutation requests it", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const run = manager.runtime.run.bind(manager.runtime);
+      let validations = 0;
+      manager.runtime.run = async (request) => {
+        if (request.operation === "validate_bundle") validations++;
+        return run(request);
+      };
+      await manager.mutateAndActivate("org-a", { actorId: "admin", operation: "noop", idempotencyKey: "lazy" }, async () => undefined);
+      expect(validations).toBe(2);
+      validations = 0;
+      await manager.mutateAndActivate("org-a", { actorId: "admin", operation: "bounds", idempotencyKey: "bounds" }, async (_tx, context) => {
+        const first = await context.overrideBoundsIdentity();
+        expect(await context.overrideBoundsIdentity()).toEqual(first);
+      });
+      expect(validations).toBe(3);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("rolls back an override and pointer when post-bounds activation fails", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const before = (await manager.host.activePointer("org-a"))!;
+      const load = manager.runtime.loadBundle.bind(manager.runtime);
+      let loads = 0;
+      manager.runtime.loadBundle = async (digest, source) => {
+        loads++;
+        if (loads === 2) throw new Error("candidate load failed");
+        return load(digest, source);
+      };
+      await expect(manager.mutateAndActivate("org-a", { actorId: "user-1", operation: "override_upsert", idempotencyKey: "rollback" }, async (tx, context) => {
+        await context.overrideBoundsIdentity();
+        await tx.insert(actionPolicyOverrides).values({ id: "override", orgId: "org-a", userId: "user-1", actionId: "gmail.send", mode: "allow", paramMatchers: [], createdAt: 2, updatedAt: 2 });
+      })).rejects.toThrow("candidate load failed");
+      expect(await db.select().from(actionPolicyOverrides).where(eq(actionPolicyOverrides.id, "override"))).toHaveLength(0);
+      expect(await manager.host.activePointer("org-a")).toEqual(before);
     } finally { await manager.close(); }
   }, 120_000);
 

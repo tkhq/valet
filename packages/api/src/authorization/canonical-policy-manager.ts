@@ -46,6 +46,10 @@ export async function currentPolicySnapshot(db: AppQueryable, organizationId: st
   return { ...base, ...source, sourceRevision: revision(source) } as CurrentPolicySourceSnapshotV1;
 }
 
+export interface CanonicalPolicyMutationContext {
+  overrideBoundsIdentity(): Promise<ValidatedBundleIdentity>;
+}
+
 export class CanonicalPolicyBundleManager {
   readonly runtime = new WasmPolicyRuntime();
   readonly host: SourceBundleHost;
@@ -88,7 +92,7 @@ export class CanonicalPolicyBundleManager {
     });
   }
 
-  async mutateAndActivate<T>(organizationId: string, audit: { actorId: string; operation: string; idempotencyKey: string }, mutate: (tx: AppTx) => Promise<T>): Promise<T> {
+  async mutateAndActivate<T>(organizationId: string, audit: { actorId: string; operation: string; idempotencyKey: string }, mutate: (tx: AppTx, context: CanonicalPolicyMutationContext) => Promise<T>): Promise<T> {
     let completed = false;
     const result = await this.db.transaction(async (tx) => {
       const pointer = (await tx.select().from(policyActiveBundles).where(eq(policyActiveBundles.orgId, organizationId)).for("update").limit(1))[0];
@@ -97,7 +101,16 @@ export class CanonicalPolicyBundleManager {
       const beforeBuilt = buildCurrentPolicySource(before);
       const beforeIdentity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: beforeBuilt.bundle });
       if (beforeIdentity.sourceBundleDigest !== pointer.digest) throw new Error(`Canonical policy pointer for ${organizationId} is stale.`);
-      const value = await mutate(tx);
+      let boundsIdentity: Promise<ValidatedBundleIdentity> | undefined;
+      const context: CanonicalPolicyMutationContext = {
+        overrideBoundsIdentity: () => boundsIdentity ??= (async () => {
+          const boundsBuilt = buildCurrentPolicySource({ ...before, teamPolicies: [], personalOverrides: [], organizationPolicies: before.organizationPolicies.map((row) => ({ ...row, paramMatchers: [] })) });
+          const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: boundsBuilt.bundle });
+          await this.runtime.loadBundle(identity.sourceBundleDigest, boundsBuilt.bundle);
+          return identity;
+        })(),
+      };
+      const value = await mutate(tx, context);
       const after = await currentPolicySnapshot(tx, organizationId, this.plugins);
       const built = buildCurrentPolicySource(after);
       const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: built.bundle });

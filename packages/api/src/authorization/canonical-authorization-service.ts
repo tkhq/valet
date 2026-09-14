@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { assertEnvelope, buildActionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, obligationDigestOf, requestSubjectDigest, type AuthorizationRequest, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import type { ApprovalMode, RiskLevel } from "@valet/engine";
+import { adaptInteractiveAction, adaptWorkflowAction, assertEnvelope, buildActionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, obligationDigestOf, requestSubjectDigest, type AuthorizationRequest, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { actionProjection } from "./action-projections.js";
 import type { AppDb, AppTx } from "../lib/drizzle.js";
 import { authorizationDecisions, type AuthorizationDecisionRow } from "../schema/index.js";
 import { buildDecisionAuditPlan } from "./action-audit.js";
 import type { AuthorizationService } from "./contracts.js";
 import { LocalValetEvaluator } from "./evaluators/local-valet.js";
-import type { CanonicalPolicyBundleManager } from "./canonical-policy-manager.js";
+import type { CanonicalPolicyBundleManager, CanonicalPolicyMutationContext } from "./canonical-policy-manager.js";
 
 export function canonicalDecisionId(orgId: string, idempotencyKey: string): string {
   return `decision:${createHash("sha256").update(`${orgId}\0${idempotencyKey}`).digest("hex")}`;
@@ -31,7 +33,7 @@ export class CanonicalAuthorizationService implements AuthorizationService {
     }, now);
   }
 
-  async mutateAndActivate<T>(organizationId: string, audit: { actorId: string; operation: string; idempotencyKey: string }, mutate: (tx: AppTx) => Promise<T>): Promise<T> {
+  async mutateAndActivate<T>(organizationId: string, audit: { actorId: string; operation: string; idempotencyKey: string }, mutate: (tx: AppTx, context: CanonicalPolicyMutationContext) => Promise<T>): Promise<T> {
     return this.manager.mutateAndActivate(organizationId, audit, mutate);
   }
 
@@ -39,6 +41,38 @@ export class CanonicalAuthorizationService implements AuthorizationService {
     const envelope = assertEnvelope(request, await this.evaluator.evaluate(request));
     buildActionObligationPlan(envelope.decision);
     return envelope;
+  }
+
+  async validateOverrideBounds(orgId: string, userId: string, target: { service?: string; actionId?: string; riskLevel?: RiskLevel }, mode: ApprovalMode, activeIdentity: { sourceBundleDigest: string; policyDigest: string }): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (mode !== "allow") return { ok: true };
+    const catalog = [...this.manager.plugins.values()].flatMap(({ actionPlugin }) => actionPlugin.actions.map((action) => ({
+      service: actionPlugin.service,
+      actionId: action.id.includes(".") ? action.id : `${actionPlugin.service}.${action.id}`,
+      riskLevel: action.riskLevel,
+    })));
+    let actions = target.actionId ? catalog.filter((action) => action.actionId === target.actionId)
+      : target.service ? catalog.filter((action) => action.service === target.service)
+      : catalog.filter((action) => action.riskLevel === target.riskLevel);
+    if (target.actionId && actions.length === 0) return { ok: false, error: `cannot set override mode "allow": action "${target.actionId}" is not in the plugin catalog and cannot be verified against org policy` };
+    if (actions.length === 0 && target.service) actions = (["low", "medium", "high", "critical"] as const).map((riskLevel) => ({ service: target.service!, actionId: `${target.service}.override_bounds`, riskLevel }));
+    if (target.riskLevel) {
+      const services = [...this.manager.plugins.keys()];
+      actions.push(...services.filter((service) => !actions.some((action) => action.service === service)).map((service) => ({ service, actionId: `${service}.override_bounds`, riskLevel: target.riskLevel! })));
+    }
+    const now = this.now();
+    for (const action of actions) for (const appliesIn of ["session", "workflow"] as const) {
+      const requestId = createHash("sha256").update(canonicalAuthorizationJson({ orgId, userId, target, action, appliesIn, now })).digest("hex");
+      const parameterProjection = action.actionId.endsWith(".override_bounds") ? { schemaVersion: 1, mode: "all_safe" } as const : actionProjection(action.actionId);
+      const common = { ...action, catalogActionId: action.actionId, sourcePluginService: action.service, sourceActionId: action.actionId, sourceToolId: "override_bounds", parameters: {}, parameterProjection };
+      const adapted = appliesIn === "session"
+        ? adaptInteractiveAction({ schemaVersion: 1, organizationId: orgId, actor: { type: "user", id: userId }, owner: { type: "user", id: userId }, requestId, sessionId: `override:${requestId}`, threadId: requestId, queueItemId: requestId, resumeKey: requestId, gateOrdinal: 0, action: common, evaluationTimeMs: now, dynamicFacts: {} })
+        : adaptWorkflowAction({ schemaVersion: 1, organizationId: orgId, actor: { type: "user", id: userId }, owner: { type: "user", id: userId }, requestId, workflowDefinitionId: "override-bounds", workflowVersion: "1", workflowExecutionId: `override:${requestId}`, nodeId: "override-bounds", invocationId: requestId, action: common, evaluationTimeMs: now, dynamicFacts: {} });
+      const envelope = assertEnvelope(adapted.request, await this.evaluator.evaluateAt(adapted.request, activeIdentity));
+      buildActionObligationPlan(envelope.decision);
+      const decision = envelope.decision;
+      if (decision.reasonCode === "organization_policy" && decision.effect !== "allow") return { ok: false, error: `cannot set override mode "allow": org policy currently resolves "${decision.effect}" for ${action.actionId} (appliesIn: "${appliesIn}")` };
+    }
+    return { ok: true };
   }
 
   async authorize(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> {
