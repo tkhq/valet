@@ -43,6 +43,7 @@ function githubPlugin(): ValetPlugin {
     actions: [
       {
         service: "github",
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
         actions: [widgetAction("create_issue", "high"), widgetAction("list_issues", "low"), widgetAction("delete_branch", "critical")],
       },
     ],
