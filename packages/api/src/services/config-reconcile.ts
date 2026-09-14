@@ -12,7 +12,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, isNull, like, lte, notLike, sql } from "drizzle-orm";
-import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   actionPolicies,
@@ -841,18 +841,22 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
  *
  * Runs only when `cfg.toolPolicies` is defined; absent = unmanaged.
  */
-async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig, manager?: CanonicalPolicyBundleManager): Promise<void> {
+async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig, manager?: CanonicalPolicyBundleManager, configPath?: string): Promise<void> {
   const toolPolicies = cfg.toolPolicies;
-  if (!toolPolicies) return;
-
-  const org = await ensureOrg(db);
-  const orgId = org.id;
+  const orgId = (await ensureOrg(db)).id;
+  if (toolPolicies === undefined) {
+    manager?.setConfigManagedToolPolicies(orgId);
+    return;
+  }
   if (!manager) throw new InstanceConfigError("toolPolicies require the canonical policy manager.");
+  const configFile = configFileLabel(configPath);
+  manager.setConfigManagedToolPolicies(orgId, configFile);
   // The first canonical upgrade can find an existing organization with policy
   // rows but no active pointer. Install that exact database state before the
   // config-owned transaction changes it.
   await manager.ensureOrganizationReady(orgId);
-  await manager.mutateAndActivate(orgId, { actorId: "config", operation: "config_reconcile", idempotencyKey: createHash("sha256").update(JSON.stringify(toolPolicies)).digest("hex") }, async (tx) => {
+  try {
+    await manager.mutateAndActivate(orgId, { actorId: "config", operation: "config_reconcile", idempotencyKey: createHash("sha256").update(JSON.stringify(toolPolicies)).digest("hex") }, async (tx) => {
   const now = Date.now();
 
   const desiredIds = new Set<string>();
@@ -909,7 +913,16 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig, manager
         .where(eq(actionPolicies.id, row.id));
     }
   }
-  });
+    });
+  } catch (error) {
+    if (error instanceof CanonicalPolicySourceReadOnlyError) {
+      throw new InstanceConfigError(
+        `${configFile}: toolPolicies conflicts with the active published policy candidate. ` +
+          `Remove toolPolicies from this file and restart to keep the candidate active.`,
+      );
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -938,5 +951,5 @@ export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: Instance
   await reconcileSkillSourcesPass(db, cfg);
 
   // Pass 5: toolPolicies → action_policies
-  await reconcileToolPoliciesPass(db, cfg, deps.canonicalPolicyManager);
+  await reconcileToolPoliciesPass(db, cfg, deps.canonicalPolicyManager, configPath);
 }

@@ -1315,6 +1315,39 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
     expect(await db.select().from(actionPolicies).where(eq(actionPolicies.id, "legacy-row"))).toHaveLength(1);
   }, 120_000);
 
+  it("classifies a reboot conflict with a published candidate and supports config removal recovery", async () => {
+    const org = await orgId();
+    const first = managers.get(db)!;
+    await first.ensureOrganizationReady(org);
+    await db.insert(actionPolicies).values({
+      id: "candidate-rule", orgId: org, principalType: "org", principalId: org,
+      service: "github", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1,
+    });
+    const candidate = await first.buildCurrent(org);
+    await db.delete(actionPolicies).where(eq(actionPolicies.id, "candidate-rule"));
+    await first.activateCandidate(org, candidate.identity, candidate.built.bundle, {
+      actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "candidate",
+    });
+    const pointer = await first.host.activePointer(org);
+    const rebooted = new CanonicalPolicyBundleManager(db, new Map());
+    managers.set(db, rebooted);
+
+    await expect(reconcileInstanceConfig({ ...deps(db), configPath: "/etc/valet.yaml" }, {
+      version: 1, toolPolicies: [{ service: "github", mode: "allow" }],
+    })).rejects.toThrow(
+      "/etc/valet.yaml: toolPolicies conflicts with the active published policy candidate. Remove toolPolicies from this file and restart to keep the candidate active.",
+    );
+    expect(await rebooted.host.activePointer(org)).toEqual(pointer);
+    expect(await db.select().from(actionPolicies)).toHaveLength(0);
+
+    const recovered = new CanonicalPolicyBundleManager(db, new Map());
+    managers.set(db, recovered);
+    await expect(reconcileInstanceConfig(deps(db), { version: 1 })).resolves.toBeUndefined();
+    await expect(recovered.ensureOrganizationReady(org)).resolves.toBeUndefined();
+    expect(await recovered.host.activePointer(org)).toEqual(pointer);
+    await Promise.all([first.close(), rebooted.close(), recovered.close()]);
+  }, 120_000);
+
   it("creates a service-targeted org row with origin/managed_by set", async () => {
     const cfg: InstanceConfig = {
       version: 1,

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, count, eq, gt } from "drizzle-orm";
 import type { AuthorizationRequest, JsonValue } from "@valet/engine/authorization";
-import type { CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
+import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import { policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringOperations, policyAuthoringReviews, policyAuthoringRevisions } from "../../schema/index.js";
 import { buildCurrentPolicySource } from "../bundles/current-policy-source.js";
@@ -483,7 +483,11 @@ export class PolicyAuthoringService {
     try {
       return await work();
     } catch (error) {
-      if (error instanceof PolicyAuthoringError) throw error;
+      if (
+        error instanceof PolicyAuthoringError ||
+        error instanceof CanonicalPolicyConfigManagedError ||
+        error instanceof CanonicalPolicySourceReadOnlyError
+      ) throw error;
       throw internal();
     }
   }

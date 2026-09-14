@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam, removeMember } from "../services/teams.js";
-import { apikey, credentials, notifications, orgMembers, orgs, skills, teamDeletionRequests, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { actionPolicies, apikey, credentials, notifications, orgMembers, orgs, skills, teamDeletionRequests, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 
 let api: TestApi;
 let teamId: string;
@@ -186,4 +186,22 @@ describe("team deletion requests", () => {
     const after = await api.providers.db.select().from(notifications).where(eq(notifications.href, href));
     expect(after.every((n) => n.readAt !== null)).toBe(true);
   });
+
+  it("returns the typed read-only conflict and preserves a team", async () => {
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Candidate owned", creatorUserId: admin });
+    await api.providers.db.insert(actionPolicies).values({
+      id: "candidate-owned", orgId: "local-org", principalType: "org", principalId: "local-org",
+      service: "github", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1,
+    });
+    const candidate = await api.providers.canonicalPolicyManager.buildCurrent("local-org");
+    await api.providers.db.delete(actionPolicies).where(eq(actionPolicies.id, "candidate-owned"));
+    await api.providers.canonicalPolicyManager.activateCandidate("local-org", candidate.identity, candidate.built.bundle, {
+      actorId: admin, operation: "policy_authoring_publish", idempotencyKey: "team-delete-candidate",
+    });
+
+    const response = await call(`/teams/${team.id}`, "DELETE", undefined, admin);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "canonical_policy_source_read_only" });
+    expect(await api.providers.db.select().from(teams).where(eq(teams.id, team.id))).toHaveLength(1);
+  }, 120_000);
 });

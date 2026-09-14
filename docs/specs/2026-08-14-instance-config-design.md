@@ -548,6 +548,12 @@ Each rule declares exactly one target and a mode:
   keeps the provenance. Re-declaring the rule clears `revoked_at`.
 - **UI-created policy rows are never touched** by the reconciler — only rows
   with the `pol:config:` id prefix.
+- **The config file owns publication while `toolPolicies` is present.** Policy
+  authoring can save and review drafts, but candidate publication returns a
+  `canonical_policy_config_managed` conflict before it changes the pointer.
+  If a published candidate is already active, reconciliation fails without
+  changing policy rows or the active pointer. Remove `toolPolicies` and
+  restart to keep the candidate active.
 
 Precedence is the policy engine's, not this file's. An org `deny` is absolute:
 neither a live runtime grant nor a per-user override can loosen it. Grants and
@@ -584,6 +590,7 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
 | Env var and file both declare a migrated value | Boot fails; message says which one to remove |
 | Demotion would remove the last admin      | Boot fails with the last-admin message          |
 | Declared source duplicates an unmanaged row | Skipped and logged; boot continues            |
+| Active policy candidate conflicts with `toolPolicies` | Boot fails; remove `toolPolicies` and restart |
 
 ## Security notes
 

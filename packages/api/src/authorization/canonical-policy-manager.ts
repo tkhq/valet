@@ -61,6 +61,15 @@ export class CanonicalPolicySourceReadOnlyError extends Error {
   }
 }
 
+export class CanonicalPolicyConfigManagedError extends Error {
+  readonly code = "canonical_policy_config_managed";
+  readonly statusCode = 409;
+  constructor(readonly organizationId: string, readonly configFile: string) {
+    super(`Canonical policy for ${organizationId} is managed by toolPolicies in ${configFile}. Remove toolPolicies and restart before you publish a candidate.`);
+    this.name = "CanonicalPolicyConfigManagedError";
+  }
+}
+
 export interface CanonicalReleaseMigrationInput {
   readonly organizationId: string;
   readonly source: "structured" | "authored";
@@ -87,8 +96,13 @@ export function sameConcurrentReleaseTarget(
 export class CanonicalPolicyBundleManager {
   readonly runtime = new WasmPolicyRuntime();
   readonly host: SourceBundleHost;
+  private readonly configManaged = new Map<string, string>();
   constructor(readonly db: AppDb, readonly plugins: ActionPluginByService, private readonly now: () => number = Date.now) {
     this.host = new SourceBundleHost(new PostgresSourceBundleStorage(db, now), this.runtime);
+  }
+  setConfigManagedToolPolicies(organizationId: string, configFile?: string): void {
+    if (configFile) this.configManaged.set(organizationId, configFile);
+    else this.configManaged.delete(organizationId);
   }
   async buildCurrent(organizationId: string) {
     const snapshot = await currentPolicySnapshot(this.db, organizationId, this.plugins);
@@ -111,6 +125,8 @@ export class CanonicalPolicyBundleManager {
     }
   }
   async activateCandidate(organizationId: string, expected: ValidatedBundleIdentity, bundle: CanonicalSourceBundle, audit: { actorId: string; operation: string; idempotencyKey: string }): Promise<void> {
+    const configFile = this.configManaged.get(organizationId);
+    if (configFile) throw new CanonicalPolicyConfigManagedError(organizationId, configFile);
     const validated = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle });
     if (canonicalJson(validated) !== canonicalJson(expected)) throw new Error("Canonical policy candidate identity changed.");
     await this.runtime.loadBundle(validated.sourceBundleDigest, bundle);

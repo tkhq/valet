@@ -7,6 +7,7 @@ import { canViewTeam, getTeamInOrg } from "../services/teams.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
 import { PolicyAuthoringError, PolicyAuthoringService, type PolicyAuthoringAuthorizer } from "../authorization/builder/service.js";
 import type { PolicyAuthoringScope } from "../authorization/builder/types.js";
+import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError } from "../authorization/canonical-policy-manager.js";
 
 export const policyAuthoringRouter = new Hono<AppEnv>();
 const MAX_BODY = 256 * 1024;
@@ -111,7 +112,8 @@ function routes(prefix: "/org/policy-drafts" | "/teams/:teamId/policy-drafts") {
   });
 }
 policyAuthoringRouter.onError((error, c) => {
-  if (error instanceof PolicyAuthoringError) return c.json({ error: error.message, code: error.code }, error.statusCode);
+  if (error instanceof PolicyAuthoringError || error instanceof CanonicalPolicyConfigManagedError || error instanceof CanonicalPolicySourceReadOnlyError)
+    return c.json({ error: error.message, code: error.code }, error.statusCode);
   console.error(`policy authoring route failed: ${c.req.method} ${c.req.path}`);
   return c.json({ error: "Policy authoring failed. Retry the request. If it fails again, contact support.", code: "internal" }, 500);
 });

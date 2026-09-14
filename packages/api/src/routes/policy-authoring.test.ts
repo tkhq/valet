@@ -197,6 +197,29 @@ describe("canonical policy authoring routes", () => {
     expect(await app.providers.db.select().from(policyAuthoringAudit)).toHaveLength(5);
   }, 120_000);
 
+  it("returns a typed config-authority conflict without partial publication", async () => {
+    const app = await setup();
+    const created = await post("/org/policy-drafts", { ...mutation("config-create-1", 0, 0), draft }).then((r) => r.json()) as { documentId: string };
+    const submitted = await post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation("config-submit-1", 1, 1)).then((r) => r.json()) as { stateVersion: number };
+    await app.providers.db.update(orgMembers).set({ role: "admin" }).where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
+    const approved = await post(`/org/policy-drafts/${created.documentId}/reviews`, {
+      ...mutation("config-review-1", 1, submitted.stateVersion), verdict: "approve", requestId: "config-review",
+    }, reviewer).then((r) => r.json()) as { stateVersion: number };
+    const pointer = await app.providers.canonicalPolicyManager.host.activePointer("local-org");
+    app.providers.canonicalPolicyManager.setConfigManagedToolPolicies("local-org", "/etc/valet.yaml");
+
+    const response = await post(`/org/policy-drafts/${created.documentId}/prepare-publication`, {
+      schemaVersion: 1, expectedRevision: 1, expectedStateVersion: approved.stateVersion,
+    }, reviewer);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      code: "canonical_policy_config_managed",
+      error: "Canonical policy for local-org is managed by toolPolicies in /etc/valet.yaml. Remove toolPolicies and restart before you publish a candidate.",
+    });
+    expect(await app.providers.canonicalPolicyManager.host.activePointer("local-org")).toEqual(pointer);
+    expect(await app.providers.db.select().from(actionPolicies)).toHaveLength(0);
+  }, 120_000);
+
   it("validates scope, unknown fields, spoofed identity, and preview privacy", async () => {
     const app = await setup();
     expect(

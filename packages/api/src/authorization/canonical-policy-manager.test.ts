@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, workflowRuns } from "../schema/index.js";
-import { CanonicalPolicyBundleManager, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
+import { CanonicalPolicyBundleManager, CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 
 let pg: TestPgDb | undefined;
@@ -98,6 +98,28 @@ describe("canonical policy readiness", () => {
       await manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, audit);
       expect(await manager.host.activePointer("org-a")).toEqual(after);
       expect(await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "policy_authoring_publish"))).toHaveLength(1);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("rejects candidate publication before config-managed pointer or row mutation", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const pointer = await manager.host.activePointer("org-a");
+      const bundles = await db.select().from(policySourceBundles);
+      const audits = await db.select().from(actionInvocations);
+      await db.insert(actionPolicies).values({ id: "candidate", orgId: "org-a", principalType: "org", principalId: "org-a", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+      const candidate = await manager.buildCurrent("org-a");
+      await db.delete(actionPolicies).where(eq(actionPolicies.id, "candidate"));
+      manager.setConfigManagedToolPolicies("org-a", "/etc/valet.yaml");
+
+      await expect(manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "blocked" }))
+        .rejects.toEqual(new CanonicalPolicyConfigManagedError("org-a", "/etc/valet.yaml"));
+      expect(await manager.host.activePointer("org-a")).toEqual(pointer);
+      expect(await db.select().from(policySourceBundles)).toEqual(bundles);
+      expect(await db.select().from(actionInvocations)).toEqual(audits);
+      expect(await db.select().from(actionPolicies)).toHaveLength(0);
     } finally { await manager.close(); }
   }, 120_000);
 
