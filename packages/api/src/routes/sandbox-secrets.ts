@@ -17,8 +17,10 @@ import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
-import { onePasswordScopesFor } from "../services/credential-resolution.js";
+import { onePasswordScopesFor, resolveAcrossScopes } from "../services/credential-resolution.js";
 import { isOnePasswordReference, OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
+import { classifySecurityBrokerCaller, loadEngagementCredentialRefs } from "../services/security-broker-allowlist.js";
+import { registerSecurityCredentialValue } from "../services/security-credential-tripwire.js";
 import { getTeamInOrg } from "../services/teams.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
@@ -150,6 +152,36 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   const scopes = narrowed.scopes;
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
 
+  // Per-engagement allowlist (Part 12 §Broker allowlist enforcement, INV-34).
+  // A security persona's child sandbox is claimed by a `security_cells` row;
+  // every other caller (workflow, coding session, orchestrator) claims none
+  // and bypasses this block entirely, unaffected. This runs before any
+  // `resolveReference` call: a reference that fails the allowlist must not
+  // reach 1Password, or a rejected reference would already have leaked its
+  // value into api memory.
+  const securityCaller = await classifySecurityBrokerCaller(db, sandbox.sessionId);
+  if (securityCaller.kind === "security-session-denied") {
+    return c.json(
+      { error: "Only a running security persona cell may resolve engagement credentials." },
+      403,
+    );
+  }
+  const engagementId =
+    securityCaller.kind === "running-cell" ? securityCaller.engagementId : null;
+  if (engagementId !== null) {
+    const allowlist = await loadEngagementCredentialRefs(db, engagementId);
+    const disallowed = references.filter((ref) => !allowlist.has(ref));
+    if (disallowed.length > 0) {
+      return c.json(
+        {
+          error: `The following op:// references are not declared on this engagement: ${disallowed.join(", ")}.`,
+          code: "credential_ref_not_allowlisted",
+        },
+        403,
+      );
+    }
+  }
+
   // Every reference in parallel, within the owner's ordered scopes. An
   // absent team token permits org fallback; a configured team refusal does not.
   // A non-team scope with no token or a disabled toggle has nothing to offer and the next may
@@ -165,17 +197,19 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   let teamRefused = false;
   const values = await Promise.all(
     references.map(async (reference): Promise<string | null> => {
-      for (const scope of scopes) {
-        try {
-          const value = await onePassword.resolveReference(scope, ctx, reference);
-          return Buffer.from(value, "utf8").toString("base64");
-        } catch (err) {
-          if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
-            teamRefused = true;
-            return null;
-          }
-          if (err instanceof OnePasswordAuthError && err.kind === "sdk") sdkRefused = true;
+      const outcome = await resolveAcrossScopes(onePassword, scopes, ctx, reference);
+      if ("value" in outcome) {
+        if (engagementId !== null) {
+          registerSecurityCredentialValue(sandbox.sessionId, engagementId, outcome.value);
         }
+        return Buffer.from(outcome.value, "utf8").toString("base64");
+      }
+      for (const { scope, error } of outcome.attempts) {
+        if (scope === "team" && !(error instanceof OnePasswordAuthError && error.kind === "no_token")) {
+          teamRefused = true;
+          break;
+        }
+        if (error instanceof OnePasswordAuthError && error.kind === "sdk") sdkRefused = true;
       }
       return null;
     }),
@@ -263,6 +297,16 @@ sandboxSecretsRouter.post("/find", async (c) => {
   const allowed = onePasswordScopesFor(teamId ? "team" : isOwnUserSession ? "user" : undefined, teamId);
   const narrowed = narrowScopes(allowed, body.scope);
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
+
+  // Discovery uses the same lifecycle boundary as resolution. A security
+  // runner or stale child must not enumerate vault, item, or field names.
+  const securityCaller = await classifySecurityBrokerCaller(db, sandbox.sessionId);
+  if (securityCaller.kind === "security-session-denied") {
+    return c.json(
+      { error: "Only a running security persona cell may search for engagement credentials." },
+      403,
+    );
+  }
 
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
   const lines: string[] = [];

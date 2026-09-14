@@ -5,6 +5,7 @@
  * authenticate, which is the exact failure the file exists to remove.
  */
 import { describe, expect, it } from "vitest";
+import { RESERVED_CREDENTIAL_LABELS } from "@valet/shared";
 import { CREDENTIAL_COMMANDS_PATH, loadCredentialCommands } from "./credential-commands.js";
 
 const reader = (body: string | null) => async (path: string) =>
@@ -80,11 +81,22 @@ describe("loadCredentialCommands", () => {
     ).rejects.toThrow(/op:\/\/ secret reference/);
   });
 
+  it("rejects every fixed or privileged sandbox helper name", async () => {
+    for (const command of RESERVED_CREDENTIAL_LABELS) {
+      await expect(
+        loadCredentialCommands(
+          reader(`commands:\n  - command: ${command}\n    env: A\n    reference: op://v/i/f\n`),
+        ),
+        command,
+      ).rejects.toThrow(/reserved by sandbox prep/);
+    }
+  });
+
   it("rejects the same command declared twice, rather than picking one", async () => {
     await expect(
       loadCredentialCommands(
         reader(
-          "commands:\n  - command: gh\n    env: A\n    reference: op://v/i/f\n  - command: gh\n    env: B\n    reference: op://v/i/g\n",
+          "commands:\n  - command: custom-cli\n    env: A\n    reference: op://v/i/f\n  - command: custom-cli\n    env: B\n    reference: op://v/i/g\n",
         ),
       ),
     ).rejects.toThrow(/declared more than once/);

@@ -207,6 +207,61 @@ tools:
   });
 });
 
+describe("credential declarations", () => {
+  it("parses an mTLS primary reference and certificate reference", () => {
+    const config = parseSecurityConfig(
+      `version: 1
+credentials:
+  - label: partner-api
+    kind: mtls
+    env: CLIENT_KEY
+    reference: op://Security/Partner/key
+    meta:
+      certRef: op://Security/Partner/cert
+`,
+      KNOWN,
+    );
+    expect(config.credentials).toEqual([
+      {
+        label: "partner-api",
+        kind: "mtls",
+        env: "CLIENT_KEY",
+        reference: "op://Security/Partner/key",
+        meta: { certRef: "op://Security/Partner/cert" },
+      },
+    ]);
+  });
+
+  it("rejects reserved launchers and malformed certificate references", () => {
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: valet-secrets\n    kind: password\n    env: TOKEN\n    reference: op://v/i/f\n",
+        KNOWN,
+      ),
+    ).toThrow(/reserved by sandbox prep/);
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: partner\n    kind: mtls\n    env: KEY\n    reference: op://v/i/key\n    meta:\n      certRef: not-a-reference\n",
+        KNOWN,
+      ),
+    ).toThrow(/has an invalid certificate reference/);
+    // A certRef that is not text used to slip through the string-only meta
+    // filter, leaving an mTLS launcher with no certificate.
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: partner\n    kind: mtls\n    env: KEY\n    reference: op://v/i/key\n    meta:\n      certRef: 123\n",
+        KNOWN,
+      ),
+    ).toThrow(/has an invalid certificate reference/);
+    expect(() =>
+      parseSecurityConfig(
+        "version: 1\ncredentials:\n  - label: partner\n    kind: password\n    env: KEY\n    reference: op://v/i/key\n    meta:\n      certRef: op://v/i/cert\n",
+        KNOWN,
+      ),
+    ).toThrow(/only on an mTLS client cert credential/);
+  });
+});
+
 describe("configToPlanYaml", () => {
   it("round-trips a config's steps through parsePlan", () => {
     const config = parseSecurityConfig(VALID, KNOWN);

@@ -164,6 +164,7 @@ export function useSecurityPreview(body: SecurityPreviewRequest, enabled: boolea
       body.ref ?? "",
       (body.paths ?? []).join(","),
       body.includeReport === undefined ? "default" : body.includeReport ? "with" : "without",
+      body.teamId ?? "",
     ],
     queryFn: () => api.securityPreview(body),
     enabled,
@@ -256,7 +257,7 @@ export function useResolveNeeds(sessionId: string) {
   return useMutation<
     SecurityResolveNeedsResponse,
     Error,
-    { needId: string; resolution: string; dismiss?: boolean }[]
+    { needId: string; resolution?: string; credentialLabel?: string; dismiss?: boolean }[]
   >({
     mutationFn: (answers) => api.resolveSecurityNeeds(sessionId, answers),
     onSuccess: () => {

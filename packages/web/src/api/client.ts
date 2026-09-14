@@ -653,10 +653,13 @@ export const api = {
     ),
   /** POST /sessions/:id/security/needs/resolve — the consolidated human answer
    * + delta re-run (pivot-coordinator, M-P4c; session admin). Marks each need
-   * answered and resets only the affected cells to pending. */
+   * answered and resets only the affected cells to pending. A `kind:
+   * "credential"` need takes `credentialLabel` (a declared label) instead of
+   * `resolution` (Part 12, INV-39): the CHECK constraint on `security_needs`
+   * refuses a non-null `resolution` on that kind. */
   resolveSecurityNeeds: (
     id: string,
-    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+    answers: { needId: string; resolution?: string; credentialLabel?: string; dismiss?: boolean }[],
   ) =>
     request<SecurityResolveNeedsResponse>(
       "POST",

@@ -1214,7 +1214,8 @@ CREATE TABLE "security_engagements" (
 	"report_json" text,
 	"report_generated_at" bigint,
 	"created_at" bigint NOT NULL,
-	"updated_at" bigint NOT NULL
+	"updated_at" bigint NOT NULL,
+	"credentials_json" jsonb
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "security_engagements_session_unique" ON "security_engagements" ("session_id");
@@ -1357,7 +1358,9 @@ CREATE TABLE "security_needs" (
 	"status" text DEFAULT 'open' NOT NULL,
 	"resolution" text,
 	"created_at" bigint NOT NULL,
-	"resolved_at" bigint
+	"resolved_at" bigint,
+	"credential_label" text,
+	CONSTRAINT "security_needs_credential_resolution_null" CHECK ("kind" <> 'credential' OR "resolution" IS NULL)
 );
 --> statement-breakpoint
 CREATE INDEX "security_needs_engagement" ON "security_needs" ("engagement_id");

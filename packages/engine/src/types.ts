@@ -2662,6 +2662,10 @@ export interface ProviderBundle {
   blobs?: BlobStore;
   credentials?: CredentialStore;
   sandboxProvider?: SandboxProvider;
+  /** Host seam that removes sensitive tool output before persistence or events. */
+  sanitizeToolOutput?: (sessionId: string, value: unknown) => unknown;
+  /** Host seam that disables raw argument deltas for sensitive sessions. */
+  canStreamToolCallArguments?: (sessionId: string) => boolean;
 }
 
 export interface EngineOptions {

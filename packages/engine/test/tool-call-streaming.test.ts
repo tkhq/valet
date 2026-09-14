@@ -8,14 +8,19 @@ import {
   type BusEvent,
 } from "../src/index.js";
 
-function makeEngine() {
+function makeEngine(canStreamToolCallArguments?: (sessionId: string) => boolean) {
   const store = new InMemorySessionStore();
   const bus = new InMemoryEventStream();
   const sandboxProvider = new VirtualSandboxProvider();
   const events: BusEvent[] = [];
   bus.subscribe({}, (e) => events.push(e));
   const engine = new Engine({
-    providers: { store, stream: bus, sandboxProvider },
+    providers: {
+      store,
+      stream: bus,
+      sandboxProvider,
+      ...(canStreamToolCallArguments ? { canStreamToolCallArguments } : {}),
+    },
   });
   return { engine, store, bus, events };
 }
@@ -72,6 +77,33 @@ describe("engine: tool-call argument streaming", () => {
     const { events: log } = await bus.read(session.id);
     expect(log.some((e) => e.event.type === "tool_call_update")).toBe(false);
 
+    faux.unregister();
+  });
+
+  it("does not emit raw argument deltas for a sensitive session", async () => {
+    const faux = registerFauxProvider({ provider: "toolstream-sensitive", tokenSize: { min: 2, max: 4 } });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall("write", { path: "/tmp/note.txt", content: "sensitive-value" }, { id: "tc-sensitive" })],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("done"),
+    ]);
+
+    const { engine, events } = makeEngine(() => false);
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const receipt = await session.prompt("write a note");
+    await waitForStatus(events, receipt.threadId, "idle");
+
+    expect(events.some((e) => e.event.type === "tool_call_update")).toBe(false);
+    expect(events.some((e) => e.event.type === "tool_start")).toBe(true);
     faux.unregister();
   });
 });
