@@ -433,3 +433,11 @@ The creation dialog recommends a size tier for each starter shape. It saves that
 ### Workflow hub on narrow screens (2026-09-11)
 
 The hub header and row actions wrap when space is limited. Tabs can scroll horizontally without widening the page. Template columns follow the available content width. Service labels, cadence, and setup actions remain readable without clipping. Template descriptions state the outcome briefly; steps and operational limits remain in the details dialog.
+
+
+### Canvas edge readability (2026-09-14)
+
+Edges show arrowheads, readable branch labels, and separate label positions for sibling branches.
+The initial fit keeps a readable zoom floor; manual Fit view can show the whole graph.
+Clicking an edge label clears the node selection and selects that edge.
+Backspace then removes only the selected edge.
