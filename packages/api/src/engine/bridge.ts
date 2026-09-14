@@ -60,8 +60,8 @@ function gateApprovalDetails(context: Record<string, unknown> | undefined, body?
     riskLevel: approval.riskLevel,
     service: approval.service,
     summary: approval.summary,
-    ...(approval.argsPreview !== undefined ? { argsPreview: approval.argsPreview } : {}),
-    ...(approval.toolId === undefined || approval.argsPreview === undefined || approval.reviewIncomplete ? { reviewIncomplete: true } : {}),
+    ...(approval.argsPreview !== undefined ? { argsPreview: approval.argsPreview.slice(0, 16_000) } : {}),
+    ...(approval.toolId === undefined || approval.argsPreview === undefined || approval.argsPreview.length > 16_000 || approval.reviewIncomplete ? { reviewIncomplete: true } : {}),
   };
 }
 

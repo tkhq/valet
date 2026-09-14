@@ -131,7 +131,7 @@ describe("engineGateToWire", () => {
     const wire = engineGateToWire({
       id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
       type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
-      context: { tool_id: "github.create_issue", argsPreview: "x".repeat(15_998), reviewIncomplete: true },
+      context: { kind: "tool_approval", tool_id: "github.create_issue", argsPreview: JSON.stringify({ body: "x".repeat(16_000) }) },
     });
     expect(new TextEncoder().encode(wire.approval?.argsPreview).length).toBeLessThanOrEqual(16_000);
     expect(wire.approval?.reviewIncomplete).toBe(true);
