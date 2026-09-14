@@ -79,6 +79,7 @@ export class CanonicalPolicyBundleManager {
     await this.db.transaction(async (tx) => {
       const pointer = (await tx.select().from(policyActiveBundles).where(eq(policyActiveBundles.orgId, organizationId)).for("update").limit(1))[0];
       if (!pointer) throw new Error(`Canonical policy pointer for ${organizationId} is missing.`);
+      if (pointer.digest === validated.sourceBundleDigest) return;
       await putBundle(tx, validated.sourceBundleDigest, bundle, this.now());
       const changed = await tx.update(policyActiveBundles).set({ digest: validated.sourceBundleDigest, generation: pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, organizationId), eq(policyActiveBundles.digest, pointer.digest), eq(policyActiveBundles.generation, pointer.generation))).returning({ orgId: policyActiveBundles.orgId });
       if (!changed[0]) throw new Error("Canonical policy candidate activation lost its compare-and-swap.");

@@ -79,10 +79,45 @@ describe("canonical policy readiness", () => {
       await db.delete(actionPolicies).where(eq(actionPolicies.id, "candidate-rule"));
       await expect(manager.activateCandidate("org-a", { ...candidate.identity, engineDigest: "0".repeat(64) }, candidate.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "bad" })).rejects.toThrow(/identity changed/);
       expect(await manager.host.activePointer("org-a")).toEqual(before);
-      await manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "good" });
+      const audit = { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "good" };
+      await manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, audit);
       const after = (await manager.host.activePointer("org-a"))!;
       expect(after).toMatchObject({ sourceBundleDigest: candidate.identity.sourceBundleDigest, generation: before.generation + 1 });
+      await manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, audit);
+      expect(await manager.host.activePointer("org-a")).toEqual(after);
       expect(await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "policy_authoring_publish"))).toHaveLength(1);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("keeps the old pointer when candidate runtime loading fails", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const before = (await manager.host.activePointer("org-a"))!;
+      await db.insert(actionPolicies).values({ id: "candidate-rule", orgId: "org-a", principalType: "org", principalId: "org-a", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+      const candidate = await manager.buildCurrent("org-a");
+      const load = manager.runtime.loadBundle.bind(manager.runtime);
+      manager.runtime.loadBundle = async () => { throw new Error("load failed"); };
+      await expect(manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "load" })).rejects.toThrow("load failed");
+      expect(await manager.host.activePointer("org-a")).toEqual(before);
+      expect(await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "policy_authoring_publish"))).toHaveLength(0);
+      manager.runtime.loadBundle = load;
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("rolls back static writes after a stale pointer CAS", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const before = (await manager.host.activePointer("org-a"))!;
+      await expect(manager.mutateAndActivate("org-a", { actorId: "admin", operation: "create", idempotencyKey: "stale" }, async (tx) => {
+        await tx.insert(actionPolicies).values({ id: "stale-rule", orgId: "org-a", principalType: "org", principalId: "org-a", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+        await tx.update(policyActiveBundles).set({ generation: before.generation + 1 }).where(eq(policyActiveBundles.orgId, "org-a"));
+      })).rejects.toThrow(/compare-and-swap/);
+      expect(await manager.host.activePointer("org-a")).toEqual(before);
+      expect(await db.select().from(actionPolicies).where(eq(actionPolicies.id, "stale-rule"))).toHaveLength(0);
     } finally { await manager.close(); }
   }, 120_000);
 
