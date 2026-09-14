@@ -788,6 +788,7 @@ interface Catalog {
   /** TTL cache of resolved dynamic actions, keyed by plugin service. */
   resolved: Map<string, ResolvedDynamic>;
   resolving: Map<string, Promise<ResolvedDynamic>>;
+  dynamicUpdate: Promise<void>;
   now: () => number;
 }
 
@@ -826,7 +827,7 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     }
     if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId, dynamicPlugins, resolved: new Map(), resolving: new Map(), now };
+  return { entries, byId, dynamicPlugins, resolved: new Map(), resolving: new Map(), dynamicUpdate: Promise.resolve(), now };
 }
 
 /**
@@ -849,13 +850,19 @@ async function resolveDynamic(
     if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
     const actions = await resolveActions({ credentials: scopedCredentialProvider(ctx, plugin.credentialService ?? plugin.service) });
     const built = buildEntries(plugin.service, plugin, actions);
-    for (const entry of built.entries) {
-      const id = qualifiedId(entry);
-      if (catalog.byId.has(id) || [...catalog.resolved.entries()].some(([service, resolved]) => service !== plugin.service && resolved.entries.some((other) => qualifiedId(other) === id))) throw new Error("duplicate plugin action id: " + id);
-    }
-    const result: ResolvedDynamic = { ...built, fetchedAt: now };
-    catalog.resolved.set(plugin.service, result);
-    return result;
+    let release: (() => void) | undefined;
+    const previous = catalog.dynamicUpdate;
+    catalog.dynamicUpdate = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      for (const entry of built.entries) {
+        const id = qualifiedId(entry);
+        if (catalog.byId.has(id) || [...catalog.resolved.entries()].some(([service, resolved]) => service !== plugin.service && resolved.entries.some((other) => qualifiedId(other) === id))) throw new Error("duplicate plugin action id: " + id);
+      }
+      const result: ResolvedDynamic = { ...built, fetchedAt: now };
+      catalog.resolved.set(plugin.service, result);
+      return result;
+    } finally { release?.(); }
   })();
   catalog.resolving.set(plugin.service, pending);
   try { return await pending; } finally { catalog.resolving.delete(plugin.service); }
