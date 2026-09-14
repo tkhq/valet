@@ -575,6 +575,10 @@ export async function invokeAction(
     return { kind: "error", message: "Approval replay rejected because the approved tool or prepared parameters changed. Ask the user to submit the action again for review." };
   }
 
+  if (ctx.suspendedDecision?.approvalReplay && ctx.suspendedDecision.resolution?.actionId !== "approve") {
+    return { kind: "denied-approval" };
+  }
+
   // One bound applies to the gate body, gate context, plugin context, and audit.
   const boundedSummary = truncateApprovalText(summary, 4_000).text;
   const resolver = ctx.policyResolver;

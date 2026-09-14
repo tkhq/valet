@@ -119,7 +119,9 @@ export function DecisionGateCard({
           </Button>
         </div>
       ) : (
-        <div className="flex max-h-[35dvh] shrink-0 flex-wrap gap-2 overflow-y-auto border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
+        <div className="max-h-[35dvh] shrink-0 overflow-y-auto border-t border-amber-300/70 px-3.5 py-3 dark:border-amber-700/50">
+          {approvalReviewIncomplete && <p id="approval-review-unavailable" className="mb-2 text-xs text-muted">Approval is unavailable because the complete parameters could not be reviewed.</p>}
+          <div className="flex max-h-[35dvh] flex-wrap gap-2">
           {gate.actions.map((action) => {
             const isAlwaysAllow = action.id === GATE_ACTION_ALWAYS_ALLOW;
             const reviewBlocked = approvalReviewIncomplete && (action.approves === true || action.id === "approve");
@@ -135,14 +137,13 @@ export function DecisionGateCard({
                 <span className="max-w-full break-all text-center">{action.label}</span>
               </Button>
             );
-            if (reviewBlocked) {
-              return <Tooltip key={action.id} content="Review the complete request in the action log, then retry this action."><span>{button}</span></Tooltip>;
-            }
+            if (reviewBlocked) return <span key={action.id} tabIndex={0} aria-describedby="approval-review-unavailable">{button}</span>;
             if (isAlwaysAllow && !isAdmin) {
               return <Tooltip key={action.id} content={ALWAYS_ALLOW_TOOLTIP}><span>{button}</span></Tooltip>;
             }
             return reviewBlocked ? <span key={action.id} tabIndex={0} aria-describedby="approval-review-unavailable">{button}</span> : button;
           })}
+          </div>
         </div>
       )}
     </section>
