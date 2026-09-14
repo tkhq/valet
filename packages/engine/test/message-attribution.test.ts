@@ -158,3 +158,29 @@ describe("entriesToSummaryMessages — attributeAuthors", () => {
     expect(textOf(msgs[0].content)).toBe("ship the release");
   });
 });
+
+describe("entriesToAgentMessages — reply context", () => {
+  it("adds the stable assistant reference without rewinding the transcript", () => {
+    const entries = [
+      userEntry({
+        content: "What about staging?",
+        metadata: {
+          replyTo: {
+            messageId: "assistant-7",
+            excerpt: "Use the blue deployment for the API.",
+          },
+        },
+      }),
+    ];
+
+    const messages = entriesToAgentMessages(entries, MODEL);
+    expect(messages).toHaveLength(1);
+    expect(textOf(messages[0].content)).toBe(
+      "<reply-context>\n" +
+        "The user is replying to assistant message assistant-7.\n" +
+        "Immutable excerpt: Use the blue deployment for the API.\n" +
+        "</reply-context>\n\n" +
+        "What about staging?",
+    );
+  });
+});

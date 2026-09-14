@@ -286,7 +286,12 @@ function ChatPage() {
             </span>
           </ScopeNotice>
         )}
-        <SessionView sessionId={sessionId} activeThreadId={thread} onOpenChild={openChild} />
+        <SessionView
+          sessionId={sessionId}
+          activeThreadId={thread}
+          onOpenChild={openChild}
+          enableReplies
+        />
       </div>
       {child && <ChildPanel childId={child} onClose={closeChild} />}
     </>

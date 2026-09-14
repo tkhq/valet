@@ -3437,15 +3437,16 @@ export class Thread {
       // pointer for the LLM so a replayed turn re-prompts what fits the window,
       // not the oversized text — matching what entriesToAgentMessages renders.
       const spillPath = existingUserEntry.metadata?.[SPILLED_INPUT_PATH_KEY];
+      const restoredText =
+        typeof spillPath === "string"
+          ? buildSpilledInputMarker({
+              path: spillPath,
+              tokens: estimateTokens(existingUserEntry.content),
+              chars: existingUserEntry.content.length,
+            })
+          : text;
       return {
-        text:
-          typeof spillPath === "string"
-            ? buildSpilledInputMarker({
-                path: spillPath,
-                tokens: estimateTokens(existingUserEntry.content),
-                chars: existingUserEntry.content.length,
-              })
-            : text,
+        text: renderReplyContext(restoredText, existingUserEntry.metadata),
         attachments: existingUserEntry.attachments,
       };
     }
@@ -3485,6 +3486,8 @@ export class Thread {
     const metadata = spilledInputPath
       ? { ...(baseMetadata ?? {}), [SPILLED_INPUT_PATH_KEY]: spilledInputPath }
       : baseMetadata;
+
+    text = renderReplyContext(text, metadata);
 
     const userEntry: MessageEntry = {
       id: entryId,
@@ -4821,6 +4824,8 @@ export class Thread {
                   ? "abort"
                   : event.message.stopReason === "error"
                   ? "error"
+                  : event.message.stopReason === "toolUse"
+                  ? "tool_use"
                   : "end_turn",
             },
             { queueItemId: this.runningItem?.id },
@@ -5622,6 +5627,40 @@ export function skillInvocationsInContext(
   return facts;
 }
 
+interface ReplyMetadata {
+  messageId: string;
+  excerpt: string;
+}
+
+function replyMetadata(metadata: Record<string, unknown> | undefined): ReplyMetadata | undefined {
+  const value = metadata?.replyTo;
+  if (!value || typeof value !== "object") return undefined;
+  const ref = value as Record<string, unknown>;
+  if (typeof ref.messageId !== "string" || typeof ref.excerpt !== "string") return undefined;
+  return { messageId: ref.messageId, excerpt: ref.excerpt };
+}
+
+function escapeReplyContext(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** Adds explicit topical context without changing transcript position or branching. */
+export function renderReplyContext(
+  text: string,
+  metadata: Record<string, unknown> | undefined,
+): string {
+  const ref = replyMetadata(metadata);
+  if (!ref) return text;
+  return [
+    "<reply-context>",
+    "The user is replying to assistant message " + escapeReplyContext(ref.messageId) + ".",
+    "Immutable excerpt: " + escapeReplyContext(ref.excerpt),
+    "</reply-context>",
+    "",
+    text,
+  ].join("\n");
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -5684,14 +5723,17 @@ export function entriesToAgentMessages(
       const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
       const text =
         typeof spillPath === "string"
-          ? buildSpilledInputMarker({
-              path: spillPath,
-              tokens: estimateTokens(e.content),
-              chars: e.content.length,
-            })
+          ? renderReplyContext(
+              buildSpilledInputMarker({
+                path: spillPath,
+                tokens: estimateTokens(e.content),
+                chars: e.content.length,
+              }),
+              e.metadata,
+            )
           : e.signal
           ? renderSignalEnvelope(e.signal, e.content)
-          : e.content;
+          : renderReplyContext(e.content, e.metadata);
       const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
       const contentBlocks = userContentBlocks(text, e.attachments, sender);
       out.push({

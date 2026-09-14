@@ -1195,6 +1195,13 @@ export interface MessageAuthor {
   avatarUrl?: string;
 }
 
+export interface MessageReplyReference {
+  /** Stable id of the assistant entry in this message's thread. */
+  messageId: string;
+  /** Server-created immutable excerpt shown after reload and sent to the agent. */
+  excerpt: string;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -1212,6 +1219,10 @@ export interface Message {
    * `submission.settled` events to the originating user message.
    */
   queueItemId?: string;
+  /** True after an assistant message reaches a terminal stop reason. */
+  completed?: boolean;
+  /** Assistant message that this user message addresses. */
+  replyTo?: MessageReplyReference;
   /**
    * Present when this entry originated from a `SignalContent` prompt (e.g.
    * a `child.settled` notification). A wire message with `signal` renders
@@ -1290,6 +1301,8 @@ export interface SendPromptRequest {
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
+  /** Stable assistant entry id to reply to. The server creates the excerpt. */
+  replyToMessageId?: string;
   /** Image attachments for the message. */
   attachments?: PromptImageAttachment[];
   /** File attachment refs (from POST /sessions/:id/files). Single-use. */
@@ -1436,7 +1449,7 @@ export type WireEvent =
       type: "message_end";
       threadId: string;
       messageId: string;
-      reason: "end_turn" | "error" | "abort";
+      reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | {
       seq: number;

@@ -129,6 +129,41 @@ describe("stream store reducer", () => {
     expect(m3?.content).toBe("hello");
   });
 
+  it("marks an assistant message complete only after message_end", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(false);
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "end_turn",
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(true);
+  });
+
+  it("keeps a tool-use message incomplete so it cannot be a reply target", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "tool_use",
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(false);
+  });
+
   it("populates the queue.state slice for the thread", () => {
     const { ingest } = useStreamStore.getState();
     const ev: WireEvent = {

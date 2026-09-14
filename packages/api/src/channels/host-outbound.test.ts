@@ -43,6 +43,7 @@ class FakeTransport implements ChannelTransport {
   /** Artificial latency on send(), to make delivery-order races observable. */
   sendDelayMs = 0;
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
+  deliveries: Array<{ type: "message"; markdown: string } | { type: "gate"; gateId: string }> = [];
   media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
   gatePrompts: Array<{ conversationKey: string; prompt: ChannelGatePrompt; messageId: string }> = [];
   gateEdits: Array<{ ref: GatePromptRef; resolution: ChannelGateResolution }> = [];
@@ -58,6 +59,7 @@ class FakeTransport implements ChannelTransport {
   async send(conversationKey: string, message: OutboundChannelMessage) {
     if (this.sendDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
     this.sent.push({ conversationKey, message });
+    this.deliveries.push({ type: "message", markdown: message.markdown });
     return { conversationKey, messageId: String(this.nextMessageId++) };
   }
   async sendMedia(conversationKey: string, attachment: OutboundChannelAttachment) {
@@ -67,6 +69,7 @@ class FakeTransport implements ChannelTransport {
   async sendGatePrompt(conversationKey: string, prompt: ChannelGatePrompt) {
     const messageId = String(this.nextMessageId++);
     this.gatePrompts.push({ conversationKey, prompt, messageId });
+    this.deliveries.push({ type: "gate", gateId: prompt.gateId });
     return { conversationKey, messageId };
   }
   async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution) {
@@ -747,6 +750,70 @@ describe("ChannelHost outbound delivery", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect((await engineStore.getQueueItem(session.id, queueItem.id))?.outcome).toEqual({ outcome: "aborted" });
     expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("posts tool-use narration before its decision gate", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-tool-use-gate";
+    const gate: DecisionGate = {
+      id: "gate-tool-use",
+      sessionId: session.id,
+      threadId,
+      queueItemId,
+      resumeKey: "rk-tool-use",
+      ordinal: 0,
+      type: "approval",
+      title: "Approve the thing?",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: {
+          signalType: "fake.message",
+          tagName: "signal",
+          origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" },
+        },
+      }),
+      {
+        type: "message",
+        id: "tool-use-narration",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "I need approval before I continue.",
+        queueItemId,
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "tool-use-narration", reason: "tool_use" },
+      },
+      `tool-use-narration-${randomUUID()}`,
+    );
+    await eventStream.append(
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      `tool-use-gate-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => expect(fakeTransport.gatePrompts).toHaveLength(1));
+    expect(fakeTransport.deliveries).toEqual([
+      { type: "message", markdown: "I need approval before I continue." },
+      { type: "gate", gateId: gate.id },
+    ]);
   });
 
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
