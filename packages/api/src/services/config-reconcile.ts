@@ -15,6 +15,7 @@ import { and, eq, isNull, like, lte, notLike, sql } from "drizzle-orm";
 import { CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
+  ACTION_POLICY_AUTHORIZATION_KIND,
   actionPolicies,
   invites,
   llmProviders,
@@ -885,16 +886,16 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig, manager
     }
     desiredIds.add(id);
 
-    const existing = (await tx.select().from(actionPolicies).where(eq(actionPolicies.id, id)).limit(1))[0];
+    const existing = (await tx.select().from(actionPolicies).where(and(eq(actionPolicies.id, id), eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND))).limit(1))[0];
     const appliesIn = rule.appliesIn ?? "any";
     if (!existing) {
       await tx.insert(actionPolicies).values({
-        id, orgId, principalType: "org", principalId: orgId, service, actionId, riskLevel,
+        id, orgId, authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND, principalType: "org", principalId: orgId, service, actionId, riskLevel,
         mode: rule.mode, paramMatchers: [], appliesIn, origin: "admin", managedBy: "config",
         expiresAt: null, revokedAt: null, createdAt: now, updatedAt: now,
       });
     } else if (existing.mode !== rule.mode || existing.appliesIn !== appliesIn || existing.revokedAt !== null) {
-      await tx.update(actionPolicies).set({ mode: rule.mode, appliesIn, revokedAt: null, updatedAt: now }).where(eq(actionPolicies.id, id));
+      await tx.update(actionPolicies).set({ mode: rule.mode, appliesIn, revokedAt: null, updatedAt: now }).where(and(eq(actionPolicies.id, id), eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND)));
     }
   }
 
@@ -903,14 +904,14 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig, manager
   const managedRows = await tx
     .select({ id: actionPolicies.id, revokedAt: actionPolicies.revokedAt })
     .from(actionPolicies)
-    .where(and(eq(actionPolicies.orgId, orgId), like(actionPolicies.id, "pol:config:%")));
+    .where(and(eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND), eq(actionPolicies.orgId, orgId), like(actionPolicies.id, "pol:config:%")));
 
   for (const row of managedRows) {
     if (!desiredIds.has(row.id) && row.revokedAt === null) {
       await tx
         .update(actionPolicies)
         .set({ revokedAt: now, updatedAt: now })
-        .where(eq(actionPolicies.id, row.id));
+        .where(and(eq(actionPolicies.id, row.id), eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND)));
     }
   }
     });

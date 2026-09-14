@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
 import { canonicalJson } from "../lib/canonical-json.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, teams } from "../schema/index.js";
+import { ACTION_POLICY_AUTHORIZATION_KIND, actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, teams } from "../schema/index.js";
 import { buildCurrentPolicySource, standardNewOrganizationPolicySnapshot } from "./bundles/current-policy-source.js";
 import type { CurrentPolicySourceSnapshotV1 } from "./bundles/current-policy-types.js";
 import { SourceBundleHost } from "./bundles/host.js";
@@ -15,8 +15,8 @@ export type ActionPluginByService = ReadonlyMap<string, { plugin: ValetPlugin; a
 
 export async function currentPolicySnapshot(db: AppQueryable, organizationId: string, plugins: ActionPluginByService): Promise<CurrentPolicySourceSnapshotV1> {
   const [policyRows, overrideRows, teamRows] = await Promise.all([
-    db.select().from(actionPolicies).where(eq(actionPolicies.orgId, organizationId)),
-    db.select().from(actionPolicyOverrides).where(eq(actionPolicyOverrides.orgId, organizationId)),
+    db.select().from(actionPolicies).where(and(eq(actionPolicies.orgId, organizationId), eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND))),
+    db.select().from(actionPolicyOverrides).where(and(eq(actionPolicyOverrides.orgId, organizationId), eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND))),
     db.select({ id: teams.id }).from(teams).where(eq(teams.orgId, organizationId)),
   ]);
   const existingTeamIds = new Set(teamRows.map((row) => row.id));

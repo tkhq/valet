@@ -1435,11 +1435,14 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
 // service layer (T3-T5) is expected to validate the same shape before
 // insert so a bad row never reaches the DB in the first place.
 
+export const ACTION_POLICY_AUTHORIZATION_KIND = "tool.action";
+
 export const actionPolicies = pgTable(
   "action_policies",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
+    authorizationKind: text("authorization_kind").notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
     principalType: text("principal_type", { enum: ["org", "user", "team"] }).notNull(),
     principalId: text("principal_id").notNull(),
     service: text("service"),
@@ -1511,6 +1514,7 @@ export const actionPolicyOverrides = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
+    authorizationKind: text("authorization_kind").notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
     userId: text("user_id").notNull(),
     service: text("service"),
     actionId: text("action_id"),

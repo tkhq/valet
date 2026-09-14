@@ -13,7 +13,7 @@ import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { ApprovalMode, RiskLevel } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
-  agentSessions, workflowRuns, workflowDefinitions,
+  ACTION_POLICY_AUTHORIZATION_KIND, agentSessions, workflowRuns, workflowDefinitions,
   actionInvocations,
   actionPolicies,
   actionPolicyOverrides,
@@ -64,6 +64,7 @@ export function isApprovalMode(v: unknown): v is ApprovalMode {
 function overrideTargetEquals(target: PolicyTarget) {
   if (target.service !== undefined) {
     return and(
+      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
       eq(actionPolicyOverrides.service, target.service),
       isNull(actionPolicyOverrides.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -71,6 +72,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.actionId !== undefined) {
     return and(
+      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
       isNull(actionPolicyOverrides.service),
       eq(actionPolicyOverrides.actionId, target.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -78,6 +80,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.riskLevel !== undefined) {
     return and(
+      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
       isNull(actionPolicyOverrides.service),
       isNull(actionPolicyOverrides.actionId),
       eq(actionPolicyOverrides.riskLevel, target.riskLevel),
@@ -89,7 +92,7 @@ function overrideTargetEquals(target: PolicyTarget) {
 export interface PolicyScope { orgId: string; type: "org" | "team"; id: string }
 
 function policyScopeFilter(scope: PolicyScope) {
-  return and(eq(actionPolicies.orgId, scope.orgId), eq(actionPolicies.principalType, scope.type), eq(actionPolicies.principalId, scope.id));
+  return and(eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND), eq(actionPolicies.orgId, scope.orgId), eq(actionPolicies.principalType, scope.type), eq(actionPolicies.principalId, scope.id));
 }
 
 // ── action_policies CRUD ────────────────────────────────────────────
@@ -118,6 +121,7 @@ export async function createPolicy(db: AppQueryable, scope: PolicyScope, input: 
   const row = {
     id: randomUUID(),
     orgId: scope.orgId,
+    authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
     principalType: scope.type,
     principalId: scope.id,
     service: input.service ?? null,
@@ -226,7 +230,7 @@ export async function upsertOverride(
     const [updated] = await db
       .update(actionPolicyOverrides)
       .set({ mode: input.mode, paramMatchers: input.paramMatchers ?? [], updatedAt: input.now })
-      .where(eq(actionPolicyOverrides.id, existing[0].id))
+      .where(and(eq(actionPolicyOverrides.id, existing[0].id), eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND)))
       .returning();
     return { ok: true, row: updated };
   }
@@ -236,6 +240,7 @@ export async function upsertOverride(
     .values({
       id: randomUUID(),
       orgId,
+      authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
       userId,
       service: input.service ?? null,
       actionId: input.actionId ?? null,
@@ -253,7 +258,7 @@ export async function listMyOverrides(db: AppDb, orgId: string, userId: string):
   return db
     .select()
     .from(actionPolicyOverrides)
-    .where(and(eq(actionPolicyOverrides.orgId, orgId), eq(actionPolicyOverrides.userId, userId)))
+    .where(and(eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND), eq(actionPolicyOverrides.orgId, orgId), eq(actionPolicyOverrides.userId, userId)))
     .orderBy(desc(actionPolicyOverrides.createdAt));
 }
 

@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type { ApprovalMode, PolicyInvocationRecord, RiskLevel } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { actionInvocations, actionPolicies, runtimeGrants } from "../schema/index.js";
+import { ACTION_POLICY_AUTHORIZATION_KIND, actionInvocations, actionPolicies, runtimeGrants } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 
 /** Per-field cap for the audit sink's `params`/`result` jsonb columns. A
@@ -228,6 +228,7 @@ export async function writeAlwaysAllowPolicy(db: AppQueryable, write: AlwaysAllo
     .values({
       id: policyId,
       orgId: write.orgId,
+      authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
       principalType: "org",
       principalId: write.orgId,
       service: null,
@@ -246,6 +247,7 @@ export async function writeAlwaysAllowPolicy(db: AppQueryable, write: AlwaysAllo
     .onConflictDoUpdate({
       target: actionPolicies.id,
       set: { mode: "allow", revokedAt: null, managedBy: write.grantedBy, updatedAt: write.now },
+      setWhere: eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
     });
 
   await db
@@ -253,6 +255,7 @@ export async function writeAlwaysAllowPolicy(db: AppQueryable, write: AlwaysAllo
     .set({ revokedAt: write.now, updatedAt: write.now })
     .where(
       and(
+        eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
         eq(actionPolicies.orgId, write.orgId),
         eq(actionPolicies.principalType, "org"),
         eq(actionPolicies.actionId, write.actionId),

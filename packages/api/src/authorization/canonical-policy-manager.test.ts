@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, teams, workflowRuns } from "../schema/index.js";
 import { CanonicalPolicyBundleManager, CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, migrateCanonicalPolicyReleaseSet, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
+import { deleteOverrideByTarget, listMyOverrides, listPolicies, revokePolicy, updatePolicy, upsertOverride } from "../policies/admin.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 import { currentPolicyCompatibilityReports } from "./policy-compatibility.js";
 
@@ -70,6 +71,38 @@ describe("canonical policy readiness", () => {
         await expect(ensureCanonicalPolicyReadiness(manager), testCase.id).resolves.toBeUndefined();
       }
       expect(await db.select().from(actionPolicies)).toHaveLength(3);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("ignores future built-in rows after rollback", async () => {
+    const db = await setup();
+    await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    const scope = { orgId: "org-a", type: "org" as const, id: "org-a" };
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const pointer = await manager.host.activePointer("org-a");
+      for (const [id, target, value] of [["builtin-risk", "risk_level", "critical"], ["builtin-service", "service", "valet"], ["builtin-action", "action_id", "valet.task"]] as const) {
+        await pg!.pgdb.query(`INSERT INTO action_policies (id, org_id, authorization_kind, principal_type, principal_id, ${target}, mode, origin, created_at, updated_at) VALUES ($1, 'org-a', 'tool.builtin', 'org', 'org-a', $2, 'deny', 'admin', 1, 1)`, [id, value]);
+        await pg!.pgdb.query(`INSERT INTO action_policy_overrides (id, org_id, authorization_kind, user_id, ${target}, mode, created_at, updated_at) VALUES ($1, 'org-a', 'tool.builtin', 'user-a', $2, 'deny', 1, 1)`, [`override-${id}`, value]);
+      }
+
+      expect(await listPolicies(db, scope)).toEqual([]);
+      expect(await listMyOverrides(db, "org-a", "user-a")).toEqual([]);
+      await expect(ensureCanonicalPolicyReadiness(manager)).resolves.toBeUndefined();
+      expect(await manager.host.activePointer("org-a")).toEqual(pointer);
+      expect(await updatePolicy(db, scope, "builtin-action", { mode: "allow", now: 2 })).toBeUndefined();
+      expect(await revokePolicy(db, scope, "builtin-action", 2)).toBeUndefined();
+      expect(await deleteOverrideByTarget(db, "org-a", "user-a", { actionId: "valet.task" })).toBe(false);
+      expect((await upsertOverride(db, "org-a", "user-a", { actionId: "gmail.send", mode: "deny", now: 2 })).ok).toBe(true);
+      const futurePolicies = await pg!.pgdb.query("SELECT id, mode, revoked_at FROM action_policies WHERE authorization_kind = 'tool.builtin' ORDER BY id");
+      const futureOverrides = await pg!.pgdb.query("SELECT id, mode FROM action_policy_overrides WHERE authorization_kind = 'tool.builtin' ORDER BY id");
+      expect(futurePolicies.rows).toEqual([
+        { id: "builtin-action", mode: "deny", revoked_at: null },
+        { id: "builtin-risk", mode: "deny", revoked_at: null },
+        { id: "builtin-service", mode: "deny", revoked_at: null },
+      ]);
+      expect(futureOverrides.rows).toHaveLength(3);
     } finally { await manager.close(); }
   }, 120_000);
 

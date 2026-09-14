@@ -219,6 +219,8 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "action policies authorization kind", probe: { kind: "column", table: "action_policies", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policies\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
+  { describe: "action policy overrides authorization kind", probe: { kind: "column", table: "action_policy_overrides", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policy_overrides\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
   { describe: "runtime grants service", probe: { kind: "column", table: "runtime_grants", column: "service" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "service" text' },
   { describe: "runtime grants action", probe: { kind: "column", table: "runtime_grants", column: "action_id" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "action_id" text' },
   { describe: "runtime grants risk", probe: { kind: "column", table: "runtime_grants", column: "risk_level" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "risk_level" text' },

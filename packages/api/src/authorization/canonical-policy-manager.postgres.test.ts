@@ -43,13 +43,28 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("canonical release migration tra
     try {
       await admin.query(`create schema ${schema}`);
       await applyAppMigrations(pgdb);
+      await pool.query('alter table action_policies drop column authorization_kind');
+      await pool.query('alter table action_policy_overrides drop column authorization_kind');
+      await applyAppMigrations(pgdb);
+      const repairedKinds = await pool.query(`select table_name, is_nullable, column_default from information_schema.columns where table_schema = current_schema() and column_name = 'authorization_kind' order by table_name`);
+      expect(repairedKinds.rows).toEqual([
+        { table_name: "action_policies", is_nullable: "NO", column_default: "'tool.action'::text" },
+        { table_name: "action_policy_overrides", is_nullable: "NO", column_default: "'tool.action'::text" },
+      ]);
       await db.insert(orgs).values([{ id: "org-a", name: "A", createdAt: 1 }, { id: "org-b", name: "B", createdAt: 1 }]);
       first = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
       second = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
       await ensureCanonicalPolicyReadiness(first);
+      const beforeFutureRows = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
+      for (const [id, target, value] of [["builtin-risk", "risk_level", "critical"], ["builtin-service", "service", "valet"], ["builtin-action", "action_id", "valet.task"]] as const) {
+        await pool.query(`insert into action_policies (id, org_id, authorization_kind, principal_type, principal_id, ${target}, mode, origin, created_at, updated_at) values ($1, 'org-a', 'tool.builtin', 'org', 'org-a', $2, 'deny', 'admin', 1, 1)`, [id, value]);
+        await pool.query(`insert into action_policy_overrides (id, org_id, authorization_kind, user_id, ${target}, mode, created_at, updated_at) values ($1, 'org-a', 'tool.builtin', 'user-a', $2, 'deny', 1, 1)`, [`override-${id}`, value]);
+      }
+      await ensureCanonicalPolicyReadiness(first);
+      expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(beforeFutureRows);
       await db.insert(actionPolicies).values({ id: "authored", orgId: "org-b", principalType: "org", principalId: "org-b", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
       const authored = await first.buildCurrent("org-b");
-      await db.delete(actionPolicies);
+      await db.delete(actionPolicies).where(eq(actionPolicies.id, "authored"));
       await first.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });
 
       const before = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);

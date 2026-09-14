@@ -814,6 +814,7 @@ CREATE TABLE "mcp_oauth_clients" (
 CREATE TABLE "action_policies" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
+	"authorization_kind" text DEFAULT 'tool.action' NOT NULL,
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"service" text,
@@ -858,6 +859,7 @@ CREATE UNIQUE INDEX "runtime_grants_execution_policy_key" ON "runtime_grants" ("
 CREATE TABLE "action_policy_overrides" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
+	"authorization_kind" text DEFAULT 'tool.action' NOT NULL,
 	"user_id" text NOT NULL,
 	"service" text,
 	"action_id" text,

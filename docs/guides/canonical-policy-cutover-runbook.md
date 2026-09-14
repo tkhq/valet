@@ -131,6 +131,8 @@ Start rollback if any of these conditions occurs:
 
 Do not enable a same-process fallback. Do not run both evaluators. Do not deploy later policy surfaces during this rollback.
 
+A later release can leave `tool.builtin` rows in the action policy tables. This release ignores those rows during compilation, readiness, administration, reconciliation, and action-only mutation. It reads and writes only `tool.action` rows. Tenant cleanup can delete both kinds.
+
 ## Evidence
 
 Attach these records to the release ticket:
