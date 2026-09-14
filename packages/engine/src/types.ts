@@ -1877,7 +1877,8 @@ export interface SessionStore {
     error?: string,
   ): Promise<QueueItem>;
   /** Stamp abortRequestedAt on unsettled submissions in scope. First write wins; NOT terminal. */
-  requestAbort(sessionId: string, threadId?: string): Promise<void>;
+  /** With queueItemId, stamp only that item within the session/thread scope. */
+  requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void>;
   /** Fenced two-phase settlement for claimed turns: running|blocked→terminalizing, recording the outcome. */
   reserveSettlement(
     sessionId: string,

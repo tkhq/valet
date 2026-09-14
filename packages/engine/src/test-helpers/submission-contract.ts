@@ -1185,6 +1185,18 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
 
     // --- Abort + blocked ---
 
+    it("requestAbort can target one item and rejects a different thread scope", async () => {
+      const a = makeItem();
+      const b = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, a);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, b);
+      await store.requestAbort(SESSION_ID, "other-thread", a.id);
+      expect((await store.getQueueItem(SESSION_ID, a.id))?.abortRequestedAt).toBeUndefined();
+      await store.requestAbort(SESSION_ID, THREAD_ID, a.id);
+      expect((await store.getQueueItem(SESSION_ID, a.id))?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, b.id))?.abortRequestedAt).toBeUndefined();
+    });
+
     it("requestAbort stamps abortRequestedAt on unsettled items in scope only; first write wins", async () => {
       const otherThreadId = "th-2";
       await store.saveThread(SESSION_ID, newThread(otherThreadId, "web:other"));

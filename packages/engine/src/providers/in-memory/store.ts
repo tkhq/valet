@@ -531,11 +531,12 @@ export class InMemorySessionStore implements SessionStore {
     return { ...item };
   }
 
-  async requestAbort(sessionId: string, threadId?: string): Promise<void> {
+  async requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void> {
     const r = this.row(sessionId);
     const now = Date.now();
     for (const item of r.queueItems.values()) {
       if (threadId && item.threadId !== threadId) continue;
+      if (queueItemId && item.id !== queueItemId) continue;
       if (item.status === "settled") continue;
       if (item.abortRequestedAt !== undefined) continue; // first write wins
       item.abortRequestedAt = now;

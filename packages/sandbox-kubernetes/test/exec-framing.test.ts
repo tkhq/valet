@@ -6,7 +6,7 @@
  * "does the shell parse this back to the original bytes", not "does it look
  * like some particular escaping convention".
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   buildShellCommand,
@@ -210,5 +210,36 @@ describe("exitCodeFromStatus", () => {
 
   it("rejects a failure when causes is empty", () => {
     expect(() => exitCodeFromStatus({ status: "Failure", details: { causes: [] } })).toThrow("no process exit status");
+  });
+});
+
+
+describe("exec stdin transport lifetime", () => {
+  it.each(["", "hello\n", "🚀".repeat(262_144)])("delivers complete stdin before transport closure (%#)", async (input) => {
+    let prematureClose = false;
+    const api: PodExecApi = {
+      async exec(_namespace, _pod, _container, command, stdout, stderr, stdin, _tty, statusCallback) {
+        const child = spawn("/bin/sh", command.slice(1));
+        if (stdout) child.stdout.pipe(stdout);
+        if (stderr) child.stderr.pipe(stderr);
+        if (stdin) {
+          stdin.pipe(child.stdin);
+          stdin.on("end", () => {
+            prematureClose = true;
+            child.kill();
+          });
+        }
+        child.on("close", (code) => statusCallback?.({
+          status: "Failure",
+          reason: "NonZeroExitCode",
+          details: { causes: [{ reason: "ExitCode", message: String(code ?? 1) }] },
+        }));
+        return { close: () => { child.kill(); } };
+      },
+    };
+    const result = await execInPod({ api, namespace: "test", containerName: "test" }, "test", "cat; exit 7", { stdin: input });
+    expect(result.stdout).toBe(input);
+    expect(result.exitCode).toBe(7);
+    expect(prematureClose).toBe(false);
   });
 });

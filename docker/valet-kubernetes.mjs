@@ -434,8 +434,9 @@ export function validateArchive(path, freeBytes = statfsSync(ROOT).bavail * stat
   catch { return "Select an existing regular OCI-layout or Docker-save tar archive."; }
 }
 export function archiveKind(path) {
+  const tar = process.platform === "darwin" ? "/usr/bin/tar" : "/bin/tar";
   const inspect = String.raw`{ name=$0; sub(/^\.\//, "", name); count=split(name, part, "/"); if (substr(name, 1, 1)=="/") bad=1; for (i=1; i<=count; i++) if (part[i]=="..") bad=1; if (name=="manifest.json") docker=1; if (name=="oci-layout") layout=1; if (name=="index.json") hasIndex=1 } END { if (bad) print "unsafe"; else if (docker) print "docker"; else if (layout && hasIndex) print "oci"; else print "unknown" }`;
-  const listed = spawnSync("/bin/bash", ["-o", "pipefail", "-c", 'exec /bin/tar --list --file "$1" | /usr/bin/awk "$2"', "archive", path, inspect], {
+  const listed = spawnSync("/bin/bash", ["-o", "pipefail", "-c", 'exec "$3" --list --file "$1" | /usr/bin/awk "$2"', "archive", path, inspect, tar], {
     encoding: "utf8", timeout: 30_000, maxBuffer: 1024, stdio: ["ignore", "pipe", "ignore"],
   });
   if (listed.error?.code === "ETIMEDOUT") return { error: "Archive inspection timed out. Use a valid OCI-layout or Docker-save tar archive." };

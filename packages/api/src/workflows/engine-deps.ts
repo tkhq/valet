@@ -163,6 +163,7 @@ export function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdPart
 }
 
 interface RunContext {
+  workflowId: string;
   orgId: string;
   actorUserId: string;
   owner: Principal;
@@ -191,7 +192,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
+  return { workflowId: run.params.workflowId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
     assistantId: workflowAssistantId(run.definition) };
 }
 
@@ -377,7 +378,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       });
     },
 
-    async abort(sessionId: string, threadId: string): Promise<void> {
+    async abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void> {
       // A retired assistant has nothing left to abort — the delete already
       // tore its session down. Throwing here would break run cancellation.
       let session;
@@ -387,7 +388,11 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         if (err instanceof ArchivedAssistantError) return;
         throw err;
       }
-      await session.abort({ threadId });
+      if (queueItemId) {
+        await session.threadById(threadId)?.abortSubmission(queueItemId);
+      } else {
+        await session.abort({ threadId });
+      }
     },
 
     async isSettled(sessionId: string, queueItemId: string): Promise<boolean> {
@@ -444,16 +449,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
      * `thread.submitPrompt` calls already have for the `session` node), so
      * it submits directly rather than waiting on that extension.
      *
-     * Thread selection: one thread per workflow RUN, keyed
-     * `signal:workflow:{runId}` — the bare-key get-or-create convention
-     * `orchestrator/signals.ts` documents for cross-orchestrator messages
-     * (`signal:{senderId}`), with the workflow run standing in for the
-     * "sender". This groups every llm/orchestrator-node prompt a given run
-     * sends to this orchestrator (including repair rounds, which reuse the
-     * same runId) onto one thread, so the orchestrator's inbox reads as one
-     * conversation per run rather than one row per node/dispatch. Node,
-     * iteration, and repair identity is carried by `dispatchId`
-     * (idempotency) and the signal body — not by thread fragmentation.
+     * Reuse one thread per workflow definition within the selected assistant.
+     * Run-specific dispatch IDs and receipts keep submissions independent.
+     * Existing per-run threads remain readable; new runs do not add threads.
      */
     async promptOrchestrator(
       promptText: string,
@@ -485,7 +483,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
         { sessionId: assistant.sessionId },
       );
-      const thread = session.thread(`signal:workflow:${runId}`);
+      // Preserve receipts for runs admitted before the thread-key change.
+      const thread = await session.threadByKey(`signal:workflow:${runId}`)
+        ?? session.thread(`signal:workflow:definition:${ctx.workflowId}`);
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
       // string-valued by contract (`SignalContent`), and nothing set it

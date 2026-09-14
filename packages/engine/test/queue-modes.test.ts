@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
@@ -442,6 +442,99 @@ describe("queue: pause + resume", () => {
 });
 
 describe("queue: abort", () => {
+  it("cancels only the selected queued submission on a shared thread", async () => {
+    const faux = registerFauxProvider({ provider: "abort-one-queued" });
+    faux.setResponses([fauxAssistantMessage("warm"), fauxAssistantMessage("kept")]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const warm = await thread.submitPrompt("warm", {});
+    await waitFor(async () => (await store.getQueueItem(session.id, warm.queueItemId))?.status === "settled");
+    await thread.pause();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
+    await thread.resume();
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("does not start a cancelled turn after async model resolution completes", async () => {
+    const faux = registerFauxProvider({ provider: "abort-during-model-resolution" });
+    faux.setResponses([fauxAssistantMessage("kept")]);
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    let resolving = false;
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModel: async () => {
+        resolving = true;
+        await pending;
+        return { model: faux.getModel() };
+      },
+    });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await waitFor(() => resolving);
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    release();
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("cancels a running submission while allowing its queued successor to finish", async () => {
+    const faux = registerFauxProvider({ provider: "abort-one-running", tokensPerSecond: 20 });
+    faux.setResponses([fauxAssistantMessage("first response is deliberately slow and long"), fauxAssistantMessage("kept")]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await waitFor(async () => (await store.getQueueItem(session.id, cancelled.queueItemId))?.status === "running");
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled", 10000);
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("withdraws only the cancelled submission's gate and continues the shared thread", async () => {
+    const faux = registerFauxProvider({ provider: "abort-one-gate" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask", {}, { id: "ask1" })], { stopReason: "toolUse" }),
+      // Gate withdrawal can consume a provider response while the turn unwinds.
+      fauxAssistantMessage("cancelled turn unwinding"),
+      fauxAssistantMessage("kept"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      tools: [{ name: "ask", description: "Request approval", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        await ctx.requestDecision({ type: "approval", title: "Approve", resumeKey: "ask" });
+        return { text: "approved" };
+      } }],
+    });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await waitFor(async () => (await store.getQueueItem(session.id, cancelled.queueItemId))?.status === "blocked_on_decision_gate");
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    expect(events.some(({ event }) => event.type === "decision_gate_withdrawn" && event.reason === "abort")).toBe(true);
+    await session.destroy();
+    faux.unregister();
+  });
+
   it("aborts a queued (not-yet-claimed) submission via settleUnclaimed", async () => {
     const faux = registerFauxProvider({ provider: "abort-queued" });
     faux.setResponses([fauxAssistantMessage("first-done"), fauxAssistantMessage("second-done")]);
