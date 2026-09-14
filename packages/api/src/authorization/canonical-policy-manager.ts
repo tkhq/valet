@@ -131,7 +131,7 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
       await this.host.activate(organizationId, undefined, published.sourceBundleDigest);
       return;
     }
-    const loaded = await this.host.load(pointer.sourceBundleDigest);
+    const loaded = await this.host.loadActive(organizationId);
     if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && !(await isRecordedCandidate(this.db, organizationId, pointer.sourceBundleDigest))) {
       throw new Error(`Canonical policy pointer for ${organizationId} is stale. Publish the exact current policy before startup.`);
     }
@@ -302,7 +302,7 @@ export async function ensureCanonicalPolicyReadiness(manager: CanonicalPolicyBun
       missing.push({ organizationId: row.id, digest: expected.identity.sourceBundleDigest, bundle: expected.built.bundle });
       continue;
     }
-    const loaded = await manager.host.load(pointer.sourceBundleDigest);
+    const loaded = await manager.host.loadActive(row.id);
     if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && !(await isRecordedCandidate(manager.db, row.id, pointer.sourceBundleDigest))) {
       throw new Error(`Canonical policy pointer for ${row.id} is stale. Publish the exact current policy before startup.`);
     }
