@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { authorizationSha256Hex, canonicalAuthorizationJson, decisionDigestOf, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
-import type { DecisionResolution, PolicyDecision, PolicyResolveInput, PolicyResolver } from "@valet/engine";
+import type { DecisionResolution, PluginActionResult, PolicyDecision, PolicyExecutionSettlement, PolicyResolveInput, PolicyResolver } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions } from "../schema/index.js";
 import { adaptResolvedPluginCatalogAction } from "@valet/engine";
@@ -11,6 +11,8 @@ import type { ActionPluginByService } from "./canonical-policy-manager.js";
 import {
   GATE_ACTION_ALWAYS_ALLOW,
   GATE_ACTION_APPROVE_SESSION,
+  capAuditField,
+  POLICY_AUDIT_FIELD_CAP,
   persistInvocationAudit,
   writeAlwaysAllowPolicy,
   writeSessionGrant,
@@ -39,15 +41,29 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
       const request = await requestFor(input);
       const envelope = await opts.service.authorize(request);
       const decisionId = canonicalDecisionId(request.subject.orgId, request.idempotencyKey);
-      let attemptId: string | undefined;
-      if (envelope.decision.effect === "allow") {
-        attemptId = `attempt:${decisionId.slice("decision:".length)}`;
-        const inserted = await opts.db.insert(authorizationExecutionAttempts).values({ attemptId, decisionId, outcome: "started", targetIdempotencyKey: request.idempotencyKey, externalOperationIds: [], startedAt: now(), createdAt: now() }).onConflictDoNothing().returning({ attemptId: authorizationExecutionAttempts.attemptId });
-        if (!inserted[0]) throw new Error("Canonical interactive execution attempt is already reserved.");
-      }
       const currentPolicy = request.facts.currentPolicy as CurrentPolicyDynamicFactsV2 | undefined;
       const grants = currentPolicy?.grants.map((grant) => grant[0]) ?? [];
-      return policyDecision(envelope, decisionId, attemptId, grants);
+      return policyDecision(envelope, decisionId, executionInputDigest(input), grants);
+    },
+    async reserveExecution(input, decision) {
+      const identity = await executionIdentity(opts.db, decision, executionInputDigest(input));
+      const attemptId = `attempt:${identity.decisionId.slice("decision:".length)}`;
+      const inserted = await opts.db.insert(authorizationExecutionAttempts).values({ attemptId, decisionId: identity.decisionId, outcome: "started", targetIdempotencyKey: identity.idempotencyKey, externalOperationIds: [], startedAt: now(), createdAt: now() }).onConflictDoNothing().returning({ attemptId: authorizationExecutionAttempts.attemptId });
+      if (inserted[0]) return { kind: "execute", attemptId };
+      return replayAttempt(await loadAttempt(opts.db, attemptId), identity.decisionId, identity.idempotencyKey);
+    },
+    async completeExecution(input, decision, attemptId, settlement) {
+      const identity = await executionIdentity(opts.db, decision, executionInputDigest(input));
+      const attempt = await loadAttempt(opts.db, attemptId);
+      assertAttemptIdentity(attempt, identity.decisionId, identity.idempotencyKey);
+      const persisted = boundedSettlement(settlement);
+      const updated = await opts.db.update(authorizationExecutionAttempts).set(persisted.outcome === "completed"
+        ? { outcome: "completed", redactedResult: persisted.result, redactedError: null, finishedAt: now() }
+        : { outcome: "failed", redactedResult: null, redactedError: persisted.error, finishedAt: now() })
+        .where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.outcome, "started")))
+        .returning({ attemptId: authorizationExecutionAttempts.attemptId });
+      if (!updated[0]) return settlementFromAttempt(await loadAttempt(opts.db, attemptId), identity.decisionId, identity.idempotencyKey);
+      return persisted;
     },
     async onResolution(input, decision, resolution) {
       const c = decision.canonical;
@@ -68,10 +84,6 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
       await opts.db.insert(canonicalApprovalResolutions).values({ resolutionId, approvalId: c.decisionId!, gateId: resolutionId, orgId: input.orgId, requestSubjectDigest: c.requestSubjectDigest, originalDecisionDigest: c.decisionDigest, approverId: resolution.resolvedBy, verdict: "approved", appliesIn: "session", sessionId: input.sessionId, resolvedAt: resolution.resolvedAt, expiresAt: requirement.expiresAtMs ?? resolution.resolvedAt + 72 * 60 * 60 * 1000, resolutionVersion: 1 }).onConflictDoNothing();
     },
     async onInvocation(record) {
-      if (record.canonicalExecutionAttemptId) {
-        const outcome = record.status === "completed" ? "completed" : record.status === "error" ? "failed" : "cancelled";
-        await opts.db.update(authorizationExecutionAttempts).set({ outcome, redactedResult: record.status === "completed" ? { completed: true } : null, redactedError: record.status === "error" ? "Action execution failed." : null, finishedAt: now() }).where(eq(authorizationExecutionAttempts.attemptId, record.canonicalExecutionAttemptId));
-      }
       const invocationId = `canonical:${authorizationSha256Hex(canonicalAuthorizationJson({ sessionId: record.sessionId, queueItemId: record.queueItemId, resumeKey: record.resumeKey, gateOrdinal: record.gateOrdinal ?? -1 }))}`;
       await persistInvocationAudit(opts.db, {
         invocationId,
@@ -98,7 +110,62 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
   };
 }
 
-function policyDecision(envelope: PolicyDecisionEnvelope, decisionId: string, executionAttemptId?: string, grantIds: readonly string[] = []): PolicyDecision {
+const INDETERMINATE_EXECUTION = "indeterminate_execution: the action may have run. Do not retry automatically.";
+
+type AttemptRow = typeof authorizationExecutionAttempts.$inferSelect;
+
+function executionInputDigest(input: PolicyResolveInput): string {
+  return authorizationSha256Hex(canonicalAuthorizationJson(input));
+}
+
+async function executionIdentity(db: AppDb, decision: PolicyDecision, inputDigest?: string): Promise<{ decisionId: string; idempotencyKey: string }> {
+  const canonical = decision.canonical;
+  if (!canonical?.decisionId) throw new Error("Canonical interactive execution has no durable decision.");
+  const inputMatches = inputDigest === undefined || canonical.executionInputDigest === inputDigest;
+  const row = (await db.select().from(authorizationDecisions).where(eq(authorizationDecisions.decisionId, canonical.decisionId)).limit(1))[0];
+  if (!inputMatches || !row || row.requestSubjectDigest !== canonical.requestSubjectDigest || row.inputDigest !== canonical.inputDigest || row.evidence?.decisionDigest !== canonical.decisionDigest || row.effect !== "allow") {
+    throw new Error("Canonical interactive execution decision identity is invalid.");
+  }
+  return { decisionId: row.decisionId, idempotencyKey: row.idempotencyKey };
+}
+
+async function loadAttempt(db: AppDb, attemptId: string): Promise<AttemptRow | undefined> {
+  return (await db.select().from(authorizationExecutionAttempts).where(eq(authorizationExecutionAttempts.attemptId, attemptId)).limit(1))[0];
+}
+
+function assertAttemptIdentity(attempt: AttemptRow | undefined, decisionId: string, idempotencyKey: string): asserts attempt is AttemptRow {
+  if (!attempt || attempt.decisionId !== decisionId || attempt.targetIdempotencyKey !== idempotencyKey) throw new Error("Canonical interactive execution attempt identity is invalid.");
+}
+
+function replayAttempt(attempt: AttemptRow | undefined, decisionId: string, idempotencyKey: string): Awaited<ReturnType<NonNullable<PolicyResolver["reserveExecution"]>>> {
+  assertAttemptIdentity(attempt, decisionId, idempotencyKey);
+  if (attempt.outcome === "completed") return { kind: "completed", result: pluginResult(attempt.redactedResult) };
+  if (attempt.outcome === "failed" && attempt.redactedError) return { kind: "failed", error: attempt.redactedError };
+  return { kind: "indeterminate", error: INDETERMINATE_EXECUTION };
+}
+
+function settlementFromAttempt(attempt: AttemptRow | undefined, decisionId: string, idempotencyKey: string): PolicyExecutionSettlement {
+  const replay = replayAttempt(attempt, decisionId, idempotencyKey);
+  if (replay.kind === "completed") return { outcome: "completed", result: replay.result };
+  if (replay.kind === "failed") return { outcome: "failed", error: replay.error };
+  return { outcome: "failed", error: INDETERMINATE_EXECUTION };
+}
+
+function pluginResult(value: unknown): PluginActionResult {
+  if (!value || typeof value !== "object" || !("success" in value) || (value.success !== true && value.success !== false)) throw new Error("Canonical interactive execution result is invalid.");
+  const row = value as Record<string, unknown>;
+  return { success: row.success === true, ...(row.data !== undefined ? { data: row.data } : {}), ...(typeof row.error === "string" ? { error: row.error } : {}) };
+}
+
+function boundedSettlement(settlement: PolicyExecutionSettlement): PolicyExecutionSettlement {
+  if (settlement.outcome === "failed") return { outcome: "failed", error: settlement.error.slice(0, POLICY_AUDIT_FIELD_CAP) };
+  const result = pluginResult(settlement.result);
+  const capped = capAuditField(result);
+  if (!capped.truncated) return { outcome: "completed", result };
+  return { outcome: "completed", result: { success: true, data: capped.value } satisfies PluginActionResult };
+}
+
+function policyDecision(envelope: PolicyDecisionEnvelope, decisionId: string, executionInputDigest: string, grantIds: readonly string[] = []): PolicyDecision {
   const d = envelope.decision;
   const matchedGrantId = d.matchedRuleIds.find((id) => grantIds.includes(id));
   const matchedId = d.matchedRuleIds.find((id) => id !== matchedGrantId);
@@ -119,5 +186,5 @@ function policyDecision(envelope: PolicyDecisionEnvelope, decisionId: string, ex
   return { mode: d.effect, provenance, ...(d.effect === "require_approval" ? { extraGateActions: [
     { id: GATE_ACTION_APPROVE_SESSION, label: "Allow for this session", style: "primary" as const, approves: true },
     { id: GATE_ACTION_ALWAYS_ALLOW, label: "Always allow", style: "primary" as const, approves: true },
-  ] } : {}), canonical: { reasonCode: d.reasonCode, obligations: d.obligations, redactions: d.redactions, ...(d.approvalRequirement ? { approvalRequirement: d.approvalRequirement } : {}), requestId: envelope.requestId, requestSubjectDigest: envelope.requestSubjectDigest, inputDigest: envelope.inputDigest, policyDigest: envelope.policyDigest, sourceBundleDigest: envelope.sourceBundleDigest, evaluatorKind: envelope.evaluator.kind, engineDigest: envelope.evaluator.engineDigest, decisionDigest: decisionDigestOf(d), decisionId, ...(executionAttemptId ? { executionAttemptId } : {}) } };
+  ] } : {}), canonical: { reasonCode: d.reasonCode, obligations: d.obligations, redactions: d.redactions, ...(d.approvalRequirement ? { approvalRequirement: d.approvalRequirement } : {}), requestId: envelope.requestId, requestSubjectDigest: envelope.requestSubjectDigest, inputDigest: envelope.inputDigest, policyDigest: envelope.policyDigest, sourceBundleDigest: envelope.sourceBundleDigest, evaluatorKind: envelope.evaluator.kind, engineDigest: envelope.evaluator.engineDigest, decisionDigest: decisionDigestOf(d), executionInputDigest, decisionId } };
 }

@@ -1,8 +1,9 @@
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
-import type { ActionPlugin, PolicyResolveInput, ValetPlugin } from "@valet/engine";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { pluginCatalogTools, type ActionPlugin, type CredentialProvider, type PolicyResolveInput, type Sandbox, type ToolContext, type ValetPlugin } from "@valet/engine";
 import {
   actionPolicies,
+  authorizationDecisions,
   authorizationExecutionAttempts,
   canonicalApprovalResolutions,
   orgMembers,
@@ -42,7 +43,88 @@ describe("canonicalInteractivePolicyResolver", () => {
       clock = 32;
       const allowed = await resolver.resolve(input("critical")); expect(allowed.mode).toBe("allow");
       expect(await pg.appDb.select().from(canonicalApprovalResolutions)).toHaveLength(1);
+      expect(await pg.appDb.select().from(authorizationExecutionAttempts)).toHaveLength(0);
+      expect((await resolver.reserveExecution!(input("critical"), allowed)).kind).toBe("execute");
       expect(await pg.appDb.select().from(authorizationExecutionAttempts)).toHaveLength(1);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("replays durable results and stops concurrent duplicate dispatch", async () => {
+    pg = await freshTestPgDb(); await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    let releaseDispatch: (() => void) | undefined;
+    const dispatchBlocked = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const credentialGet = vi.fn(async () => null);
+    const execute = vi.fn(async (args: unknown, context: { credentials: CredentialProvider }) => {
+      if (!args || typeof args !== "object" || !("value" in args) || typeof args.value !== "string") throw new Error("invalid test input");
+      expect(await pg!.appDb.select().from(authorizationDecisions)).not.toHaveLength(0);
+      expect((await pg!.appDb.select().from(authorizationExecutionAttempts)).some((row) => row.outcome === "started")).toBe(true);
+      await context.credentials.get();
+      if (args.value === "concurrent") await dispatchBlocked;
+      if (args.value === "failure") throw new Error("provider failure");
+      return { success: true, data: { value: args.value } };
+    });
+    const actionPlugin: ActionPlugin = { service: "github", safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [{ id: "github.create_issue", name: "Action", description: "Action", riskLevel: "low", parameters: Type.Object({ value: Type.String() }), execute }] };
+    const plugin = { name: "github", version: "1", actions: [actionPlugin] } as ValetPlugin;
+    const map = new Map([["github", { plugin, actionPlugin }]]); const manager = new CanonicalPolicyBundleManager(pg.appDb, map, () => 10);
+    const credentials: CredentialProvider = { get: credentialGet, request: async () => { throw new Error("not connected"); } };
+    const context = (resolver: ReturnType<typeof canonicalInteractivePolicyResolver>, queueItemId: string): ToolContext => ({
+      userId: "user-1", orgId: "org-1", sessionId: "session-1", threadId: "thread-1", owner: { type: "user", id: "user-1" }, queueItemId,
+      credentials, sandbox: { id: "sandbox-1" } as Sandbox, policyResolver: resolver, signal: new AbortController().signal,
+      requestDecision: async () => { throw new Error("unexpected approval"); }, threadRead: async () => [], listThreads: async () => [], setModel: async ({ model }) => ({ fromModel: model, toModel: model }),
+    });
+    try {
+      await manager.ensureOrganizationReady("org-1"); const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const resolver = () => canonicalInteractivePolicyResolver({ db: pg!.appDb, service, plugins: map, clock: () => 30 });
+      const call = pluginCatalogTools({ plugins: [actionPlugin] })[1]!;
+      const first = await call.execute({ tool_id: "github.create_issue", params: { value: "done" }, summary: "create" }, context(resolver(), "queue-done"));
+      expect(first.text).toContain("done");
+      const credentialsAfterFirst = credentialGet.mock.calls.length;
+      const replay = await call.execute({ tool_id: "github.create_issue", params: { value: "done" }, summary: "create" }, context(resolver(), "queue-done"));
+      expect(replay).toEqual(first); expect(execute).toHaveBeenCalledTimes(1); expect(credentialGet).toHaveBeenCalledTimes(credentialsAfterFirst);
+
+      const running = call.execute({ tool_id: "github.create_issue", params: { value: "concurrent" }, summary: "create" }, context(resolver(), "queue-concurrent"));
+      while (execute.mock.calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 1));
+      const duplicate = await call.execute({ tool_id: "github.create_issue", params: { value: "concurrent" }, summary: "create" }, context(resolver(), "queue-concurrent"));
+      expect(duplicate.text).toContain("indeterminate_execution: the action may have run. Do not retry automatically.");
+      expect(execute).toHaveBeenCalledTimes(2); releaseDispatch!(); await expect(running).resolves.toMatchObject({ ok: true });
+
+      for (const [value, queueItemId] of [["success-crash", "queue-success-crash"], ["failure", "queue-failure-crash"]] as const) {
+        const durable = resolver();
+        const crashBeforePersistence = { ...durable, completeExecution: async () => { throw new Error("process stopped before outcome persistence"); } };
+        const before = execute.mock.calls.length;
+        const crashed = await call.execute({ tool_id: "github.create_issue", params: { value }, summary: "create" }, context(crashBeforePersistence, queueItemId));
+        expect(crashed.text).toBe("indeterminate_execution: the action may have run. Do not retry automatically.");
+        const redelivery = await call.execute({ tool_id: "github.create_issue", params: { value }, summary: "create" }, context(resolver(), queueItemId));
+        expect(redelivery.text).toBe("indeterminate_execution: the action may have run. Do not retry automatically.");
+        expect(execute).toHaveBeenCalledTimes(before + 1);
+      }
+      expect((await pg.appDb.select().from(authorizationExecutionAttempts)).map((row) => row.outcome).sort()).toEqual(["completed", "completed", "started", "started"]);
+    } finally { releaseDispatch?.(); await manager.close(); }
+  }, 120_000);
+
+  it("survives crashes at every interactive execution boundary", async () => {
+    pg = await freshTestPgDb(); await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    const map = plugins("low"); const manager = new CanonicalPolicyBundleManager(pg.appDb, map, () => 10);
+    try {
+      await manager.ensureOrganizationReady("org-1"); const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const restart = () => canonicalInteractivePolicyResolver({ db: pg!.appDb, service, plugins: map, clock: () => 30 });
+      const resolver = restart(); const decision = await resolver.resolve(input("low"));
+      expect(await pg.appDb.select().from(authorizationExecutionAttempts)).toHaveLength(0);
+      await expect(resolver.reserveExecution!({ ...input("low"), params: { value: "changed" } }, decision)).rejects.toThrow("decision identity is invalid");
+      const reservation = await resolver.reserveExecution!(input("low"), decision); expect(reservation.kind).toBe("execute");
+      expect((await restart().reserveExecution!(input("low"), decision)).kind).toBe("indeterminate");
+      if (reservation.kind !== "execute") throw new Error("expected execution reservation");
+      await expect(resolver.completeExecution!({ ...input("low"), params: { value: "changed" } }, decision, reservation.attemptId, { outcome: "completed", result: { success: true } })).rejects.toThrow("decision identity is invalid");
+      const persisted = await resolver.completeExecution!(input("low"), decision, reservation.attemptId, { outcome: "completed", result: { success: true, data: { text: "x".repeat(20_000) } } });
+      expect(JSON.stringify(persisted).length).toBeLessThan(9_000);
+      if (persisted.outcome !== "completed") throw new Error("expected completed settlement");
+      expect(await restart().reserveExecution!(input("low"), decision)).toEqual({ kind: "completed", result: persisted.result });
+
+      const failedInput = { ...input("low"), queueItemId: "queue-failed", resumeKey: "call-failed" };
+      const failedDecision = await restart().resolve(failedInput); const failedReservation = await restart().reserveExecution!(failedInput, failedDecision);
+      if (failedReservation.kind !== "execute") throw new Error("expected failure reservation");
+      await restart().completeExecution!(failedInput, failedDecision, failedReservation.attemptId, { outcome: "failed", error: "redacted failure" });
+      expect(await restart().reserveExecution!(failedInput, failedDecision)).toEqual({ kind: "failed", error: "redacted failure" });
     } finally { await manager.close(); }
   }, 120_000);
 

@@ -1051,6 +1051,8 @@ export interface PolicyDecision {
     evaluatorKind: import("./authorization/types.js").EvaluatorIdentity["kind"];
     engineDigest: string;
     decisionDigest: string;
+    /** Binds durable dispatch to the exact engine execution input. */
+    executionInputDigest?: string;
     decisionId?: string;
     executionAttemptId?: string;
   };
@@ -1130,8 +1132,22 @@ export interface PolicyInvocationRecord {
  * riskLevel→approvalMode fallback (`approvalModeFor`), byte-identical to
  * pre-policy behavior. Present === `call_tool` consults it per invocation.
  */
+export type PolicyExecutionReservation =
+  | { kind: "execute"; attemptId: string }
+  | { kind: "completed"; result: unknown }
+  | { kind: "failed"; error: string }
+  | { kind: "indeterminate"; error: string };
+
+export type PolicyExecutionSettlement =
+  | { outcome: "completed"; result: unknown }
+  | { outcome: "failed"; error: string };
+
 export interface PolicyResolver {
   resolve(input: PolicyResolveInput): Promise<PolicyDecision>;
+  /** Reserve the durable attempt immediately before action dispatch. */
+  reserveExecution?(input: PolicyResolveInput, decision: PolicyDecision): Promise<PolicyExecutionReservation>;
+  /** Persist the bounded action outcome before it is returned to the caller. */
+  completeExecution?(input: PolicyResolveInput, decision: PolicyDecision, attemptId: string, settlement: PolicyExecutionSettlement): Promise<PolicyExecutionSettlement>;
   /**
    * Host side effects on gate resolution (grant/policy writes). Awaited by
    * `call_tool` BEFORE it interprets the resolution; a throw fails the

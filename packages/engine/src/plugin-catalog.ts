@@ -323,6 +323,7 @@ export type InvokeActionResult =
   | { kind: "pending-approval" }
   | { kind: "missing-credential"; service: string }
   | { kind: "error"; message: string }
+  | { kind: "indeterminate-execution"; message: string }
   | { kind: "resolve-failed"; service: string; message: string };
 
 /**
@@ -647,6 +648,8 @@ export async function invokeAction(
   // allow, or an approved require_approval → execute with audit.
   return executeAction(entry, actionId, args, summary, ctx, {
     resolver,
+    input,
+    decision,
     redactions: decision.canonical?.redactions,
     record: {
       ...baseRecord,
@@ -991,6 +994,8 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       };
     case "error":
       return { text: `error: ${outcome.message}` };
+    case "indeterminate-execution":
+      return { text: outcome.message, ok: false };
   }
 }
 
@@ -1231,7 +1236,7 @@ async function executeAction(
   args: Record<string, unknown> | undefined,
   summary: string,
   ctx: ToolContext,
-  audit?: { resolver: PolicyResolver; record: BaseAuditedRecord; redactions?: import("./authorization/types.js").RedactionDirective[] },
+  audit?: { resolver: PolicyResolver; input: PolicyResolveInput; decision: PolicyDecision; record: BaseAuditedRecord; redactions?: import("./authorization/types.js").RedactionDirective[] },
 ): Promise<InvokeActionResult> {
   // Validate (and apply schema defaults to) LLM-supplied params before they
   // reach the plugin action's execute body — closes the gap where unvalidated
@@ -1246,6 +1251,20 @@ async function executeAction(
       });
     }
     return { kind: "invalid-args", error: prepared.error };
+  }
+
+  let attemptId: string | undefined;
+  if (audit?.resolver.reserveExecution) {
+    let reservation: Awaited<ReturnType<NonNullable<PolicyResolver["reserveExecution"]>>>;
+    try {
+      reservation = await audit.resolver.reserveExecution(audit.input, audit.decision);
+    } catch (err) {
+      return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+    }
+    if (reservation.kind === "completed") return { kind: "ok", result: storedPluginResult(reservation.result) };
+    if (reservation.kind === "indeterminate") return { kind: "indeterminate-execution", message: reservation.error };
+    if (reservation.kind === "failed") return { kind: "error", message: reservation.error };
+    attemptId = reservation.attemptId;
   }
 
   // Build the plugin action context. credentialService routing is per-plugin;
@@ -1271,19 +1290,36 @@ async function executeAction(
       prepared.args as Static<typeof entry.action.parameters>,
       actionCtx,
     );
-    const userResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "user_output") ?? []) : result;
+    let userResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "user_output") ?? []) : result;
     const auditResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "audit") ?? []) : result;
-    if (audit) {
-      emitInvocation(audit.resolver, {
-        ...audit.record,
-        status: "completed",
-        durationMs: Date.now() - startedAt,
-        result: auditResult,
-      });
+    if (audit?.resolver.completeExecution && attemptId) {
+      try {
+        const settlement = result.success
+          ? await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "completed", result: userResult })
+          : await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "failed", error: result.error ?? "Action execution failed." });
+        if (settlement.outcome === "failed") return settlement.error.startsWith("indeterminate_execution:")
+          ? { kind: "indeterminate-execution", message: settlement.error }
+          : { kind: "error", message: settlement.error };
+        userResult = storedPluginResult(settlement.result);
+      } catch {
+        return { kind: "indeterminate-execution", message: "indeterminate_execution: the action may have run. Do not retry automatically." };
+      }
     }
+    if (audit) emitInvocation(audit.resolver, { ...audit.record, status: "completed", durationMs: Date.now() - startedAt, result: auditResult });
     return { kind: "ok", result: userResult };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    let message = err instanceof Error ? err.message : String(err);
+    let indeterminate = false;
+    if (audit?.resolver.completeExecution && attemptId) {
+      try {
+        const settlement = await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "failed", error: message });
+        if (settlement.outcome === "failed") message = settlement.error;
+        else { message = "indeterminate_execution: the action may have run. Do not retry automatically."; indeterminate = true; }
+      } catch {
+        message = "indeterminate_execution: the action may have run. Do not retry automatically.";
+        indeterminate = true;
+      }
+    }
     if (audit) {
       emitInvocation(audit.resolver, {
         ...audit.record,
@@ -1292,6 +1328,7 @@ async function executeAction(
         error: message,
       });
     }
+    if (indeterminate) return { kind: "indeterminate-execution", message };
     // A plugin action that needs a credential calls `credentials.request`,
     // which throws "credential <service> not connected: <reason>" (store
     // present, no cred) or "credential <service> not available (no store)"
@@ -1302,6 +1339,18 @@ async function executeAction(
     }
     return { kind: "error", message };
   }
+}
+
+function storedPluginResult(value: unknown): PluginActionResult {
+  if (!value || typeof value !== "object" || !("success" in value) || typeof value.success !== "boolean") {
+    throw new Error("Canonical interactive execution result is invalid.");
+  }
+  const result = value as Record<string, unknown>;
+  return {
+    success: result.success === true,
+    ...(result.data !== undefined ? { data: result.data } : {}),
+    ...(typeof result.error === "string" ? { error: result.error } : {}),
+  };
 }
 
 /** Base record plus the resolved mode + provenance carried into execution. */
