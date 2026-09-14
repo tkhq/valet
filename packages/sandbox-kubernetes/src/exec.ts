@@ -20,7 +20,7 @@
  * a fresh pod object (same name, new uid) out from under a long-lived
  * exec-based provider (see lifecycle.ts's restartPolicy docblock).
  */
-import { PassThrough, Readable } from "node:stream";
+import { PassThrough } from "node:stream";
 import type { Readable as ReadableStream, Writable as WritableStream } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
 import { CappedOutputBuffer, type ExecOpts, type ExecResult } from "@valet/engine";
@@ -251,7 +251,15 @@ export async function execInPod(
   stdout.on("data", onStdoutData);
   stderr.on("data", onStderrData);
 
-  const stdin = opts?.stdin !== undefined ? Readable.from(Buffer.from(opts.stdin, "utf8")) : null;
+  const input = opts?.stdin !== undefined ? Buffer.from(opts.stdin, "utf8") : undefined;
+  // Older exec protocols close the entire socket when stdin ends. Bound
+  // stdin inside the pod so the command receives EOF without closing the
+  // transport before it has consumed the payload and returned its status.
+  const stdin = input !== undefined ? new PassThrough() : null;
+  if (stdin && input) stdin.write(input);
+  const framedCommand = input !== undefined
+    ? `head -c ${input.length} | /bin/sh -c ${shQuote(shellCommand)}`
+    : shellCommand;
 
   let resolveStatus!: (status: ExecStatus) => void;
   const statusPromise = new Promise<ExecStatus>((resolve) => {
@@ -262,13 +270,16 @@ export async function execInPod(
     deps.namespace,
     podName,
     deps.containerName,
-    ["/bin/sh", "-c", shellCommand],
+    ["/bin/sh", "-c", framedCommand],
     stdout,
     stderr,
     stdin,
     false,
     (status) => resolveStatus(status),
-  );
+  ).catch((error: unknown) => {
+    stdin?.destroy();
+    throw error;
+  });
 
   const raced: Array<Promise<{ kind: "status"; status: ExecStatus } | { kind: "timeout" } | { kind: "abort" }>> = [
     statusPromise.then((status) => ({ kind: "status" as const, status })),
@@ -301,6 +312,7 @@ export async function execInPod(
   }
 
   const winner = await Promise.race(raced);
+  stdin?.destroy();
   if (timer) clearTimeout(timer);
   if (signal && abortResolve) signal.removeEventListener("abort", abortResolve);
 

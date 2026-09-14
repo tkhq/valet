@@ -228,3 +228,7 @@ After pod deletion, the provider checks namespace events from the last ten minut
 Each active job retains its kickoff pod name and UID. Polling and cancellation check that identity before using a replacement pod. Terminal results, cancellation, and rejected polls release the retained identity.
 
 An exec failure without a valid process exit code preserves the Kubernetes status reason and message. Job polling rejects a failed exec before parsing its marker. Empty, malformed, or out-of-range markers cannot report success. Ordinary command exit codes remain command results when eviction evidence is absent.
+
+### Exec stdin completion
+
+Exec bounds provided stdin by its UTF-8 byte count inside the pod. A `head -c` pipe delivers EOF to the command. The client keeps stdin open until the command returns its status. This prevents older WebSocket protocols from closing the transport before the pod consumes the payload. Empty input produces immediate EOF. Command exit codes and output remain intact. Regression tests cover empty input, Unicode input, and a live 1 MB binary round trip.
