@@ -194,9 +194,6 @@ export async function revokePolicy(db: AppQueryable, scope: PolicyScope, id: str
 }
 
 export const listOrgPolicies = (db: AppDb, orgId: string) => listPolicies(db, { orgId, type: "org", id: orgId });
-export const createOrgPolicy = (db: AppDb, orgId: string, input: CreateOrgPolicyInput) => createPolicy(db, { orgId, type: "org", id: orgId }, input);
-export const updateOrgPolicy = (db: AppDb, orgId: string, id: string, patch: UpdateOrgPolicyInput) => updatePolicy(db, { orgId, type: "org", id: orgId }, id, patch);
-export const revokeOrgPolicy = (db: AppDb, orgId: string, id: string, now: number) => revokePolicy(db, { orgId, type: "org", id: orgId }, id, now);
 
 export interface UpsertOverrideInput extends PolicyTarget {
   mode: ApprovalMode;

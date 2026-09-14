@@ -29,9 +29,28 @@ describe("PR 9 canonical authorization cutover", () => {
     expect(workflow).not.toMatch(/\.authorize\(/);
   });
 
-  it("does not let HTTP routes mutate static policy tables directly", () => {
-    for (const path of productionFiles("packages/api/src/routes")) {
-      expect(readFileSync(path, "utf8"), path).not.toMatch(/(?:insert|update|delete)\(actionPolic(?:ies|yOverrides)\)/);
+  it("limits static policy table writes to transaction callback helpers", () => {
+    const allowedWriters = new Set([
+      "packages/api/src/policies/admin.ts",
+      "packages/api/src/policies/service.ts",
+      "packages/api/src/services/config-reconcile.ts",
+      "packages/api/src/services/teams.ts",
+    ].map((path) => resolve(root, path)));
+    const mutation = /(?:insert|update|delete)\(actionPolic(?:ies|yOverrides)\)/;
+    for (const path of productionFiles("packages/api/src")) {
+      if (mutation.test(readFileSync(path, "utf8"))) expect(allowedWriters.has(path), path).toBe(true);
     }
+
+    const managerWiring = [
+      ["packages/api/src/routes/policies.ts", "canonicalPolicyManager.mutateAndActivate("],
+      ["packages/api/src/routes/me-policies.ts", "canonicalPolicyManager.mutateAndActivate("],
+      ["packages/api/src/routes/team-policies.ts", "canonicalPolicyManager.mutateAndActivate("],
+      ["packages/api/src/services/config-reconcile.ts", "manager.mutateAndActivate("],
+      ["packages/api/src/services/team-resource-deletion.ts", "manager.mutateAndActivate("],
+      ["packages/api/src/authorization/canonical-interactive-resolver.ts", "service.mutateAndActivate("],
+      ["packages/api/src/workflows/service.ts", "canonicalPolicyManager.mutateAndActivate("],
+      ["packages/api/src/workflows/permissions.ts", "manager.mutateAndActivate("],
+    ] as const;
+    for (const [path, call] of managerWiring) expect(readFileSync(resolve(root, path), "utf8"), path).toContain(call);
   });
 });
