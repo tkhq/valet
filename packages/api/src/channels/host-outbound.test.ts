@@ -25,7 +25,10 @@ import {
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
-import { agentSessions, assistants, teamMembers, teams, users } from "../schema/index.js";
+import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { ensureWorkflowSession } from "../workflows/engine-deps.js";
+import { assemblePlugins } from "../plugins/assemble.js";
+import { agentSessions, assistants, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -165,6 +168,9 @@ describe("ChannelHost outbound delivery", () => {
   let faux: FauxProviderRegistration;
   let eventStream: PgEventStream;
   let engineStore: PgSessionStore;
+  let workflowStore: PgWorkflowStore;
+  let actionPluginByService: ReturnType<typeof assemblePlugins>["actionPluginByService"];
+  let engineCredentials: PgCredentialStore;
 
   beforeEach(async () => {
     // See host.test.ts / task-6-report.md: registerFauxProvider overwrites
@@ -184,7 +190,7 @@ describe("ChannelHost outbound delivery", () => {
     engineStore = new PgSessionStore(pgdb);
     const sandboxProvider = new VirtualSandboxProvider();
     eventStream = new PgEventStream(pgdb);
-    const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
 
     fakeTransport = new FakeTransport();
     keyedTransport = new KeyedTransport();
@@ -220,6 +226,9 @@ describe("ChannelHost outbound delivery", () => {
       ],
     };
 
+    ({ actionPluginByService } = assemblePlugins([[fakePlugin]]));
+    workflowStore = new PgWorkflowStore(pgdb);
+
     await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", {
       type: "bot_token",
       accessToken: "fake-bot-token",
@@ -237,6 +246,7 @@ describe("ChannelHost outbound delivery", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [fakePlugin],
+      actionPluginByService,
     });
 
     host = new ChannelHost({
@@ -246,6 +256,8 @@ describe("ChannelHost outbound delivery", () => {
       eventStream,
       engineCredentials,
       plugins: [fakePlugin],
+      workflowStore,
+      actionPluginByService,
       resolveOrgId: async () => ORG_ID,
     });
     await host.start();
@@ -1021,6 +1033,109 @@ describe("ChannelHost outbound delivery", () => {
       { timeout: 3000 },
     );
     expect(fakeTransport.answered.some((a) => a.callbackId === "cb2" && a.text === undefined)).toBe(true);
+  });
+
+  it("a Slack approval resolves its originating workflow gate", async () => {
+    const now = Date.now();
+    await testDb.appDb.insert(workflowDefinitions).values({
+      id: "workflow-slack-gate",
+      orgId: ORG_ID,
+      ownerType: "user",
+      ownerId: USER_ID,
+      name: "Slack gate",
+      definition: {},
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      "workflow-slack-run",
+      { workflowId: "workflow-slack-gate", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "user", ownerId: USER_ID },
+    );
+    const sessionId = "wf:workflow-slack-run:step";
+    const session = await ensureWorkflowSession({
+      host: engineHost,
+      store: workflowStore,
+      db: testDb.appDb,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    }, sessionId);
+    const threadId = session.thread().id;
+    await engineStore.saveDecisionGate(sessionId, threadId, {
+      id: "workflow-slack-approval",
+      sessionId,
+      threadId,
+      queueItemId: "q-workflow",
+      resumeKey: "workflow-action",
+      ordinal: 0,
+      type: "approval",
+      title: "Approve workflow action?",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      sessionId,
+      title: "Approve workflow action?",
+      gate: { id: "workflow-slack-approval", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+    });
+    const prompt = fakeTransport.gatePrompts[0];
+    expect(prompt).toBeDefined();
+    const ref = { conversationKey: prompt?.conversationKey ?? "", messageId: prompt?.messageId ?? "" };
+
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId: "forged_approve", callbackId: "forged-workflow-callback", ref },
+    }));
+    expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.status).toBe("pending");
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "forged-workflow-callback")?.text).toContain("already resolved");
+
+    const restoreFailure = vi.spyOn(engineHost, "workflowSessionFor").mockRejectedValueOnce(new Error("restore failed"));
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId: "approve", callbackId: "failed-workflow-callback", ref },
+    }));
+    restoreFailure.mockRestore();
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "failed-workflow-callback")?.text).toContain("Open the session");
+    expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.status).toBe("pending");
+
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      sessionId,
+      title: "Approve workflow action?",
+      gate: { id: "workflow-slack-approval", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+    });
+    const secondPrompt = fakeTransport.gatePrompts[1];
+    expect(secondPrompt).toBeDefined();
+    const secondRef = { conversationKey: secondPrompt?.conversationKey ?? "", messageId: secondPrompt?.messageId ?? "" };
+
+    await Promise.all(["workflow-callback-a", "workflow-callback-b"].map((callbackId, index) =>
+      host.handleUpdate("fake", inbound({
+        dispatchId: `fake:${randomUUID()}`,
+        kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId, ref: index === 0 ? ref : secondRef },
+      })),
+    ));
+
+    await vi.waitFor(async () => {
+      expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.status).toBe("resolved");
+    });
+    expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.resolution).toMatchObject({
+      actionId: "approve",
+      resolvedBy: USER_ID,
+    });
+    expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text === undefined)).toHaveLength(1);
+    expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text?.includes("already resolved"))).toHaveLength(1);
   });
 
   it("gate_callback from a user who may not resolve the session answers 'expired'", async () => {

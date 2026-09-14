@@ -462,6 +462,32 @@ describe("stream store reducer", () => {
     expect(slice.lastOffset).toBe(offset(6));
   });
 
+  it("removes a Slack-resolved gate so its web approval card does not remain", () => {
+    const { ingest } = useStreamStore.getState();
+    const gate = {
+      id: "gate-slack-approval",
+      sessionId: SESSION,
+      threadId: THREAD,
+      type: "approval" as const,
+      title: "Approve?",
+      actions: [{ id: "approve", label: "Approve", style: "primary" as const }],
+      status: "pending" as const,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    ingest(SESSION, { seq: 1, ts: Date.now(), offset: offset(1), type: "decision_gate", threadId: THREAD, gate });
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "decision_gate_resolved",
+      threadId: THREAD,
+      gateId: gate.id,
+      resolution: { actionId: "approve", resolvedBy: "local-user", resolvedAt: Date.now() },
+    });
+    expect(useStreamStore.getState().bySession[SESSION].pendingGates).toEqual({});
+  });
+
   it("setPendingGates keeps the record identity for equal content (idempotent seeding)", () => {
     // More than one surface seeds (SessionView and ThreadTree via
     // usePendingGatesSeed); an equal-content re-seed must not rebuild the
