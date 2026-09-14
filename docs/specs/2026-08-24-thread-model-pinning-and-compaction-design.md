@@ -103,11 +103,40 @@ suppresses both the proactive auto-continue follow-up and the
 `skipNextProactiveCheck` cool-down (there is no follow-up turn; arming the
 cool-down would eat the same turn's legitimate post-turn check).
 
-### 6. `/compact` instructions reach the summarizer
+### 6. `/compact` uses an asynchronous lifecycle
 
-`compactThread` accepts `instructions`; the manual command passes its
-argument text through, and `summarize` appends the instructions to the
-summarizer prompt.
+The message route persists the user command echo before it starts compaction.
+It then returns a typed `started` command receipt. The summarizer does not
+hold the HTTP request open. Normal prompts and other built-in commands keep
+their current request behavior.
+
+The engine persists and emits the `command_result` after compaction ends.
+A failure produces an actionable `compaction_failed` event and an
+`ok: false` command result. A successful command does not create an
+assistant message.
+
+One per-thread promise owns manual, proactive, and reactive compaction.
+Concurrent callers join that promise. They do not start another summarizer or
+DAG rewrite. A manual join starts the shared lifecycle if the nonmanual owner
+has not started it. The owner closes joining before it captures completion
+state. A later manual request starts a new pass. The owner emits one matching
+end event for all joiners. `compactThread` still accepts `instructions`;
+only the first owner supplies instructions. A joined command result states
+that the request did not change the existing pass instructions.
+
+The web client sets the target thread's compacting state before it sends
+`/compact`. A failed POST clears that state. Durable `compaction_start`,
+`compaction_end`, and error events then own the state. Each WebSocket
+handshake sends a `compaction.state` snapshot after replay. The snapshot
+corrects reconnects whose resume offset is already past the start event. The
+engine marks the snapshot inactive before it publishes the end event. A
+snapshot after replayed completion cannot restore stale active state. Durable
+`command_result` frames append the result after the end event, so the result
+does not depend on the earlier completion refetch. The web store marks that
+message as durable. It keeps the message until a REST snapshot confirms the
+same message id. If a manual request joins a failed automatic pass, the engine
+marks the shared error as reported. The automatic caller updates its circuit
+breaker without emitting a duplicate `compaction_failed` event.
 
 ### 7. Compaction crosses the wire
 
@@ -116,9 +145,10 @@ summarizer prompt.
   summarizer AND the persist/rebuild steps, so a mid-compaction throw still
   emits `compaction_end`. The web stream store tracks a per-thread
   compacting flag and, on `compaction_end`, bumps a nonce that invalidates
-  the messages query so the divider appears without a reload. The flag is
-  transient: the `init` frame clears it on reconnect, because an api crash
-  between the two frames orphans the start with no end ever coming.
+  the messages query so the divider appears without a reload. The `init`
+  frame clears transient state. The later `compaction.state` snapshot restores
+  an active in-process pass. An API restart reports inactive because that
+  process cannot continue the old pass.
 - `entryToMessage` projects `CompactionEntry` as a `role: "system"` message
   with a `compaction` field: `{ summary, tokensBefore, tokensAfter,
   coveredEntryIds }`. `coveredEntryIds` is deliberately on the wire: it is

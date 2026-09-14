@@ -47,7 +47,7 @@ export type AgentStatus =
  */
 export interface StreamMessage extends Message {
   /** Client-only rows stay until REST confirms the same message or queue item. */
-  persistence?: "optimistic" | "streaming";
+  persistence?: "optimistic" | "streaming" | "durable";
   settledOutcome?: SettledOutcome;
   /**
    * Reason for a non-clean `settledOutcome`, taken from the wire event's
@@ -188,6 +188,8 @@ export interface StreamStore {
   // ── actions ────────────────────────────────────────────────────────────
   setConnection(sessionId: string, conn: ConnectionStatus): void;
   ingest(sessionId: string, ev: WireEvent): void;
+  /** Set optimistic or handshake compaction state for one thread. */
+  setCompacting(sessionId: string, threadId: string, active: boolean): void;
   /**
    * Optimistically append a user-authored message to the local view. Engine
    * doesn't emit a wire event when a user prompt is enqueued — without this
@@ -546,6 +548,16 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "compaction.state": {
+      if (ev.active) {
+        next.compactingByThread = { ...slice.compactingByThread, [ev.threadId]: true };
+      } else {
+        const { [ev.threadId]: _, ...rest } = slice.compactingByThread;
+        next.compactingByThread = rest;
+      }
+      return next;
+    }
+
     case "compaction_end": {
       // `compaction_end` fires on failure too (the engine balances the
       // pair), so the flag always clears. The nonce bump cues the
@@ -677,9 +689,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "command_result": {
-      // Command results reach the message list through the REST refetch in
-      // useSendPrompt's onSuccess, not through the stream store. The frame
-      // still advances lastOffset via `next`.
+      // The result is persisted after compaction_end. Append its durable wire
+      // message directly so the earlier completion refetch cannot miss it.
+      if (slice.messages.some((message) => message.id === ev.message.id)) return next;
+      next.messages = [...slice.messages, { ...ev.message, persistence: "durable" }];
       return next;
     }
   }
@@ -773,6 +786,20 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const updated = reduce(slice, ev, sessionId);
       if (updated === slice) return state;
       return { bySession: { ...state.bySession, [sessionId]: updated } };
+    }),
+
+  setCompacting: (sessionId, threadId, active) =>
+    set((state) => {
+      const slice = ensure(state, sessionId);
+      const compactingByThread = { ...slice.compactingByThread };
+      if (active) compactingByThread[threadId] = true;
+      else delete compactingByThread[threadId];
+      return {
+        bySession: {
+          ...state.bySession,
+          [sessionId]: { ...slice, compactingByThread },
+        },
+      };
     }),
 
   addUserMessage: (sessionId, text, threadId, attachments) => {

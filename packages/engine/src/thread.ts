@@ -437,6 +437,18 @@ export class Thread {
    * every turn.
    */
   private consecutiveCompactionFailures = 0;
+  /** One owner for any manual, proactive, or reactive compaction on this thread. */
+  private compactionInFlight: Promise<CompactionOutcome> | null = null;
+  /** True until owned work enters its synchronous completion section. */
+  private compactionJoinable = false;
+  /** Shared lifecycle start for the current pass. Manual joiners can create it. */
+  private compactionLifecycleStart: Promise<void> | null = null;
+  /** Snapshot state clears before compaction_end is published. */
+  private compactionSnapshotActive = false;
+  /** True when the current pass owns or gained a manual command request. */
+  private compactionManualRequested = false;
+  /** Errors already published for a manual join must not be published again. */
+  private readonly reportedCompactionErrors = new WeakSet<object>();
   /**
    * Content hashes from the model's file reads, backing the
    * read-before-write staleness gate (TKAI-318). In-memory only: after a
@@ -3907,10 +3919,12 @@ export class Thread {
         try {
           outcome = await this.compactThread({ mode: "reactive" });
         } catch (err) {
-          this.emitError(
-            "compaction_failed",
-            err instanceof Error ? err.message : String(err),
-          );
+          if (!this.wasCompactionFailureReported(err)) {
+            this.emitError(
+              "compaction_failed",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
           return;
         }
         if (outcome === "insufficient") {
@@ -4075,11 +4089,21 @@ export class Thread {
         this.bumpCompactionFailureBreaker();
       }
     } catch (err) {
-      this.recordProactiveCompactionFailure(
-        "compaction_failed",
-        err instanceof Error ? err.message : String(err),
-      );
+      if (this.wasCompactionFailureReported(err)) {
+        this.bumpCompactionFailureBreaker();
+      } else {
+        this.recordProactiveCompactionFailure(
+          "compaction_failed",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
+  }
+
+  private wasCompactionFailureReported(err: unknown): boolean {
+    return ((typeof err === "object" && err !== null) || typeof err === "function")
+      ? this.reportedCompactionErrors.has(err)
+      : false;
   }
 
   private shouldCompactProactive(): boolean {
@@ -4136,18 +4160,113 @@ export class Thread {
      */
     autoContinue?: false;
   }): Promise<CompactionOutcome> {
-    const cfg = this.session.options.compaction;
-    if (cfg?.enabled === false) return "noop";
-    await this.ensureTranscript();
-    return withSpan(
-      "compaction",
-      {
-        "valet.session.id": this.session.id,
-        "valet.thread.id": this.id,
-        "valet.compaction.mode": opts.mode,
-      },
-      (span) => this.compactThreadInner(opts, span),
-    );
+    return (await this.compactThreadWithStatus(opts)).outcome;
+  }
+
+  /** Run or join one pass and report whether another caller owns it. */
+  async compactThreadWithStatus(opts: {
+    mode: "proactive" | "reactive" | "manual";
+    instructions?: string;
+    autoContinue?: false;
+  }): Promise<{ outcome: CompactionOutcome; joined: boolean }> {
+    const existing = this.compactionInFlight;
+    if (existing) {
+      if (!this.compactionJoinable) {
+        // Owned work already captured its lifecycle for completion. Wait for
+        // stale promise cleanup, then give this request a fresh owned pass.
+        try {
+          await existing;
+        } catch {
+          // This request did not join that failure.
+        }
+        if (this.compactionInFlight === existing) this.compactionInFlight = null;
+        return this.compactThreadWithStatus(opts);
+      }
+      // A nonmanual owner can exit before its normal step-3 start. A manual
+      // join must still create one balanced lifecycle for optimistic clients.
+      if (opts.mode === "manual") {
+        this.compactionManualRequested = true;
+        await this.startCompactionLifecycle();
+      }
+      return { outcome: await existing, joined: true };
+    }
+
+    this.compactionJoinable = true;
+    this.compactionLifecycleStart = null;
+    this.compactionManualRequested = opts.mode === "manual";
+    this.compactionSnapshotActive = false;
+    const pending = Promise.resolve().then(() => this.compactThreadOwned(opts));
+    this.compactionInFlight = pending;
+    try {
+      return { outcome: await pending, joined: false };
+    } finally {
+      if (this.compactionInFlight === pending) this.compactionInFlight = null;
+    }
+  }
+
+  /** Current in-process state for the WebSocket handshake snapshot. */
+  isCompacting(): boolean {
+    return this.compactionSnapshotActive;
+  }
+
+  private startCompactionLifecycle(): Promise<void> {
+    if (!this.compactionLifecycleStart) {
+      this.compactionSnapshotActive = true;
+      this.compactionLifecycleStart = this.session.emit(
+        { type: "compaction_start", threadId: this.id },
+        { queueItemId: this.runningItem?.id },
+      );
+    }
+    return this.compactionLifecycleStart;
+  }
+
+  private async compactThreadOwned(opts: {
+    mode: "proactive" | "reactive" | "manual";
+    instructions?: string;
+    autoContinue?: false;
+  }): Promise<CompactionOutcome> {
+    if (opts.mode === "manual") await this.startCompactionLifecycle();
+    try {
+      const cfg = this.session.options.compaction;
+      if (cfg?.enabled === false) return "noop";
+      await this.ensureTranscript();
+      return await withSpan(
+        "compaction",
+        {
+          "valet.session.id": this.session.id,
+          "valet.thread.id": this.id,
+          "valet.compaction.mode": opts.mode,
+        },
+        (span) => this.compactThreadInner(opts, span),
+      );
+    } catch (err) {
+      if (this.compactionManualRequested) {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.emitError(
+          "compaction_failed",
+          `Compaction failed: ${reason}. Retry /compact, or start a new thread if the failure continues.`,
+        );
+        if ((typeof err === "object" && err !== null) || typeof err === "function") {
+          this.reportedCompactionErrors.add(err);
+        }
+      }
+      throw err;
+    } finally {
+      // Close joining before this pass captures lifecycle state. A caller
+      // after this point starts a new pass instead of creating an orphan start.
+      this.compactionJoinable = false;
+      // Report inactive before end publication. A handshake after replayed
+      // compaction_end must not restore stale active state from this promise.
+      this.compactionSnapshotActive = false;
+      const started = this.compactionLifecycleStart;
+      if (started) {
+        await started;
+        await this.session.emit(
+          { type: "compaction_end", threadId: this.id },
+          { queueItemId: this.runningItem?.id },
+        );
+      }
+    }
   }
 
   private async compactThreadInner(
@@ -4241,17 +4360,11 @@ export class Thread {
       return "insufficient";
     }
 
-    // Step 3: summarize.
-    await session.emit(
-      { type: "compaction_start", threadId: this.id },
-      { queueItemId: this.runningItem?.id },
-    );
+    // Step 3: summarize. The shared lifecycle also covers a manual
+    // request that joined this pass before it reached this point.
+    await this.startCompactionLifecycle();
     let summaryResult: SummarizeResult;
-    // Everything between compaction_start and here MUST balance the pair —
-    // the wire contract promises "compaction_end fires on failure too", and
-    // the web store's compacting indicator only clears on the end frame. The
-    // finally covers the summarizer AND the persist/rebuild steps.
-    try {
+    {
       const previousSummary = findMostRecentCompaction(entries)?.summary;
       // Overflow retry (TKAI-306): if the summarize call itself blows the
       // summarizer model's context, drop the oldest half of the head input
@@ -4346,11 +4459,6 @@ export class Thread {
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
-    } finally {
-      await session.emit(
-        { type: "compaction_end", threadId: this.id },
-        { queueItemId: this.runningItem?.id },
-      );
     }
 
     // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each

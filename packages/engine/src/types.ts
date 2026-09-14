@@ -362,7 +362,12 @@ export interface PromptReceipt {
   queueItemId: string;
   status: "queued" | "running" | "blocked_on_decision_gate";
   /** Set when the submission was handled as a command and no prompt was queued. */
-  command?: { name: string; source: import("./commands/types.js").CommandSource };
+  command?: {
+    name: string;
+    source: "builtin" | "plugin";
+    /** Set when command completion continues after this receipt returns. */
+    status?: "started";
+  };
   /** Set when an unknown /word passed through as prompt text; closest registered name. */
   nearMiss?: string;
 }

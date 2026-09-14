@@ -70,6 +70,62 @@ function idleModelState(threadId: string): WireEvent {
 describe("stream store reducer", () => {
   beforeEach(reset);
 
+  it("applies optimistic and handshake compaction state", () => {
+    const { ingest, setCompacting } = useStreamStore.getState();
+    setCompacting(SESSION, THREAD, true);
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBe(true);
+
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      type: "compaction.state",
+      threadId: THREAD,
+      active: false,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBeUndefined();
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "compaction.state",
+      threadId: THREAD,
+      active: true,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBe(true);
+
+    ingest(SESSION, { seq: 3, ts: Date.now(), type: "compaction_end", threadId: THREAD });
+    expect(useStreamStore.getState().bySession[SESSION].compactingByThread[THREAD]).toBeUndefined();
+  });
+
+  it("appends and deduplicates a durable command result", () => {
+    const { ingest } = useStreamStore.getState();
+    const message: Message = {
+      id: "command-1",
+      sessionId: SESSION,
+      threadId: THREAD,
+      role: "system",
+      content: "Compacted the thread context.",
+      parts: [],
+      createdAt: Date.now(),
+      command: { name: "compact", source: "builtin", ok: true },
+    };
+    const event: WireEvent = {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "command_result",
+      threadId: THREAD,
+      message,
+    };
+
+    ingest(SESSION, event);
+    ingest(SESSION, { ...event, seq: 2, offset: offset(2) });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages).toEqual([
+      { ...message, persistence: "durable" },
+    ]);
+  });
+
   it("preserves store identity for an offset-free ping", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));
@@ -751,6 +807,37 @@ describe("setThreadMessages", () => {
       createdAt: 1,
     };
   }
+
+  it("preserves a durable command result until REST confirms it", () => {
+    const { ingest, setThreadMessages } = useStreamStore.getState();
+    const result: Message = {
+      id: "command-1",
+      sessionId: SESSION,
+      threadId: THREAD,
+      role: "system",
+      content: "Compacted the thread context.",
+      parts: [],
+      createdAt: 2,
+      command: { name: "compact", source: "builtin", ok: true },
+    };
+    ingest(SESSION, {
+      seq: 1,
+      ts: 2,
+      offset: offset(1),
+      type: "command_result",
+      threadId: THREAD,
+      message: result,
+    });
+
+    setThreadMessages(SESSION, THREAD, [restMessage("echo")]);
+    expect(useStreamStore.getState().bySession[SESSION].messages.map((message) => message.id)).toEqual(
+      ["echo", "command-1"],
+    );
+
+    setThreadMessages(SESSION, THREAD, [restMessage("echo"), result]);
+    const messages = useStreamStore.getState().bySession[SESSION].messages;
+    expect(messages.filter((message) => message.id === "command-1")).toHaveLength(1);
+  });
 
   it("keeps the prefix when a bounded tail advances by one row", () => {
     const { setThreadMessages } = useStreamStore.getState();
