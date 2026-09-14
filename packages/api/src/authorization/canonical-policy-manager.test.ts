@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionPolicies, orgs, policyActiveBundles, policySourceBundles } from "../schema/index.js";
+import { actionInvocations, actionPolicies, orgs, policyActiveBundles, policySourceBundles } from "../schema/index.js";
 import { CanonicalPolicyBundleManager, ensureCanonicalPolicyReadiness } from "./canonical-policy-manager.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 
@@ -65,6 +65,24 @@ describe("canonical policy readiness", () => {
       expect(await db.select().from(policySourceBundles)).toHaveLength(1);
       expect(await db.select().from(policyActiveBundles)).toMatchObject([{ orgId: "org-new", generation: 1 }]);
       await manager.ensureOrganizationReady("org-new");
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("revalidates exact candidate identity before pointer CAS and audit", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const before = (await manager.host.activePointer("org-a"))!;
+      await db.insert(actionPolicies).values({ id: "candidate-rule", orgId: "org-a", principalType: "org", principalId: "org-a", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+      const candidate = await manager.buildCurrent("org-a");
+      await db.delete(actionPolicies).where(eq(actionPolicies.id, "candidate-rule"));
+      await expect(manager.activateCandidate("org-a", { ...candidate.identity, engineDigest: "0".repeat(64) }, candidate.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "bad" })).rejects.toThrow(/identity changed/);
+      expect(await manager.host.activePointer("org-a")).toEqual(before);
+      await manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "good" });
+      const after = (await manager.host.activePointer("org-a"))!;
+      expect(after).toMatchObject({ sourceBundleDigest: candidate.identity.sourceBundleDigest, generation: before.generation + 1 });
+      expect(await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "policy_authoring_publish"))).toHaveLength(1);
     } finally { await manager.close(); }
   }, 120_000);
 
