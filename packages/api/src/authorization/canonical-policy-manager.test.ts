@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles } from "../schema/index.js";
-import { CanonicalPolicyBundleManager, ensureCanonicalPolicyReadiness } from "./canonical-policy-manager.js";
+import { CanonicalPolicyBundleManager, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness } from "./canonical-policy-manager.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 
 let pg: TestPgDb | undefined;
@@ -98,6 +98,36 @@ describe("canonical policy readiness", () => {
       await manager.activateCandidate("org-a", candidate.identity, candidate.built.bundle, audit);
       expect(await manager.host.activePointer("org-a")).toEqual(after);
       expect(await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "policy_authoring_publish"))).toHaveLength(1);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("makes candidate-owned policy read-only to every structured writer and permits reviewed candidate recovery", async () => {
+    const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      await db.insert(actionPolicies).values({ id: "candidate-a", orgId: "org-a", principalType: "org", principalId: "org-a", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+      const first = await manager.buildCurrent("org-a");
+      await db.update(actionPolicies).set({ id: "candidate-b", mode: "allow" }).where(eq(actionPolicies.id, "candidate-a"));
+      const replacement = await manager.buildCurrent("org-a");
+      await db.delete(actionPolicies).where(eq(actionPolicies.id, "candidate-b"));
+
+      await manager.activateCandidate("org-a", first.identity, first.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "first" });
+      const active = await manager.host.activePointer("org-a");
+      let mutations = 0;
+      for (const operation of ["create", "update", "revoke", "always_allow", "workflow_always_allow", "workflow_preapproval", "team_delete", "config_reconcile"]) {
+        await expect(manager.mutateAndActivate("org-a", { actorId: "admin", operation, idempotencyKey: operation }, async () => { mutations++; }))
+          .rejects.toMatchObject({ code: "canonical_policy_source_read_only", statusCode: 409 });
+      }
+      expect(mutations).toBe(0);
+      expect(await db.select().from(actionPolicies)).toHaveLength(0);
+      expect(await manager.host.activePointer("org-a")).toEqual(active);
+
+      await expect(manager.activateCandidate("org-a", { ...replacement.identity, policyDigest: "0".repeat(64) }, replacement.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "invalid" }))
+        .rejects.toThrow(/identity changed/);
+      await manager.activateCandidate("org-a", replacement.identity, replacement.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "replacement" });
+      expect((await manager.host.activePointer("org-a"))?.sourceBundleDigest).toBe(replacement.identity.sourceBundleDigest);
+      expect(new CanonicalPolicySourceReadOnlyError("org-a")).toMatchObject({ code: "canonical_policy_source_read_only", statusCode: 409 });
     } finally { await manager.close(); }
   }, 120_000);
 

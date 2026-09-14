@@ -50,6 +50,17 @@ export interface CanonicalPolicyMutationContext {
   overrideBoundsIdentity(): Promise<ValidatedBundleIdentity>;
 }
 
+/** A reviewed authored bundle is the active source of truth, so row-backed
+ * writers must not mutate shadow state that the evaluator would ignore. */
+export class CanonicalPolicySourceReadOnlyError extends Error {
+  readonly code = "canonical_policy_source_read_only";
+  readonly statusCode = 409;
+  constructor(readonly organizationId: string) {
+    super(`Canonical policy for ${organizationId} is owned by a published candidate. Publish a reviewed replacement candidate to change it.`);
+    this.name = "CanonicalPolicySourceReadOnlyError";
+  }
+}
+
 export class CanonicalPolicyBundleManager {
   readonly runtime = new WasmPolicyRuntime();
   readonly host: SourceBundleHost;
@@ -100,7 +111,10 @@ export class CanonicalPolicyBundleManager {
       const before = await currentPolicySnapshot(tx, organizationId, this.plugins);
       const beforeBuilt = buildCurrentPolicySource(before);
       const beforeIdentity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: beforeBuilt.bundle });
-      if (beforeIdentity.sourceBundleDigest !== pointer.digest) throw new Error(`Canonical policy pointer for ${organizationId} is stale.`);
+      if (beforeIdentity.sourceBundleDigest !== pointer.digest) {
+        if (await isRecordedCandidate(tx, organizationId, pointer.digest)) throw new CanonicalPolicySourceReadOnlyError(organizationId);
+        throw new Error(`Canonical policy pointer for ${organizationId} is stale.`);
+      }
       let boundsIdentity: Promise<ValidatedBundleIdentity> | undefined;
       const context: CanonicalPolicyMutationContext = {
         overrideBoundsIdentity: () => boundsIdentity ??= (async () => {
