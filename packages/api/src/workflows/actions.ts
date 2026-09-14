@@ -36,7 +36,7 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import type { TeamServiceReadinessDeps } from "./team-service-readiness.js";
-import { buildValidateEnvironment } from "./validation-env.js";
+import { buildValidateEnvironment, buildOrgValidateEnvironment } from "./validation-env.js";
 import {
   appendRemovedEdgeHint,
   applyWorkflowModelPatch,
@@ -282,13 +282,16 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // The validate env is best-effort: if deps aren't wired (early boot,
       // or a test that only exercises validation), lint without the
       // catalog hooks rather than failing the whole call.
-      let catalog: WorkflowServiceDeps["actionPluginByService"];
+      let validationDeps: WorkflowServiceDeps | undefined;
       try {
-        catalog = getDeps().actionPluginByService;
+        validationDeps = getDeps();
       } catch {
-        catalog = undefined;
+        validationDeps = undefined;
       }
-      const validation = validateDefinitionInput(definition, buildValidateEnvironment(catalog));
+      const env = validationDeps
+        ? await buildOrgValidateEnvironment(validationDeps, owner.orgId)
+        : buildValidateEnvironment();
+      const validation = validateDefinitionInput(definition, env);
       if (!validation.ok) {
         return {
           success: false,
@@ -606,7 +609,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         (remove_edges !== undefined && remove_edges.length > 0);
 
       if (changesGraph) {
-        const env = buildValidateEnvironment(deps.actionPluginByService);
+        const env = await buildOrgValidateEnvironment(deps, owner.orgId);
         const validation = validateDefinitionInput(patched.definition, env);
         if (!validation.ok) {
           // Validate the stored definition too, so the reply can say which
@@ -683,7 +686,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!stored.ok) return { success: false, error: formatLintErrors(stored.errors) };
       const patched = applyWorkflowModelPatch(stored.definition, model, node_ids);
       if (!patched.ok) return { success: false, error: formatLintErrors(patched.errors) };
-      const validation = validateDefinitionInput(patched.definition, buildValidateEnvironment(deps.actionPluginByService));
+      const validation = validateDefinitionInput(patched.definition, await buildOrgValidateEnvironment(deps, owner.orgId));
       if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
       const updated = await updateWorkflowDefinition(deps, owner, workflow_id, { definition: patched.definition });
       if (!updated) return { success: false, error: `workflow not found: ${workflow_id}` };
@@ -720,7 +723,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         owner,
         workflow_id,
         { mode, model, nodeId: node_id, sources, instructions },
-        buildValidateEnvironment(deps.actionPluginByService),
+        await buildOrgValidateEnvironment(deps, owner.orgId),
       );
       if (!result.ok) {
         if (result.reason === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };

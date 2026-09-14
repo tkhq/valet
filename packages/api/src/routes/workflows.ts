@@ -62,7 +62,7 @@ import {
   listWorkflowSchedules,
   type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
-import { buildValidateEnvironment } from "../workflows/validation-env.js";
+import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workflows/validation-env.js";
 import { applyWorkflowModelPatch } from "../workflows/patch.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
@@ -164,7 +164,8 @@ function serviceCtx(c: {
 // ── Definitions ───────────────────────────────────────────────────────────
 
 workflowsRouter.post("/", async (c) => {
-  const { deps, owner, env } = serviceCtx(c);
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
 
   let body: CreateWorkflowRequest;
   try {
@@ -478,7 +479,8 @@ workflowsRouter.get("/:id/file", async (c) => {
 });
 
 workflowsRouter.put("/:id", async (c) => {
-  const { deps, owner, env } = serviceCtx(c);
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
   const id = c.req.param("id");
 
   let body: UpdateWorkflowRequest;
@@ -507,7 +509,8 @@ workflowsRouter.put("/:id", async (c) => {
 
 /** Change only model-capable nodes. Existing models stay unchanged unless this route is called. */
 workflowsRouter.patch("/:id/model", async (c) => {
-  const { deps, owner, env } = serviceCtx(c);
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
   let body: UpdateWorkflowModelRequest;
   try {
     body = (await c.req.json()) as UpdateWorkflowModelRequest;

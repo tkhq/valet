@@ -11,6 +11,7 @@ import { eq } from "drizzle-orm";
 import type { RunHost, WorkflowDefinition } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
+import { createLlmProvider } from "../services/llm-providers.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
@@ -590,6 +591,44 @@ describe("PATCH /api/workflows/:id/model", () => {
       .filter((node) => node.type === "llm" || node.type === "session")
       .map((node) => [node.id, node.model]);
     expect(models).toEqual([["draft", "l"], ["review", "m"]]);
+  });
+
+  it("round-trips an active custom catalog model through creation, editing, and focused updates", async () => {
+    api = await bootTestApi();
+    const provider = await createLlmProvider(api.providers.db, {
+      orgId: "local-org", kind: "openai_compatible", name: "Custom",
+      baseUrl: "https://models.example.test/v1", models: [{ id: "writer", name: "Writer" }],
+    });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, `llm:${provider.id}`, {
+      type: "api_key", apiKey: "test-custom-key",
+    });
+    const model = `${provider.id}/writer`;
+    const definition = {
+      ...MODEL_DEFINITION,
+      nodes: MODEL_DEFINITION.nodes.map((node) => node.type === "llm" ? { ...node, model } : node),
+    };
+    const create = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "custom-model", definition }),
+    });
+    expect(create.status).toBe(201);
+    const created = await create.json() as CreateWorkflowResponse;
+    const edit = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition }),
+    });
+    expect(edit.status).toBe(200);
+    const patch = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    expect(patch.status).toBe(200);
+    const saved = await fetch(`${api.baseUrl}/api/workflows/${created.id}`).then(
+      (response) => response.json() as Promise<CreateWorkflowResponse>,
+    );
+    expect(saved.definition).toMatchObject({ nodes: [
+      { id: "trigger" }, { id: "draft", model }, { id: "review", model }, { id: "stop" },
+    ] });
   });
 
   it("rejects a concrete model that the org did not approve", async () => {

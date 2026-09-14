@@ -7,6 +7,8 @@
 import { bundledModel } from "@valet/engine/model-catalog";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { ValidateEnvironment } from "@valet/workflow";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import type { WorkflowServiceDeps } from "./service.js";
 import { TIER_SET } from "../services/model-tiers.js";
 
 /**
@@ -36,9 +38,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function buildValidateEnvironment(
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
+  orgModelIds?: ReadonlySet<string>,
 ): ValidateEnvironment {
   return {
-    isKnownModel: isKnownModelSpec,
+    isKnownModel: (spec) => orgModelIds?.has(spec) === true || isKnownModelSpec(spec),
     isKnownAction: actionPluginByService
       ? (service, action) => {
           const entry = actionPluginByService.get(service);
@@ -71,4 +74,13 @@ export function buildValidateEnvironment(
         }
       : undefined,
   };
+}
+
+/** Include active org models while retaining validation of legacy bundled IDs. */
+export async function buildOrgValidateEnvironment(
+  deps: WorkflowServiceDeps,
+  orgId: string,
+): Promise<ValidateEnvironment> {
+  const catalog = await buildOrgCatalog(deps.db, deps.credentials, orgId);
+  return buildValidateEnvironment(deps.actionPluginByService, catalogValidIds(catalog));
 }

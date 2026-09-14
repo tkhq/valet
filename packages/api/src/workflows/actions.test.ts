@@ -18,6 +18,7 @@ import { teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, work
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
+import { createLlmProvider } from "../services/llm-providers.js";
 import { setApprovedModels } from "../services/approved-models.js";
 
 afterEach(() => {
@@ -270,6 +271,34 @@ describe("DB-backed actions", () => {
     expect(definition?.nodes
       .filter((node) => node.type === "llm" || node.type === "session")
       .map((node) => [node.id, node.model])).toEqual([["draft", "s"], ["review", "l"]]);
+  });
+
+  it("saves and updates custom catalog models through assistant actions", async () => {
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    const provider = await createLlmProvider(db, {
+      orgId: "org1", kind: "openai_compatible", name: "Custom",
+      baseUrl: "https://models.example.test/v1", models: [{ id: "writer", name: "Writer" }],
+    });
+    await deps.credentials.save({ type: "org", id: "org1" }, `llm:${provider.id}`, {
+      type: "api_key", apiKey: "test-custom-key",
+    });
+    const model = `${provider.id}/writer`;
+    const definition = {
+      version: "dag/v1", nodes: [
+        { id: "trigger", type: "trigger" }, { id: "draft", type: "llm", model, prompt: "Draft" },
+      ], edges: [{ from: "trigger", to: "draft" }],
+    };
+    const created = await createWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, {
+      name: "custom-model", definition,
+    });
+    const actions = workflowsActionPlugin(() => deps).actions;
+    const save = actions.find((action) => action.id === "workflows.save_workflow");
+    const update = actions.find((action) => action.id === "workflows.update_model");
+    if (!save || !update) throw new Error("Expected workflow actions");
+    expect(await save.execute({ workflow_id: created.id, definition }, ctx())).toMatchObject({ success: true });
+    expect(await update.execute({ workflow_id: created.id, model }, ctx())).toMatchObject({ success: true });
+    const saved = await getWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, created.id);
+    expect(saved?.definition).toMatchObject({ nodes: [{ id: "trigger" }, { id: "draft", model }] });
   });
 
   it("rejects invalid model choices and node targets through the focused assistant action", async () => {
