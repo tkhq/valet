@@ -19,7 +19,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
+import type { PromptAuthor, SessionEntry, Session as EngineSession, Thread } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
@@ -248,13 +248,14 @@ function threadToSummary(
   threadId: string,
   createdAt: number,
   sessionId: string,
+  lastUserActivityAt: number,
   title?: string,
   model?: string,
   key?: string,
   archivedAt?: number,
   reasoning?: string | null,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt, reasoning };
+  return { id: threadId, sessionId, title, createdAt, lastUserActivityAt, model, key, archivedAt, reasoning };
 }
 
 async function loadEngineSession(
@@ -300,12 +301,23 @@ messagesRouter.get("/:id/threads", async (c) => {
           id: sessionThreads.id,
           title: sessionThreads.title,
           archivedAt: sessionThreads.archivedAt,
+          lastUserActivityAt: sessionThreads.lastUserActivityAt,
         })
         .from(sessionThreads)
         .where(inArray(sessionThreads.id, ids))
     : [];
   const metaById = new Map(
-    metaRows.map((r) => [r.id, { title: r.title ?? undefined, archivedAt: r.archivedAt ?? undefined }] as const),
+    metaRows.map(
+      (r) =>
+        [
+          r.id,
+          {
+            title: r.title ?? undefined,
+            archivedAt: r.archivedAt ?? undefined,
+            lastUserActivityAt: r.lastUserActivityAt ?? undefined,
+          },
+        ] as const,
+    ),
   );
 
   // Default list excludes archived threads; `?archived=1` lists only them.
@@ -317,6 +329,7 @@ messagesRouter.get("/:id/threads", async (c) => {
         t.id,
         t.toThreadData().createdAt,
         session.id,
+        metaById.get(t.id)?.lastUserActivityAt ?? t.toThreadData().createdAt,
         metaById.get(t.id)?.title,
         t.modelId(),
         t.key,
@@ -494,7 +507,11 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
 
   // Return the same title and archive state as a subsequent GET.
   const rows = await db
-    .select({ archivedAt: sessionThreads.archivedAt, title: sessionThreads.title })
+    .select({
+      archivedAt: sessionThreads.archivedAt,
+      title: sessionThreads.title,
+      lastUserActivityAt: sessionThreads.lastUserActivityAt,
+    })
     .from(sessionThreads)
     .where(eq(sessionThreads.id, thread.id))
     .limit(1);
@@ -505,6 +522,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
+    rows[0]?.lastUserActivityAt ?? thread.toThreadData().createdAt,
     title,
     thread.modelId(),
     thread.key,
@@ -565,6 +583,7 @@ messagesRouter.post("/:id/threads", async (c) => {
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
+    thread.toThreadData().createdAt,
     body.title,
     thread.modelId(),
     thread.key,
@@ -634,6 +653,26 @@ messagesRouter.get("/:id/messages", async (c) => {
  * Returns null when `threadId` names no thread of this session. The caller
  * must have authorized the session already — this function does not.
  */
+async function recordThreadUserActivity(
+  db: Providers["db"],
+  sessionId: string,
+  thread: Thread,
+  now: number,
+): Promise<void> {
+  await db
+    .insert(sessionThreads)
+    .values({
+      id: thread.id,
+      sessionId,
+      createdAt: thread.toThreadData().createdAt,
+      lastUserActivityAt: now,
+    })
+    .onConflictDoUpdate({
+      target: sessionThreads.id,
+      set: { lastUserActivityAt: now },
+    });
+}
+
 export async function submitSessionPrompt(
   providers: Pick<Providers, "db" | "engineHost">,
   row: typeof agentSessions.$inferSelect,
@@ -646,9 +685,11 @@ export async function submitSessionPrompt(
     promoteItemId?: string;
     /** The authenticated sender, persisted on the user entry as `MessageEntry.author`. */
     author?: PromptAuthor;
+    /** False for agent-driven submissions, which must not reorder the sidebar. */
+    recordUserActivity?: boolean;
   },
 ): Promise<SendPromptResponse | null> {
-  const { threadId, attachments, fileRefs, author } = opts ?? {};
+  const { threadId, attachments, fileRefs, author, recordUserActivity = true } = opts ?? {};
   const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -668,6 +709,7 @@ export async function submitSessionPrompt(
       .update(agentSessions)
       .set({ updatedAt: now, lastActivityAt: now })
       .where(eq(agentSessions.id, row.id));
+    if (recordUserActivity) await recordThreadUserActivity(db, row.id, thread, now);
     return {
       messageId: receipt.queueItemId || null,
       threadId: receipt.threadId,
@@ -784,6 +826,7 @@ export async function submitSessionPrompt(
     .update(agentSessions)
     .set({ updatedAt: submitNow, lastActivityAt: submitNow })
     .where(eq(agentSessions.id, row.id));
+  if (recordUserActivity) await recordThreadUserActivity(db, row.id, thread, submitNow);
 
   return {
     // Commands take no queue item; "" would read as a real (broken) id.

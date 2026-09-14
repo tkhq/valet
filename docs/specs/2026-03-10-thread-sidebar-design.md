@@ -89,3 +89,11 @@ ChatContainer (orchestrator)
 - Thread renaming from sidebar (exists in thread detail page)
 - Notification sounds or desktop notifications for new thread activity
 - Mobile/touch interactions (long-press to dismiss)
+
+### Thread Sort Preference
+
+- The sidebar defaults to **Last user activity**. It orders active threads by each thread's latest user action.
+- **Created** orders active threads by creation time, newest first.
+- The browser stores the selected mode at `valet:thread-sort`.
+- Agent frames and agent-driven submissions do not update the user-activity timestamp.
+- Origin filters and the archived-thread section keep their existing order and behavior.
