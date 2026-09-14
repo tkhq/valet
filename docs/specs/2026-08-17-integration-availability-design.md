@@ -273,6 +273,18 @@ change, with tests.
 
 ## Deviations from prior specs
 
+`GET /api/plugins?teamId=` returns the effective team catalog after a live
+team-access check. A team catalog marks an org-provided credential connected.
+A personal catalog keeps it disconnected, so it does not offer Disconnect for
+an organization-owned credential. The response does not expose another team's
+catalog.
+
+A broken delegated team credential is disconnected with no health data. The
+catalog remains available and does not expose the delegator. The availability
+resolver treats that row as unconfigured when no organization credential
+exists. Slack identity links remain required for actions that need a person's
+identity, such as private-channel access and `slack.dm_owner`.
+
 `2026-07-20-integration-oauth-design.md` specified that an
 `authorization_code` service with unset client env reports `"manual"` so
 the UI renders token entry instead of a 503ing Connect button. This design

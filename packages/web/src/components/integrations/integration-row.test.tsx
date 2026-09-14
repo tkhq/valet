@@ -83,6 +83,25 @@ describe("IntegrationRow disconnect", () => {
     disconnectError = null;
   });
 
+  it("does not offer Disconnect for an organization-provided Slack bot", () => {
+    const orgSlack: PluginSummary = {
+      ...PLUGIN,
+      name: "slack",
+      services: [{
+        service: "slack",
+        type: "bot_token",
+        configKeys: ["accessToken"],
+        connected: false,
+        connect: "org",
+        actions: [],
+      }],
+    };
+
+    render(<IntegrationRow plugin={orgSlack} />);
+
+    expect(screen.queryByRole("button", { name: /Disconnect Slack/ })).toBeNull();
+  });
+
   it("asks in a dialog, naming the cost and the way back, and deletes nothing yet", () => {
     const confirmSpy = nativeConfirm();
     render(<IntegrationRow plugin={PLUGIN} />);

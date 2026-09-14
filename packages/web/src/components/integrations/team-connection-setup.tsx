@@ -13,7 +13,10 @@ import { githubOrgAppState } from "./github-org-app";
 export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
   teamId: string; canManage: boolean; orgAdmin: boolean;
 }) {
-  const plugins = usePlugins();
+  // The team catalog reports effective credentials for this team. In
+  // particular, an org-managed Slack bot is connected for team workflows
+  // even though the team has no Slack credential row of its own.
+  const plugins = usePlugins(teamId);
   const github = useGithubOrgStatus();
   const credentials = useCredentials("team", { teamId });
   const [selected, setSelected] = useState<PluginServiceSummary | null>(null);

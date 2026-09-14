@@ -42,6 +42,7 @@ import type {
   CredentialStore,
   ValetPlugin,
 } from "@valet/engine";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { authCodeEnvReady, findOAuthDeclaration } from "./integration-oauth.js";
 
 export type ConnectMode = "oauth" | "manual" | "org" | "unconfigured";
@@ -89,8 +90,14 @@ export async function connectModeFor(
     );
     if (orgCredential !== null) return "org";
     if (params.owner?.type === "team") {
-      const teamCredential = await params.credentials.get(params.owner, params.service);
-      if (teamCredential !== null) return "manual";
+      try {
+        const teamCredential = await params.credentials.get(params.owner, params.service);
+        if (teamCredential !== null) return "manual";
+      } catch (err) {
+        // A broken delegated row is not a usable team credential. Do not
+        // fail the catalog, and do not fall back to a member's credential.
+        if (!(err instanceof CredentialReferenceBrokenError)) throw err;
+      }
     }
     return "unconfigured";
   }
