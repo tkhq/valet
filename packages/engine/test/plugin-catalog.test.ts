@@ -1802,3 +1802,15 @@ describe("approval review context", () => {
     expect(toolApprovalGateContext({ kind: "tool_approval", tool_id: "github.create_issue", argsPreview: '{"title":"ok"}' })?.reviewIncomplete).toBeUndefined();
   });
 });
+
+describe("dynamic discovery collision serialization", () => {
+  it("rejects one concurrent service that discovers an already-qualified action", async () => {
+    const action: PluginAction = { id: "shared.run", name: "Run", description: "run", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) };
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("one", async () => [action]), makeDynamicPlugin("two", async () => [action])] });
+    const ctx = makeCtx();
+    const [one, two] = await Promise.all([list.execute({ service: "one" }, ctx), list.execute({ service: "two" }, ctx)]);
+    const payloads = [decode(one.text), decode(two.text)] as Array<{ tools?: unknown[]; warnings?: unknown[] }>;
+    expect(payloads.filter((payload) => payload.tools?.length === 1 && !payload.warnings?.length)).toHaveLength(1);
+    expect(payloads.filter((payload) => payload.warnings?.length === 1)).toHaveLength(1);
+  });
+});
