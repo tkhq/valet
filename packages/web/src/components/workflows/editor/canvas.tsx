@@ -372,6 +372,7 @@ export function Canvas({
     // Labels render in a viewport portal, outside xyflow's edge group. Mirror
     // the library's selected state before informing the editor, so its moss
     // selected styling remains visible after a label click.
+    setNodes((current) => current.map((node) => ({ ...node, selected: false })));
     setEdges((current) => current.map((edge) => ({ ...edge, selected: edge.id === edgeId })));
     edgeSelectRef.current(edgeId);
   }

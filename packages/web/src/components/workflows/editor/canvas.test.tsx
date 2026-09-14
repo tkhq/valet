@@ -6,7 +6,7 @@
  * decision 12) — not unit-tested here.
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import type { NodeChange, EdgeChange, Edge } from "@xyflow/react";
 import { Canvas, INITIAL_FIT_OPTIONS, MANUAL_FIT_OPTIONS, enteringNodeIds, routeNodeChanges, routeEdgeChanges, toXyEdges, viewportMoveResult } from "./canvas";
 import { toFlow, type WorkflowDefinition, type WorkflowFlowState } from "../editor-model";
@@ -99,6 +99,33 @@ describe("Canvas", () => {
     await waitFor(() =>
       expect(container.querySelector('.react-flow__edge[data-id="check:true->stop"]')?.classList).toContain("selected"),
     );
+  });
+
+  it("deletes only the labeled edge after a node was selected", async () => {
+    const onRemoveNode = vi.fn();
+    const onRemoveEdge = vi.fn();
+    const { container } = render(
+      <Canvas
+        flow={toFlow(definition)}
+        onNodePositionChange={noop}
+        onConnect={noop}
+        onSelectNode={noop}
+        onSelectEdge={noop}
+        onRemoveNode={onRemoveNode}
+        onRemoveEdge={onRemoveEdge}
+      />,
+    );
+    fireEvent.click(screen.getByText("If"));
+    await waitFor(() =>
+      expect(container.querySelector('.react-flow__node[data-id="check"]')?.classList).toContain("selected"),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "True branch. Condition: approved" }));
+    await waitFor(() =>
+      expect(container.querySelector('.react-flow__node[data-id="check"]')?.classList).not.toContain("selected"),
+    );
+    fireEvent.keyDown(document, { key: "Backspace", code: "Backspace" });
+    await waitFor(() => expect(onRemoveEdge).toHaveBeenCalledWith("check:true->stop"));
+    expect(onRemoveNode).not.toHaveBeenCalled();
   });
 
   it("persists a Controls zoom after the automatic initial fit", async () => {
