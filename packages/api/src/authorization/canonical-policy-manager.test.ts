@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, workflowRuns } from "../schema/index.js";
-import { CanonicalPolicyBundleManager, CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
+import { CanonicalPolicyBundleManager, CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, migrateCanonicalPolicyReleaseSet, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 
 let pg: TestPgDb | undefined;
@@ -170,6 +170,29 @@ describe("canonical policy readiness", () => {
     } finally { await manager.close(); }
   }, 120_000);
 
+  it("runs the production release wrapper within the PGlite transaction bound", async () => {
+    const db = await setup();
+    await db.insert(orgs).values([{ id: "org-a", name: "A", createdAt: 1 }, { id: "org-b", name: "B", createdAt: 1 }]);
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      await db.insert(actionPolicies).values({ id: "authored", orgId: "org-b", principalType: "org", principalId: "org-b", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+      const authored = await manager.buildCurrent("org-b");
+      await db.delete(actionPolicies).where(eq(actionPolicies.id, "authored"));
+      await manager.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });
+
+      await Promise.race([
+        migrateCanonicalPolicyReleaseSet(manager, "current-release"),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("production release wrapper exceeded 10 seconds")), 10_000)),
+      ]);
+      const audits = await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "release_set_migration"));
+      expect(audits.sort((a, b) => (a.orgId ?? "").localeCompare(b.orgId ?? ""))).toMatchObject([
+        { orgId: "org-a", params: { source: "structured" } },
+        { orgId: "org-b", params: { source: "authored" } },
+      ]);
+    } finally { await manager.close(); }
+  }, 120_000);
+
   it("migrates a release set atomically, preserves authored source, and is repeatable after rollback", async () => {
     const db = await setup();
     await db.insert(orgs).values([{ id: "org-a", name: "A", createdAt: 1 }, { id: "org-b", name: "B", createdAt: 1 }]);
@@ -240,14 +263,13 @@ describe("canonical policy readiness", () => {
     } finally { await manager.close(); }
   }, 120_000);
 
-  it("accepts only an identical target after a concurrent manager changes the release set", () => {
-    const observed = [{ orgId: "org-a", digest: "old-a", generation: 1 }, { orgId: "org-b", digest: "same-b", generation: 3 }];
+  it("accepts only a fully recorded identical concurrent release target", () => {
     const current = [{ orgId: "org-a", digest: "new-a", generation: 2 }, { orgId: "org-b", digest: "same-b", generation: 3 }];
-    const audits = [{ orgId: "org-a", params: { targetRelease: "release-2", sourceBundleDigest: "new-a", generation: 2 } }];
-    expect(sameConcurrentReleaseTarget(observed, current, audits, "release-2")).toBe(true);
-    expect(sameConcurrentReleaseTarget(observed, current, audits, "release-3")).toBe(false);
-    expect(sameConcurrentReleaseTarget(observed, [{ ...current[0]!, generation: 3 }, current[1]!], audits, "release-2")).toBe(false);
-    expect(sameConcurrentReleaseTarget(observed, current, [{ ...audits[0]!, params: { ...audits[0]!.params, sourceBundleDigest: "other" } }], "release-2")).toBe(false);
+    const audits = current.map((pointer) => ({ orgId: pointer.orgId, params: { targetRelease: "release-2", sourceBundleDigest: pointer.digest, generation: pointer.generation } }));
+    expect(sameConcurrentReleaseTarget(current, audits, "release-2")).toBe(true);
+    expect(sameConcurrentReleaseTarget(current, audits, "release-3")).toBe(false);
+    expect(sameConcurrentReleaseTarget([{ ...current[0]!, generation: 3 }, current[1]!], audits, "release-2")).toBe(false);
+    expect(sameConcurrentReleaseTarget(current, audits.slice(0, 1), "release-2")).toBe(false);
   });
 
   it("rolls back static writes after a stale pointer CAS", async () => {

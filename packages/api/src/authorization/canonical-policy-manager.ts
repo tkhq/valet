@@ -81,34 +81,39 @@ interface ReleasePointerSnapshot { readonly orgId: string; readonly digest: stri
 interface ReleaseAuditSnapshot { readonly orgId: string | null; readonly params: unknown }
 
 export function sameConcurrentReleaseTarget(
-  observed: readonly ReleasePointerSnapshot[],
   current: readonly ReleasePointerSnapshot[],
   audits: readonly ReleaseAuditSnapshot[],
   targetRelease: string,
 ): boolean {
-  return current.every((pointer) => observed.some((prior) => prior.orgId === pointer.orgId && prior.digest === pointer.digest && prior.generation === pointer.generation)
-    || audits.some((row) => row.orgId === pointer.orgId && row.params && typeof row.params === "object" && !Array.isArray(row.params)
-      && (row.params as Record<string, unknown>).targetRelease === targetRelease
-      && (row.params as Record<string, unknown>).sourceBundleDigest === pointer.digest
-      && (row.params as Record<string, unknown>).generation === pointer.generation));
+  return current.every((pointer) => audits.some((row) => row.orgId === pointer.orgId && row.params && typeof row.params === "object" && !Array.isArray(row.params)
+    && (row.params as Record<string, unknown>).targetRelease === targetRelease
+    && (row.params as Record<string, unknown>).sourceBundleDigest === pointer.digest
+    && (row.params as Record<string, unknown>).generation === pointer.generation));
 }
 
-export class CanonicalPolicyBundleManager {
-  readonly runtime = new WasmPolicyRuntime();
-  readonly host: SourceBundleHost;
-  private readonly configManaged = new Map<string, string>();
-  constructor(readonly db: AppDb, readonly plugins: ActionPluginByService, private readonly now: () => number = Date.now) {
-    this.host = new SourceBundleHost(new PostgresSourceBundleStorage(db, now), this.runtime);
-  }
-  setConfigManagedToolPolicies(organizationId: string, configFile?: string): void {
-    if (configFile) this.configManaged.set(organizationId, configFile);
-    else this.configManaged.delete(organizationId);
-  }
+/** Read-only policy builder bound to one database scope. Release migration
+ * uses a transaction instance so every snapshot observes the locked state. */
+export class CanonicalPolicyBuildManager {
+  constructor(readonly db: AppQueryable, readonly plugins: ActionPluginByService, readonly runtime: WasmPolicyRuntime) {}
   async buildCurrent(organizationId: string) {
     const snapshot = await currentPolicySnapshot(this.db, organizationId, this.plugins);
     const built = buildCurrentPolicySource(snapshot);
     const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: built.bundle });
     return { snapshot, built, identity };
+  }
+}
+
+export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
+  readonly host: SourceBundleHost;
+  private readonly configManaged = new Map<string, string>();
+  constructor(override readonly db: AppDb, plugins: ActionPluginByService, private readonly now: () => number = Date.now) {
+    const runtime = new WasmPolicyRuntime();
+    super(db, plugins, runtime);
+    this.host = new SourceBundleHost(new PostgresSourceBundleStorage(db, now), runtime);
+  }
+  setConfigManagedToolPolicies(organizationId: string, configFile?: string): void {
+    if (configFile) this.configManaged.set(organizationId, configFile);
+    else this.configManaged.delete(organizationId);
   }
   async ensureOrganizationReady(organizationId: string): Promise<void> {
     const expected = await this.buildCurrent(organizationId);
@@ -185,22 +190,22 @@ export class CanonicalPolicyBundleManager {
    * partial engine/profile/plugin/source migration. */
   async migrateReleaseSet(
     targetRelease: string,
-    replacement: (input: CanonicalReleaseMigrationInput) => Promise<CanonicalSourceBundle>,
+    replacement: (input: CanonicalReleaseMigrationInput, manager: CanonicalPolicyBuildManager) => Promise<CanonicalSourceBundle>,
   ): Promise<void> {
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(targetRelease)) throw new Error("Canonical release identifier is invalid.");
     await this.db.transaction(async (tx) => {
-      // Read before waiting for the global lock. If another manager changes
-      // the release set while this caller waits, only the same target can win.
-      const observed = await tx.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
-      await tx.execute(sql`select pg_advisory_xact_lock(1447382105)`);
-      const pointers = await tx.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId).for("update");
-      if (canonicalJson(observed) !== canonicalJson(pointers)) {
+      const lock = await tx.execute(sql`select pg_try_advisory_xact_lock(1447382105) as acquired`);
+      if (!releaseLockAcquired(lock)) {
+        await tx.execute(sql`select pg_advisory_xact_lock(1447382105)`);
+        const pointers = await tx.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId).for("update");
         const winner = await tx.select({ orgId: actionInvocations.orgId, params: actionInvocations.params })
           .from(actionInvocations)
           .where(and(eq(actionInvocations.service, "canonical-policy"), eq(actionInvocations.actionId, "release_set_migration")));
-        if (!sameConcurrentReleaseTarget(observed, pointers, winner, targetRelease)) throw new Error("Canonical release migration lost a concurrent target race. Retry only after you verify the active release set.");
+        if (!sameConcurrentReleaseTarget(pointers, winner, targetRelease)) throw new Error("Canonical release migration lost a concurrent target race. Retry only after you verify the active release set.");
         return;
       }
+      const pointers = await tx.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId).for("update");
+      const transactionManager = new CanonicalPolicyBuildManager(tx, this.plugins, this.runtime);
 
       // Legacy grants lack one or more facts required by the canonical grant
       // contract. Revoke them in the release transaction so they re-gate.
@@ -228,18 +233,21 @@ export class CanonicalPolicyBundleManager {
         const stored = (await tx.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, pointer.digest)).limit(1))[0];
         if (!stored) throw new Error(`Canonical policy bundle ${pointer.digest} is missing.`);
         const authored = await isRecordedCandidate(tx, pointer.orgId, pointer.digest);
-        const bundle = await replacement({ organizationId: pointer.orgId, source: authored ? "authored" : "structured", active: { sourceBundleDigest: pointer.digest, generation: pointer.generation }, bundle: stored.bundle });
+        const bundle = await replacement({ organizationId: pointer.orgId, source: authored ? "authored" : "structured", active: { sourceBundleDigest: pointer.digest, generation: pointer.generation }, bundle: stored.bundle }, transactionManager);
         if (authored && canonicalJson(bundle.files) !== canonicalJson(stored.bundle.files)) throw new Error(`Authored policy source for ${pointer.orgId} changed during release migration.`);
         const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle });
         await this.runtime.loadBundle(identity.sourceBundleDigest, bundle);
         plans.push({ pointer, bundle, identity, authored });
       }
       for (const plan of plans) {
-        if (plan.identity.sourceBundleDigest === plan.pointer.digest) continue;
-        await putBundle(tx, plan.identity.sourceBundleDigest, plan.bundle, this.now());
-        const changed = await tx.update(policyActiveBundles).set({ digest: plan.identity.sourceBundleDigest, generation: plan.pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, plan.pointer.orgId), eq(policyActiveBundles.digest, plan.pointer.digest), eq(policyActiveBundles.generation, plan.pointer.generation))).returning({ id: policyActiveBundles.orgId });
-        if (!changed[0]) throw new Error(`Canonical release migration conflict for ${plan.pointer.orgId}.`);
-        await tx.insert(actionInvocations).values({ invocationId: `policy:release:${createHash("sha256").update(`${targetRelease}\0${plan.pointer.orgId}\0${plan.pointer.digest}\0${plan.identity.sourceBundleDigest}`).digest("hex")}`, service: "canonical-policy", actionId: "release_set_migration", status: "completed", userId: "release-migration", orgId: plan.pointer.orgId, params: { targetRelease, priorDigest: plan.pointer.digest, sourceBundleDigest: plan.identity.sourceBundleDigest, generation: plan.pointer.generation + 1, source: plan.authored ? "authored" : "structured" }, createdAt: this.now() }).onConflictDoNothing();
+        const changed = plan.identity.sourceBundleDigest !== plan.pointer.digest;
+        if (changed) {
+          await putBundle(tx, plan.identity.sourceBundleDigest, plan.bundle, this.now());
+          const updated = await tx.update(policyActiveBundles).set({ digest: plan.identity.sourceBundleDigest, generation: plan.pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, plan.pointer.orgId), eq(policyActiveBundles.digest, plan.pointer.digest), eq(policyActiveBundles.generation, plan.pointer.generation))).returning({ id: policyActiveBundles.orgId });
+          if (!updated[0]) throw new Error(`Canonical release migration conflict for ${plan.pointer.orgId}.`);
+        }
+        const generation = plan.pointer.generation + Number(changed);
+        await tx.insert(actionInvocations).values({ invocationId: `policy:release:${createHash("sha256").update(`${targetRelease}\0${plan.pointer.orgId}\0${plan.pointer.digest}\0${plan.identity.sourceBundleDigest}`).digest("hex")}`, service: "canonical-policy", actionId: "release_set_migration", status: "completed", userId: "release-migration", orgId: plan.pointer.orgId, params: { targetRelease, priorDigest: plan.pointer.digest, sourceBundleDigest: plan.identity.sourceBundleDigest, generation, source: plan.authored ? "authored" : "structured" }, createdAt: this.now() }).onConflictDoNothing();
       }
     });
   }
@@ -266,8 +274,8 @@ export class CanonicalPolicyBundleManager {
 export async function migrateCanonicalPolicyReleaseSet(manager: CanonicalPolicyBundleManager, targetRelease: string): Promise<void> {
   const template = buildCurrentPolicySource(standardNewOrganizationPolicySnapshot("release-template", targetRelease)).bundle;
   const compatibility = JSON.parse(template.manifestJson) as Record<string, unknown>;
-  await manager.migrateReleaseSet(targetRelease, async (input) => {
-    if (input.source === "structured") return (await manager.buildCurrent(input.organizationId)).built.bundle;
+  await manager.migrateReleaseSet(targetRelease, async (input, transactionManager) => {
+    if (input.source === "structured") return (await transactionManager.buildCurrent(input.organizationId)).built.bundle;
     const manifest = JSON.parse(input.bundle.manifestJson) as Record<string, unknown>;
     for (const key of ["engineName", "engineVersion", "capabilityProfileVersion", "interpreter", "contractVersion", "regoVersion", "entrypoint"] as const) manifest[key] = compatibility[key];
     return { manifestJson: canonicalJson(manifest), files: input.bundle.files };
@@ -306,6 +314,13 @@ export async function ensureCanonicalPolicyReadiness(manager: CanonicalPolicyBun
       }
     }
   });
+}
+
+function releaseLockAcquired(result: unknown): boolean {
+  if (!result || typeof result !== "object" || !("rows" in result) || !Array.isArray(result.rows)) throw new Error("Canonical release lock returned an invalid result.");
+  const row: unknown = result.rows[0];
+  if (!row || typeof row !== "object" || !("acquired" in row) || typeof row.acquired !== "boolean") throw new Error("Canonical release lock returned an invalid result.");
+  return row.acquired;
 }
 
 async function putBundle(db: AppQueryable, digest: string, bundle: CanonicalSourceBundle, now: number): Promise<void> {
