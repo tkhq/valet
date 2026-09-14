@@ -81,7 +81,7 @@ Overlapping runs of one workflow now share FIFO execution and conversation conte
 The completed full `make e2e` run reported 22 passed, 4 failed, and 9 skipped. Its complete local log is `/tmp/workflow-stability-e2e.log`.
 The baseline had a macOS `/bin/tar` failure, a CLI harness `tsx` path failure, and two Kubernetes transport assertions.
 The current full unit sweep had two GitHub fixture failures; both suites passed the isolated 107-test rerun.
-A baseline child-dismiss failure passed an isolated rerun. These do not yet constitute a clean local scorecard.
+A baseline child-dismiss failure passed an isolated rerun. These historical results led to the repairs documented below.
 
 An attempted independent review agent was blocked by automatic safety review with “Potentially unintended activity.”
 The agent was not retried. The new thread patch still requires independent review before merge.
@@ -96,5 +96,38 @@ The regression passes after the repair.
 Cancel, stop, and foreach tests also assert the queue-item ID passed to the adapter.
 
 Post-repair focused checks: 40 engine queue/gate tests and 38 workflow cancellation/foreach tests passed.
-The isolated Kubernetes binary round-trip test still fails; this is unchanged code and reproduced in the prior baseline.
-The local end-to-end requirement remains unsatisfied. Do not treat green hosted checks as a clean local scorecard.
+The isolated Kubernetes binary round-trip failure reproduced in the prior baseline. The follow-up below repairs it.
+
+## End-to-end repairs and regression coverage
+
+The follow-up fixed three failures from the full scorecard:
+
+- Archive inspection assumed Linux's `/bin/tar`. The macOS path is `/usr/bin/tar`; all 54 archive vectors now pass.
+- CLI integration assumed a package-local tsx executable. Workspace loader resolution now starts the real CLI and server; nine keyless tests pass.
+- Kubernetes exec closed stdin before the pod consumed all input. A 1 MB upload reported success with only 24 KB written. Byte-count framing keeps the transport open through command completion. All 16 live exec/file/job tests now pass. Three new transport regressions cover empty, small, and 1 MB Unicode inputs.
+
+A new keyless HTTP regression runs the same workflow twice through the API, LocalRunHost, engine, and PGlite. Only the model transport is substituted. It verifies completed outputs, distinct durable submissions, and one workflow thread.
+
+The next full run recorded 23 passed, 3 failed, and 9 skipped in `/tmp/pr706-e2e-fixed.log`. Its failures were the new HTTP test's response types, model fixture registration, and a sandbox test lifecycle limit. All three were repaired. A later full run is recorded in `/tmp/pr706-e2e-final.log`; its root sweep exposed intermittent GitHub fixture transport failures.
+
+The sandbox timeout test included pod creation and cleanup within a ten-second override, despite the Kubernetes suite allowing 120 seconds. It now uses the provider suite deadline. The exec operation still must return within two seconds.
+
+GitHub fixtures now send `Connection: close` to keep pooled connections from outliving short-lived test servers. Root unit tests and typecheck passed after this repair (`/tmp/pr706-fixture-recheck.log`). The precise source of the earlier intermittent network failures was not reproduced deterministically.
+
+Slack host regressions: 32 passed. Slack transport and signature regressions: 120 passed. The PR Validation section records the latest aggregate check status. Credential-gated live provider tests remain unverified.
+
+### Slack coverage and live verification
+
+Automated tests exercise signed request verification, callback parsing, real gate persistence, workflow-session restoration, and authorization. The host tests use a fake channel transport. They cover invalid actions, restoration failures, duplicate callbacks through different prompt references, and exactly one successful resolution.
+
+These tests do not verify Slack app installation, deployed callback URLs, network delivery, or message rendering in Slack. After staging deployment, use a disposable workflow and linked test users:
+
+1. Start a workflow that requires tool approval. Confirm the Slack prompt identifies the correct workflow.
+2. Approve once. Confirm the gate resolves, the workflow continues once, and all copies of the prompt update.
+3. Click an older copy again. Confirm the callback reports an expired or resolved gate without executing again.
+4. Use an unauthorized account. Confirm the gate stays pending and no action executes.
+5. Test rejection. Confirm the workflow reports the intended outcome without hanging.
+6. Repeat the workflow. Confirm its assistant thread count stays constant and each run retains its own result.
+7. Overlap two runs, then cancel one. Confirm the other submission completes.
+
+Also test an explicit workflow approval node in the web UI. This uses a different approval path from an engine tool gate.
