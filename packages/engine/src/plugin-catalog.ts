@@ -389,17 +389,7 @@ export function toolApprovalGateContext(
     return { reviewIncomplete: true };
   }
   const record = context as Record<string, unknown>;
-  const isToolApproval =
-    record.kind === "tool_approval" ||
-    "tool_id" in record ||
-    "toolId" in record ||
-    "toolName" in record ||
-    "tool" in record ||
-    "actionId" in record ||
-    "argsPreview" in record ||
-    "args" in record ||
-    "riskLevel" in record ||
-    "service" in record;
+  const isToolApproval = record.kind === "tool_approval";
   if (!isToolApproval) return null;
   const toolId = typeof record.tool_id === "string" && record.tool_id.trim() !== ""
     ? record.tool_id
@@ -464,7 +454,7 @@ function approvalArgsPreview(args: Record<string, unknown>): { preview: string; 
     if (typeof value === "object") {
       const entries = Object.entries(value as Record<string, unknown>);
       if (entries.length > 64) incomplete = true;
-      const object: Record<string, unknown> = {};
+      const object: Record<string, unknown> = Object.create(null);
       for (const [key, item] of entries.slice(0, 64)) {
         const boundedKey = truncateApprovalText(key, 128);
         if (boundedKey.truncated) incomplete = true;

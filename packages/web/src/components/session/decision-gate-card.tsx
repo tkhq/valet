@@ -141,7 +141,7 @@ export function DecisionGateCard({
             if (isAlwaysAllow && !isAdmin) {
               return <Tooltip key={action.id} content={ALWAYS_ALLOW_TOOLTIP}><span>{button}</span></Tooltip>;
             }
-            return button;
+            return reviewBlocked ? <span key={action.id} tabIndex={0} aria-describedby="approval-review-unavailable">{button}</span> : button;
           })}
         </div>
       )}
@@ -189,7 +189,7 @@ function ApprovalReview({
           <pre className="max-h-52 overflow-auto overscroll-contain whitespace-pre-wrap break-all rounded bg-ink-wash p-2 text-xs text-[--fg]" tabIndex={0} aria-label="Approval request parameters">
             {argsPreview.text}
           </pre>
-          {reviewIncomplete && <p className="mt-2 text-xs text-muted">The complete parameters are not available here. Reject this request and ask the agent to retry with a smaller request.</p>}
+          {reviewIncomplete && <p id="approval-review-unavailable" className="mt-2 text-xs text-muted">The complete parameters are not available here. Reject this request and ask the agent to retry with a smaller request.</p>}
         </div>
       </details>
     </div>
