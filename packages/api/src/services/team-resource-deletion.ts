@@ -2,7 +2,7 @@
 import { and, eq } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppDb, AppTx } from "../lib/drizzle.js";
 import { apikey, assistants, credentials } from "../schema/index.js";
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { deleteTeam } from "./teams.js";
@@ -32,13 +32,16 @@ export async function deleteTeamApiKey(db: AppDb, actor: Actor, teamId: string, 
   });
 }
 /** Returns sessions for teardown only after the enclosing transaction commits. */
+export async function deleteTeamResourcesInTransaction(db: AppTx, actor: Actor, teamId: string): Promise<string[]> {
+  if (!(await lockTeamDeletionAccess(db, actor, teamId))) throw new TeamAdminRequiredError(teamId, "team", teamId);
+  const rows = await db.select({ sessionId: assistants.sessionId }).from(assistants)
+    .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, teamId)));
+  await deleteTeam(db, { teamId, reapOwnedWorkflows: (inner) => reapTeamWorkflows(inner, teamId) });
+  return rows.map((r) => r.sessionId);
+}
+
 export async function deleteTeamResources(db: AppDb, actor: Actor, teamId: string, manager?: CanonicalPolicyBundleManager): Promise<string[]> {
   if (!manager) throw new Error("Canonical policy manager is unavailable.");
-  return manager.mutateAndActivate(actor.orgId, { actorId: actor.userId, operation: "team_delete", idempotencyKey: teamId }, async (tx) => {
-    if (!(await lockTeamDeletionAccess(tx, actor, teamId))) throw new TeamAdminRequiredError(teamId, "team", teamId);
-    const rows = await tx.select({ sessionId: assistants.sessionId }).from(assistants)
-      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, teamId)));
-    await deleteTeam(tx, { teamId, reapOwnedWorkflows: (inner) => reapTeamWorkflows(inner, teamId) });
-    return rows.map((r) => r.sessionId);
-  });
+  return manager.mutateAndActivate(actor.orgId, { actorId: actor.userId, operation: "team_delete", idempotencyKey: teamId },
+    (tx) => deleteTeamResourcesInTransaction(tx, actor, teamId));
 }

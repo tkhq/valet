@@ -28,6 +28,7 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import telegramPlugin from "@valet/plugin-telegram/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
 import { EngineHost } from "./host.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
 
 const orgId = "slack-org";
 const userId = "slack-user";
@@ -35,16 +36,20 @@ const userId = "slack-user";
 describe("EngineHost session slack credential resolution", () => {
   let fixture: GithubFixture | undefined;
   let host: EngineHost | undefined;
+  let canonical: Awaited<ReturnType<typeof canonicalPolicyForTest>> | undefined;
 
   afterEach(async () => {
     host?.evictAll();
     host = undefined;
+    await canonical?.manager.close();
+    canonical = undefined;
     await fixture?.close();
     fixture = undefined;
   });
 
   async function harness(): Promise<{ appDb: AppDb; credentials: PgCredentialStore }> {
     const { appDb, pgdb } = await freshTestPgDb();
+    canonical = await canonicalPolicyForTest(appDb, orgId);
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
@@ -60,6 +65,8 @@ describe("EngineHost session slack credential resolution", () => {
       eventStream: new InMemoryEventStream(),
       engineCredentials: credentials,
       db: appDb,
+      actionPluginByService: canonical?.actionPluginByService,
+      canonicalAuthorizationService: canonical?.canonicalAuthorizationService,
       // Escalation to an org row is declaration-driven now
       // (`orgFallbackPolicy`), and production always wires the registry
       // (`providers/node.ts`). Without it slack would not escalate here, and

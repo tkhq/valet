@@ -13,6 +13,8 @@ import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 import { eq } from "drizzle-orm";
 import { teams, teamMembers, orgMembers } from "../schema/index.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
+import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 
 const ORG = "org-1";
 const USER = "user-1";
@@ -55,6 +57,7 @@ describe("handleFollowedMessage", () => {
   let testDb: TestPgDb;
   let engineHost: EngineHost;
   let faux: FauxProviderRegistration;
+  let canonicalPolicyManager: CanonicalPolicyBundleManager;
 
   beforeEach(async () => {
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
@@ -63,6 +66,8 @@ describe("handleFollowedMessage", () => {
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
     await appDb.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
+    const canonical = await canonicalPolicyForTest(appDb, ORG);
+    canonicalPolicyManager = canonical.manager;
     engineHost = new EngineHost({
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
@@ -71,11 +76,14 @@ describe("handleFollowedMessage", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [],
+      actionPluginByService: canonical.actionPluginByService,
+      canonicalAuthorizationService: canonical.canonicalAuthorizationService,
     });
   });
 
   afterEach(async () => {
     await engineHost.destroyAll();
+    await canonicalPolicyManager.close();
     faux.unregister();
     vi.unstubAllEnvs();
   });

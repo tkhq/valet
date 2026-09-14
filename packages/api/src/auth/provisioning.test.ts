@@ -2,7 +2,7 @@
  * Tests for auth provisioning: the admission rule and the better-auth hooks
  * that wire it into signup/social/SSO flows and post-create bookkeeping.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, beforeEach } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { APIError, type AuthMiddleware } from "better-auth/api";
 import type { Account, BetterAuthOptions, User } from "better-auth";
@@ -27,6 +27,24 @@ import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { CLIENT_TEAM_KEY_METADATA_MESSAGE, PERSONAL_TEAM_KEY_MUTATION_MESSAGE } from "./api-key-hooks.js";
 import { buildAuthHooks, evaluateAdmission, INVITE_REQUIRED_MESSAGE } from "./provisioning.js";
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { configureCanonicalOrganizationProvisioner } from "../services/org.js";
+
+const canonicalPolicyManagers: CanonicalPolicyBundleManager[] = [];
+
+async function freshAuthTestPgDb() {
+  const fresh = await freshTestPgDb();
+  const manager = new CanonicalPolicyBundleManager(fresh.appDb, new Map());
+  configureCanonicalOrganizationProvisioner(fresh.appDb, (id, name) =>
+    manager.provisionOrganization(id, name),
+  );
+  canonicalPolicyManagers.push(manager);
+  return fresh;
+}
+
+afterEach(async () => {
+  await Promise.all(canonicalPolicyManagers.splice(0).map((manager) => manager.close()));
+});
 
 // better-auth's real `GenericEndpointContext` is a large request-plumbing object
 // (session config, adapters, cookie helpers, rate-limit state, …) that's
@@ -69,7 +87,7 @@ describe("evaluateAdmission", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    ({ appDb: db } = await freshAuthTestPgDb());
   });
 
   it("admits the first user in the db as admin, regardless of domain/invite", async () => {
@@ -200,7 +218,7 @@ describe("buildAuthHooks", () => {
   let credentialStore: CredentialStore;
 
   beforeEach(async () => {
-    const fresh = await freshTestPgDb();
+    const fresh = await freshAuthTestPgDb();
     db = fresh.appDb;
     credentialStore = new PgCredentialStore(fresh.pgdb, deriveSecretKey("test-key"));
     // Seed one existing user so "first user → admin" doesn't dominate every test.
@@ -306,7 +324,7 @@ describe("buildAuthHooks", () => {
     });
 
     it("SSO path: first user (empty db) is stamped admin", async () => {
-      const fresh = await freshTestPgDb();
+      const fresh = await freshAuthTestPgDb();
       db = fresh.appDb;
       credentialStore = new PgCredentialStore(fresh.pgdb, deriveSecretKey("test-key"));
       const cfg = baseConfig();

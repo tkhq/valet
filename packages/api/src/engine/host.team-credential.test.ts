@@ -22,6 +22,9 @@ import { agentSessions, orgs } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { createAssistant } from "../assistants/service.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
+import { assemblePlugins } from "../plugins/assemble.js";
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 
 const orgId = "team-cred-org";
 const userId = "team-cred-user";
@@ -46,16 +49,27 @@ const appConfig: GithubAppConfig = {
 describe("EngineHost team-owned session credentials", () => {
   let fixture: GithubFixture | undefined;
   let host: EngineHost | undefined;
+  let canonicalPolicyManager: CanonicalPolicyBundleManager | undefined;
+  let canonicalAuthorizationService: CanonicalAuthorizationService | undefined;
+  const { actionPluginByService } = assemblePlugins([[slackPlugin]]);
 
   afterEach(async () => {
     host?.evictAll();
     host = undefined;
+    await canonicalPolicyManager?.close();
+    canonicalPolicyManager = undefined;
+    canonicalAuthorizationService = undefined;
     await fixture?.close();
     fixture = undefined;
   });
 
   async function harness(): Promise<{ appDb: AppDb; credentials: PgCredentialStore }> {
     const { appDb, pgdb } = await freshTestPgDb();
+    canonicalPolicyManager = new CanonicalPolicyBundleManager(appDb, actionPluginByService);
+    await canonicalPolicyManager.provisionOrganization(orgId, "Org");
+    canonicalAuthorizationService = await CanonicalAuthorizationService.create(
+      canonicalPolicyManager,
+    );
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
@@ -67,6 +81,8 @@ describe("EngineHost team-owned session credentials", () => {
       engineCredentials: credentials,
       db: appDb,
       plugins: [slackPlugin],
+      actionPluginByService,
+      canonicalAuthorizationService,
       githubTokenDeps: {
         key: deriveSecretKey("cache-key"),
         apiUrl: fixtureUrl,
@@ -261,7 +277,7 @@ describe("EngineHost team-owned session credentials", () => {
 
   it("team OpenAI prefers the org LLM-provider key over the prompting member's row", async () => {
     const { appDb, credentials } = await harness();
-    await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+    await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW }).onConflictDoNothing();
     const provider = await createLlmProvider(appDb, { orgId, kind: "openai", name: "OpenAI" });
     await credentials.save({ type: "org", id: orgId }, `llm:${provider.id}`, {
       type: "api_key",
@@ -282,7 +298,7 @@ describe("EngineHost team-owned session credentials", () => {
 
   it("team OpenAI reaches the org-scoped vault item a team workflow reaches", async () => {
     const { appDb, credentials } = await harness();
-    await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+    await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW }).onConflictDoNothing();
     const tried: string[] = [];
     const onePassword: OnePasswordService = {
       tokenConnected: async () => true,
@@ -304,6 +320,8 @@ describe("EngineHost team-owned session credentials", () => {
       engineCredentials: credentials,
       db: appDb,
       plugins: [slackPlugin],
+      actionPluginByService,
+      canonicalAuthorizationService,
       onePassword,
       githubTokenDeps: {
         key: deriveSecretKey("cache-key"),
@@ -389,7 +407,7 @@ describe("EngineHost team-owned session credentials", () => {
 
     it("actor mode reads the acting member's OpenAI row", async () => {
       const { appDb, credentials } = await harness();
-      await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+      await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW }).onConflictDoNothing();
       await credentials.save({ type: "user", id: userId }, "openai", {
         type: "api_key",
         apiKey: "sk-member",
@@ -471,7 +489,7 @@ describe("EngineHost team-owned session credentials", () => {
 
     it("a team assistant session reads the mode from its stored row", async () => {
       const { appDb, credentials } = await harness();
-      await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+      await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW }).onConflictDoNothing();
       await credentials.save({ type: "user", id: userId }, "linear", {
         type: "api_key",
         apiKey: "member-linear",
@@ -498,6 +516,8 @@ describe("EngineHost team-owned session credentials", () => {
         db: appDb,
         apiBaseUrl: "http://127.0.0.1:0",
         plugins: [slackPlugin],
+      actionPluginByService,
+      canonicalAuthorizationService,
         githubTokenDeps: {
           key: deriveSecretKey("cache-key"),
           apiUrl: fixture.url,

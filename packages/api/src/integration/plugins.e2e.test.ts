@@ -73,10 +73,13 @@ interface DemoPingFixture {
 /** A minimal ValetPlugin exposing one low-risk action, `demo.ping`, whose
  * `execute` returns a distinctive payload (so we can grep for it in a
  * model's final text) and reports whether a credential was connected. */
-function makeDemoPingPlugin(): DemoPingFixture {
+function makeDemoPingPlugin(
+  service = "demo",
+  actionId = "demo.ping",
+): DemoPingFixture {
   let calls = 0;
   const action: PluginAction = {
-    id: "demo.ping",
+    id: actionId,
     name: "Demo Ping",
     description: "Returns a fixture payload; used only by plugin system exit-criteria tests.",
     riskLevel: "low",
@@ -93,8 +96,8 @@ function makeDemoPingPlugin(): DemoPingFixture {
   const plugin: ValetPlugin = {
     name: "demo",
     version: "0.0.1",
-    actions: [{ service: "demo", actions: [action] }],
-    credentials: [{ service: "demo", type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }],
+    actions: [{ service, actions: [action] }],
+    credentials: [{ service, type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }],
   };
   return { plugin, calls: () => calls };
 }
@@ -235,14 +238,18 @@ describe("api integration: plugin system exit criteria — workflow tool node (u
   it(
     "a tool node against the fixture service completes with the action result in the node checkpoint",
     async () => {
-      const fixture = makeDemoPingPlugin();
+      const fixture = makeDemoPingPlugin("github", "github.get_issue");
       api = await bootTestApi({ plugins: [fixture.plugin] });
+      await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+        type: "oauth2",
+        accessToken: "fixture-github-token",
+      });
 
       const definition = {
         version: "dag/v1",
         nodes: [
           { id: "trigger", type: "trigger" },
-          { id: "call", type: "tool", service: "demo", action: "ping", params: {} },
+          { id: "call", type: "tool", service: "github", action: "get_issue", params: {} },
           { id: "done", type: "stop" },
         ],
         edges: [
@@ -312,14 +319,15 @@ describe("api integration: plugin system exit criteria — workflow tool node (u
         db: api.providers.db,
         credentials: api.providers.engineCredentials,
         actionPluginByService: api.providers.actionPluginByService,
+        canonicalAuthorizationService: api.providers.canonicalAuthorizationService,
       });
 
       const replay = await invoke(
-        { service: "demo", action: "ping", params: {}, invocationId },
+        { service: "github", action: "get_issue", params: {}, invocationId },
         { userId: "local-user", orgId: "local-org", owner: { type: "user", id: "local-user" } },
       );
 
-      expect(replay).toEqual({ ok: true, result: { payload: `${DEMO_PAYLOAD_PREFIX}1`, hasCredential: false } });
+      expect(replay).toEqual({ ok: true, result: { payload: `${DEMO_PAYLOAD_PREFIX}1`, hasCredential: true } });
       // Still exactly one execute() call total — the replay above did NOT
       // re-invoke the fixture action.
       expect(fixture.calls()).toBe(1);

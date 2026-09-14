@@ -27,6 +27,8 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { agentSessions } from "../schema/index.js";
 import { buildHibernationHooks } from "./hibernation-hooks.js";
 import { EngineHost } from "./host.js";
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 
 /** Minimal hibernation-capable provider — suspend/resume tracked but not
  * exercised by this test (the "restart" is simulated by dropping the
@@ -77,8 +79,11 @@ class TestProvider implements SandboxProvider {
 
 describe("EngineHost cross-restart hibernation clear", () => {
   let testDb: TestPgDb | undefined;
+  let canonicalPolicyManager: CanonicalPolicyBundleManager | undefined;
 
   afterEach(async () => {
+    await canonicalPolicyManager?.close();
+    canonicalPolicyManager = undefined;
     await testDb?.cleanup();
     testDb = undefined;
   });
@@ -86,6 +91,12 @@ describe("EngineHost cross-restart hibernation clear", () => {
   it("clears status='hibernated' back to 'active' when a fresh host's rebuilt attachment reaches ready", async () => {
     testDb = await freshTestPgDb();
     const { appDb: db } = testDb;
+    const actionPluginByService = new Map();
+    canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+    await canonicalPolicyManager.provisionOrganization("o1");
+    const canonicalAuthorizationService = await CanonicalAuthorizationService.create(
+      canonicalPolicyManager,
+    );
 
     const sessionId = "s-cross-restart";
     const now = Date.now();
@@ -116,6 +127,8 @@ describe("EngineHost cross-restart hibernation clear", () => {
       eventStream: new InMemoryEventStream(),
       engineCredentials: new InMemoryCredentialStore(),
       db,
+      actionPluginByService,
+      canonicalAuthorizationService,
       ...buildHibernationHooks(db),
     });
     const sessionA = await hostA.sessionFor(sessionId, {
@@ -146,6 +159,8 @@ describe("EngineHost cross-restart hibernation clear", () => {
       eventStream: new InMemoryEventStream(),
       engineCredentials: new InMemoryCredentialStore(),
       db,
+      actionPluginByService,
+      canonicalAuthorizationService,
       ...buildHibernationHooks(db),
     });
     const sessionB = await hostB.sessionFor(sessionId, {

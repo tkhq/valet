@@ -41,6 +41,7 @@ import { EngineHost } from "../engine/host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import { SourceService } from "../bakes/source-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { agentSessions } from "../schema/index.js";
 
@@ -76,6 +77,7 @@ async function bootRestoredProviders(pgDataDir: string) {
   const engineCredentials = new InMemoryCredentialStore();
   const blobs = new FsBlobStore(join(dirname(pgDataDir), "blobs"));
 
+  const canonical = await canonicalPolicyForTest(db, "local-org");
   let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
     engineStore,
@@ -85,6 +87,8 @@ async function bootRestoredProviders(pgDataDir: string) {
     blobs,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     db,
+    actionPluginByService: canonical.actionPluginByService,
+    canonicalAuthorizationService: canonical.canonicalAuthorizationService,
     apiBaseUrl: "http://127.0.0.1:0",
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
@@ -102,7 +106,7 @@ async function bootRestoredProviders(pgDataDir: string) {
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 
-  return { pglite, db, engineStore, engineHost, childWatcher };
+  return { pglite, db, engineStore, engineHost, childWatcher, canonicalPolicyManager: canonical.manager };
 }
 
 function signalEntries(entries: MessageEntry[], childSessionId: string): MessageEntry[] {
@@ -222,6 +226,7 @@ describeIfKey("api integration: cross-process restart mid-child-run (Phase 4 exi
           expect(JSON.stringify(childEntries)).toContain("p4-restart-ok");
         } finally {
           await restored.engineHost.destroyAll();
+          await restored.canonicalPolicyManager.close();
           await restored.pglite.close();
         }
       } finally {

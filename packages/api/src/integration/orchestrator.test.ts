@@ -149,6 +149,8 @@ describe("api integration: default assistant lifecycle", () => {
       engineCredentials: api.providers.engineCredentials,
       blobs: api.providers.blobs,
       db: api.providers.db,
+      actionPluginByService: api.providers.actionPluginByService,
+      canonicalAuthorizationService: api.providers.canonicalAuthorizationService,
       apiBaseUrl: api.baseUrl,
     });
 

@@ -24,6 +24,7 @@ import { startGithubFixture, type GithubFixture } from "../test-helpers/github-f
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { EngineHost } from "./host.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
 
 const orgId = "gh-org";
 const userId = "gh-user";
@@ -47,16 +48,20 @@ const appConfig: GithubAppConfig = {
 describe("EngineHost session github credential resolution", () => {
   let fixture: GithubFixture | undefined;
   let host: EngineHost | undefined;
+  let canonical: Awaited<ReturnType<typeof canonicalPolicyForTest>> | undefined;
 
   afterEach(async () => {
     host?.evictAll();
     host = undefined;
+    await canonical?.manager.close();
+    canonical = undefined;
     await fixture?.close();
     fixture = undefined;
   });
 
   async function harness(): Promise<{ appDb: AppDb; credentials: PgCredentialStore }> {
     const { appDb, pgdb } = await freshTestPgDb();
+    canonical = await canonicalPolicyForTest(appDb, orgId);
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
@@ -67,6 +72,8 @@ describe("EngineHost session github credential resolution", () => {
       eventStream: new InMemoryEventStream(),
       engineCredentials: credentials,
       db: appDb,
+      actionPluginByService: canonical?.actionPluginByService,
+      canonicalAuthorizationService: canonical?.canonicalAuthorizationService,
       githubTokenDeps: {
         key: deriveSecretKey("cache-key"),
         apiUrl: fixtureUrl,
