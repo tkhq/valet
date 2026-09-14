@@ -262,7 +262,7 @@ describe("ConnectedAccountsPage", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
 
-      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalledWith(undefined));
       await waitFor(() =>
         expect(window.location.href).toBe("https://github.com/login/oauth/authorize?x=1"),
       );
@@ -289,7 +289,7 @@ describe("ConnectedAccountsPage", () => {
       expect(screen.getByText(/sign-in only/i)).toBeTruthy();
       const btn = screen.getByRole("button", { name: "Connect GitHub" });
       fireEvent.click(btn);
-      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalledWith(undefined));
       expect(confirm).not.toHaveBeenCalled();
       expect(screen.queryByRole("dialog")).toBeNull();
     });
@@ -349,7 +349,7 @@ describe("ConnectedAccountsPage", () => {
       const dialog = await screen.findByRole("dialog");
       fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect GitHub" }));
 
-      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalledWith(undefined));
       await waitFor(() => expect(window.location.href).toBe("https://github.com/x"));
     });
 

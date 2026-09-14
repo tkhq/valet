@@ -222,7 +222,7 @@ function GithubRow() {
   async function connect(): Promise<boolean> {
     setConnectError(null);
     try {
-      const res = await connectGithub.mutateAsync();
+      const res = await connectGithub.mutateAsync(undefined);
       window.location.href = res.url;
       return true;
     } catch (err) {
