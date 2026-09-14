@@ -958,3 +958,66 @@ The current action obligation plan supports only credential-owner requirements, 
 Pure audit builders produce the existing decision and execution row shapes. A decision plan carries profile, interpreter, contract, decision, and obligation digests beside its row. A gated decision also carries its non-content evaluation time for restart reconstruction. The evidence never stores the request or projected parameters. An execution plan links one stored decision and stores only result digests and fixed error summaries.
 
 All PR 8 adapters are inert. Production plugin catalog, tool bridge, action invoker, workflow execution, approval dispatch, and audit persistence do not import or call them. PR 9 owns construction, injection, evaluator calls, durable reservation, and cutover.
+
+### PR 10 built-in tool boundary
+
+Each registered engine or API-built tool has a version 1 canonical descriptor. The descriptor binds one `builtin.<name>` action, capability class, risk, safe projection, supported obligations, redactions, and at-most-once audit behavior. Direct pinned integration tools use `builtin.pinned.<action-id>` and still invoke the existing `tool.action` decision. The built-in allow cannot replace the action decision.
+
+The safe projection includes only reviewed identifiers and bounded settings. File tools include a path but omit file bytes and replacement text. Process tools include a timeout but omit commands. Child tools include child IDs, repository and branch identifiers, model tier, resource settings, profile, Docker, limits, and interrupt state. They omit prompts and messages. The approval tool omits its title and body. The integration wrapper includes its action ID and summary but omits raw plugin parameters and results. The skill tool includes the skill name but omits template arguments. Memory and security tools omit content-bearing values. No omitted value is hashed into authorization identity or audit evidence.
+
+`ToolDef.exclusiveDispatch` controls sequential dispatch only. Canonical policy approval uses the separate `BuiltinPolicyResolver` port. The tool bridge authorizes before implementation access, re-evaluates after a durable approval fact, reserves immediately before execution, and stores a bounded replay result. Completed delivery does not call the implementation again. A started attempt returns an indeterminate result and cannot retry automatically.
+
+The standard source bundle contains one explicit built-in default per registered stable tool. Low and medium risks allow. High and critical risks require human approval. An organization or team rule can target an exact built-in action, the `builtin` service, or its risk. Unknown tools, metadata, obligations, redactions, facts, bundles, or evaluator results fail closed. New organizations receive these defaults in their initial transaction. Existing organizations receive them when the canonical release-set migration rebuilds each active snapshot.
+
+The reviewed built-in baseline is:
+
+| Tool | Capability | Risk | Default |
+|---|---|---:|---|
+| `artifact_copy_to_team` | `memory.write` | high | require approval |
+| `artifact_publish` | `memory.write` | high | require approval |
+| `ask_approval` | `approval.request` | low | allow |
+| `bash` | `process.execute` | high | require approval |
+| `call_tool` | `integration.wrapper` | low | allow |
+| `child_read` | `thread.read` | low | allow |
+| `child_send` | `thread.write` | medium | allow |
+| `child_status` | `thread.read` | low | allow |
+| `edit` | `file.write` | medium | allow |
+| `list_threads` | `thread.read` | low | allow |
+| `list_tools` | `integration.wrapper` | low | allow |
+| `mem_copy_from_team` | `memory.write` | high | require approval |
+| `mem_copy_to_team` | `memory.write` | high | require approval |
+| `mem_links` | `memory.read` | low | allow |
+| `mem_move` | `memory.write` | medium | allow |
+| `mem_patch` | `memory.write` | medium | allow |
+| `mem_read` | `memory.read` | low | allow |
+| `mem_rm` | `memory.write` | high | require approval |
+| `mem_search` | `memory.read` | low | allow |
+| `mem_share` | `memory.write` | high | require approval |
+| `mem_write` | `memory.write` | medium | allow |
+| `read` | `file.read` | low | allow |
+| `sec_cell_complete` | `security.write` | medium | allow |
+| `sec_cell_fail` | `security.write` | medium | allow |
+| `sec_close` | `security.write` | high | require approval |
+| `sec_coverage_report` | `security.write` | medium | allow |
+| `sec_dispatch` | `security.write` | medium | allow |
+| `sec_finding_report` | `security.write` | medium | allow |
+| `sec_finding_review` | `security.write` | medium | allow |
+| `sec_findings_list` | `security.read` | low | allow |
+| `sec_fs_list` | `security.read` | low | allow |
+| `sec_fs_read` | `security.read` | low | allow |
+| `sec_fs_write` | `security.write` | medium | allow |
+| `sec_handoff` | `security.write` | medium | allow |
+| `sec_need_report` | `security.write` | medium | allow |
+| `sec_plan_set` | `security.write` | medium | allow |
+| `sec_protocol_read` | `security.read` | low | allow |
+| `sec_report_write` | `security.write` | medium | allow |
+| `sec_start` | `security.write` | high | require approval |
+| `sec_status` | `security.read` | low | allow |
+| `sec_wait` | `security.read` | low | allow |
+| `skill` | `skill.read` | low | allow |
+| `switch_model` | `model.switch` | medium | allow |
+| `task` | `child.manage` | high | require approval |
+| `thread_read` | `thread.read` | low | allow |
+| `write` | `file.write` | medium | allow |
+
+`ask_approval` is an approval UI primitive, not a privileged side effect. The canonical bundle always allows its valid request after fail-closed input and fact validation, so an organization-wide built-in approval rule cannot recursively gate the approval surface. `call_tool` and `list_tools` are low-risk wrappers; the underlying integration action retains its independent `tool.action` decision. Pinned wrappers use an action-specific built-in identity and retain the same underlying action decision. Child management is high risk, but this default does not add delegation policy; delegation remains PR 12.

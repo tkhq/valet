@@ -23,7 +23,7 @@ export async function currentPolicySnapshot(db: AppQueryable, organizationId: st
   const teamIds = [...new Set(policyRows.filter((row) => row.principalType === "team").map((row) => row.principalId))].sort();
   if (teamIds.some((id) => !existingTeamIds.has(id))) throw new Error("Canonical policy source references a missing team.");
   const common = (row: typeof policyRows[number]) => ({
-    id: row.id, organizationId, principalType: row.principalType as "org" | "team", principalId: row.principalId,
+    id: row.id, organizationId, authorizationKind: row.authorizationKind, principalType: row.principalType as "org" | "team", principalId: row.principalId,
     ...(row.service ? { service: row.service } : row.actionId ? { actionId: row.actionId } : { riskLevel: row.riskLevel! }),
     mode: row.mode, paramMatchers: row.paramMatchers, appliesIn: row.appliesIn, expiresAtMs: row.expiresAt,
     revokedAtMs: row.revokedAt, createdAtMs: row.createdAt, updatedAtMs: row.updatedAt,
@@ -36,7 +36,7 @@ export async function currentPolicySnapshot(db: AppQueryable, organizationId: st
     organizationPolicies: policyRows.filter((row) => row.principalType === "org").map(common),
     teamPolicies: policyRows.filter((row) => row.principalType === "team").map(common),
     personalOverrides: overrideRows.map((row) => ({
-      id: row.id, organizationId, userId: row.userId,
+      id: row.id, organizationId, userId: row.userId, authorizationKind: row.authorizationKind,
       ...(row.service ? { service: row.service } : row.actionId ? { actionId: row.actionId } : { riskLevel: row.riskLevel! }),
       mode: row.mode, paramMatchers: row.paramMatchers, createdAtMs: row.createdAt, updatedAtMs: row.updatedAt,
       sourceTable: "action_policy_overrides" as const, sourcePath: `action_policy_overrides/${row.id}`,

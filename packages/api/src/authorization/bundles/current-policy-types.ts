@@ -12,6 +12,8 @@ export interface CurrentPolicyMatcherV1 {
 }
 
 export interface CurrentPolicyTargetV1 {
+  /** Version 1 snapshots omit this field and canonicalize to tool.action. */
+  readonly authorizationKind?: "tool.action" | "tool.builtin";
   readonly service?: string;
   readonly actionId?: string;
   readonly riskLevel?: RiskLevel;
@@ -69,6 +71,10 @@ export interface CurrentPluginDefaultV1 {
   readonly sourcePath: string;
 }
 
+export interface CurrentBuiltinDefaultV1 {
+  readonly id: string; readonly actionId: string; readonly capability: string; readonly riskLevel: RiskLevel; readonly mode: CurrentPolicyMode; readonly sourcePath: string;
+}
+
 export interface CurrentRiskDefaultV1 {
   readonly id: string;
   readonly riskLevel: RiskLevel;
@@ -87,6 +93,8 @@ export interface CurrentPolicySourceSnapshotV1 {
   readonly personalOverrides: readonly CurrentPersonalOverrideV1[];
   readonly pluginDefaults: readonly CurrentPluginDefaultV1[];
   readonly riskDefaults: readonly CurrentRiskDefaultV1[];
+  /** Version 1 action-only snapshots omit this field and receive canonical defaults. */
+  readonly builtinDefaults?: readonly CurrentBuiltinDefaultV1[];
   readonly bundleDefault: {
     readonly id: string;
     readonly actionEffect: "require_approval";

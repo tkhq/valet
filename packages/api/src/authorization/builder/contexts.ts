@@ -41,7 +41,7 @@ export const POLICY_CONTEXTS = {
     appliesIn: true,
     obligations: [],
   }),
-  "tool.builtin": descriptor("tool.builtin", "Tool and action", [field("action.id", "string", "target"), field("action.toolClass", "string", "target")], { humanApproval: true }),
+  "tool.builtin": descriptor("tool.builtin", "Tool and action", [field("action.service", "string", "target"), field("action.id", "string", "target"), field("action.riskLevel", "string", "target")], { publishable: true, humanApproval: true, appliesIn: true, obligations: [] }),
   "workflow.action": descriptor("workflow.action", "Workflow", [field("action.service", "string", "target"), field("action.id", "string", "target"), field("action.riskLevel", "string", "target"), field("parameters.*", "string"), field("workflow.definitionId", "string"), field("workflow.nodeId", "string"), field("workflow.executionId", "string", "fact", "sensitive"), field("workflow.trigger", "string")], { humanApproval: true, appliesIn: true }),
   "route.access": descriptor("route.access", "Route and API", [field("route.method", "string", "target"), field("route.id", "string", "target"), field("route.operation", "string"), field("route.conceal", "boolean")]),
   "resource.access": descriptor("resource.access", "Resource", [field("resource.type", "string", "target"), field("resource.id", "string", "target", "sensitive"), field("resource.ownerId", "string", "fact", "sensitive"), field("resource.visibility", "string"), field("resource.operation", "string")]),
@@ -50,7 +50,7 @@ export const POLICY_CONTEXTS = {
   "agent.signal": descriptor("agent.signal", "Delegation and child session", [field("delegation.childId", "string", "target", "sensitive"), field("delegation.edgeType", "string")]),
   "sandbox.capability": descriptor("sandbox.capability", "Sandbox capability", [field("sandbox.profile", "string", "target"), field("sandbox.provider", "string"), field("sandbox.image", "string"), field("sandbox.docker", "boolean"), field("sandbox.cpu", "number"), field("sandbox.memory", "number"), field("sandbox.mount", "string", "attribute", "sensitive"), field("sandbox.terminal", "boolean"), field("sandbox.capability", "string", "target")], {
     humanApproval: true,
-    obligations: ["sandbox_capabilities", "redact"],
+    obligations: [],
   }),
   "credential.use": descriptor("credential.use", "Credential", [field("credential.service", "string", "target"), field("credential.ownerId", "string", "fact", "sensitive"), field("credential.use", "string"), field("credential.secret", "string", "attribute", "secret_reference_only")], { humanApproval: true, obligations: ["credential_owner", "redact"] }),
   "credential.delegate": descriptor("credential.delegate", "Credential", [field("credential.service", "string", "target"), field("credential.ownerId", "string", "fact", "sensitive"), field("credential.delegationSource", "string", "fact", "sensitive")], { humanApproval: true, obligations: ["credential_owner", "redact"] }),

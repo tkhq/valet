@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { BUILTIN_TOOL_NAMES, builtinAuthorization } from "@valet/engine";
 import { validateCurrentPolicyDynamicFactsV2, type CurrentPolicyDynamicFactsV2, type JsonValue } from "@valet/engine/authorization";
 import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, isCurrentPolicyActionV1, isCurrentPolicyRiskV1, isCurrentPolicyServiceV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
 export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
@@ -61,6 +62,7 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
   const pluginDefaults = [...snapshot.pluginDefaults]
     .map((row) => ({ id: row.id, mode: row.mode, service: row.service, sourcePath: row.sourcePath }))
     .sort(compareById);
+  const builtinDefaults = [...(snapshot.builtinDefaults ?? canonicalBuiltinDefaults())].map((row) => ({ id: row.id, mode: row.mode, actionId: row.actionId, capability: row.capability, riskLevel: row.riskLevel, sourcePath: row.sourcePath })).sort(compareById);
   const riskDefaults = [...snapshot.riskDefaults]
     .map((row) => ({ id: row.id, mode: row.mode, riskLevel: row.riskLevel, sourcePath: row.sourcePath }))
     .sort(compareById);
@@ -79,7 +81,7 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
       },
     },
   });
-  const generated = buildPolicySource(records, pluginDefaults, riskDefaults, snapshot.bundleDefault);
+  const generated = buildPolicySource(records, pluginDefaults, builtinDefaults, riskDefaults, snapshot.bundleDefault);
   const policySource = generated.source;
   const provenanceEntries = records.map((row) => ({
     module_id: POLICY_PATH,
@@ -87,7 +89,7 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
     source_id: `${row.sourceTable}:${row.ownerType}:${row.ownerId}:${row.id}:${row.sourcePath}`,
     ...generated.ranges.get(row.id)!,
   }));
-  for (const row of [...pluginDefaults, ...riskDefaults, snapshot.bundleDefault]) {
+  for (const row of [...pluginDefaults, ...builtinDefaults, ...riskDefaults, snapshot.bundleDefault]) {
     provenanceEntries.push({
       module_id: POLICY_PATH,
       rule_id: row.id,
@@ -141,6 +143,13 @@ export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1
   });
 }
 
+function canonicalBuiltinDefaults() {
+  return Object.freeze(BUILTIN_TOOL_NAMES.map((name) => {
+    const descriptor = builtinAuthorization(name);
+    return Object.freeze({ id: `builtin-default:${name}`, actionId: descriptor.actionId, capability: descriptor.capability, riskLevel: descriptor.riskLevel, mode: descriptor.riskLevel === "high" || descriptor.riskLevel === "critical" ? "require_approval" as const : "allow" as const, sourcePath: `standard/builtin/${name}` });
+  }));
+}
+
 export function standardNewOrganizationPolicySnapshot(
   organizationId: string,
   sourceRevision = "standard-new-organization-v1",
@@ -156,6 +165,7 @@ export function standardNewOrganizationPolicySnapshot(
     teamPolicies: Object.freeze([]),
     personalOverrides: Object.freeze([]),
     pluginDefaults: Object.freeze([]),
+    builtinDefaults: canonicalBuiltinDefaults(),
     riskDefaults: Object.freeze([
       Object.freeze({ id: "risk:critical", riskLevel: "critical", mode: "require_approval", sourcePath: "standard/risk/critical" }),
       Object.freeze({ id: "risk:high", riskLevel: "high", mode: "require_approval", sourcePath: "standard/risk/high" }),
@@ -241,6 +251,7 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   let matcherValueBytes = 0;
   let matcherValueNodes = 0;
   for (const row of liveRules) {
+    if (row.authorizationKind !== undefined && row.authorizationKind !== "tool.action" && row.authorizationKind !== "tool.builtin") fail("unknown_authorization_kind", `Rule ${row.id} has an unknown authorization kind.`);
     validateTarget(row.id, row);
     validateMode(row.id, row.mode);
     if ("appliesIn" in row) validatePolicySemantics(row);
@@ -274,6 +285,9 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   if (new Set(snapshot.pluginDefaults.map((row) => row.service)).size !== snapshot.pluginDefaults.length) {
     fail("duplicate_default", "Plugin defaults contain a duplicate service.");
   }
+  for (const row of snapshot.builtinDefaults ?? canonicalBuiltinDefaults()) { unique(ids, row.id); validateAction("builtin", row.actionId); validateMode(row.id, row.mode); if (!row.capability) fail("invalid_builtin_default", `Built-in default ${row.id} has no capability.`); if (!isCurrentPolicyRiskV1(row.riskLevel)) fail("unknown_risk", `Built-in default ${row.id} has an unknown risk level.`); nonEmpty(`${row.id}.sourcePath`, row.sourcePath); }
+  const builtinDefaults = snapshot.builtinDefaults ?? canonicalBuiltinDefaults();
+  if (new Set(builtinDefaults.map((row) => row.actionId)).size !== builtinDefaults.length) fail("duplicate_default", "Built-in defaults contain a duplicate action.");
   for (const row of snapshot.riskDefaults) {
     unique(ids, row.id);
     if (!isCurrentPolicyRiskV1(row.riskLevel)) fail("unknown_risk", `Risk default ${row.id} has an unknown risk level.`);
@@ -381,6 +395,7 @@ function normalizeRule(
       : { kind: "risk", value: row.riskLevel, specificity: 1 };
   return {
     id: row.id,
+    authorizationKind: row.authorizationKind ?? "tool.action",
     ownerType,
     ownerId,
     sourceTable: row.sourceTable,
@@ -400,11 +415,12 @@ function normalizeRule(
 }
 
 type NormalizedRule = ReturnType<typeof normalizeRule> & { precedenceRank?: number };
-type PolicyDefault = { id: string; mode: string; sourcePath: string; service?: string; riskLevel?: string };
+type PolicyDefault = { id: string; mode: string; sourcePath: string; service?: string; actionId?: string; capability?: string; riskLevel?: string };
 
 function buildPolicySource(
   records: readonly NormalizedRule[],
   pluginDefaults: readonly PolicyDefault[],
+  builtinDefaults: readonly PolicyDefault[],
   riskDefaults: readonly PolicyDefault[],
   bundleDefault: CurrentPolicySourceSnapshotV1["bundleDefault"],
 ): { source: string; ranges: ReadonlyMap<string, { start_line: number; end_line: number }> } {
@@ -430,6 +446,7 @@ function buildPolicySource(
   emitWinner(lines, "team_winner", records.filter((row) => row.ownerType === "team"), candidateNames);
   emitWinner(lines, "override_winner", records.filter((row) => row.ownerType === "personal"), candidateNames);
   emitDefaultCandidates(lines, ranges, pluginDefaults, "plugin", "service", "input.action.service");
+  emitBuiltinDefaults(lines, ranges, builtinDefaults);
   emitDefaultCandidates(lines, ranges, riskDefaults, "risk", "riskLevel", "input.action.riskLevel");
   const bundleStart = lines.length + 1;
   lines.push(`bundle_winner := ${canonicalJson({ id: bundleDefault.id, mode: bundleDefault.actionEffect, source: "bundle" })}`);
@@ -452,7 +469,7 @@ function emitRegexInputLimit(lines: string[], records: readonly NormalizedRule[]
 }
 function emitFactWinner(lines: string[], kind: "grant" | "approval", limit: number): void {
   const facts = kind === "grant" ? "grants" : "approvals";
-  const match = kind === "grant" ? "count(fact) == 10; fact[1] == input.action.id; fact[2] == input.action.service; fact[3] == input.action.id; fact[4] == input.action.riskLevel; scope_matches(fact); fact[9] == null; fact[7] <= input.context.evaluationTimeMs; fact[8] > input.context.evaluationTimeMs" : "input.facts.currentPolicy.approvalBinding[0] == input.context.requestSubjectDigest; input.facts.currentPolicy.approvalBinding[1] == input.context.originalDecisionDigest; approval_scope_matches; count(fact) == 5; fact[4] == 1; fact[1] == \"approved\"; fact[2] <= input.context.evaluationTimeMs; fact[3] > input.context.evaluationTimeMs";
+  const match = kind === "grant" ? "input.kind in {\"tool.action\",\"workflow.action\"}; count(fact) == 10; fact[1] == input.action.id; fact[2] == input.action.service; fact[3] == input.action.id; fact[4] == input.action.riskLevel; scope_matches(fact); fact[9] == null; fact[7] <= input.context.evaluationTimeMs; fact[8] > input.context.evaluationTimeMs" : "input.facts.currentPolicy.approvalBinding[0] == input.context.requestSubjectDigest; input.facts.currentPolicy.approvalBinding[1] == input.context.originalDecisionDigest; approval_scope_matches; count(fact) == 5; fact[4] == 1; fact[1] == \"approved\"; fact[2] <= input.context.evaluationTimeMs; fact[3] > input.context.evaluationTimeMs";
   for (let i=0;i<limit;i++) lines.push(`${i ? "else" : kind+"_winner"} := fact[0] if { fact := input.facts.currentPolicy.${facts}[${i}]; ${match} }`);
   lines.push("else := null if { true }");
 }
@@ -468,12 +485,18 @@ function emitWinner(lines: string[], name: string, records: readonly NormalizedR
   lines.push("else := null if { true }");
 }
 
+function emitBuiltinDefaults(lines: string[], ranges: Map<string, { start_line: number; end_line: number }>, defaults: readonly PolicyDefault[]): void {
+  for (const row of [...defaults].sort(compareById)) { const line = lines.length + 1; lines.push(`builtin_default[${canonicalJson(row.actionId)}] := ${canonicalJson({ id: row.id, mode: row.mode, source: "builtin" })}`); ranges.set(row.id, { start_line: line, end_line: line }); }
+  lines.push("builtin_winner := builtin_default[input.action.id] if { input.kind == \"tool.builtin\" }");
+  lines.push("else := null if { true }");
+}
+
 function emitDefaultCandidates(
   lines: string[],
   ranges: Map<string, { start_line: number; end_line: number }>,
   defaults: readonly PolicyDefault[],
-  name: "plugin" | "risk",
-  field: "service" | "riskLevel",
+  name: "plugin" | "builtin" | "risk",
+  field: "service" | "actionId" | "riskLevel",
   inputRef: string,
 ): void {
   const candidates: string[] = [];
@@ -496,6 +519,7 @@ function ruleConditions(row: NormalizedRule, rowIndex: number): string[] {
 
 function ruleApplicabilityConditions(row: NormalizedRule): string[] {
   return [
+    row.authorizationKind === "tool.action" ? `input.kind in {"tool.action","workflow.action"}` : `input.kind == "tool.builtin"`,
     row.ownerType === "team" ? `input.subject.principal.type == "team"` : row.ownerType === "personal" ? `input.subject.principal.type == "user"` : undefined,
     row.ownerType === "organization" ? undefined : `input.subject.principal.id == ${canonicalJson(row.ownerId)}`,
     row.target.kind === "action" ? `input.action.id == ${canonicalJson(row.target.value)}` : row.target.kind === "service" ? `input.action.service == ${canonicalJson(row.target.value)}` : `input.action.riskLevel == ${canonicalJson(row.target.value)}`,
@@ -553,6 +577,7 @@ function compareById<T extends { id: string }>(a: T, b: T): number { return utf8
 function evaluationRule(row: ReturnType<typeof normalizeRule> & { precedenceRank?: number }) {
   return {
     id: row.id,
+    authorizationKind: row.authorizationKind,
     ownerType: row.ownerType,
     ...(row.ownerType === "organization" ? {} : { ownerId: row.ownerId }),
     target: { kind: row.target.kind, value: row.target.value },
@@ -573,7 +598,7 @@ function compareCanonicalPrecedence(a: { precedenceRank?: number; id: string }, 
 }
 function utf8Compare(a: string, b: string): number { return Buffer.compare(Buffer.from(a), Buffer.from(b)); }
 function utf16Compare(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
-function targetKind(row: CurrentPolicyTargetV1): string { return row.actionId !== undefined ? `action:${row.actionId}` : row.service !== undefined ? `service:${row.service}` : `risk:${row.riskLevel}`; }
+function targetKind(row: CurrentPolicyTargetV1): string { return `${row.authorizationKind ?? "tool.action"}:` + (row.actionId !== undefined ? `action:${row.actionId}` : row.service !== undefined ? `service:${row.service}` : `risk:${row.riskLevel}`); }
 function rulesCanTie(
   left: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number] | CurrentPersonalOverrideV1,
   right: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number] | CurrentPersonalOverrideV1,
@@ -609,10 +634,12 @@ policy := data.valet.authz
 
 supported_kind if { input.kind == "tool.action" }
 supported_kind if { input.kind == "workflow.action" }
+supported_kind if { input.kind == "tool.builtin" }
 action_context if { supported_kind }
 
 applies_in := "session" if { input.kind == "tool.action" }
 applies_in := "workflow" if { input.kind == "workflow.action" }
+applies_in := "session" if { input.kind == "tool.builtin" }
 
 input_valid if {
   input.schemaVersion == 1
@@ -642,19 +669,32 @@ else := org if { org != null }
 else := team if { team != null }
 else := null if { true }
 
-base_winner(strict, plugin, risk, bundle) := strict if { strict != null }
-else := plugin if { plugin != null }
+base_winner(strict, plugin, builtin, risk, bundle) := strict if { strict != null }
+else := plugin if { input.kind != "tool.builtin"; plugin != null }
+else := builtin if { input.kind == "tool.builtin"; builtin != null }
 else := risk if { risk != null }
 else := bundle if { true }
 
 static_layers := layers if {
+  input.kind == "tool.builtin"
+  org := org_winner
+  team := team_winner
+  override := override_winner
+  builtin := builtin_winner
+  risk := risk_winner
+  strict := strict_winner(org, team)
+  base := base_winner(strict, null, builtin, risk, bundle_winner)
+  layers := {"org":org,"team":team,"override":override,"base":base}
+}
+static_layers := layers if {
+  input.kind != "tool.builtin"
   org := org_winner
   team := team_winner
   override := override_winner
   plugin := plugin_winner
   risk := risk_winner
   strict := strict_winner(org, team)
-  base := base_winner(strict, plugin, risk, bundle_winner)
+  base := base_winner(strict, plugin, null, risk, bundle_winner)
   layers := {"org":org,"team":team,"override":override,"base":base}
 }
 
@@ -672,7 +712,7 @@ else := result("deny", "team_policy", [layers.team.id]) if { layers.team.mode ==
 else := result("allow", "dynamic_grant", array.concat([layers.base.id], ids)) if { count(ids) > 0 }
 else := result(layers.override.mode, "personal_override", [layers.base.id, layers.override.id]) if { layers.override != null }
 else := result(layers.base.mode, concat("", [layers.base.source, "_", "policy"]), [layers.base.id]) if { layers.base.source in {"organization", "team"} }
-else := result(layers.base.mode, concat("", [layers.base.source, "_", "default"]), [layers.base.id]) if { layers.base.source in {"plugin", "risk", "bundle"} }
+else := result(layers.base.mode, concat("", [layers.base.source, "_", "default"]), [layers.base.id]) if { layers.base.source in {"plugin", "builtin", "risk", "bundle"} }
 
 decision := result("deny", "unsupported_authorization_context", [bundle_winner.id]) if { not action_context }
 else := result("deny", "policy_input_invalid", []) if { not input_valid }

@@ -5,10 +5,10 @@ import { currentPolicyCompatibilityReport } from "./policy-compatibility.js";
 
 const ORG = "org-1";
 function policy(id: string, paramMatchers: CurrentOrganizationPolicyV1["paramMatchers"] = [], revokedAtMs: number | null = null): CurrentOrganizationPolicyV1 {
-  return { id, organizationId: ORG, principalType: "org", principalId: ORG, actionId: `svc.${id}`, mode: "deny", paramMatchers, appliesIn: "any", expiresAtMs: null, revokedAtMs, createdAtMs: 1, updatedAtMs: 1, sourceTable: "action_policies", sourcePath: `action_policies/${id}` };
+  return { id, organizationId: ORG, authorizationKind: "tool.action", principalType: "org", principalId: ORG, actionId: `svc.${id}`, mode: "deny", paramMatchers, appliesIn: "any", expiresAtMs: null, revokedAtMs, createdAtMs: 1, updatedAtMs: 1, sourceTable: "action_policies", sourcePath: `action_policies/${id}` };
 }
 function override(id: string, paramMatchers: CurrentPersonalOverrideV1["paramMatchers"], revokedAtMs?: number): CurrentPersonalOverrideV1 {
-  return { id, organizationId: ORG, userId: "user-1", actionId: `svc.${id}`, mode: "allow", paramMatchers, ...(revokedAtMs === undefined ? {} : { revokedAtMs }), createdAtMs: 1, updatedAtMs: 1, sourceTable: "action_policy_overrides", sourcePath: `action_policy_overrides/${id}` };
+  return { id, organizationId: ORG, authorizationKind: "tool.action", userId: "user-1", actionId: `svc.${id}`, mode: "allow", paramMatchers, ...(revokedAtMs === undefined ? {} : { revokedAtMs }), createdAtMs: 1, updatedAtMs: 1, sourceTable: "action_policy_overrides", sourcePath: `action_policy_overrides/${id}` };
 }
 
 describe("current policy compatibility preflight", () => {

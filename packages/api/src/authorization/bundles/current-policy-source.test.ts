@@ -30,6 +30,7 @@ function orgRule(overrides: Partial<CurrentPolicySourceSnapshotV1["organizationP
   return {
     id: "org-rule",
     organizationId: ORG,
+    authorizationKind: "tool.action",
     principalType: "org",
     principalId: ORG,
     actionId: "gmail.send_email",
@@ -59,6 +60,7 @@ function personalRule(overrides: Partial<CurrentPolicySourceSnapshotV1["personal
   return {
     id: "personal-rule",
     organizationId: ORG,
+    authorizationKind: "tool.action",
     userId: "user-1",
     actionId: "gmail.send_email",
     mode: "allow",
@@ -116,6 +118,53 @@ describe("current policy source builder", () => {
     });
     const unsupported = await evaluate(snapshot(), request({ kind: "route.access" }));
     expect(unsupported.decision).toMatchObject({ effect: "deny", reasonCode: "unsupported_authorization_context" });
+  });
+
+  it("canonicalizes a PR 9 version 1 action-only snapshot", async () => {
+    const legacy = { ...snapshot(), organizationPolicies: [orgRule({ authorizationKind: undefined })] };
+    delete (legacy as { builtinDefaults?: unknown }).builtinDefaults;
+    const built = buildCurrentPolicySource(legacy);
+    const upgraded = buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule()] }));
+    expect(built.bundle).toEqual(upgraded.bundle);
+    expect(buildCurrentPolicySource(legacy).bundle).toEqual(built.bundle);
+    expect(built.policySource).toContain('builtin_default["builtin.ask_approval"]');
+    const action = await evaluate(legacy);
+    expect(action.decision.reasonCode).toBe("organization_policy");
+    const builtin = await evaluate(legacy, request({ kind: "tool.builtin", action: { service: "builtin", id: "builtin.read", riskLevel: "low", parameters: {} } }));
+    expect(builtin.decision).toMatchObject({ effect: "allow", reasonCode: "builtin_default" });
+  });
+
+  it("publishes explicit built-in defaults in the same Rego bundle", async () => {
+    const builtin = await evaluate(snapshot(), request({
+      kind: "tool.builtin",
+      action: { service: "builtin", id: "builtin.bash", riskLevel: "high", parameters: { timeout: 120 } },
+      context: { evaluationTimeMs: NOW, capability: "process.execute", projectionVersion: 1 },
+    }));
+    expect(builtin.decision).toMatchObject({ effect: "require_approval", reasonCode: "builtin_default", matchedRuleIds: ["builtin-default:bash"] });
+    const denied = await evaluate(snapshot({ organizationPolicies: [orgRule({ id: "deny-bash", authorizationKind: "tool.builtin", actionId: "builtin.bash", mode: "deny" })] }), request({ kind: "tool.builtin", action: { service: "builtin", id: "builtin.bash", riskLevel: "high", parameters: {} } }));
+    expect(denied.decision).toMatchObject({ effect: "deny", reasonCode: "organization_policy", matchedRuleIds: ["deny-bash"] });
+  });
+
+  it("evaluates approval primitive allow, approval, and deny through Rego", async () => {
+    const approvalRequest = request({ kind: "tool.builtin", action: { service: "builtin", id: "builtin.ask_approval", riskLevel: "low", parameters: {} } });
+    const allowed = await evaluate(snapshot(), approvalRequest);
+    expect(allowed.decision).toMatchObject({ effect: "allow", reasonCode: "builtin_default" });
+    const gated = await evaluate(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "tool.builtin", service: "builtin", actionId: undefined, mode: "require_approval" })] }), approvalRequest);
+    expect(gated.decision).toMatchObject({ effect: "require_approval", reasonCode: "organization_policy" });
+    const denied = await evaluate(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "tool.builtin", actionId: "builtin.ask_approval", mode: "deny" })] }), approvalRequest);
+    expect(denied.decision).toMatchObject({ effect: "deny", reasonCode: "organization_policy" });
+  });
+
+  it("separates built-in policies from action policies at every target width", async () => {
+    const builtinRequest = request({ kind: "tool.builtin", action: { service: "builtin", id: "builtin.bash", riskLevel: "high", parameters: {} } });
+    for (const target of [{ actionId: "builtin.bash" }, { service: "builtin" }, { riskLevel: "high" as const }]) {
+      const actionOnly = await evaluate(snapshot({ organizationPolicies: [orgRule({ ...target, actionId: target.actionId, service: target.service, riskLevel: target.riskLevel, authorizationKind: "tool.action", mode: "deny" })] }), builtinRequest);
+      expect(actionOnly.decision.reasonCode).toBe("builtin_default");
+      const builtinOnly = await evaluate(snapshot({ organizationPolicies: [orgRule({ ...target, actionId: target.actionId, service: target.service, riskLevel: target.riskLevel, authorizationKind: "tool.builtin", mode: "deny" })] }), builtinRequest);
+      expect(builtinOnly.decision).toMatchObject({ effect: "deny", reasonCode: "organization_policy" });
+    }
+    const action = await evaluate(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "tool.builtin", actionId: "builtin.bash", mode: "deny" })] }));
+    expect(action.decision.reasonCode).toBe("risk_default");
   });
 
   it("evaluates the generated bundle through LocalValetEvaluator", async () => {

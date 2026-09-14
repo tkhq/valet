@@ -617,7 +617,10 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
   description: string;
   parameters: TParams;
   riskLevel?: RiskLevel;
-  requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
+  /** Canonical authorization metadata for a Valet or host-built tool. */
+  authorization?: import("./authorization/builtin-tools.js").BuiltinAuthorizationDescriptorV1;
+  /** Force sequential dispatch for state ordering. This field is not authorization. */
+  exclusiveDispatch?: boolean;
   /** When true, this tool's outputs are exempt from pruning during compaction. */
   protectedFromPruning?: boolean;
   /**
@@ -635,6 +638,8 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 
 export interface ToolResult {
   text: string;
+  /** Stable machine-readable result code for non-error terminal outcomes. */
+  code?: "completed_output_unavailable";
   attachments?: ToolAttachment[];
   /**
    * Action-level outcome, set by action-backed tools (`call_tool`): `false`
@@ -733,6 +738,8 @@ export interface ToolContext {
    * Threaded from `CreateSessionOptions.policyResolver` via `buildToolContext`.
    */
   policyResolver?: PolicyResolver;
+  /** Canonical host port for Valet and host-built tools. */
+  builtinPolicyResolver?: BuiltinPolicyResolver;
   /**
    * The queue item (turn) this tool call runs under. On a restart replay the
    * engine reconstructs the running item with the ORIGINAL queueItemId (see
@@ -976,6 +983,22 @@ export interface SuspendedTurnState {
  * invoke a plugin action. `appliesIn` is `"session"` from the interactive
  * `call_tool` path; a future workflow-mode invoker (T3) passes `"workflow"`.
  */
+export interface BuiltinPolicyResolveInput {
+  descriptor: import("./authorization/builtin-tools.js").BuiltinAuthorizationDescriptorV1;
+  args: Record<string, unknown>;
+  userId: string; orgId: string; sessionId: string; threadId: string; owner: Principal;
+  queueItemId: string; toolCallId: string; gateOrdinal: number;
+}
+
+export interface BuiltinPolicyResolver {
+  resolve(input: BuiltinPolicyResolveInput): Promise<PolicyDecision>;
+  onResolution?(input: BuiltinPolicyResolveInput, decision: PolicyDecision, resolution: DecisionResolution): Promise<void>;
+  reserveExecution?(input: BuiltinPolicyResolveInput, decision: PolicyDecision): Promise<{ kind: "execute"; attemptId: string } | { kind: "completed"; result: ToolResult } | { kind: "failed"; error: string; result?: ToolResult } | { kind: "indeterminate"; error: string }>;
+  completeExecution?(input: BuiltinPolicyResolveInput, decision: PolicyDecision, attemptId: string, settlement: { outcome: "completed"; result: ToolResult } | { outcome: "failed"; error: string; result?: ToolResult }): Promise<{ outcome: "completed"; result: ToolResult } | { outcome: "failed"; error: string; result?: ToolResult }>;
+  /** Idempotent audit sink. Replay calls repair a prior failed audit write. */
+  onInvocation?(record: PolicyInvocationRecord): Promise<void> | void;
+}
+
 export interface PolicyResolveInput {
   /** Trusted session owner; workflow agent sessions may have no app row. */
   teamId?: string;
@@ -2330,6 +2353,8 @@ export interface CreateSessionOptions {
    * a transient store error). Threaded onto `ToolContext.policyResolver`.
    */
   policyResolver?: PolicyResolver;
+  /** Canonical host port for Valet and host-built tools. */
+  builtinPolicyResolver?: BuiltinPolicyResolver;
   /**
    * Optional host-provided factory for plugin persistence
    * (docs/specs/2026-08-29-plugin-store-design.md). When present, `call_tool`

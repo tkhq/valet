@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, count, eq, gt } from "drizzle-orm";
 import type { AuthorizationRequest, JsonValue } from "@valet/engine/authorization";
+import { builtinAuthorization } from "@valet/engine";
 import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import { policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringOperations, policyAuthoringReviews, policyAuthoringRevisions } from "../../schema/index.js";
@@ -50,7 +51,7 @@ export interface PolicyAuthoringCompiler {
 let runtime: WasmPolicyRuntime | undefined;
 export const policyAuthoringCompiler: PolicyAuthoringCompiler = {
   async compile(draft, scope) {
-    if (draft.rules.some((rule) => rule.context !== "tool.action"))
+    if (draft.rules.some((rule) => rule.context !== "tool.action" && rule.context !== "tool.builtin"))
       return {
         validation: {
           valid: true,
@@ -709,15 +710,21 @@ function validateEvaluation(result: object, identity: ValidatedBundleIdentity) {
   )
     throw new Error("invalid evaluation");
 }
+function builtinPreviewDescriptor(action: string | undefined) {
+  try { return builtinAuthorization(action?.startsWith("builtin.") ? action.slice("builtin.".length) : "read"); }
+  catch { return builtinAuthorization("read"); }
+}
+
 function previewRequest(draft: NormalizedPolicyDraftV1, scope: PolicyAuthoringScope, actor: string, facts: Readonly<Record<string, JsonValue>>, now: number): AuthorizationRequest {
-  const target = draft.rules[0]?.target ?? {},
+  const context = draft.rules[0]?.context ?? "tool.action",
+    target = draft.rules[0]?.target ?? {},
     action = typeof target["action.id"] === "string" ? target["action.id"] : undefined,
     service = typeof target["action.service"] === "string" ? target["action.service"] : (action?.split(".")[0] ?? "preview");
   return {
     schemaVersion: 1,
     requestId: randomUUID(),
     idempotencyKey: `policy-preview:${randomUUID()}`,
-    kind: "tool.action",
+    kind: context as "tool.action" | "tool.builtin",
     subject: {
       orgId: scope.organizationId,
       principal: { type: scope.teamId ? "team" : "org", id: scope.teamId ?? scope.organizationId },
@@ -734,7 +741,9 @@ function previewRequest(draft: NormalizedPolicyDraftV1, scope: PolicyAuthoringSc
           .map(([k, v]) => [k.slice(11), v]),
       ),
     },
-    context: { evaluationTimeMs: now },
+    context: context === "tool.builtin"
+      ? { schemaVersion: 1, evaluationTimeMs: now, capability: builtinPreviewDescriptor(action).capability, projectionVersion: 1 }
+      : { evaluationTimeMs: now },
     facts: {},
   };
 }

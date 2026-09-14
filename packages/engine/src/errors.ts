@@ -260,3 +260,10 @@ export class SandboxEvictedError extends Error {
     this.name = "SandboxEvictedError";
   }
 }
+
+export class BuiltinAuthorizationError extends Error {
+  constructor(readonly code: "recursive_approval") {
+    super("Canonical policy required approval for ask_approval. Change the policy to allow or deny the approval primitive.");
+    this.name = "BuiltinAuthorizationError";
+  }
+}

@@ -10,12 +10,13 @@ export function projectActionDraftToCurrentSnapshot(draft: NormalizedPolicyDraft
     personalOverrides: CurrentPersonalOverrideV1[] = [];
   const teamIds = new Set<string>();
   for (const rule of draft.rules) {
-    if (rule.context !== "tool.action") throw new TypeError("Current source projection supports tool.action only.");
+    if (rule.context !== "tool.action" && rule.context !== "tool.builtin") throw new TypeError("Current source projection supports action and built-in tool contexts only.");
+    if (rule.context === "tool.builtin" && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Built-in tool rules do not support content matchers.");
     if (rule.matcherGroups.some((group) => group.mode !== "all")) throw new TypeError("Current source projection supports all matcher groups only.");
     if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length || rule.approval) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
     if (rule.subjects.length !== 1 || rule.subjects[0] !== rule.owner.kind) throw new TypeError("Current source projection rejects subject scope loss.");
     if (rule.authority === "personal" && (rule.appliesIn !== "any" || rule.expiresAtMs !== undefined)) throw new TypeError("Personal overrides cannot preserve scope or expiry.");
-    const target = actionTarget(rule),
+    const target = rule.context === "tool.builtin" ? builtinTarget(rule) : actionTarget(rule),
       paramMatchers = rule.matcherGroups.flatMap((group) =>
         group.matchers.map(
           (matcher) =>
@@ -29,6 +30,7 @@ export function projectActionDraftToCurrentSnapshot(draft: NormalizedPolicyDraft
     const common = {
       id: rule.ruleId,
       organizationId,
+      authorizationKind: rule.context as "tool.action" | "tool.builtin",
       ...target,
       mode: rule.effect,
       paramMatchers,
@@ -83,4 +85,11 @@ function actionTarget(rule: PolicyRuleDraftV1): Pick<CurrentOrganizationPolicyV1
   ].filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
   if (entries.length !== 1) throw new TypeError("Current action rules require exactly one service, action, or risk target.");
   return { [entries[0][0]]: entries[0][1] };
+}
+
+function builtinTarget(rule: PolicyRuleDraftV1): Pick<CurrentOrganizationPolicyV1, "service" | "actionId" | "riskLevel"> {
+  const target = actionTarget(rule);
+  if (target.actionId !== undefined && !target.actionId.startsWith("builtin.")) throw new TypeError("Built-in action targets require a canonical built-in action ID.");
+  if (target.service !== undefined && target.service !== "builtin") throw new TypeError("Built-in service targets must use the builtin service.");
+  return target;
 }

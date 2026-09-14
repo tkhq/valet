@@ -18,7 +18,7 @@
  */
 import { Type, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
-import { renderTemplate } from "@valet/engine";
+import { builtinAuthorizationFor, renderTemplate } from "@valet/engine";
 import type { SkillSource, ToolDef, ToolResult } from "@valet/engine";
 
 export const SKILL_TOOL_NAME = "skill";
@@ -28,7 +28,7 @@ export const SKILL_TOOL_NAME = "skill";
  * `orchestrator/memory-tools.ts` — the engine's own `defineTool` is not
  * exported). */
 function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return def;
+  return { ...def, authorization: def.authorization ?? builtinAuthorizationFor(def.name) };
 }
 
 const skillParameters = Type.Object({
