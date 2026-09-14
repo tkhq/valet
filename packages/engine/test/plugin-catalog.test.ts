@@ -922,6 +922,71 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     expect(decode(result.text)).toEqual({ ok: true });
   });
 
+  it.each(["cloudflare", "deepwiki", "figma", "linear", "notion", "sentry", "stripe", "typefully"])(
+    "passes the resolved %s action projection to policy before dispatch",
+    async (service) => {
+      const order: string[] = [];
+      const projection = { schemaVersion: 1 as const, mode: "selected" as const, paths: [{ pointer: "/safe", required: true }] };
+      const plugin: ActionPlugin = {
+        service,
+        actions: [],
+        resolveActions: async () => {
+          order.push("resolve");
+          return [{
+            id: `${service}.dynamic_action`,
+            name: "Dynamic action",
+            description: "Dynamic action.",
+            riskLevel: "high",
+            parameters: Type.Object({ safe: Type.String() }),
+            safeParameterProjection: projection,
+            execute: async () => {
+              order.push("execute");
+              return { success: true };
+            },
+          }];
+        },
+      };
+      const resolver: PolicyResolver = {
+        resolve: async (input) => {
+          order.push("policy");
+          expect(input.actionId).toBe(`${service}.dynamic_action`);
+          expect(input.riskLevel).toBe("high");
+          expect(input.parameterProjection).toBe(projection);
+          expect(input.params).toEqual({ safe: "visible" });
+          return { mode: "deny", provenance: { baseMode: "deny", source: "org_policy" } };
+        },
+      };
+      const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+      const result = await callTool.execute(
+        { tool_id: `${service}.dynamic_action`, params: { safe: "visible" }, summary: "test dynamic authorization" },
+        makeCtx({ policyResolver: resolver }),
+      );
+      expect(order).toEqual(["resolve", "policy"]);
+      expect(result.text).toContain("blocked by org policy");
+    },
+  );
+
+  it("rejects an unknown dynamic action before policy, credentials, or dispatch", async () => {
+    const order: string[] = [];
+    const plugin = makeDynamicPlugin("notion", async () => {
+      order.push("resolve");
+      return [];
+    });
+    const resolver: PolicyResolver = {
+      resolve: async () => {
+        order.push("policy");
+        return { mode: "allow", provenance: { baseMode: "allow", source: "org_policy" } };
+      },
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute(
+      { tool_id: "notion.unknown", params: {}, summary: "unknown action" },
+      makeCtx({ policyResolver: resolver }),
+    );
+    expect(order).toEqual(["resolve"]);
+    expect(result.text).toContain("unknown tool_id");
+  });
+
   it("preserves plain string action data", async () => {
     const plugin = makeDynamicPlugin("notion", async () => [{
       id: "notion.status",

@@ -3,10 +3,9 @@ import { authorizationSha256Hex, canonicalAuthorizationJson, decisionDigestOf, t
 import type { DecisionResolution, PolicyDecision, PolicyResolveInput, PolicyResolver } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions } from "../schema/index.js";
-import { adaptPluginCatalogAction } from "@valet/engine";
+import { adaptResolvedPluginCatalogAction } from "@valet/engine";
 import type { CanonicalAuthorizationService } from "./canonical-authorization-service.js";
 import { canonicalDecisionId } from "./canonical-authorization-service.js";
-import { actionProjection } from "./action-projections.js";
 import { loadCanonicalDynamicFacts } from "./canonical-facts.js";
 import type { ActionPluginByService } from "./canonical-policy-manager.js";
 import {
@@ -21,17 +20,16 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
   const now = opts.clock ?? Date.now;
   const requestFor = async (input: PolicyResolveInput) => {
     if (!input.orgId || !input.userId || !input.queueItemId || !input.resumeKey || !input.owner) throw new Error("Canonical interactive authorization context is incomplete.");
-    const entry = opts.plugins.get(input.service);
-    const action = entry?.actionPlugin.actions.find((item) => (item.id.includes(".") ? item.id : `${input.service}.${item.id}`) === input.actionId);
-    if (!entry || !action || !input.params) throw new Error("Canonical interactive action is not statically registered.");
-    const common = { plugin: entry.actionPlugin, action, params: input.params, projection: actionProjection(entry.actionPlugin, action), context: { userId: input.userId, orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, owner: input.owner, queueItemId: input.queueItemId }, requestId: input.queueItemId, resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal ?? 0, evaluationTimeMs: now() };
-    const initial = adaptPluginCatalogAction({ ...common, dynamicFacts: {} });
+    if (!opts.plugins.has(input.service)) throw new Error("Canonical interactive service is not registered.");
+    if (!input.parameterProjection) throw new Error("Canonical interactive action has no safe-parameter projection.");
+    const common = { service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, params: input.params, projection: input.parameterProjection, context: { userId: input.userId, orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, owner: input.owner, queueItemId: input.queueItemId }, requestId: input.queueItemId, resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal ?? 0, evaluationTimeMs: now() };
+    const initial = adaptResolvedPluginCatalogAction({ ...common, dynamicFacts: {} });
     const original = (await opts.db.select().from(authorizationDecisions).where(and(eq(authorizationDecisions.orgId, input.orgId), eq(authorizationDecisions.idempotencyKey, initial.request.idempotencyKey))).limit(1))[0];
     const approvalBindingContext = original?.effect === "require_approval" && original.evidence
       ? { requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest }
       : undefined;
     const facts = await loadCanonicalDynamicFacts(opts.db, { organizationId: input.orgId, service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, appliesIn: "session", scopeId: input.sessionId, evaluationTimeMs: now(), ...approvalBindingContext });
-    const post = adaptPluginCatalogAction({ ...common, dynamicFacts: { currentPolicy: facts }, ...(approvalBindingContext ? { approvalBindingContext } : {}) });
+    const post = adaptResolvedPluginCatalogAction({ ...common, dynamicFacts: { currentPolicy: facts }, ...(approvalBindingContext ? { approvalBindingContext } : {}) });
     if (!approvalBindingContext) return post.request;
     const invocationId = authorizationSha256Hex(canonicalAuthorizationJson({ original: post.request.subject.invocation.id, facts }));
     return { ...post.request, subject: { ...post.request.subject, invocation: { ...post.request.subject.invocation, id: invocationId } }, idempotencyKey: `${post.request.subject.invocation.type}:${invocationId}` };

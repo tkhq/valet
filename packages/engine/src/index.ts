@@ -278,4 +278,4 @@ export { formatTranscriptText } from "./transcript-formatter.js";
 export * from "./authorization/types.js";
 export * from "./authorization/identity.js";
 
-export { adaptPluginCatalogAction } from "./plugin-catalog-authorization.js";
+export { adaptPluginCatalogAction, adaptResolvedPluginCatalogAction } from "./plugin-catalog-authorization.js";

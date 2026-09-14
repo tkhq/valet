@@ -26,7 +26,7 @@ function plugins(riskLevel: "low" | "critical") {
 }
 
 function input(riskLevel: "low" | "critical"): PolicyResolveInput {
-  return { service: "github", actionId: riskLevel === "critical" ? "github.merge_pull_request" : "github.create_issue", riskLevel, params: { value: "x" }, userId: "user-1", orgId: "org-1", sessionId: "session-1", threadId: "thread-1", appliesIn: "session", owner: { type: "user", id: "user-1" }, queueItemId: "queue-1", resumeKey: "call-1", gateOrdinal: 0 };
+  return { service: "github", actionId: riskLevel === "critical" ? "github.merge_pull_request" : "github.create_issue", riskLevel, parameterProjection: { schemaVersion: 1, mode: "all_safe" }, params: { value: "x" }, userId: "user-1", orgId: "org-1", sessionId: "session-1", threadId: "thread-1", appliesIn: "session", owner: { type: "user", id: "user-1" }, queueItemId: "queue-1", resumeKey: "call-1", gateOrdinal: 0 };
 }
 
 describe("canonicalInteractivePolicyResolver", () => {

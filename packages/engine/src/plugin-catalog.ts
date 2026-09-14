@@ -497,6 +497,7 @@ export async function invokeAction(
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
+    parameterProjection: entry.action.safeParameterProjection ?? entry.plugin.safeParameterProjection,
     params: args,
     userId: ctx.userId,
     orgId: ctx.orgId,

@@ -982,6 +982,8 @@ export interface PolicyResolveInput {
   service: string;
   actionId: string;
   riskLevel: RiskLevel;
+  /** Projection attached by the resolved catalog action, including dynamic actions. */
+  parameterProjection?: import("./authorization/action-adapters.js").SafeParameterProjectionV1;
   params: Record<string, unknown> | undefined;
   userId?: string;
   orgId?: string;
