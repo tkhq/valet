@@ -1,6 +1,7 @@
-import { Worker } from "node:worker_threads";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 import type { CanonicalSourceBundle, ValidatedBundleIdentity } from "../bundles/types.js";
 import { policyWorkerUrl } from "../../assets/base.js";
+import { isBunRuntime } from "../../server-adapter.js";
 import { LocalEvaluatorError, type LocalEvaluatorErrorCode } from "./errors.js";
 
 export const MAX_WALL_TIME_MS = 100;
@@ -10,6 +11,16 @@ const MAX_READY_TIME_MS = 5_000;
 const MAX_QUEUE_TIME_MS = 5_000;
 const MAX_START_TIME_MS = 1_000;
 const MAX_CONTROL_TIME_MS = 10_000;
+
+/**
+ * Node uses an old-generation heap limit as defense in depth. Bun 1.2.17
+ * accepts this option but ignores it and emits ERR_NOT_IMPLEMENTED, so the Bun
+ * path omits it. Both paths retain the authoritative 64 MiB WebAssembly linear
+ * memory cap, deterministic fuel, and the 100 ms host deadline.
+ */
+export function policyWorkerOptions(bunRuntime = isBunRuntime()): WorkerOptions {
+  return bunRuntime ? {} : { resourceLimits: { maxOldGenerationSizeMb: MAX_WORKER_HEAP_MIB } };
+}
 
 export interface RuntimeIdentity {
   readonly engineDigest: string;
@@ -235,9 +246,7 @@ export class WasmPolicyRuntime {
     });
     void ready.catch(() => undefined);
     const url = typeof this.workerUrl === "function" ? this.workerUrl(generation) : this.workerUrl;
-    const worker = new Worker(url, {
-      resourceLimits: { maxOldGenerationSizeMb: MAX_WORKER_HEAP_MIB },
-    });
+    const worker = new Worker(url, policyWorkerOptions());
     const state: WorkerState = {
       worker,
       generation,

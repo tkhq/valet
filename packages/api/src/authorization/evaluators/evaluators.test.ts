@@ -4,7 +4,12 @@ import { SourceBundleHost } from "../bundles/host.js";
 import { InMemorySourceBundleStorage } from "../bundles/in-memory-storage.js";
 import { testBundle, testRequest } from "../test-bundle.js";
 import { LocalValetEvaluator } from "./local-valet.js";
-import { MAX_WASM_LINEAR_MEMORY_BYTES, WasmPolicyRuntime } from "./wasm-runtime.js";
+import {
+  MAX_WASM_LINEAR_MEMORY_BYTES,
+  MAX_WORKER_HEAP_MIB,
+  policyWorkerOptions,
+  WasmPolicyRuntime,
+} from "./wasm-runtime.js";
 
 async function activeEvaluator(runtime: WasmPolicyRuntime, bundle = testBundle()) {
   const storage = new InMemorySourceBundleStorage();
@@ -16,6 +21,13 @@ async function activeEvaluator(runtime: WasmPolicyRuntime, bundle = testBundle()
 
 describe("local Valet evaluator containment", () => {
   let runtime: WasmPolicyRuntime;
+
+  it("keeps the Node heap limit and omits Bun's ignored worker option", () => {
+    expect(policyWorkerOptions(false)).toEqual({
+      resourceLimits: { maxOldGenerationSizeMb: MAX_WORKER_HEAP_MIB },
+    });
+    expect(policyWorkerOptions(true)).toEqual({});
+  });
 
   beforeEach(() => {
     runtime = new WasmPolicyRuntime();
