@@ -2045,6 +2045,8 @@ export interface WorkflowRunCheckpoint {
 /** One pending approval gate on a parked workflow run. */
 export interface WorkflowPendingGate {
   nodeId: string;
+  /** When this gate first parked. Used for the waiting duration. */
+  waitingSince?: number;
   kind: "approval" | "policy_gate";
   iteration?: number;
   /** Approval nodes: the human-readable prompt from the definition. */
@@ -2480,6 +2482,26 @@ export interface ListAllWorkflowRunsResponse {
   runs: GlobalWorkflowRunSummary[];
   /** Absent on the last page, exactly as `ListWorkflowRunsResponse`. */
   nextCursor?: string;
+}
+
+/** One active workflow gate that the calling principal can resolve. */
+export interface WorkflowActionRequiredItem {
+  id: string;
+  runId: string;
+  workflowId: string;
+  workflowName: string;
+  runCreatedAt: number;
+  owner: { type: "user" | "team" | "org"; id: string };
+  trigger: {
+    type: "manual" | "schedule" | "webhook" | "event" | "workflow" | "unknown";
+    triggerId?: string;
+  };
+  gate: WorkflowPendingGate;
+}
+
+export interface ListWorkflowActionRequiredResponse {
+  items: WorkflowActionRequiredItem[];
+  count: number;
 }
 
 // ── Workflow triggers (spec 2026-08-15) ──────────────────────────────────

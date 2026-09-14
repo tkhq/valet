@@ -62,7 +62,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { buildRunSettledAttention } from "../workflows/run-attention.js";
+import { buildRunSettledAttention, workflowApprovalHref } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -629,7 +629,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
             : info.summary
               ? info.prompt
               : undefined,
-          href: `/workflows/runs/${info.runId}`,
+          href: workflowApprovalHref(info.runId, info.nodeId),
           dedupeKey: `${info.runId}:${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`,
         },
       );

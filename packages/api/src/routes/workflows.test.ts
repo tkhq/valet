@@ -33,6 +33,7 @@ import type {
   ListWorkflowSchedulesResponse,
   DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
+  ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   RetryWorkflowRunResponse,
@@ -1476,6 +1477,171 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       .from(actionInvocations)
       .where(eq(actionInvocations.invocationId, invId));
     expect(rows[0]?.status).toBe("cancelled");
+  });
+});
+
+describe("GET /api/workflows/action-required", () => {
+  it("shows org-owned gates only to org admins who can resolve them", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const { db, workflowStore } = api.providers;
+    const now = Date.now();
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "review", type: "approval", prompt: "Approve org action?" }],
+      edges: [],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: "wf_org_action", orgId: "local-org", name: "Org action", definition,
+      ownerType: "org", ownerId: "local-org", createdAt: now, updatedAt: now,
+    });
+    await workflowStore.createRun(
+      "wfrun_org_action", { workflowId: "wf_org_action", definitionVersionId: "v1" },
+      definition, "v1", { ownerType: "org", ownerId: "local-org" },
+    );
+    await workflowStore.parkRun("wfrun_org_action", 1, [
+      { kind: "signal", signalType: "approval:review", nodeId: "review" },
+    ]);
+    const memberHeaders = { "x-valet-test-user-id": "test-member" };
+    const readable = await fetch(`${api.baseUrl}/api/workflows/runs/wfrun_org_action`, { headers: memberHeaders });
+    expect(readable.status).toBe(200);
+    const memberList = await fetch(`${api.baseUrl}/api/workflows/action-required`, { headers: memberHeaders });
+    expect(await memberList.json()).toEqual({ items: [], count: 0 });
+    const denied = await fetch(`${api.baseUrl}/api/workflows/runs/wfrun_org_action/approvals/review`, {
+      method: "POST", headers: { ...memberHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(denied.status).toBe(404);
+    const adminList = await fetch(`${api.baseUrl}/api/workflows/action-required`);
+    expect(await adminList.json()).toMatchObject({ count: 1, items: [{ runId: "wfrun_org_action" }] });
+  });
+
+  it("lists both gate classes and hides another user's gate", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const { db, workflowStore } = api.providers;
+    const now = Date.now();
+
+    async function park(
+      suffix: string,
+      ownerId: string,
+      node: Record<string, unknown>,
+      effects?: Record<string, unknown>,
+    ) {
+      const workflowId = `wf_action_${suffix}`;
+      const runId = `wfrun_action_${suffix}`;
+      const definition = {
+        version: "dag/v1",
+        nodes: [{ id: "trigger", type: "trigger" }, node, { id: "stop", type: "stop" }],
+        edges: [
+          { from: "trigger", to: String(node.id) },
+          { from: String(node.id), to: "stop" },
+        ],
+      };
+      await db.insert(workflowDefinitions).values({
+        id: workflowId,
+        orgId: "local-org",
+        name: `Action ${suffix}`,
+        definition,
+        ownerType: "user",
+        ownerId,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await workflowStore.createRun(
+        runId,
+        {
+          workflowId,
+          definitionVersionId: "v1",
+          input: {
+            type: "event",
+            triggerId: "evt-1",
+            timestamp: new Date(now).toISOString(),
+            data: {},
+            metadata: {},
+          },
+        },
+        definition,
+        "v1",
+        { ownerType: "user", ownerId },
+      );
+      await workflowStore.putIntent({
+        runId,
+        nodeId: String(node.id),
+        iteration: 0,
+        attempt: 1,
+        status: "intent",
+        createdAt: now - 5_000,
+        effects,
+      });
+      await workflowStore.parkRun(runId, 1, [
+        {
+          kind: "signal",
+          signalType: `approval:${String(node.id)}`,
+          nodeId: String(node.id),
+        },
+      ]);
+      return runId;
+    }
+
+    await park("approval", "local-user", {
+      id: "review",
+      type: "approval",
+      prompt: "Approve the release?",
+    });
+    await park(
+      "policy",
+      "local-user",
+      {
+        id: "send",
+        type: "tool",
+        service: "slack",
+        action: "send_message",
+        params: {},
+        onDeny: "skip",
+      },
+      {
+        riskLevel: "high",
+        provenance: "org_policy",
+        gateParams: { channel: "C123" },
+      },
+    );
+    const hiddenRun = await park("hidden", "someone-else", {
+      id: "private",
+      type: "approval",
+      prompt: "Private decision",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/action-required`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowActionRequiredResponse;
+    expect(body.count).toBe(2);
+    expect(body.items.map((item) => item.gate.kind).sort()).toEqual(["approval", "policy_gate"]);
+    expect(body.items.some((item) => item.runId === hiddenRun)).toBe(false);
+    expect(body.items.find((item) => item.gate.kind === "approval")).toMatchObject({
+      workflowName: "Action approval",
+      trigger: { type: "event", triggerId: "evt-1" },
+      gate: {
+        nodeId: "review",
+        prompt: "Approve the release?",
+        waitingSince: now - 5_000,
+      },
+    });
+    expect(body.items.find((item) => item.gate.kind === "policy_gate")).toMatchObject({
+      gate: {
+        nodeId: "send",
+        service: "slack",
+        action: "send_message",
+        onDeny: "skip",
+        gateParams: { channel: "C123" },
+      },
+    });
+
+    const forbidden = await fetch(`${api.baseUrl}/api/workflows/runs/${hiddenRun}/approvals/private`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(forbidden.status).toBe(404);
   });
 });
 

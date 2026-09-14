@@ -105,6 +105,7 @@ import type {
   ListIdentityLinksResponse,
   ListInvitesResponse,
   ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
   CreateLlmProviderRequest,
@@ -1099,6 +1100,7 @@ export const api = {
     ),
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
+  listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
   listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
     const qs = new URLSearchParams();
     if (page?.limit) qs.set("limit", String(page.limit));

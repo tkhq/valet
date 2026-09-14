@@ -11,20 +11,35 @@
 import { useState } from "react";
 import { Hand } from "lucide-react";
 import { useResolveApproval } from "~/api/workflows";
-import { Button, Input } from "~/components/primitives";
+import { Button, ConfirmDialog, Input } from "~/components/primitives";
 
 export interface ApprovalCardProps {
   runId: string;
   nodeId: string;
   prompt?: string;
+  iteration?: number;
+  confirmActions?: boolean;
 }
 
-export function ApprovalCard({ runId, nodeId, prompt }: ApprovalCardProps) {
+export function ApprovalCard({ runId, nodeId, prompt, iteration, confirmActions = false }: ApprovalCardProps) {
   const [note, setNote] = useState("");
+  const [confirmation, setConfirmation] = useState<boolean | null>(null);
   const resolve = useResolveApproval(runId);
 
   function respond(approved: boolean) {
-    resolve.mutate({ nodeId, body: { approved, note: note.trim() || undefined } });
+    if (confirmActions) {
+      setConfirmation(approved);
+      return;
+    }
+    submit(approved);
+  }
+
+  function submit(approved: boolean) {
+    resolve.mutate({
+      nodeId,
+      body: { approved, note: note.trim() || undefined, iteration },
+    });
+    setConfirmation(null);
   }
 
   return (
@@ -57,9 +72,21 @@ export function ApprovalCard({ runId, nodeId, prompt }: ApprovalCardProps) {
           Deny
         </Button>
       </div>
-      {resolve.isError && (
-        <div className="text-xs text-danger-500">Failed to record response — try again.</div>
-      )}
+      <ConfirmDialog
+        open={confirmation !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmation(null);
+        }}
+        title={confirmation ? "Approve this workflow step?" : "Deny this workflow step?"}
+        description={
+          confirmation
+            ? "The run continues past this step."
+            : "The run stops at this step unless the workflow handles denial."
+        }
+        confirmLabel={confirmation ? "Approve step" : "Deny step"}
+        onConfirm={() => submit(confirmation === true)}
+      />
+      {resolve.isError && <div className="text-xs text-danger-500">Failed to record response — try again.</div>}
     </div>
   );
 }

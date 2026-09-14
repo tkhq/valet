@@ -203,6 +203,7 @@ export function RunDetailBody({
               runId={runId}
               nodeId={gate.nodeId}
               prompt={gate.prompt ?? findApprovalPrompt(run.definition, gate.nodeId)}
+              iteration={gate.iteration}
             />
           ) : (
             <PolicyGateCard key={`${gate.nodeId}:${gate.iteration ?? 0}`} runId={runId} gate={gate} />
