@@ -684,6 +684,8 @@ A `require_approval` decision creates one durable gate bound to `requestSubjectD
 
 An `approve_once` resolution authorizes one replay of the same request subject. A session or workflow grant creates a separate dynamic fact with its own durable ID and scope. An always-allow action uses the transactional policy authoring write to activate a new bundle. It does not mutate the original decision.
 
+An interactive `deny` resolution is an intentional no-op in the host adapter. It creates no approval or grant fact. The engine returns the sticky final denial and tells the model not to retry during that turn. An unknown resolution action is a processing error and fails closed.
+
 After approval, Valet re-evaluates the request with the approval fact or grant included. It does not execute only because a UI callback said yes. The new decision must bind the same request subject. A changed parameter, resource, actor, or target produces a different subject and requires a new decision.
 
 If a restart occurs after approval but before execution, the same idempotency key returns the stored post-approval decision. Valet executes at most once when the target operation supports idempotency. If the target cannot provide idempotency, the execution record must show an indeterminate outcome rather than silently retrying a side effect.

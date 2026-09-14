@@ -54,6 +54,7 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
     async onResolution(input, decision, resolution) {
       const c = decision.canonical;
       if (!c?.approvalRequirement || !input.orgId) throw new Error("Canonical approval is incomplete.");
+      if (resolution.actionId === "deny") return;
       if (resolution.actionId === GATE_ACTION_APPROVE_SESSION) {
         const sourceApprovalId = `resolution:${input.queueItemId}:${resolution.gateOrdinal ?? input.gateOrdinal ?? 0}`;
         await writeSessionGrant(opts.db, input.sessionId, { orgId: input.orgId, service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, sourceApprovalId, expiresAt: resolution.resolvedAt + 72 * 60 * 60 * 1000, grantedBy: resolution.resolvedBy, now: resolution.resolvedAt });

@@ -1,7 +1,16 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionPlugin, PolicyResolveInput, ValetPlugin } from "@valet/engine";
-import { authorizationExecutionAttempts, canonicalApprovalResolutions, orgs } from "../schema/index.js";
+import {
+  actionPolicies,
+  authorizationExecutionAttempts,
+  canonicalApprovalResolutions,
+  orgMembers,
+  orgs,
+  policyActiveBundles,
+  runtimeGrants,
+  users,
+} from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { CanonicalAuthorizationService } from "./canonical-authorization-service.js";
 import { canonicalInteractivePolicyResolver } from "./canonical-interactive-resolver.js";
@@ -36,4 +45,45 @@ describe("canonicalInteractivePolicyResolver", () => {
       expect(await pg.appDb.select().from(authorizationExecutionAttempts)).toHaveLength(1);
     } finally { await manager.close(); }
   }, 120_000);
+
+  it.each([
+    ["deny", false, 0, 0, 0, 0],
+    ["approve", false, 1, 0, 0, 0],
+    ["approve_session", false, 0, 1, 0, 0],
+    ["always_allow", false, 0, 0, 1, 1],
+    ["malformed", true, 0, 0, 0, 0],
+  ] as const)(
+    "applies resolution %s with only its required mutation",
+    async (actionId, rejects, approvals, grants, policies, generationDelta) => {
+      pg = await freshTestPgDb();
+      await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+      await pg.appDb.insert(users).values({ id: "user-2", name: "Admin", email: "admin@example.com", emailVerified: true, createdAt: new Date(1), updatedAt: new Date(1) });
+      await pg.appDb.insert(orgMembers).values({ orgId: "org-1", userId: "user-2", role: "admin", createdAt: 1 });
+      const map = plugins("critical");
+      const manager = new CanonicalPolicyBundleManager(pg.appDb, map, () => 10);
+      try {
+        await manager.ensureOrganizationReady("org-1");
+        const resolver = canonicalInteractivePolicyResolver({
+          db: pg.appDb,
+          service: await CanonicalAuthorizationService.create(manager, () => 20),
+          plugins: map,
+          clock: () => 30,
+        });
+        const pending = await resolver.resolve(input("critical"));
+        expect(pending.mode).toBe("require_approval");
+        const before = (await pg.appDb.select().from(policyActiveBundles))[0]!;
+        const resolution = { actionId, resolvedBy: "user-2", resolvedAt: 31, gateOrdinal: 1 };
+        if (rejects) await expect(resolver.onResolution!(input("critical"), pending, resolution)).rejects.toThrow("Canonical approval was not approved.");
+        else await expect(resolver.onResolution!(input("critical"), pending, resolution)).resolves.toBeUndefined();
+        expect(await pg.appDb.select().from(canonicalApprovalResolutions)).toHaveLength(approvals);
+        expect(await pg.appDb.select().from(runtimeGrants)).toHaveLength(grants);
+        expect(await pg.appDb.select().from(actionPolicies)).toHaveLength(policies);
+        const after = (await pg.appDb.select().from(policyActiveBundles))[0]!;
+        expect(after.generation).toBe(before.generation + generationDelta);
+      } finally {
+        await manager.close();
+      }
+    },
+    120_000,
+  );
 });

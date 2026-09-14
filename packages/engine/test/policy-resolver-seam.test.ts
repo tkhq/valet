@@ -357,7 +357,9 @@ describe("policyResolver seam: require_approval gate", () => {
       }),
     );
     expect(executed).toBe(false);
-    expect(result.text).toContain("did not approve");
+    expect(result.text).toBe(
+      "denied: user did not approve github.get_issue. This denial is final for the current turn — do not call github.get_issue again, with these or modified arguments. Tell the user what was denied; they can ask again in a new message.",
+    );
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("rejected");
   });
@@ -379,9 +381,31 @@ describe("policyResolver seam: require_approval gate", () => {
       }),
     );
     expect(executed).toBe(false);
-    expect(result.text.toLowerCase()).toContain("approval");
+    expect(result.text).toBe("denied: approval processing failed, so github.get_issue did not approve");
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("rejected");
+  });
+
+  it("an unknown resolution action fails closed as a processing error", async () => {
+    let executed = false;
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
+      onResolution: async () => { throw new Error("unknown resolution action"); },
+    });
+    const [, callTool] = pluginCatalogTools({
+      plugins: [makePlugin(makeAction({ execute: async () => { executed = true; return { success: true, data: {} }; } }))],
+    });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async () => ({ actionId: "unknown", resolvedBy: "u1", resolvedAt: Date.now() }),
+      }),
+    );
+    expect(executed).toBe(false);
+    expect(result.text).toBe("denied: approval processing failed, so github.get_issue did not approve");
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({ status: "rejected", resolvedMode: "require_approval" });
   });
 });
 
