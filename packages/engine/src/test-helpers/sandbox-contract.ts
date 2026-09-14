@@ -149,7 +149,8 @@ export function runSandboxContract(name: string, ctx: SandboxContractContext) {
           expect(r.timedOut).toBe(true);
           expect(Date.now() - start).toBeLessThan(2000);
         }),
-      10_000,
+      // Use the provider suite deadline for provisioning and cleanup. The
+      // assertion above still limits the exec operation itself to 2 seconds.
     );
 
     it("exec forwards maxOutputBytes and marks the result truncated", () =>
