@@ -47,8 +47,9 @@ describe("canonical action request adapters", () => {
     expect(left.subject.invocation.type).toBe("interactive"); expect(right.subject.invocation.type).toBe("workflow");
   });
 
-  it("accepts queued actors and the engine's pretty-printed resume keys", () => {
-    expect(interactive({ owner: { type: "user", id: "credential-owner" } }).request.subject.principal.id).toBe("credential-owner");
+  it("binds personal owners to the actor and permits team ownership", () => {
+    expect(() => interactive({ owner: { type: "user", id: "other-user" } })).toThrowError(expect.objectContaining({ code: "invalid_identity" }));
+    expect(interactive({ owner: { type: "team", id: "team-1" }, teamId: "team-1" }).request.subject.principal).toEqual({ type: "team", id: "team-1" });
     expect(interactive({ resumeKey: "github.create_issue:{\n  \"title\": \"x\"\n}" }).request.subject.invocation.type).toBe("interactive");
     expect(() => interactive({ resumeKey: "github.create_issue:\u0000" })).toThrowError(expect.objectContaining({ code: "invalid_identity" }));
   });

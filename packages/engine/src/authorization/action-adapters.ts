@@ -57,6 +57,7 @@ function common(input: CommonInput): void {
   exact(input.actor, ["type", "id"]); exact(input.owner, ["type", "id"]); exact(input.action, ["service", "actionId", "catalogActionId", "sourcePluginService", "sourceActionId", "sourceToolId", "riskLevel", "parameters", "parameterProjection"]);
   validId(input.organizationId); validId(input.actor.id); validId(input.owner.id); validId(input.requestId);
   if (input.actor.type !== "user" || !["user", "team", "org"].includes(input.owner.type)) fail("invalid_identity");
+  if (input.owner.type === "user" && input.owner.id !== input.actor.id) fail("invalid_identity");
   if (input.owner.type === "org" && input.owner.id !== input.organizationId) fail("cross_scope");
   if ((input.owner.type === "team") !== (input.teamId !== undefined) || (input.teamId && input.teamId !== input.owner.id)) fail("cross_scope");
   action(input.action);
