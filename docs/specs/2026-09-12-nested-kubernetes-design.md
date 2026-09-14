@@ -325,3 +325,7 @@ These errata are normative for the stacked implementation. They do not rewrite t
 2. The lifecycle kernel is total. `recover` with no active Operation returns a no-op report. Final-commit guards apply to start, import, and stop. Concurrent import during a live import waits for the owner. The lifecycle vectors define these branches.
 3. K131 and K142 distinguish environment sources. `sandboxEnv` supplies sandbox-global variables. `k3sEnv` supplies launcher-only variables.
 4. The informative L4 rollout range is A1 through A15.
+
+### Archive inspection portability
+
+Archive inspection uses `/usr/bin/tar` on macOS and `/bin/tar` on Linux. Both paths remain absolute. The existing unsafe-archive vectors run on both platforms.
