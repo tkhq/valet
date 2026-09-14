@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import type { NodeChange, EdgeChange, Edge } from "@xyflow/react";
-import { Canvas, enteringNodeIds, routeNodeChanges, routeEdgeChanges } from "./canvas";
+import { Canvas, INITIAL_FIT_OPTIONS, MANUAL_FIT_OPTIONS, enteringNodeIds, routeNodeChanges, routeEdgeChanges, toXyEdges, viewportMoveResult } from "./canvas";
 import { toFlow, type WorkflowDefinition, type WorkflowFlowState } from "../editor-model";
 import type { FlowXyNode } from "./flow-node";
 
@@ -78,7 +78,43 @@ describe("Canvas", () => {
     // Edge rendering only happens once xyflow's ResizeObserver-driven node
     // measurement pass completes (see src/test/setup.ts); that fires on a
     // microtask, so the label shows up a tick after the initial render.
-    await waitFor(() => expect(screen.getByText("approved")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("True · approved")).toBeTruthy());
+    expect(screen.getByTitle("True branch. Condition: approved")).toBeTruthy();
+  });
+
+  it("selects an edge when its label is clicked", async () => {
+    const onSelectEdge = vi.fn();
+    const { container } = render(
+      <Canvas
+        flow={toFlow(definition)}
+        onNodePositionChange={noop}
+        onConnect={noop}
+        onSelectNode={noop}
+        onSelectEdge={onSelectEdge}
+      />,
+    );
+    const label = await screen.findByRole("button", { name: "True branch. Condition: approved" });
+    label.click();
+    expect(onSelectEdge).toHaveBeenCalledWith("check:true->stop");
+    await waitFor(() =>
+      expect(container.querySelector('.react-flow__edge[data-id="check:true->stop"]')?.classList).toContain("selected"),
+    );
+  });
+
+  it("persists a Controls zoom after the automatic initial fit", async () => {
+    const onViewportChange = vi.fn();
+    render(
+      <Canvas
+        flow={toFlow({ ...definition, ui: { nodes: definition.ui!.nodes } })}
+        onNodePositionChange={noop}
+        onConnect={noop}
+        onSelectNode={noop}
+        onSelectEdge={noop}
+        onViewportChange={onViewportChange}
+      />,
+    );
+    screen.getByRole("button", { name: "Zoom in" }).click();
+    await waitFor(() => expect(onViewportChange).toHaveBeenCalled());
   });
 
   it("points every edge at its target with an arrowhead", async () => {
@@ -106,12 +142,38 @@ describe("Canvas", () => {
         onSelectEdge={noop}
       />,
     );
-    await waitFor(() => expect(screen.getByText("approved")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("True · approved")).toBeTruthy());
+    expect(screen.getByTitle("True branch. Condition: approved")).toBeTruthy();
     // Opening a workflow draws it; it does not perform it. The arrival
     // animation is for what the assistant adds afterwards, and the
     // travelling dash belongs to a run overlay this canvas never gets.
     expect(container.querySelector(".flow-node-enter")).toBeNull();
     expect(container.querySelector(".react-flow__edge.animated")).toBeNull();
+  });
+
+  it("uses a readable floor when it fits a complex graph for the first time", () => {
+    expect(INITIAL_FIT_OPTIONS).toEqual({ padding: 0.16, minZoom: 0.5, maxZoom: 1.1 });
+  });
+
+  it("lets manual Fit view shrink below the automatic readable floor", () => {
+    expect(MANUAL_FIT_OPTIONS).toEqual({ padding: 0.16 });
+    expect(MANUAL_FIT_OPTIONS.minZoom).toBeUndefined();
+  });
+
+  it("keeps sibling edge labels apart", () => {
+    const flow = toFlow({
+      ...definition,
+      nodes: [...definition.nodes, { id: "rejected", type: "stop", outcome: "failure" }],
+      edges: [
+        ...definition.edges,
+        { from: "check", to: "rejected", fromOutput: "false", when: "not approved" },
+      ],
+      ui: { nodes: { ...definition.ui?.nodes, rejected: { position: { x: 520, y: 140 } } } },
+    });
+    const offsets = toXyEdges(flow)
+      .filter((edge) => edge.source === "check")
+      .map((edge) => edge.data?.labelOffsetY);
+    expect(new Set(offsets).size).toBe(2);
   });
 
   it("brings in a node that arrives after the first snapshot, and only that node", async () => {
@@ -145,6 +207,16 @@ describe("Canvas", () => {
     const arriving = container.querySelectorAll(".flow-node-enter");
     expect(arriving.length).toBe(1);
     expect(arriving[0]?.textContent).toContain("LLM");
+  });
+});
+
+describe("viewportMoveResult", () => {
+  it("does not persist React Flow's automatic initial fit", () => {
+    expect(viewportMoveResult(true)).toEqual({ persist: false, initialFitPending: false });
+  });
+
+  it("persists a later Controls zoom even when it has no DOM event", () => {
+    expect(viewportMoveResult(false)).toEqual({ persist: true, initialFitPending: false });
   });
 });
 
