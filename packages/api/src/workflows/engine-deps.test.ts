@@ -379,6 +379,46 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     expect(second.sessionId).toBe(first.sessionId);
   });
 
+  it("reuses a workflow thread across runs without mixing receipts", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+      actionPluginByService, credentials: engineCredentials });
+    await seedRun(api, "run_first", "wf_shared");
+    await workflowStore.createRun("run_second", { workflowId: "wf_shared", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: LOCAL_USER.id });
+    await seedRun(api, "run_other", "wf_other");
+    const submit = (runId: string) => deps.promptOrchestrator("report", {
+      dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    const [first, second] = await Promise.all([submit("run_first"), submit("run_second")]);
+    expect(second.threadId).toBe(first.threadId);
+    expect(second.queueItemId).not.toBe(first.queueItemId);
+    expect(await submit("run_first")).toEqual(first);
+    expect((await submit("run_other")).threadId).not.toBe(first.threadId);
+    const item = await engineStore.getQueueItem(second.sessionId, second.queueItemId);
+    expect(item?.content).toMatchObject({ attributes: { runId: "run_second" } });
+  });
+
+  it("keeps an existing per-run thread for retries after an upgrade", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+      actionPluginByService, credentials: engineCredentials });
+    await seedRun(api, "run_legacy", "wf_legacy");
+    const assistant = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
+    const session = await engineHost.assistantSessionFor(assistant.id,
+      { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id }, { sessionId: assistant.sessionId });
+    const oldThread = session.thread("signal:workflow:run_legacy");
+    const dispatchId = "workflow:run_legacy:node1";
+    const original = await oldThread.submitPrompt({ kind: "signal", signalType: "workflow.request",
+      body: "report", attributes: { runId: "run_legacy" } }, { dispatchId, queueMode: "followup" });
+    const retried = await deps.promptOrchestrator("report", { dispatchId, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id } });
+    expect(retried).toEqual({ sessionId: session.id, threadId: oldThread.id, queueItemId: original.queueItemId });
+  });
+
   it("throws a descriptive error for a run with no recorded owner", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;

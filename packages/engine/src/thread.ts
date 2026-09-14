@@ -1207,6 +1207,22 @@ export class Thread {
     }
   }
 
+  /** Cancel one submission without aborting other work on this thread. */
+  async abortSubmission(queueItemId: string): Promise<void> {
+    const store = this.session.providers.store;
+    await store.requestAbort(this.session.id, this.id, queueItemId);
+    const running = this.runningItem?.id === queueItemId;
+    if (running) this.agent.abort();
+    for (const gate of this.pendingDecisionGates()) {
+      if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, "abort");
+    }
+    const settled = await store.settleUnclaimed(this.session.id, this.id, queueItemId, { outcome: "aborted" });
+    if (settled) await this.emitSettled(queueItemId, { outcome: "aborted" });
+    if (running) await this.agent.waitForIdle();
+    await this.emitQueueState();
+    void this.kick();
+  }
+
   async abort(): Promise<void> {
     this.aborted = true;
     if (this.collectTimer) {

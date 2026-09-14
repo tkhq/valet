@@ -441,3 +441,17 @@ Edges show arrowheads, readable branch labels, and separate label positions for 
 The initial fit keeps a readable zoom floor; manual Fit view can show the whole graph.
 Clicking an edge label clears the node selection and selects that edge.
 Backspace then removes only the selected edge.
+
+
+### Workflow assistant thread reuse (2026-09-14)
+
+Repeated runs reuse one thread per workflow definition in the selected assistant.
+The key is `signal:workflow:definition:{workflowId}`.
+Run-specific dispatch IDs, queue receipts, and signal attributes remain unchanged.
+A run with an existing `signal:workflow:{runId}` thread keeps that thread for retries.
+Existing history is retained. New runs do not create per-run threads.
+
+Cancellation passes the submission ID to the engine. It aborts only that submission, including its pending gates.
+Other queued or running submissions on the shared thread remain active.
+This applies to explicit cancellation, stop nodes, and failed foreach siblings.
+Legacy callers without a submission ID retain thread-wide abort behavior.
