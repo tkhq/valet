@@ -3,6 +3,7 @@ import type { SafeParameterProjectionV1 } from "@valet/engine/authorization";
 
 /** Version 1 inventory. all_safe is an explicit assertion that action params contain no credential material. */
 const ALL_SAFE = Object.freeze({ schemaVersion: 1, mode: "all_safe" } as const);
+const DYNAMIC_ALL_SAFE_SERVICES = new Set(["cloudflare", "deepwiki", "figma", "linear", "notion", "sentry", "stripe", "typefully"]);
 const INVENTORY: Readonly<Record<string, SafeParameterProjectionV1>> = Object.freeze({
   "assistants.archive_assistant": ALL_SAFE,
   "assistants.create_assistant": ALL_SAFE,
@@ -206,14 +207,19 @@ const INVENTORY: Readonly<Record<string, SafeParameterProjectionV1>> = Object.fr
 
 export function actionProjection(actionId: string): SafeParameterProjectionV1 {
   const projection = INVENTORY[actionId];
-  if (!projection) throw new Error(`Missing canonical safe-parameter projection for ${actionId}.`);
-  return projection;
+  if (projection) return projection;
+  const service = actionId.split(".", 1)[0];
+  if (service && DYNAMIC_ALL_SAFE_SERVICES.has(service)) return ALL_SAFE;
+  throw new Error(`Missing canonical safe-parameter projection for ${actionId}.`);
 }
 
 export function validateActionProjectionInventory(plugins: ReadonlyMap<string, { actionPlugin: ActionPlugin }>): void {
   const actual = new Set<string>();
   for (const [service, { actionPlugin }] of plugins) {
-    if (actionPlugin.resolveActions) throw new Error(`Dynamic plugin ${service} requires an explicit canonical projection handler.`);
+    if (actionPlugin.resolveActions) {
+      if (!DYNAMIC_ALL_SAFE_SERVICES.has(service)) throw new Error(`Dynamic plugin ${service} requires an explicit canonical projection handler.`);
+      continue;
+    }
     for (const action of actionPlugin.actions) actual.add(action.id.includes(".") ? action.id : `${service}.${action.id}`);
   }
   const missing = [...actual].filter((id) => !INVENTORY[id]).sort();

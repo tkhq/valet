@@ -64,8 +64,8 @@ const APP_CONFIG: GithubAppConfig = {
  * can assert WHICH identity the action ran as. */
 function echoTokenAction(): PluginAction {
   return {
-    id: "github.echo_token",
-    name: "echo_token",
+    id: "github.get_issue",
+    name: "get_issue",
     description: "report the resolved github token",
     riskLevel: "low",
     parameters: Type.Object({ owner: Type.String(), repo: Type.String() }),
@@ -92,7 +92,7 @@ function definitionWith(credential: "app" | "user" | "auto" | undefined) {
         id: "comment",
         type: "tool",
         service: "github",
-        action: "echo_token",
+        action: "get_issue",
         params: { owner: "acme", repo: "widgets" },
         ...(credential !== undefined ? { credential } : {}),
       },

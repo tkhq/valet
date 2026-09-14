@@ -382,7 +382,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   validateActionProjectionInventory(actionPluginByService);
   const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
   const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
-  configureCanonicalOrganizationProvisioner((id, name) => canonicalPolicyManager.provisionOrganization(id, name));
+  configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));
 
   // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
   // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when

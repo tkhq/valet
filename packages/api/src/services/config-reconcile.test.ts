@@ -37,7 +37,7 @@ async function freshConfigDb(): Promise<AppDb> {
   const { appDb } = await freshTestPgDb();
   const manager = new CanonicalPolicyBundleManager(appDb, new Map());
   managers.set(appDb, manager);
-  configureCanonicalOrganizationProvisioner((id, name) => manager.provisionOrganization(id, name));
+  configureCanonicalOrganizationProvisioner(appDb, (id, name) => manager.provisionOrganization(id, name));
   return appDb;
 }
 

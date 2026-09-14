@@ -247,11 +247,12 @@ async function computeResult(
   const entry = opts.actionPluginByService.get(req.service);
   if (!entry) return unknownAction(req);
 
-  // Canonical authorization is complete before any credential provider is built or read.
+  // Static actions authorize before credential resolution. Dynamic MCP actions
+  // must first discover their schema and risk level, but still authorize before
+  // argument preparation, audit reservation, or execution.
   const staticAction = findAction(entry.actionPlugin.actions, req.service, req.action);
   let canonicalEnvelope: PolicyDecisionEnvelope | undefined;
-  if (opts.canonicalAuthorizationService) {
-    if (!staticAction) return unknownAction(req);
+  if (opts.canonicalAuthorizationService && staticAction) {
     const authorization = await enforceCanonicalWorkflowPolicy(opts, req, ctx, staticAction);
     if ("ok" in authorization) return authorization;
     canonicalEnvelope = authorization;
@@ -373,6 +374,12 @@ async function computeResult(
     action = findAction(resolved, req.service, req.action);
   }
   if (!action) return unknownAction(req);
+
+  if (opts.canonicalAuthorizationService && !canonicalEnvelope) {
+    const authorization = await enforceCanonicalWorkflowPolicy(opts, req, ctx, action);
+    if ("ok" in authorization) return authorization;
+    canonicalEnvelope = authorization;
+  }
 
   if (teamGated) {
     const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);

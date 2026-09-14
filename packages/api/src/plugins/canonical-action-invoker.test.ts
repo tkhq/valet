@@ -34,6 +34,28 @@ describe("canonical workflow action invocation", () => {
     } finally { await manager.close(); }
   }, 120_000);
 
+  it("authorizes a resolved dynamic action before dispatch", async () => {
+    pg = await freshTestPgDb(); await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    const execute = vi.fn(async () => ({ success: true, data: { ok: true } }));
+    const actionPlugin: ActionPlugin = {
+      service: "deepwiki",
+      actions: [],
+      resolveActions: async () => [{ id: "deepwiki.ask_question", name: "Ask", description: "Ask", riskLevel: "medium", parameters: Type.Object({ title: Type.String() }), execute }],
+    };
+    const plugin = { name: "deepwiki", version: "1", actions: [actionPlugin] } as ValetPlugin;
+    const plugins = new Map([["deepwiki", { plugin, actionPlugin }]]);
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, plugins, () => 10);
+    try {
+      await manager.ensureOrganizationReady("org-1"); const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const authorize = vi.spyOn(service, "authorize");
+      const invoke = buildActionInvoker({ db: pg.appDb, credentials, actionPluginByService: plugins, canonicalAuthorizationService: service, clock: () => 30 });
+      const result = await invoke({ service: "deepwiki", action: "ask_question", params: { title: "One" }, invocationId: "workflow:run-1:dynamic" }, { userId: "user-1", orgId: "org-1", owner: { type: "user", id: "user-1" }, workflowExecutionId: "run-1", workflowDefinitionId: "workflow-1", workflowVersion: "1", workflowNodeId: "dynamic" });
+      expect(result).toEqual({ ok: true, result: { ok: true } });
+      expect(authorize).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+    } finally { await manager.close(); }
+  }, 120_000);
+
   it("does not dispatch when decision audit reservation fails", async () => {
     pg = await freshTestPgDb(); await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
     const execute = vi.fn(async () => ({ success: true })); const plugins = catalog(execute);

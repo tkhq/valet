@@ -1,10 +1,28 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import type { ActionPlugin, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
 import { actionProjection, validateActionProjectionInventory } from "./action-projections.js";
 
-const action = (id: string) => ({ id, name: id, description: id, riskLevel: "low" as const, parameters: Type.Object({}), execute: async () => ({ success: true, data: {} }) });
-const plugin = (service: string, ids: string[], dynamic = false) => ({ plugin: { id: service, name: service, version: "1", actions: [] } as unknown as ValetPlugin, actionPlugin: { service, actions: ids.map(action), ...(dynamic ? { resolveActions: async () => [] } : {}) } as ActionPlugin });
+const action = (id: string): PluginAction => ({
+  id,
+  name: id,
+  description: id,
+  riskLevel: "low",
+  parameters: Type.Object({}),
+  execute: async () => ({ success: true, data: {} }),
+});
+
+function plugin(service: string, ids: string[], dynamic = false): { plugin: ValetPlugin; actionPlugin: ActionPlugin } {
+  const actionPlugin: ActionPlugin = {
+    service,
+    actions: ids.map(action),
+    ...(dynamic ? { resolveActions: async () => [] } : {}),
+  };
+  return {
+    plugin: { name: service, version: "1", actions: [actionPlugin] },
+    actionPlugin,
+  };
+}
 
 describe("canonical action projection inventory", () => {
   it("returns versioned projections and rejects unknown actions", () => {
@@ -12,7 +30,11 @@ describe("canonical action projection inventory", () => {
     expect(() => actionProjection("github.not_registered")).toThrow(/Missing canonical/);
   });
 
-  it("fails closed for missing, extra, and dynamic actions", () => {
+  it.each(["cloudflare.workers_list", "deepwiki.ask_question", "figma.get_file", "linear.save_issue", "notion.search", "sentry.find_issues", "stripe.list_customers", "typefully.create_draft"])("uses an explicit all-safe handler for dynamic action %s", (actionId) => {
+    expect(actionProjection(actionId)).toEqual({ schemaVersion: 1, mode: "all_safe" });
+  });
+
+  it("fails closed for missing, extra, and unhandled dynamic actions", () => {
     const missing = new Map(); missing.set("github", plugin("github", ["github.create_issue", "github.not_registered"]));
     const extra = new Map(); extra.set("github", plugin("github", ["github.create_issue"]));
     const dynamic = new Map(); dynamic.set("github", plugin("github", [], true));

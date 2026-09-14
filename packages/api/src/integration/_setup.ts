@@ -57,7 +57,7 @@ import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createOnePasswordService } from "../services/onepassword.js";
-import { getAllowPersonalOnePassword } from "../services/org.js";
+import { configureCanonicalOrganizationProvisioner, getAllowPersonalOnePassword } from "../services/org.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
@@ -319,6 +319,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   }
   const { plugins, actionPluginByService } = assemblePlugins([seededPlugins]);
   const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+  configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));
   await ensureCanonicalPolicyReadiness(canonicalPolicyManager);
   const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
 
