@@ -66,6 +66,12 @@ describe("SettingsRail", () => {
     const menu = screen.getByRole("menu");
     const team = within(menu).getByRole("group", { name: "Team" });
     const organization = within(menu).getByRole("group", { name: "Organization" });
+    const personal = within(menu).getByRole("group", { name: "You" });
+    expect(within(personal).getByRole("menuitem", { name: "Profile" })).toBeTruthy();
+    for (const label of ["API keys", "Proxy", "Policies"]) {
+      expect(within(personal).queryByRole("menuitem", { name: label })).toBeNull();
+      expect(within(team).getByRole("menuitem", { name: label })).toBeTruthy();
+    }
     expect(within(team).getByRole("menuitem", { name: "General" }).getAttribute("aria-current")).toBe("page");
     expect(within(organization).getByRole("menuitem", { name: "General" }).getAttribute("href")).toBe("/settings/organization");
     await userEvent.keyboard("{Escape}");
@@ -74,7 +80,7 @@ describe("SettingsRail", () => {
     expect(screen.getByRole("button", { name: "Settings section: Organization / General" })).toBeTruthy();
   });
 
-  it("keeps Proxy and Policies reachable in the team rail and route allowlist", () => {
+  it("keeps workspace settings in Team and personal settings in You", () => {
     teamId = "team";
     orgData = { callerRole: "member", features: { organizations: false } };
     render(<SettingsRail />);
@@ -83,7 +89,7 @@ describe("SettingsRail", () => {
       expect(screen.getByRole("link", { name: label }).getAttribute("href")).toBe(`/settings/${label.toLowerCase()}`);
       expect(isTeamSettingsPath(`/settings/${label.toLowerCase()}`)).toBe(true);
     }
-    expect(screen.queryByRole("link", { name: "Profile" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Profile" })).toBeTruthy();
   });
   it("always shows the You · Policies entry", () => {
     orgData = { callerRole: "member", features: { organizations: false } };

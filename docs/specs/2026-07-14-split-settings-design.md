@@ -151,3 +151,11 @@ Creating an org makes the creator its `org_members.role = "admin"`. First login 
 ### Narrow settings navigation (2026-09-11)
 
 Below the small-screen breakpoint, each settings group uses a horizontal list so the selected page stays near the top. Navigation keeps the active link in view. Desktop retains the left rail and the same route and permission gates.
+
+### Personal settings with a selected team (2026-09-14)
+
+The settings rail keeps the You group visible when a team is selected. Profile,
+Appearance, Assistant, Notifications, and Connected accounts remain reachable.
+Team adds General and the workspace-aware API keys, Proxy, and Policies routes.
+Those routes appear only under Team while a team is selected. The mobile menu
+uses the same groups. Changing workspace still clears section drafts.
