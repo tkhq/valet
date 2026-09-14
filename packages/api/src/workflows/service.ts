@@ -1402,6 +1402,7 @@ export async function listWorkflowActionRequired(
 
   const items: ListWorkflowActionRequiredResponse["items"] = [];
   for (const summary of summaries) {
+    if (!(await ownedRun(deps, owner, summary.runId, "act"))) continue;
     const detail = await getWorkflowRunDetail(deps, owner, summary.runId);
     if (detail === null) continue;
     const trigger = workflowActionTrigger(detail.run.params);

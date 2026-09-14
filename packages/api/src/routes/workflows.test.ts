@@ -1481,6 +1481,40 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
 });
 
 describe("GET /api/workflows/action-required", () => {
+  it("shows org-owned gates only to org admins who can resolve them", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const { db, workflowStore } = api.providers;
+    const now = Date.now();
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "review", type: "approval", prompt: "Approve org action?" }],
+      edges: [],
+    };
+    await db.insert(workflowDefinitions).values({
+      id: "wf_org_action", orgId: "local-org", name: "Org action", definition,
+      ownerType: "org", ownerId: "local-org", createdAt: now, updatedAt: now,
+    });
+    await workflowStore.createRun(
+      "wfrun_org_action", { workflowId: "wf_org_action", definitionVersionId: "v1" },
+      definition, "v1", { ownerType: "org", ownerId: "local-org" },
+    );
+    await workflowStore.parkRun("wfrun_org_action", 1, [
+      { kind: "signal", signalType: "approval:review", nodeId: "review" },
+    ]);
+    const memberHeaders = { "x-valet-test-user-id": "test-member" };
+    const readable = await fetch(`${api.baseUrl}/api/workflows/runs/wfrun_org_action`, { headers: memberHeaders });
+    expect(readable.status).toBe(200);
+    const memberList = await fetch(`${api.baseUrl}/api/workflows/action-required`, { headers: memberHeaders });
+    expect(await memberList.json()).toEqual({ items: [], count: 0 });
+    const denied = await fetch(`${api.baseUrl}/api/workflows/runs/wfrun_org_action/approvals/review`, {
+      method: "POST", headers: { ...memberHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(denied.status).toBe(404);
+    const adminList = await fetch(`${api.baseUrl}/api/workflows/action-required`);
+    expect(await adminList.json()).toMatchObject({ count: 1, items: [{ runId: "wfrun_org_action" }] });
+  });
+
   it("lists both gate classes and hides another user's gate", async () => {
     const stub = new StubRunHost();
     api = await bootTestApi({ workflowRunHost: stub });

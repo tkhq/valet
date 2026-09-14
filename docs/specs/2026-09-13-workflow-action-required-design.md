@@ -69,6 +69,8 @@ A team run is visible to current team members because the team is the principal.
 A former member loses access immediately.
 The API does not reveal excluded run ids, workflow names, or counts.
 
+Only org admins see gates on org-owned runs.
+The list uses the same action authorization as the resolution route.
 The resolution route repeats the authorization check.
 An unreadable run returns `404`, which matches a missing run.
 Org admin status does not grant access to another person's run.
