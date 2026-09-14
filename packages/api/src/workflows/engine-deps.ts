@@ -397,21 +397,17 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
 
     async llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult> {
       const ctx = await resolveRunContext(opts, req.runId);
-      let resolved = await resolveModelSpec(opts.db, opts.credentials, ctx.orgId, req.model);
-      // Legacy workflow definitions could save a bare OpenAI or Google id.
-      // The catalog now writes namespaced ids, but old runs must keep working.
-      if (!resolved && !req.model.includes("/")) {
-        for (const provider of ["openai", "google"] as const) {
-          if (!bundledModel(provider, req.model)) continue;
-          resolved = await resolveModelSpec(
-            opts.db,
-            opts.credentials,
-            ctx.orgId,
-            `${provider}/${req.model}`,
-          );
-          if (resolved) break;
+      // Resolve the provider before reading its settings. An unrelated disabled
+      // Anthropic provider must not block legacy bare OpenAI or Google IDs.
+      let modelSpec = req.model;
+      if (!modelSpec.includes("/")) {
+        for (const provider of ["anthropic", "openai", "google"] as const) {
+          if (!bundledModel(provider, modelSpec)) continue;
+          modelSpec = `${provider}/${modelSpec}`;
+          break;
         }
       }
+      const resolved = await resolveModelSpec(opts.db, opts.credentials, ctx.orgId, modelSpec);
       if (!resolved) {
         throw new Error(`workflow engine-deps: unknown or unavailable model "${req.model}"`);
       }

@@ -17,6 +17,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import { createLlmProvider } from "../services/llm-providers.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
 
 let api: TestApi | undefined;
@@ -424,7 +425,9 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 });
 
 describe("buildWorkflowEngineDeps: llmComplete", () => {
-  it.each(["openai/gpt-6-astra", "gpt-6-astra"])("completes with supplemental model %s", async (model) => {
+  it.each([
+    ["openai/gpt-6-astra", false], ["gpt-6-astra", false], ["gpt-6-astra", true],
+  ] as const)("completes with supplemental model %s (Anthropic disabled: %s)", async (model, disableAnthropic) => {
     vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
     const original = piAi.getApiProvider("openai-responses");
     if (!original) throw new Error("The OpenAI Responses transport must be registered.");
@@ -444,6 +447,11 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
         actionPluginByService, credentials: engineCredentials,
       });
 
+      if (disableAnthropic) {
+        await createLlmProvider(db, {
+          orgId: LOCAL_ORG.id, kind: "anthropic", name: "Anthropic", enabled: false,
+        });
+      }
       const runId = `wfrun_llm_${model.includes("/") ? "namespaced" : "bare"}`;
       await seedRun(api, runId, `wf_llm_${model.includes("/") ? "namespaced" : "bare"}`);
       const result = await deps.llmComplete({ runId, model, prompt: "hi" });

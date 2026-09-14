@@ -426,7 +426,7 @@ Explicit IdP joins invalidate team workflow sources in the membership insert tra
 
 ### Workflow model selection (2026-09-13)
 
-The creation dialog recommends a size tier for each starter shape. It saves that tier on each starter `llm` and `session` node. It also saves the tier as `ui.defaultModel`. The blank preset stays a trigger and a stop. The editor applies its saved default when the user adds an `llm` or `session` node. A user override stops preset changes from replacing the selection. The editor uses the org model catalog for later node edits. Creation, edits, and focused updates validate custom provider models against that same catalog. Existing bundled model IDs remain valid.
+The creation dialog recommends a size tier for each starter shape. It saves that tier on each starter `llm` and `session` node. It also saves the tier as `ui.defaultModel`. The blank preset stays a trigger and a stop. The editor applies its saved default when the user adds an `llm` or `session` node. A user override stops preset changes from replacing the selection. The editor uses the org model catalog for later node edits. Creation, edits, and focused updates validate custom provider models against that same catalog. Existing bundled model IDs remain valid. Bare OpenAI and Google IDs resolve through their own provider settings.
 
 `PATCH /api/workflows/:id/model` and `workflows.update_model` provide focused updates. Both validate active and approved catalog choices. They also accept org size tiers. They update `llm` and `session` nodes, including `foreach` bodies. An `orchestrator` node keeps the selected assistant's model because it has no per-node model field. Existing explicit model values remain unchanged until a user calls an edit path.
 
