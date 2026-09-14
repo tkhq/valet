@@ -3,7 +3,7 @@ import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import { threadActivity } from "./threads-card";
 
 function thread(id: string, createdAt: number, title?: string): ThreadSummary {
-  return { id, sessionId: "s1", title, createdAt };
+  return { id, sessionId: "s1", title, createdAt, lastUserActivityAt: createdAt };
 }
 
 function child(parentThreadId: string, status: OrchestratorChildSummary["status"]): OrchestratorChildSummary {

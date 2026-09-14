@@ -253,6 +253,7 @@ CREATE TABLE "session_threads" (
 	"session_id" text NOT NULL,
 	"title" text,
 	"created_at" bigint NOT NULL,
+	"last_user_activity_at" bigint,
 	"archived_at" bigint
 );
 --> statement-breakpoint

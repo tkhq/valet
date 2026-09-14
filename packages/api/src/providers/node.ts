@@ -550,7 +550,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const securityRunnerDriver = new SecurityRunnerDriver({
     db,
     engineStore,
-    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text, { recordUserActivity: false }),
     sweepIntervalMs: resolveSecurityNudgeIntervalMs(process.env),
     maxStalls: resolveSecurityNudgeMaxStalls(process.env),
   });

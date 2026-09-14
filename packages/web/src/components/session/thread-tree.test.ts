@@ -11,6 +11,7 @@ import {
   childStatusDotClassName,
   groupChildrenByThread,
   hasGateOutsideList,
+  sortThreads,
   threadIdsWithPendingGates,
   untitledThreadLabel,
   visibleThreads,
@@ -113,6 +114,7 @@ describe("visibleThreads", () => {
     sessionId: "s1",
     title,
     createdAt: 1_000,
+    lastUserActivityAt: 1_000,
     key,
   });
   const threads = [
@@ -137,7 +139,7 @@ describe("visibleThreads", () => {
 });
 
 describe("hasGateOutsideList", () => {
-  const t = (id: string): ThreadSummary => ({ id, sessionId: "s1", createdAt: 1_000, key: "web:1" });
+  const t = (id: string): ThreadSummary => ({ id, sessionId: "s1", createdAt: 1_000, lastUserActivityAt: 1_000, key: "web:1" });
 
   it("true when a gate's thread is missing from the active list (archived)", () => {
     expect(hasGateOutsideList([t("a")], new Set(["archived-thread"]))).toBe(true);
@@ -160,6 +162,7 @@ describe("untitledThreadLabel", () => {
     id,
     sessionId: "s1",
     createdAt,
+    lastUserActivityAt: createdAt,
     key: "web:1",
   });
 
@@ -179,5 +182,29 @@ describe("untitledThreadLabel", () => {
     const a = t("a", 1_700_000_000_000);
     const b = t("b", 1_700_086_400_000);
     expect(untitledThreadLabel(a, 2)).not.toBe(untitledThreadLabel(b, 3));
+  });
+});
+describe("sortThreads", () => {
+  const thread = (id: string, createdAt: number, lastUserActivityAt: number): ThreadSummary => ({
+    id,
+    sessionId: "s1",
+    createdAt,
+    lastUserActivityAt,
+    key: "web:1",
+  });
+
+  it("moves a user-updated older thread ahead without moving an agent-only thread", () => {
+    const agentThread = thread("agent", 2_000, 2_000);
+    const userThread = thread("user", 1_000, 3_000);
+    expect(sortThreads([agentThread, userThread], "last-user-activity").map((t) => t.id)).toEqual([
+      "user",
+      "agent",
+    ]);
+  });
+
+  it("preserves newest-first creation order when Created is selected", () => {
+    const older = thread("older", 1_000, 5_000);
+    const newer = thread("newer", 2_000, 2_000);
+    expect(sortThreads([older, newer], "created").map((t) => t.id)).toEqual(["newer", "older"]);
   });
 });
