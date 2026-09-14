@@ -945,7 +945,8 @@ export class ChannelHost {
 
     if (event.kind === "gate_callback") {
       const callback = event.gateCallback;
-      const key = callback?.gateId ?? `${callback?.ref.conversationKey ?? event.conversationKey}#${callback?.ref.messageId ?? ""}`;
+      const mappedGateId = callback ? this.gateForRef(callback.ref)?.gateId : undefined;
+      const key = mappedGateId ?? callback?.gateId ?? `${callback?.ref.conversationKey ?? event.conversationKey}#${callback?.ref.messageId ?? ""}`;
       await this.serializeGateCallback(key, () => this.handleGateCallback(transport, event, orgId, userId, channelType));
       return;
     }
@@ -1183,7 +1184,17 @@ export class ChannelHost {
       .where(eq(agentSessions.id, mapped.sessionId))
       .limit(1);
     const sessionRow = rows[0];
-    const workflow = sessionRow ? null : await this.workflowGateSession(mapped.sessionId, orgId, userId);
+    let workflow: Awaited<ReturnType<ChannelHost["workflowGateSession"]>> = null;
+    try {
+      workflow = sessionRow ? null : await this.workflowGateSession(mapped.sessionId, orgId, userId);
+    } catch (err) {
+      console.error("[channels] workflow gate resolve wake failed", err);
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        "Valet could not process this approval. Open the session in Valet to resolve it.",
+      );
+      return;
+    }
     if (!sessionRow && !workflow) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");

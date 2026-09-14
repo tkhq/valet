@@ -1031,11 +1031,32 @@ describe("ChannelHost outbound delivery", () => {
     expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.status).toBe("pending");
     expect(fakeTransport.answered.find((answer) => answer.callbackId === "forged-workflow-callback")?.text).toContain("already resolved");
 
-    await Promise.all(["workflow-callback-a", "workflow-callback-b"].map((callbackId) =>
+    const restoreFailure = vi.spyOn(engineHost, "workflowSessionFor").mockRejectedValueOnce(new Error("restore failed"));
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId: "approve", callbackId: "failed-workflow-callback", ref },
+    }));
+    restoreFailure.mockRestore();
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "failed-workflow-callback")?.text).toContain("Open the session");
+    expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.status).toBe("pending");
+
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      sessionId,
+      title: "Approve workflow action?",
+      gate: { id: "workflow-slack-approval", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+    });
+    const secondPrompt = fakeTransport.gatePrompts[1];
+    expect(secondPrompt).toBeDefined();
+    const secondRef = { conversationKey: secondPrompt?.conversationKey ?? "", messageId: secondPrompt?.messageId ?? "" };
+
+    await Promise.all(["workflow-callback-a", "workflow-callback-b"].map((callbackId, index) =>
       host.handleUpdate("fake", inbound({
         dispatchId: `fake:${randomUUID()}`,
         kind: "gate_callback",
-        gateCallback: { actionId: "approve", callbackId, ref },
+        gateCallback: { actionId: "approve", callbackId, ref: index === 0 ? ref : secondRef },
       })),
     ));
 
