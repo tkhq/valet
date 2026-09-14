@@ -1482,7 +1482,7 @@ export class Thread {
       })
       .then((resolution) => {
         this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
-          this.replayBlocked({ suspended, resolution, approvalReplay: toolApprovalGateContext(gate.context) !== null || isLegacyToolApprovalBody(gate.body) }),
+          this.replayBlocked({ suspended, resolution, approvalReplay: (suspended.preparedToolId !== undefined || suspended.preparedArgsDigest !== undefined) || toolApprovalGateContext(gate.context) !== null || isLegacyToolApprovalBody(gate.body) }),
         );
       })
       .catch((err) => {
@@ -3157,7 +3157,7 @@ export class Thread {
         this.replayBlocked({
           suspended,
           resolution,
-          approvalReplay: toolApprovalGateContext(gate.context) !== null || isLegacyToolApprovalBody(gate.body),
+          approvalReplay: (suspended.preparedToolId !== undefined || suspended.preparedArgsDigest !== undefined) || toolApprovalGateContext(gate.context) !== null || isLegacyToolApprovalBody(gate.body),
         }),
       );
     }
