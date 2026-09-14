@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, workflowRuns } from "../schema/index.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, teams, workflowRuns } from "../schema/index.js";
 import { CanonicalPolicyBundleManager, CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, migrateCanonicalPolicyReleaseSet, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
+import { currentPolicyCompatibilityReports } from "./policy-compatibility.js";
 
 let pg: TestPgDb | undefined;
 afterEach(async () => { await pg?.cleanup(); pg = undefined; });
@@ -41,6 +42,34 @@ describe("canonical policy readiness", () => {
       await db.insert(actionPolicies).values({ id: "rule", orgId: "org-a", principalType: "org", principalId: "org-a", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
       await expect(ensureCanonicalPolicyReadiness(manager)).rejects.toThrow(/stale/);
       expect(await manager.host.activePointer("org-a")).toEqual(first);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("ignores revoked incompatible org, team, personal, and config rows", async () => {
+    const db = await setup();
+    await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    await db.insert(teams).values({ id: "team-a", orgId: "org-a", name: "Team A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    const policy = { orgId: "org-a", mode: "deny" as const, appliesIn: "any" as const, origin: "admin" as const, createdAt: 1, updatedAt: 1 };
+    const revokePolicy = (id: string) => db.update(actionPolicies).set({ revokedAt: 2, updatedAt: 2 }).where(eq(actionPolicies.id, id));
+    const cases = [
+      { id: "org-bad", insert: () => db.insert(actionPolicies).values({ ...policy, id: "org-bad", principalType: "org", principalId: "org-a", actionId: "gmail.send", paramMatchers: [{ path: "to", op: "regex", value: "a|b" }] }), revoke: () => revokePolicy("org-bad") },
+      { id: "team-bad", insert: () => db.insert(actionPolicies).values({ ...policy, id: "team-bad", principalType: "team", principalId: "team-a", actionId: "gmail.send", paramMatchers: [{ path: "mail-to", op: "eq", value: "x" }] }), revoke: () => revokePolicy("team-bad") },
+      { id: "config-bad", insert: () => db.insert(actionPolicies).values({ ...policy, id: "config-bad", principalType: "org", principalId: "org-a", actionId: "gmail.send", managedBy: "config", paramMatchers: [{ path: "size", op: "gt", value: "10" }] }), revoke: () => revokePolicy("config-bad") },
+      { id: "personal-bad", insert: () => db.insert(actionPolicyOverrides).values({ id: "personal-bad", orgId: "org-a", userId: "user-a", actionId: "gmail.send", mode: "allow", paramMatchers: [{ path: "size", op: "gt", value: "10" }], createdAt: 1, updatedAt: 1 }), revoke: () => db.delete(actionPolicyOverrides).where(eq(actionPolicyOverrides.id, "personal-bad")) },
+    ];
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      for (const testCase of cases) {
+        await testCase.insert();
+        expect((await currentPolicyCompatibilityReports(db, new Map()))[0]?.compatible).toBe(false);
+        await expect(ensureCanonicalPolicyReadiness(manager)).rejects.toThrow();
+        await testCase.revoke();
+        expect((await currentPolicyCompatibilityReports(db, new Map()))[0]?.compatible).toBe(true);
+        expect((await manager.buildCurrent("org-a")).identity.sourceBundleDigest, testCase.id).toBe((await manager.host.activePointer("org-a"))?.sourceBundleDigest);
+        await expect(ensureCanonicalPolicyReadiness(manager), testCase.id).resolves.toBeUndefined();
+      }
+      expect(await db.select().from(actionPolicies)).toHaveLength(3);
     } finally { await manager.close(); }
   }, 120_000);
 

@@ -36,7 +36,7 @@ export function currentPolicyCompatibilityReport(snapshot: CurrentPolicySourceSn
   try {
     buildCurrentPolicySource(snapshot);
   } catch (error) {
-    const activeIds = rows.filter((row) => !("revokedAtMs" in row) || row.revokedAtMs === null).map((row) => row.id);
+    const activeIds = rows.filter((row) => row.revokedAtMs === undefined || row.revokedAtMs === null).map((row) => row.id);
     const aggregate = issue(activeIds, error);
     if (!issues.some((entry) => entry.reason === aggregate.reason && entry.ids.length === 1)) issues.push(aggregate);
   }
@@ -75,9 +75,9 @@ function utf8Compare(left: string, right: string): number {
 }
 
 function correctiveAction(reason: string): string {
-  if (reason === "non_lossless_path" || reason === "unsafe_path") return "Rewrite the matcher with dot keys and numeric bracket indexes, then retry preflight.";
-  if (reason === "non_lossless_regex" || reason === "unsafe_regex") return "Replace the regex with a lossless bounded pattern, then retry preflight.";
-  if (reason === "invalid_value") return "Use a JSON value of the type required by the matcher operator, then retry preflight.";
+  if (reason === "non_lossless_path" || reason === "unsafe_path") return "Rewrite the matcher path or revoke the row. Then retry preflight.";
+  if (reason === "non_lossless_regex" || reason === "unsafe_regex") return "Replace the regex or revoke the row. Then retry preflight.";
+  if (reason === "invalid_value") return "Correct the matcher value or revoke the row. Then retry preflight.";
   if (reason === "complexity_limit") return "Revoke or split active rules until the current policy limits are satisfied.";
   return "Correct or revoke the listed row, then retry canonical policy preflight.";
 }

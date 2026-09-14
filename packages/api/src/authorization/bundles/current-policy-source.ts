@@ -43,10 +43,10 @@ export class CurrentPolicySourceError extends Error {
 export function buildCurrentPolicySource(snapshot: CurrentPolicySourceSnapshotV1): BuiltCurrentPolicySourceV1 {
   validateSnapshot(snapshot);
   const rawRecords = [
-    ...snapshot.organizationPolicies.map((row) => normalizeRule(row, "organization", row.principalId)),
-    ...snapshot.teamPolicies.map((row) => normalizeRule(row, "team", row.principalId)),
-    ...snapshot.personalOverrides.map((row) => normalizeRule(row, "personal", row.userId)),
-  ].filter((row) => row.revokedAtMs === null);
+    ...snapshot.organizationPolicies.filter(activeRule).map((row) => normalizeRule(row, "organization", row.principalId)),
+    ...snapshot.teamPolicies.filter(activeRule).map((row) => normalizeRule(row, "team", row.principalId)),
+    ...snapshot.personalOverrides.filter(activeRule).map((row) => normalizeRule(row, "personal", row.userId)),
+  ];
   const rankById = new Map<string, number>();
   const owners = new Set(rawRecords.map((row) => `${row.ownerType}\0${row.ownerId}`));
   for (const owner of owners) {
@@ -214,61 +214,47 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     teamIds.add(teamId);
   }
   const rules = [...snapshot.organizationPolicies, ...snapshot.teamPolicies, ...snapshot.personalOverrides];
-  const liveRules = rules.filter((row) => !("revokedAtMs" in row) || row.revokedAtMs === null);
-  const liveRuleIds = new Set(liveRules.map((row) => row.id));
-  if (liveRules.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules) {
-    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules} active rules.`);
+  for (const row of rules) {
+    unique(ids, row.id);
+    if (row.organizationId !== snapshot.organizationId) fail("cross_organization", `Rule ${row.id} belongs to another organization.`);
+    validTimestamp(`${row.id}.createdAtMs`, row.createdAtMs);
+    validTimestamp(`${row.id}.updatedAtMs`, row.updatedAtMs);
+    if (row.updatedAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} was updated before it was created.`);
+    validateRevocation(row);
   }
+  for (const row of snapshot.organizationPolicies) {
+    if (row.principalType !== "org" || row.principalId !== snapshot.organizationId || row.sourceTable !== "action_policies") fail("invalid_ownership", `Organization rule ${row.id} has invalid ownership or source.`);
+    validatePolicyTimestamps(row);
+  }
+  for (const row of snapshot.teamPolicies) {
+    if (row.principalType !== "team" || !teamIds.has(row.principalId) || row.sourceTable !== "action_policies") fail("invalid_ownership", `Team rule ${row.id} has invalid ownership or source.`);
+    validatePolicyTimestamps(row);
+  }
+  for (const row of snapshot.personalOverrides) {
+    if (row.userId.length === 0 || row.sourceTable !== "action_policy_overrides") fail("invalid_ownership", `Personal override ${row.id} has invalid ownership or source.`);
+  }
+
+  const liveRules = rules.filter(activeRule);
+  if (liveRules.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules) fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules} active rules.`);
   let matcherCount = 0;
   let regexCount = 0;
   let matcherValueBytes = 0;
   let matcherValueNodes = 0;
-  for (const row of rules) {
-    unique(ids, row.id);
-    if (row.organizationId !== snapshot.organizationId) fail("cross_organization", `Rule ${row.id} belongs to another organization.`);
+  for (const row of liveRules) {
     validateTarget(row.id, row);
     validateMode(row.id, row.mode);
-    validTimestamp(`${row.id}.createdAtMs`, row.createdAtMs);
-    validTimestamp(`${row.id}.updatedAtMs`, row.updatedAtMs);
-    if (row.updatedAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} was updated before it was created.`);
+    if ("appliesIn" in row) validatePolicySemantics(row);
     const valueComplexity = validateMatchers(row.id, row.paramMatchers);
-    if (liveRuleIds.has(row.id)) {
-      if (row.paramMatchers.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) {
-        fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} active matchers.`);
-      }
-      matcherCount += row.paramMatchers.length;
-      regexCount += row.paramMatchers.filter((matcher) => matcher.op === "regex").length;
-      matcherValueBytes += valueComplexity.bytes;
-      matcherValueNodes += valueComplexity.nodes;
-    }
+    if (row.paramMatchers.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} active matchers.`);
+    matcherCount += row.paramMatchers.length;
+    regexCount += row.paramMatchers.filter((matcher) => matcher.op === "regex").length;
+    matcherValueBytes += valueComplexity.bytes;
+    matcherValueNodes += valueComplexity.nodes;
   }
   if (regexCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexMatchers) fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexMatchers} regex matchers.`);
-  if (matcherCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers) {
-    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers} matchers.`);
-  }
-  if (matcherValueBytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueBytes) {
-    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueBytes} matcher value bytes.`);
-  }
-  if (matcherValueNodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueNodes) {
-    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueNodes} matcher value nodes.`);
-  }
-  for (const row of snapshot.organizationPolicies) {
-    if (row.principalType !== "org" || row.principalId !== snapshot.organizationId || row.sourceTable !== "action_policies") {
-      fail("invalid_ownership", `Organization rule ${row.id} has invalid ownership or source.`);
-    }
-    validatePolicyLifetime(row);
-  }
-  for (const row of snapshot.teamPolicies) {
-    if (row.principalType !== "team" || !teamIds.has(row.principalId) || row.sourceTable !== "action_policies") {
-      fail("invalid_ownership", `Team rule ${row.id} has invalid ownership or source.`);
-    }
-    validatePolicyLifetime(row);
-  }
-  for (const row of snapshot.personalOverrides) {
-    if (row.userId.length === 0 || row.sourceTable !== "action_policy_overrides") {
-      fail("invalid_ownership", `Personal override ${row.id} has invalid ownership or source.`);
-    }
-  }
+  if (matcherCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers) fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers} matchers.`);
+  if (matcherValueBytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueBytes) fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueBytes} matcher value bytes.`);
+  if (matcherValueNodes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueNodes) fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatcherValueNodes} matcher value nodes.`);
   for (const [index, row] of liveRules.entries()) {
     for (const other of liveRules.slice(index + 1)) {
       if (rulesCanTie(row, other)) {
@@ -304,16 +290,20 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   nonEmpty("bundleDefault.sourcePath", snapshot.bundleDefault.sourcePath);
 }
 
-function validatePolicyLifetime(row: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number]): void {
+type SnapshotRule = CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number] | CurrentPersonalOverrideV1;
+function activeRule(row: SnapshotRule): boolean { return row.revokedAtMs === undefined || row.revokedAtMs === null; }
+function validateRevocation(row: SnapshotRule): void {
+  if (row.revokedAtMs === undefined || row.revokedAtMs === null) return;
+  validTimestamp(`${row.id}.revokedAtMs`, row.revokedAtMs);
+  if (row.revokedAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} is revoked before creation.`);
+}
+function validatePolicyTimestamps(row: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number]): void {
+  if (row.expiresAtMs === null) return;
+  validTimestamp(`${row.id}.expiresAtMs`, row.expiresAtMs);
+  if (row.expiresAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} expires before creation.`);
+}
+function validatePolicySemantics(row: CurrentPolicySourceSnapshotV1["organizationPolicies"][number] | CurrentPolicySourceSnapshotV1["teamPolicies"][number]): void {
   if (!APPLIES_IN.has(row.appliesIn)) fail("invalid_applies_in", `Rule ${row.id} has an invalid appliesIn value.`);
-  if (row.expiresAtMs !== null) {
-    validTimestamp(`${row.id}.expiresAtMs`, row.expiresAtMs);
-    if (row.expiresAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} expires before creation.`);
-  }
-  if (row.revokedAtMs !== null) {
-    validTimestamp(`${row.id}.revokedAtMs`, row.revokedAtMs);
-    if (row.revokedAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} is revoked before creation.`);
-  }
 }
 
 function validateGrant(grant: CurrentRuntimeGrantSourceV1, organizationId: string): void {

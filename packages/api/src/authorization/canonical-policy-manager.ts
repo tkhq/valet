@@ -43,7 +43,14 @@ export async function currentPolicySnapshot(db: AppQueryable, organizationId: st
     })),
     pluginDefaults,
   };
-  return { ...base, ...source, sourceRevision: revision(source) } as CurrentPolicySourceSnapshotV1;
+  const activeTeamPolicies = source.teamPolicies.filter((row) => row.revokedAtMs === null);
+  const activeSource = {
+    ...source,
+    teamIds: [...new Set(activeTeamPolicies.map((row) => row.principalId))].sort(),
+    organizationPolicies: source.organizationPolicies.filter((row) => row.revokedAtMs === null),
+    teamPolicies: activeTeamPolicies,
+  };
+  return { ...base, ...source, sourceRevision: revision(activeSource) } as CurrentPolicySourceSnapshotV1;
 }
 
 export interface CanonicalPolicyMutationContext {

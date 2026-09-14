@@ -46,9 +46,12 @@ DATABASE_URL="$DATABASE_URL" pnpm --filter @valet/api policy:compatibility > can
 
 The command must exit zero and every organization report must have `"compatible": true`. The report contains row IDs and corrective actions, but no policy evaluation or matcher values.
 
-5. Stop if any required check or compatibility report fails.
-6. Create a database backup with the approved platform procedure.
-7. Record all active policy pointers.
+A revoked policy row does not block preflight. Remove a personal override to revoke it. Preflight still checks each tombstone's tenant, identity, source, and timestamps.
+
+5. If a listed row is obsolete, revoke it and run preflight again.
+6. Stop if any required check or compatibility report fails.
+7. Create a database backup with the approved platform procedure.
+8. Record all active policy pointers.
 
 ```bash
 psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --csv \
@@ -56,7 +59,7 @@ psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --csv \
   > canonical-policy-pointers-before.csv
 ```
 
-8. Confirm that every organization has one active pointer and stored bundle.
+9. Confirm that every organization has one active pointer and stored bundle.
 
 ```bash
 psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --tuples-only --no-align <<'SQL'
@@ -70,7 +73,7 @@ SQL
 
 The command must print `0`.
 
-9. When the release contract changes, start an isolated candidate with `VALET_POLICY_RELEASE_MIGRATION=<release-id>`.
+10. When the release contract changes, start an isolated candidate with `VALET_POLICY_RELEASE_MIGRATION=<release-id>`.
 
 The pre-listen migration takes a global advisory lock. It validates every replacement before it updates any pointer. It preserves authored policy files byte-for-byte.
 
@@ -80,13 +83,13 @@ The migration preserves parked workflow approval nodes. When an operator resolve
 
 Concurrent candidates can use the same release identifier. A candidate with a different identifier fails if another candidate changes the release set while it waits.
 
-10. Remove the variable after the migration succeeds.
-11. Start one candidate API process against the release database in the approved isolated environment.
-12. Stop if canonical policy readiness prevents startup.
-13. Confirm that the process reports healthy only after readiness completes.
-14. Stop the isolated process.
-15. Compare active pointers with `canonical-policy-pointers-before.csv`.
-16. Investigate every pointer change before release approval.
+11. Remove the variable after the migration succeeds.
+12. Start one candidate API process against the release database in the approved isolated environment.
+13. Stop if canonical policy readiness prevents startup.
+14. Confirm that the process reports healthy only after readiness completes.
+15. Stop the isolated process.
+16. Compare active pointers with `canonical-policy-pointers-before.csv`.
+17. Investigate every pointer change before release approval.
 
 Readiness can add a missing initial pointer. It must not replace a stale or invalid pointer.
 
