@@ -463,6 +463,33 @@ describe("queue: abort", () => {
     faux.unregister();
   });
 
+  it("does not start a cancelled turn after async model resolution completes", async () => {
+    const faux = registerFauxProvider({ provider: "abort-during-model-resolution" });
+    faux.setResponses([fauxAssistantMessage("kept")]);
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    let resolving = false;
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModel: async () => {
+        resolving = true;
+        await pending;
+        return { model: faux.getModel() };
+      },
+    });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await waitFor(() => resolving);
+    const kept = await thread.submitPrompt("keep", {});
+    await thread.abortSubmission(cancelled.queueItemId);
+    release();
+    await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled");
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
   it("cancels a running submission while allowing its queued successor to finish", async () => {
     const faux = registerFauxProvider({ provider: "abort-one-running", tokensPerSecond: 20 });
     faux.setResponses([fauxAssistantMessage("first response is deliberately slow and long"), fauxAssistantMessage("kept")]);

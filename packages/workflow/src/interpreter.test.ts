@@ -381,6 +381,7 @@ describe('driveUntilPark: cancel signal', () => {
     expect(park.status).toBe('settled');
     expect(park.outcome).toBe('cancelled');
     expect(engine.abortCalls).toEqual([{ sessionId: 'session-1', threadId: 'thread-1' }]);
+    expect(engine.abort).toHaveBeenCalledWith('session-1', 'thread-1', 'queue-1');
   });
 });
 
@@ -753,6 +754,7 @@ describe('driveUntilPark: terminate does not leak in-flight submissions', () => 
     expect(park.status).toBe('settled');
     expect(park.outcome).toBe('completed');
     expect(engine.abortCalls).toEqual([{ sessionId: 'session-leaked', threadId: 'thread-leaked' }]);
+    expect(engine.abort).toHaveBeenCalledWith('session-leaked', 'thread-leaked', 'queue-leaked');
   });
 });
 

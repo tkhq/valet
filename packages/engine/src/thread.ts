@@ -1210,9 +1210,14 @@ export class Thread {
   /** Cancel one submission without aborting other work on this thread. */
   async abortSubmission(queueItemId: string): Promise<void> {
     const store = this.session.providers.store;
+    // Mark the live item before I/O so a stale store read cannot start it.
+    if (this.runningItem?.id === queueItemId) this.runningItem.abortRequestedAt ??= Date.now();
     await store.requestAbort(this.session.id, this.id, queueItemId);
     const running = this.runningItem?.id === queueItemId;
-    if (running) this.agent.abort();
+    if (running && this.runningItem) {
+      this.runningItem.abortRequestedAt ??= Date.now();
+      this.agent.abort();
+    }
     for (const gate of this.pendingDecisionGates()) {
       if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, "abort");
     }
@@ -3295,7 +3300,8 @@ export class Thread {
       // Host resolver (if any) delivers this resumed turn's per-turn key before
       // the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(item);
-      if (await this.publishActiveModelState(item.id, this.agent.state.model)) {
+      if (await this.publishActiveModelState(item.id, this.agent.state.model) &&
+          await this.canRunCurrentSubmission()) {
         await this.agent.continue();
         await this.agent.waitForIdle();
       }
@@ -3616,6 +3622,7 @@ export class Thread {
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
+    if (!(await this.canRunCurrentSubmission())) return;
 
     // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
     // start of the claimed turn, in parallel with the LLM call — never at
@@ -3651,6 +3658,11 @@ export class Thread {
       }
       await this.appendUserEntry(item);
       throw err;
+    }
+
+    if (!(await this.canRunCurrentSubmission())) {
+      this.turnApiKey = undefined;
+      return;
     }
 
     // Apply the turn model (resolved above) BEFORE the role overlay so a
@@ -3881,6 +3893,17 @@ export class Thread {
     }
   }
 
+  /** Recheck durable cancellation after asynchronous turn setup or recovery. */
+  private async canRunCurrentSubmission(): Promise<boolean> {
+    if (this.aborted) return false;
+    const running = this.runningItem;
+    if (!running) return true;
+    const item = await this.session.providers.store.getQueueItem(this.session.id, running.id);
+    return this.runningItem === running && running.abortRequestedAt === undefined &&
+      !!item && item.status === "running" &&
+      item.abortRequestedAt === undefined && !item.supersededByItemId;
+  }
+
   /**
    * Run one prompt cycle. On context-overflow error, compact and retry once.
    *
@@ -3898,6 +3921,7 @@ export class Thread {
     attachments?: MessageEntry["attachments"],
     sender?: PromptAuthor,
   ): Promise<void> {
+    if (!(await this.canRunCurrentSubmission())) return;
     const content = userContentBlocks(text, attachments, sender);
     await this.agent.prompt({
       role: "user",

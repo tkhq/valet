@@ -301,3 +301,6 @@ The store writes abort intent using the session, thread, and queue-item IDs.
 Only the matching running turn is interrupted, and only its pending gates are withdrawn.
 Queued targets settle without running. Other submissions retain their state and continue in FIFO order.
 The existing thread-wide abort remains available for session and thread cancellation.
+
+The engine rechecks durable abort intent after asynchronous model resolution and before starting or resuming a model call.
+Cancellation during turn setup must not start new provider work after the setup resolves.

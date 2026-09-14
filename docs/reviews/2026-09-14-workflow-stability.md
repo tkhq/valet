@@ -78,10 +78,23 @@ Focused checks on this branch:
 
 Overlapping runs of one workflow now share FIFO execution and conversation context. Different workflows retain separate threads.
 
-The full `make e2e` run is in progress. Its complete local log is `/tmp/workflow-stability-e2e.log`.
+The completed full `make e2e` run reported 22 passed, 4 failed, and 9 skipped. Its complete local log is `/tmp/workflow-stability-e2e.log`.
 The baseline had a macOS `/bin/tar` failure, a CLI harness `tsx` path failure, and two Kubernetes transport assertions.
 The current full unit sweep had two GitHub fixture failures; both suites passed the isolated 107-test rerun.
 A baseline child-dismiss failure passed an isolated rerun. These do not yet constitute a clean local scorecard.
 
 An attempted independent review agent was blocked by automatic safety review with “Potentially unintended activity.”
 The agent was not retried. The new thread patch still requires independent review before merge.
+
+## Review follow-up
+
+The code review found a cancellation race during asynchronous model resolution.
+A cancelled turn could start a model call after resolution returned.
+A deterministic test reproduced the problem before the repair.
+The engine now marks the live submission and rechecks durable abort intent before starting or resuming provider work.
+The regression passes after the repair.
+Cancel, stop, and foreach tests also assert the queue-item ID passed to the adapter.
+
+Post-repair focused checks: 40 engine queue/gate tests and 38 workflow cancellation/foreach tests passed.
+The isolated Kubernetes binary round-trip test still fails; this is unchanged code and reproduced in the prior baseline.
+The local end-to-end requirement remains unsatisfied. Do not treat green hosted checks as a clean local scorecard.
