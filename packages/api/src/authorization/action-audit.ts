@@ -24,6 +24,7 @@ export interface DecisionAuditEvidenceV1 {
   readonly contractDigest: string;
   readonly decisionDigest: string;
   readonly obligationDigest: string;
+  readonly request: AuthorizationRequest;
 }
 export interface DecisionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationDecisionRow; readonly evidence: DecisionAuditEvidenceV1 }
 
@@ -69,10 +70,10 @@ export function buildDecisionAuditPlan(input: {
     proofVerificationStatus: verification?.status ?? "not_required", proofVerifiedAt: verification?.atMs ?? null,
     proofVerificationError: verification?.errorCode ? safeCode(verification.errorCode) : null,
     identityFactProvenance: identityFactProvenance.map(copy), policyFactProvenance: policyFactProvenance.map(copy),
-    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest },
+    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, request: copy(request) },
     evaluatedAt: envelope.evaluatedAtMs, createdAt: input.createdAtMs,
   };
-  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest } });
+  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, request: copy(request) } });
 }
 
 export interface ExecutionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationExecutionAttemptRow; readonly requestSubjectDigest: string; readonly resultDigest: string | null }

@@ -93,7 +93,7 @@ export function authorizationServicePolicyResolver(service: CanonicalAuthorizati
     } catch (error) {
       const reported = record(error) && typeof error.code === "string" ? error.code : "";
       const code: AuthorizationAdapterFailureCode = error instanceof AuthorizationAdapterError ? error.code : reported === "bundle_not_found" ? "bundle_not_found" : reported === "unsupported_context" ? "unsupported_context" : "service_error";
-      return deepFreeze({ mode: "deny", provenance: { baseMode: "deny", source: "resolver_error" }, canonical: { reasonCode: `fail_closed.${code}`, obligations: [], redactions: [], requestId: "unavailable", requestSubjectDigest: "0".repeat(64), inputDigest: "0".repeat(64), policyDigest: "0".repeat(64), sourceBundleDigest: "0".repeat(64), evaluatorKind: "local_valet", engineDigest: "0".repeat(64), decisionDigest: "0".repeat(64) } });
+      return deepFreeze({ mode: "deny", provenance: { baseMode: "deny", source: "resolver_error" }, canonical: { reasonCode: `fail_closed.${code}`, obligations: [], redactions: [], requestId: "unavailable", requestSubjectDigest: "0".repeat(64), inputDigest: "0".repeat(64), policyDigest: "0".repeat(64), sourceBundleDigest: "0".repeat(64), evaluatorKind: "local_valet", engineDigest: "0".repeat(64), profileDigest: "0".repeat(64), interpreterDigest: "0".repeat(64), contractDigest: "0".repeat(64), decisionDigest: "0".repeat(64) } });
     }
   } };
 }

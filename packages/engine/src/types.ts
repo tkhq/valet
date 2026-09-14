@@ -1050,6 +1050,9 @@ export interface PolicyDecision {
     sourceBundleDigest: string;
     evaluatorKind: import("./authorization/types.js").EvaluatorIdentity["kind"];
     engineDigest: string;
+    profileDigest?: string;
+    interpreterDigest?: string;
+    contractDigest?: string;
     decisionDigest: string;
     /** Binds durable dispatch to the exact engine execution input. */
     executionInputDigest?: string;

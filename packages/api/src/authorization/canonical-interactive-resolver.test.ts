@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { pluginCatalogTools, type ActionPlugin, type CredentialProvider, type PolicyResolveInput, type Sandbox, type ToolContext, type ValetPlugin } from "@valet/engine";
+import { pluginCatalogTools, type ActionPlugin, type CredentialProvider, type PolicyDecision, type PolicyResolveInput, type Sandbox, type ToolContext, type ValetPlugin } from "@valet/engine";
 import {
   actionInvocations,
   actionPolicies,
@@ -38,15 +38,28 @@ describe("canonicalInteractivePolicyResolver", () => {
     try {
       await manager.ensureOrganizationReady("org-1");
       let clock = 30;
-      const resolver = canonicalInteractivePolicyResolver({ db: pg.appDb, service: await CanonicalAuthorizationService.create(manager, () => 20), plugins: map, clock: () => clock });
+      const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const restart = () => canonicalInteractivePolicyResolver({ db: pg!.appDb, service, plugins: map, clock: () => clock });
+      const resolver = restart();
       const pending = await resolver.resolve(input("critical")); expect(pending.mode).toBe("require_approval");
-      await resolver.onResolution!(input("critical"), pending, { actionId: "approve", resolvedBy: "user-2", resolvedAt: 31, gateOrdinal: 1 });
+      const replayedBeforeResolution = await restart().resolve(input("critical"));
+      expect(replayedBeforeResolution.canonical).toEqual(pending.canonical);
+      await expect(restart().onResolution!({ ...input("critical"), params: { value: "changed" } }, replayedBeforeResolution, { actionId: "approve", resolvedBy: "user-2", resolvedAt: 31, gateOrdinal: 1 })).rejects.toThrow("decision identity is invalid");
+      const equivalentRetry = { ...input("critical"), queueItemId: "queue-2" };
+      const retryPending = await restart().resolve(equivalentRetry);
+      expect(retryPending.mode).toBe("require_approval");
+      expect(retryPending.canonical?.decisionId).not.toBe(pending.canonical?.decisionId);
+      await restart().onResolution!(input("critical"), replayedBeforeResolution, { actionId: "approve", resolvedBy: "user-2", resolvedAt: 31, gateOrdinal: 1 });
+      await restart().onResolution!(input("critical"), replayedBeforeResolution, { actionId: "approve", resolvedBy: "user-2", resolvedAt: 31, gateOrdinal: 1 });
       clock = 32;
-      const allowed = await resolver.resolve(input("critical")); expect(allowed.mode).toBe("allow");
+      const allowed = await restart().resolve(input("critical")); expect(allowed.mode).toBe("allow");
       expect(await pg.appDb.select().from(canonicalApprovalResolutions)).toHaveLength(1);
       expect(await pg.appDb.select().from(authorizationExecutionAttempts)).toHaveLength(0);
       expect((await resolver.reserveExecution!(input("critical"), allowed)).kind).toBe("execute");
       expect(await pg.appDb.select().from(authorizationExecutionAttempts)).toHaveLength(1);
+      clock = 31 + 72 * 60 * 60 * 1000;
+      expect((await restart().resolve(input("critical"))).mode).toBe("require_approval");
+      expect(await pg.appDb.select().from(canonicalApprovalResolutions)).toHaveLength(1);
     } finally { await manager.close(); }
   }, 120_000);
 
@@ -209,8 +222,8 @@ describe("canonicalInteractivePolicyResolver", () => {
   it.each([
     ["deny", false, 0, 0, 0, 0],
     ["approve", false, 1, 0, 0, 0],
-    ["approve_session", false, 0, 1, 0, 0],
-    ["always_allow", false, 0, 0, 1, 1],
+    ["approve_session", false, 1, 1, 0, 0],
+    ["always_allow", false, 1, 0, 1, 1],
     ["malformed", true, 0, 0, 0, 0],
   ] as const)(
     "applies resolution %s with only its required mutation",
@@ -246,4 +259,87 @@ describe("canonicalInteractivePolicyResolver", () => {
     },
     120_000,
   );
+});
+
+describe("canonical interactive restart lifecycle", () => {
+  it("keeps the original approval identity across an engine and thread restart", async () => {
+    const { fauxAssistantMessage, fauxToolCall, registerFauxProvider } = await import("@earendil-works/pi-ai/compat");
+    const { Engine, InMemoryCredentialStore, InMemoryEventStream, VirtualSandboxProvider } = await import("@valet/engine");
+    const { PgSessionStore } = await import("@valet/store-postgres");
+    pg = await freshTestPgDb();
+    await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    const execute = vi.fn(async () => ({ success: true, data: "executed" }));
+    const actionPlugin: ActionPlugin = {
+      service: "github",
+      safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
+      actions: [{ id: "github.merge_pull_request", name: "Merge", description: "Merge", riskLevel: "critical", parameters: Type.Object({ value: Type.String() }), execute }],
+    };
+    const plugin = { name: "github", version: "1", actions: [actionPlugin] } as ValetPlugin;
+    const map = new Map([["github", { plugin, actionPlugin }]]);
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, map, () => 10);
+    const store = new PgSessionStore(pg.pgdb);
+    const sandboxProvider = new VirtualSandboxProvider();
+    const credentials = new InMemoryCredentialStore();
+    const optionsFor = (model: NonNullable<ReturnType<ReturnType<typeof registerFauxProvider>["getModel"]>>, resolver: ReturnType<typeof canonicalInteractivePolicyResolver>) => ({
+      userId: "user-1", orgId: "org-1", workspace: "/", sandbox: {}, model,
+      tools: pluginCatalogTools({ plugins: [actionPlugin] }), policyResolver: resolver, credentials,
+    });
+    try {
+      await manager.ensureOrganizationReady("org-1");
+      const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const firstResolver = canonicalInteractivePolicyResolver({ db: pg.appDb, service, plugins: map, clock: () => 30 });
+      const first = registerFauxProvider({ provider: "canonical-gate-before-restart" });
+      first.setResponses([fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "github.merge_pull_request", params: { value: "x" }, summary: "merge" }, { id: "old-tool-call" })], { stopReason: "toolUse" })]);
+      const firstBus = new InMemoryEventStream();
+      const firstEngine = new Engine({ providers: { store, stream: firstBus, sandboxProvider } });
+      const firstModel = first.getModel();
+      if (!firstModel) throw new Error("missing first faux model");
+      const session = await firstEngine.createSession({ id: "approval-restart", ...optionsFor(firstModel, firstResolver) });
+      const gate = await new Promise<import("@valet/engine").DecisionGate>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("approval gate timeout")), 5_000);
+        const unsubscribe = firstBus.subscribe({}, (event) => {
+          if (event.event.type === "decision_gate") { clearTimeout(timeout); unsubscribe(); resolve(event.event.gate); }
+        });
+        void session.prompt("merge");
+      });
+      const original = (await pg.appDb.select().from(authorizationDecisions))[0]!;
+      first.unregister();
+
+      const restartedResolver = canonicalInteractivePolicyResolver({ db: pg.appDb, service, plugins: map, clock: () => 33 });
+      const onResolution = restartedResolver.onResolution!.bind(restartedResolver);
+      let replayedDecision: PolicyDecision | undefined;
+      restartedResolver.onResolution = async (resolveInput, decision, resolution) => {
+        replayedDecision = decision;
+        await onResolution(resolveInput, decision, resolution);
+      };
+      const second = registerFauxProvider({ provider: "canonical-gate-after-restart" });
+      second.setResponses([fauxAssistantMessage("done")]);
+      const secondBus = new InMemoryEventStream();
+      const secondEngine = new Engine({ providers: { store, stream: secondBus, sandboxProvider } });
+      const secondModel = second.getModel();
+      if (!secondModel) throw new Error("missing second faux model");
+      const restored = await secondEngine.restoreSession({ sessionId: "approval-restart", options: optionsFor(secondModel, restartedResolver) });
+      await restored.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "user-1", resolvedAt: 32 });
+      const suspended = await store.getSuspendedTurn("approval-restart", gate.threadId);
+      const queueItemId = suspended?.queueItemId ?? gate.queueItemId;
+      for (let attempt = 0; attempt < 1_000 && (await store.getQueueItem("approval-restart", queueItemId))?.status !== "settled"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      expect(replayedDecision?.canonical).toMatchObject({
+        decisionId: original.decisionId,
+        requestSubjectDigest: original.requestSubjectDigest,
+        inputDigest: original.inputDigest,
+        policyDigest: original.policyDigest,
+        sourceBundleDigest: original.sourceBundleDigest,
+        engineDigest: original.evaluatorEngineDigest,
+        decisionDigest: original.evidence?.decisionDigest,
+        profileDigest: original.evidence?.profileDigest,
+        interpreterDigest: original.evidence?.interpreterDigest,
+        contractDigest: original.evidence?.contractDigest,
+      });
+      expect(execute).toHaveBeenCalledOnce();
+      expect(await pg.appDb.select().from(canonicalApprovalResolutions)).toHaveLength(1);
+      expect(await pg.appDb.select().from(authorizationExecutionAttempts)).toHaveLength(1);
+      second.unregister();
+    } finally { await manager.close(); }
+  }, 120_000);
 });

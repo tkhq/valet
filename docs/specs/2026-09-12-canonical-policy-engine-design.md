@@ -897,7 +897,7 @@ An interactive `call_tool` request and a workflow tool node use the same service
 
 ### Approval replay
 
-A critical action returns `require_approval`. Valet persists the decision and gate. A user approves once. Valet re-evaluates with a fact bound to the original subject. The process restarts before execution. The repeated request returns the stored post-approval decision. A request with one changed parameter has a different subject and does not reuse the approval.
+A critical action returns `require_approval`. Valet persists the decision and gate. A user approves once. Valet re-evaluates with a fact bound to the original subject. The process restarts before execution. The repeated request returns the stored post-approval decision. A request with one changed parameter has a different subject and does not reuse the approval. A restart before resolution persistence replays the exact original request and decision evidence. The approval binding includes the input, policy, engine, profile, interpreter, contract, and source bundle digests. Rolled-back releases read and mutate only `tool.action` policy rows. They ignore later `tool.builtin` rows.
 
 ### Resource and delegation access
 
