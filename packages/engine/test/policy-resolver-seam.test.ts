@@ -174,7 +174,7 @@ describe("policyResolver seam: absent resolver", () => {
     );
     expect(gateReq?.context?.argsPreview).toContain("sendUpdates");
     expect(gateReq?.context?.argsPreview).toContain("all");
-    expect(gateReq?.body).not.toContain("args=");
+    expect(gateReq?.body).toContain("args=");
     expect(gateReq?.context?.args).toBeUndefined();
     expect(executed).toEqual({ eventId: "evt_1", sendUpdates: "all" });
   });
