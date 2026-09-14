@@ -42,6 +42,42 @@ describe("CanonicalAuthorizationService", () => {
     } finally { await manager.close(); }
   }, 120_000);
 
+  it("stores only digest evidence for large allow, deny, and approval inputs", async () => {
+    pg = await freshTestPgDb();
+    await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    await pg.appDb.insert(actionPolicies).values({ id: "deny-large", orgId: "org-1", principalType: "org", principalId: "org-1", actionId: "gmail.deny_large", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, new Map(), () => 10);
+    try {
+      await manager.ensureOrganizationReady("org-1");
+      const service = await CanonicalAuthorizationService.create(manager, () => 200);
+      const large = (effect: string) => `CANARY-${effect}-${"x".repeat(60 * 1024)}`;
+      const authorize = async (effect: "allow" | "deny" | "gate", riskLevel: "low" | "high") => {
+        const adapted = adaptInteractiveAction({
+          schemaVersion: 1, organizationId: "org-1", actor: { type: "user", id: "user-1" }, owner: { type: "user", id: "user-1" }, requestId: `request-${effect}`,
+          sessionId: "session-1", threadId: "thread-1", queueItemId: `queue-${effect}`, resumeKey: `resume-${effect}`, gateOrdinal: 0,
+          action: { service: "gmail", actionId: effect === "deny" ? "gmail.deny_large" : `gmail.${effect}_large`, catalogActionId: effect === "deny" ? "gmail.deny_large" : `gmail.${effect}_large`, sourcePluginService: "gmail", sourceActionId: effect === "deny" ? "gmail.deny_large" : `gmail.${effect}_large`, sourceToolId: "call_tool", riskLevel, parameters: { value: large(effect) }, parameterProjection: { schemaVersion: 1, mode: "all_safe" } },
+          evaluationTimeMs: 100, dynamicFacts: {},
+        });
+        return service.authorize(adapted.request);
+      };
+      expect((await authorize("allow", "low")).decision.effect).toBe("allow");
+      expect((await authorize("deny", "low")).decision.effect).toBe("deny");
+      expect((await authorize("gate", "high")).decision.effect).toBe("require_approval");
+
+      const rows = await pg.appDb.select().from(authorizationDecisions);
+      expect(rows).toHaveLength(3);
+      const stored = JSON.stringify(rows);
+      for (const effect of ["allow", "deny", "gate"]) {
+        expect(stored).not.toContain(`CANARY-${effect}-`);
+        expect(stored).not.toContain(large(effect));
+      }
+      expect(rows.find((row) => row.effect === "allow")?.evidence).not.toHaveProperty("approvalReplay");
+      expect(rows.find((row) => row.effect === "deny")?.evidence).not.toHaveProperty("approvalReplay");
+      expect(rows.find((row) => row.effect === "require_approval")?.evidence?.approvalReplay).toEqual({ evaluationTimeMs: 100 });
+      for (const row of rows) expect(row.evidence).not.toHaveProperty("request");
+    } finally { await manager.close(); }
+  }, 120_000);
+
   it.each([
     ["blocks a broad service allow for an absent org action", "org", { actionId: "future.hidden" }, { service: "future" }, null, false],
     ["blocks a broad risk allow for an absent team action", "team", { actionId: "future.hidden" }, { riskLevel: "high" }, null, false],

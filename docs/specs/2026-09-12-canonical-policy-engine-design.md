@@ -698,13 +698,13 @@ A decision can include typed obligations. Initial obligations can require an app
 
 The enforcement point must understand every obligation before it acts. An unknown, malformed, or unfulfilled obligation changes the effective result to deny. The evaluator does not return executable code as an obligation.
 
-Redaction occurs before persistence and telemetry export. Audit records retain canonical digests even when raw fields are removed. Valet stores raw sensitive inputs only where an existing product requirement needs them and an explicit retention rule permits them. Proof envelopes never include credential secrets or raw tool parameters.
+Redaction occurs before persistence and telemetry export. Audit records retain canonical digests after Valet removes raw fields. Decision rows never store raw requests or projected action parameters. The owning queue item retains tool input under its existing retention policy. Proof envelopes never include credential secrets or raw tool parameters.
 
 ## Audit model
 
 Valet stores decision and execution records separately.
 
-A decision record contains request ID, idempotency key, request subject digest, input digest, policy digest, evaluator identity, effect, reason code, matched rule IDs, obligations, approval requirement, proof material, and verification result. It also records whether identity and policy facts were host-asserted or rooted in a trusted issuer.
+A decision record contains request ID, idempotency key, request subject digest, input digest, policy digest, evaluator identity, effect, reason code, matched rule IDs, obligations, approval requirement, proof material, and verification result. It also records whether identity and policy facts were host-asserted or rooted in a trusted issuer. For an approval decision, evidence retains only the original evaluation time needed for strict digest reconstruction. It does not retain the request or parameters.
 
 An execution record contains decision record ID, attempt ID, start and finish times, outcome, target idempotency key, redacted result or error, and external operation identifiers. `allowed` is not an execution outcome. `completed` is not a policy decision.
 
@@ -897,7 +897,7 @@ An interactive `call_tool` request and a workflow tool node use the same service
 
 ### Approval replay
 
-A critical action returns `require_approval`. Valet persists the decision and gate. A user approves once. Valet re-evaluates with a fact bound to the original subject. The process restarts before execution. The repeated request returns the stored post-approval decision. A request with one changed parameter has a different subject and does not reuse the approval. A restart before resolution persistence replays the exact original request and decision evidence. The approval binding includes the input, policy, engine, profile, interpreter, contract, and source bundle digests. Rolled-back releases read and mutate only `tool.action` policy rows. They ignore later `tool.builtin` rows.
+A critical action returns `require_approval`. Valet persists the decision and gate. A user approves once. Valet re-evaluates with a fact bound to the original subject. The process restarts before execution. The repeated request returns the stored post-approval decision. A request with one changed parameter has a different subject and does not reuse the approval. Before resolution persistence, the resolver reconstructs the request from the owning queue item. It rebinds only after the request ID, idempotency key, subject digest, and input digest match the original decision. The approval binding includes the input, policy, engine, profile, interpreter, contract, and source bundle digests. Decision evidence does not store the raw request or projected parameters. Rolled-back releases read and mutate only `tool.action` policy rows. They ignore later `tool.builtin` rows.
 
 ### Resource and delegation access
 
@@ -955,6 +955,6 @@ The adapter uses one browser-safe validator for the #679 dynamic fact tuples. It
 
 The current action obligation plan supports only credential-owner requirements, target idempotency, and post-execution redaction. Other obligations remain unsupported for action cutover and fail closed. Approval plans bind the request, subject, input, policy, decision, source bundle, evaluator engine, profile, interpreter, contract, action, principal, actor, session or workflow, replay rule, approver, and expiry. Dynamic approval facts remain separate request facts.
 
-Pure audit builders produce the existing decision and execution row shapes. A decision plan carries profile, interpreter, contract, decision, and obligation digests beside its row because PR 8 cannot change the database schema. PR 9 must preserve this evidence when it adds persistence. An execution plan links one stored decision and stores only result digests and fixed error summaries.
+Pure audit builders produce the existing decision and execution row shapes. A decision plan carries profile, interpreter, contract, decision, and obligation digests beside its row. A gated decision also carries its non-content evaluation time for restart reconstruction. The evidence never stores the request or projected parameters. An execution plan links one stored decision and stores only result digests and fixed error summaries.
 
 All PR 8 adapters are inert. Production plugin catalog, tool bridge, action invoker, workflow execution, approval dispatch, and audit persistence do not import or call them. PR 9 owns construction, injection, evaluator calls, durable reservation, and cutover.

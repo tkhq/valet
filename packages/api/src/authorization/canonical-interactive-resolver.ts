@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { authorizationSha256Hex, canonicalAuthorizationJson, decisionDigestOf, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { authorizationSha256Hex, canonicalAuthorizationJson, decisionDigestOf, inputDigestOf, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { DecisionResolution, PluginActionResult, PolicyDecision, PolicyExecutionSettlement, PolicyResolveInput, PolicyResolver } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions, type AuthorizationDecisionRow } from "../schema/index.js";
@@ -24,19 +24,25 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
     if (!input.orgId || !input.userId || !input.queueItemId || !input.resumeKey || !input.owner) throw new Error("Canonical interactive authorization context is incomplete.");
     if (!opts.plugins.has(input.service)) throw new Error("Canonical interactive service is not registered.");
     if (!input.parameterProjection) throw new Error("Canonical interactive action has no safe-parameter projection.");
-    const common = { service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, params: input.params, projection: input.parameterProjection, context: { userId: input.userId, orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, owner: input.owner, queueItemId: input.queueItemId }, requestId: input.queueItemId, resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal ?? 0, evaluationTimeMs: now() };
-    const initial = adaptResolvedPluginCatalogAction({ ...common, dynamicFacts: {} });
-    const original = (await opts.db.select().from(authorizationDecisions).where(and(eq(authorizationDecisions.orgId, input.orgId), eq(authorizationDecisions.idempotencyKey, initial.request.idempotencyKey))).limit(1))[0];
+    const common = { service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, params: input.params, projection: input.parameterProjection, context: { userId: input.userId, orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, owner: input.owner, queueItemId: input.queueItemId }, requestId: input.queueItemId, resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal ?? 0 };
+    const probe = adaptResolvedPluginCatalogAction({ ...common, evaluationTimeMs: now(), dynamicFacts: {} });
+    const original = (await opts.db.select().from(authorizationDecisions).where(and(eq(authorizationDecisions.orgId, input.orgId), eq(authorizationDecisions.idempotencyKey, probe.request.idempotencyKey))).limit(1))[0];
+    const replayTime = original?.effect === "require_approval" ? original.evidence?.approvalReplay?.evaluationTimeMs : undefined;
+    const replayFacts: CurrentPolicyDynamicFactsV2 | undefined = replayTime === undefined ? undefined : { schemaVersion: 2, organizationId: input.orgId, grants: [], approvalBinding: null, approvals: [] };
+    const initial = replayTime === undefined ? probe : adaptResolvedPluginCatalogAction({ ...common, evaluationTimeMs: replayTime, dynamicFacts: { currentPolicy: replayFacts } });
     const approvalBindingContext = original?.effect === "require_approval" && original.evidence
       ? { requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest }
       : undefined;
-    const facts = await loadCanonicalDynamicFacts(opts.db, { organizationId: input.orgId, service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, appliesIn: "session", scopeId: input.sessionId, evaluationTimeMs: now(), ...approvalBindingContext });
-    const post = adaptResolvedPluginCatalogAction({ ...common, dynamicFacts: { currentPolicy: facts }, ...(approvalBindingContext ? { approvalBindingContext } : {}) });
+    if (approvalBindingContext && (replayTime === undefined || canonicalDecisionId(input.orgId, initial.request.idempotencyKey) !== original.decisionId || initial.request.idempotencyKey !== original.idempotencyKey || initial.request.requestId !== original.requestId || initial.requestSubjectDigest !== original.requestSubjectDigest || inputDigestOf(initial.request) !== original.inputDigest)) {
+      throw new Error("Canonical approval retry identity is invalid.");
+    }
+    const evaluationTimeMs = now();
+    const facts = await loadCanonicalDynamicFacts(opts.db, { organizationId: input.orgId, service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, appliesIn: "session", scopeId: input.sessionId, evaluationTimeMs, ...approvalBindingContext });
+    const post = adaptResolvedPluginCatalogAction({ ...common, evaluationTimeMs, dynamicFacts: { currentPolicy: facts }, ...(approvalBindingContext ? { approvalBindingContext } : {}) });
     if (!approvalBindingContext) return post.request;
-    if (original.requestSubjectDigest !== initial.requestSubjectDigest) throw new Error("Canonical approval retry identity is invalid.");
-    // A restart resolves before it receives the stored gate resolution. Replay
-    // the persisted request until that resolution is durable.
-    if (facts.approvals.length === 0) return original.evidence!.request;
+    // The queue item owns the replayed parameters. The stored digests prove
+    // that this reconstructed request is the original approval request.
+    if (facts.approvals.length === 0) return initial.request;
     const invocationId = authorizationSha256Hex(canonicalAuthorizationJson({ original: post.request.subject.invocation.id, facts }));
     return { ...post.request, subject: { ...post.request.subject, invocation: { ...post.request.subject.invocation, id: invocationId } }, idempotencyKey: `${post.request.subject.invocation.type}:${invocationId}` };
   };

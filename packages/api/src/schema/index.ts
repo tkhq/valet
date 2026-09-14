@@ -19,7 +19,6 @@ import type { NormalizedPolicyDraftV1, PolicyAuthoringDocument, PolicyValidation
 import type { CanonicalSourceBundle } from "../authorization/bundles/types.js";
 import type { ParamMatcher } from "../policies/matchers.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
-import type { AuthorizationRequest } from "@valet/engine/authorization";
 import type {
   ApprovalRequirement,
   FactProvenance,
@@ -1756,7 +1755,7 @@ export const authorizationDecisions = pgTable(
     proofVerificationError: text("proof_verification_error"),
     identityFactProvenance: jsonb("identity_fact_provenance").$type<FactProvenance[]>().notNull(),
     policyFactProvenance: jsonb("policy_fact_provenance").$type<FactProvenance[]>().notNull(),
-    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string; request: AuthorizationRequest }>(),
+    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string; approvalReplay?: { evaluationTimeMs: number } }>(),
     evaluatedAt: bigint("evaluated_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
