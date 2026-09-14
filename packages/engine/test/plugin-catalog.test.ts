@@ -1793,3 +1793,12 @@ describe("legacy approval body recognition", () => {
     expect(isLegacyToolApprovalBody('Approve it\n\ntool_id=github.create_issue\nargs={"title":"x"}')).toBe(true);
   });
 });
+
+describe("approval review context", () => {
+  it("does not classify generic contextual approvals as tool approvals", async () => {
+    const { toolApprovalGateContext } = await import("../src/plugin-catalog.js");
+    expect(toolApprovalGateContext({ service: "github", riskLevel: "high" })).toBeNull();
+    expect(toolApprovalGateContext({ kind: "tool_approval", tool_id: "github.create_issue", argsPreview: "{bad" })?.reviewIncomplete).toBe(true);
+    expect(toolApprovalGateContext({ kind: "tool_approval", tool_id: "github.create_issue", argsPreview: '{"title":"ok"}' })?.reviewIncomplete).toBeUndefined();
+  });
+});
