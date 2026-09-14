@@ -70,13 +70,17 @@ A successful image build is not evidence of a completed production deployment.
 Focused checks on this branch:
 
 - Workflow engine adapter: 18 passed, 2 live integration tests skipped.
-- Engine queue and in-memory store: 98 passed.
+- Engine queue and in-memory store: 98 passed; the added approval-blocked cancellation case also passed (15 queue tests total).
 - Workflow package: 433 passed.
 - Postgres package: 148 passed, 119 environment-gated tests skipped.
-- Initial root typecheck passed.
+- Root typecheck passed after the final cancellation test.
+- GitHub action and token service suites passed an isolated rerun: 107 tests.
+
+Overlapping runs of one workflow now share FIFO execution and conversation context. Different workflows retain separate threads.
 
 The full `make e2e` run is in progress. Its complete local log is `/tmp/workflow-stability-e2e.log`.
 The baseline had a macOS `/bin/tar` failure, a CLI harness `tsx` path failure, and two Kubernetes transport assertions.
+The current full unit sweep had two GitHub fixture failures; both suites passed the isolated 107-test rerun.
 A baseline child-dismiss failure passed an isolated rerun. These do not yet constitute a clean local scorecard.
 
 An attempted independent review agent was blocked by automatic safety review with “Potentially unintended activity.”

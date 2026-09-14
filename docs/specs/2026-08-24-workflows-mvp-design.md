@@ -446,6 +446,7 @@ Backspace then removes only the selected edge.
 ### Workflow assistant thread reuse (2026-09-14)
 
 Repeated runs reuse one thread per workflow definition in the selected assistant.
+Overlapping runs share FIFO execution and conversation context. Different workflows retain separate threads.
 The key is `signal:workflow:definition:{workflowId}`.
 Run-specific dispatch IDs, queue receipts, and signal attributes remain unchanged.
 A run with an existing `signal:workflow:{runId}` thread keeps that thread for retries.
