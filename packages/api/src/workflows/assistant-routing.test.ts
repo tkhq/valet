@@ -26,6 +26,7 @@ async function setup() {
     { id: "default-a", orgId: "local-org", ownerType: "team", ownerId: "team-a", sessionId: "assistant:default-a", isDefault: true, createdAt: 1 },
     { id: "other", orgId: "local-org", ownerType: "team", ownerId: "team-b", sessionId: "assistant:other", isDefault: true, createdAt: 1 },
     { id: "foreign", orgId: "other-org", ownerType: "team", ownerId: "team-a", sessionId: "assistant:foreign", isDefault: false, createdAt: 1 },
+    { id: "personal", orgId: "local-org", ownerType: "user", ownerId: "local-user", sessionId: "assistant:personal", isDefault: false, createdAt: 1 },
   ]);
   return { api, p, deps: { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials } };
 }
@@ -79,6 +80,89 @@ describe("workflow explicit assistant routing", () => {
     expect(sameOwner?.definition).toEqual(personal.definition);
     const otherTeam = await copyWorkflowDefinition(deps, owner, personal.id, { teamId: "team-b", name: "Destination" });
     expect(otherTeam).toMatchObject({ ownerType: "team", ownerId: "team-b", definition: { assistantId: "other" } });
+  });
+
+  it("persists only direct active assistant origins and revalidates ownership", async () => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, {
+      name: "Origin", teamId: "team-a", definition: { ...graph, assistantId: "chosen" },
+    });
+    const session = await p.engineHost.assistantSessionFor(
+      "chosen",
+      { actorUserId: owner.userId, orgId: owner.orgId },
+      { sessionId: "assistant:chosen" },
+    );
+    const thread = await session.createThread("web:origin");
+    const start = vi.spyOn(p.workflowRunHost, "start").mockResolvedValue();
+    const action = workflowsActionPlugin(() => deps).actions.find((candidate) => candidate.id === "workflows.start_run");
+    if (!action) throw new Error("Missing start action");
+    const ctx = {
+      ...owner,
+      sessionId: "assistant:chosen",
+      threadId: thread.id,
+      owner: { type: "team", id: "team-a" },
+      actionId: "workflows.start_run",
+      service: "workflows",
+    } as PluginActionContext;
+
+    expect((await action.execute({ workflow_id: created.id }, ctx)).success).toBe(true);
+    expect(start.mock.calls[0]?.[1]).toMatchObject({
+      origin: { assistantSessionId: "assistant:chosen", threadId: thread.id },
+    });
+
+    expect((await action.execute({ workflow_id: created.id }, { ...ctx, sessionId: "child-session" })).success).toBe(true);
+    expect(start.mock.calls[1]?.[1]).not.toHaveProperty("origin");
+    expect(await startWorkflowRun(deps, owner, created.id, undefined, {
+      assistantSessionId: "assistant:other", threadId: thread.id,
+    })).toBeTruthy();
+    expect(start.mock.calls[2]?.[1]).not.toHaveProperty("origin");
+  });
+
+  it("starts a team workflow from a personal assistant on the originating thread", async () => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, {
+      name: "Personal to team", teamId: "team-a", definition: { ...graph, assistantId: "chosen" },
+    });
+    const session = await p.engineHost.assistantSessionFor(
+      "personal",
+      { actorUserId: owner.userId, orgId: owner.orgId },
+      { sessionId: "assistant:personal" },
+    );
+    const thread = await session.createThread("web:personal-origin");
+    vi.spyOn(p.workflowRunHost, "start").mockImplementation(async (id, params, definition, runOwner) => {
+      await p.workflowStore.createRun(id, params, definition, params.definitionVersionId, runOwner);
+    });
+    const action = workflowsActionPlugin(() => deps).actions.find((candidate) => candidate.id === "workflows.start_run");
+    if (!action) throw new Error("Missing start action");
+    const result = await action.execute({ workflow_id: created.id }, {
+      ...owner,
+      sessionId: "assistant:personal",
+      threadId: thread.id,
+      owner: { type: "user", id: owner.userId },
+      actionId: "workflows.start_run",
+      service: "workflows",
+    } as PluginActionContext);
+    if (!result.success || typeof result.data !== "object" || result.data === null || !("runId" in result.data)) {
+      throw new Error(`Run did not start: ${JSON.stringify(result)}`);
+    }
+    const runId = String(result.data.runId);
+    const run = await p.workflowStore.getRun(runId);
+    expect(run).toMatchObject({
+      owner: { ownerType: "team", ownerId: "team-a" },
+      actorUserId: "local-user",
+      params: { origin: { assistantSessionId: "assistant:personal", threadId: thread.id } },
+    });
+
+    const engine = buildWorkflowEngineDeps({
+      db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore,
+      actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials,
+    });
+    const receipt = await engine.promptOrchestrator("continue", {
+      dispatchId: `workflow:${runId}:node`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: "team-a" },
+    });
+    expect(receipt).toMatchObject({ sessionId: "assistant:personal", threadId: thread.id });
   });
 
   it("routes every node and repair to the run snapshot, preserves manual actor, and refuses archived targets", async () => {

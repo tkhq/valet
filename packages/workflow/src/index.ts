@@ -83,6 +83,7 @@ export type {
   RunWaitCondition,
   WorkflowRun,
   WorkflowRunListItem,
+  WorkflowRunOrigin,
   WorkflowRunOwnerInput,
   WorkflowRunPrincipal,
   WorkflowStore,

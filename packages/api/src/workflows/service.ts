@@ -21,6 +21,7 @@ import {
   type WorkflowEdge,
   type WorkflowNode,
   type WorkflowRunListItem,
+  type WorkflowRunOrigin,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
@@ -30,6 +31,7 @@ import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/s
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   actionInvocations,
+  assistants,
   contentSources,
   eventSubscriptions,
   workflowDefinitions,
@@ -1194,17 +1196,45 @@ export async function reapTeamWorkflows(tx: AppQueryable, teamId: string): Promi
   }
 }
 
+/** Keep an origin only when its active assistant belongs to the caller or run. */
+async function activeWorkflowOrigin(
+  db: AppDb,
+  owner: WorkflowOwner,
+  runOwner: { ownerType: string; ownerId: string },
+  origin: WorkflowRunOrigin,
+): Promise<WorkflowRunOrigin | undefined> {
+  if (origin.assistantSessionId.length === 0 || origin.threadId.length === 0) return undefined;
+  const [assistant] = await db.select().from(assistants)
+    .where(and(eq(assistants.sessionId, origin.assistantSessionId), eq(assistants.orgId, owner.orgId)))
+    .limit(1);
+  if (!assistant || assistant.archivedAt !== null) return undefined;
+  const callerOwner = owner.principal?.type === "team"
+    ? { ownerType: "team", ownerId: owner.principal.id }
+    : { ownerType: "user", ownerId: owner.userId };
+  const belongsToCaller = assistant.ownerType === callerOwner.ownerType && assistant.ownerId === callerOwner.ownerId;
+  const belongsToRun = assistant.ownerType === runOwner.ownerType && assistant.ownerId === runOwner.ownerId;
+  return belongsToCaller || belongsToRun ? origin : undefined;
+}
+
 /** Returns null when the workflow doesn't exist (or isn't owned); an
  * `invalidInput` result when the caller's input fails the trigger's
- * declared dataSchema (routes map that to 400). */
+ * declared dataSchema (routes map that to 400). Invalid origins are omitted. */
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
   input?: Record<string, unknown>,
+  origin?: WorkflowRunOrigin,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
+
+  const runOwner = row.ownerType === "org"
+    ? { ownerType: "user", ownerId: owner.userId }
+    : { ownerType: row.ownerType, ownerId: row.ownerId };
+  const validOrigin = origin
+    ? await activeWorkflowOrigin(deps.db, owner, runOwner, origin)
+    : undefined;
 
   const definition = row.definition;
   const versionId = definitionVersionId(definition);
@@ -1223,6 +1253,7 @@ export async function startWorkflowRun(
     workflowId,
     definitionVersionId: versionId,
     input: trigger,
+    ...(validOrigin ? { origin: validOrigin } : {}),
   };
 
   // Team and user runs use the definition owner, matching the scheduler,
@@ -1605,6 +1636,7 @@ export async function retryWorkflowRun(
     owner,
     run.params.workflowId,
     triggerData(run.params.input),
+    run.params.origin,
   );
   if (!started) return "workflow_deleted";
   return started;

@@ -168,8 +168,14 @@ interface RunParams {
   definitionVersionId: string;
   triggerId?: string;
   input?: unknown;            // JSON-serializable trigger/manual input
+  origin?: {
+    assistantSessionId: string;
+    threadId: string;          // scoped to assistantSessionId
+  };
 }
 ```
+
+An assistant action stores an `origin` only when the action runs in the caller's active assistant session. The start service accepts an active origin owned by the caller or run principal. This permits a personal assistant to start an authorized team workflow. Delegated child sessions do not qualify. Workflow-call child runs copy the origin and actor. Retries keep a valid origin and omit an inactive origin. An orchestrator node uses the exact origin session and thread. If that durable thread is missing, the node fails instead of creating a replacement. Scheduled, webhook, event, and HTTP starts omit the origin and keep their run-specific `signal:workflow:{runId}` thread.
 
 The port is deliberately this small. Everything correctness-critical (checkpoints, signals, leases, idempotent dispatch) lives in the interpreter + store, where it is testable in-memory and identical across platforms.
 

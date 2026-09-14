@@ -126,8 +126,15 @@ export async function executeWorkflowCall(args: NodeExecutorArgs<WorkflowCallNod
     parentRunId: run.runId,
     parentNodeId: node.id,
     parentIteration: iteration,
+    ...(run.params.origin ? { origin: run.params.origin } : {}),
   };
-  await store.createRun(childRunId, params, resolved.definition, resolved.definitionVersionId, run.owner);
+  await store.createRun(
+    childRunId,
+    params,
+    resolved.definition,
+    resolved.definitionVersionId,
+    run.owner ? { ...run.owner, ...(run.actorUserId ? { actorUserId: run.actorUserId } : {}) } : undefined,
+  );
   await store.requestWake(childRunId);
 
   return { status: 'parked', waitingOn: [{ kind: 'run', nodeId: node.id, runId: childRunId }] };
