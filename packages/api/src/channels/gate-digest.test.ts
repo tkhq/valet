@@ -5,7 +5,7 @@ const TOOL_GATE = {
   type: "approval" as const,
   title: "Approve Create PR?",
   body: 'Open a PR\n\ntool_id=github.create_pr\nargs={"title":"fix"}',
-  context: {
+  context: { kind: "tool_approval",
     riskLevel: "high",
     service: "github",
     tool_id: "github.create_pr",
