@@ -197,7 +197,6 @@ workflowsRouter.post("/", async (c) => {
       name: body.name,
       definition: body.definition,
       teamId: createdOwner.owner.type === "team" ? createdOwner.owner.id : undefined,
-      skipMembershipCheck: principal.type === "team",
     });
   } catch (err) {
     // Same "cross-owner 404, never 403" convention as the rest of this

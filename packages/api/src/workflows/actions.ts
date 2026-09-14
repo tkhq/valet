@@ -143,11 +143,21 @@ export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
   if (typeof userId !== "string" || userId.length === 0) return null;
   if (typeof orgId !== "string" || orgId.length === 0) return null;
-  const owner: WorkflowOwner = { userId: ctx.actor?.id ?? userId, orgId };
-  if (ctx.owner?.type === "team") {
-    owner.principal = { type: "team", id: ctx.owner.id };
+  const actorUserId = ctx.actor?.id ?? userId;
+  const principal = ctx.owner;
+  if (principal?.type === "user") {
+    if (principal.id !== actorUserId) return null;
+    return { userId: actorUserId, orgId, principal: { type: "user", id: principal.id } };
   }
-  return owner;
+  if (principal?.type === "team") {
+    return {
+      userId: actorUserId,
+      orgId,
+      principal: { type: "team", id: principal.id },
+      requireTeamMembership: ctx.sessionPurpose !== "workflow",
+    };
+  }
+  return { userId: actorUserId, orgId };
 }
 
 const NO_OWNER: PluginActionResult = {
@@ -212,7 +222,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const listWorkflows = action(Type.Object({}))({
     id: "workflows.list_workflows",
     name: "List workflows",
-    description: "List the user's workflow definitions (id, name, timestamps).",
+    description: "List the assistant owner's workflow definitions (id, name, timestamps).",
     riskLevel: "low",
     execute: async (_args, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -263,7 +273,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     id: "workflows.save_workflow",
     name: "Save workflow",
     description:
-      "Create a workflow (omit workflow_id) or update one (pass workflow_id). " +
+      "Create a workflow for the assistant owner (omit workflow_id) or update one (pass workflow_id). " +
       "`definition` MUST be a dag/v1 object: { version: 'dag/v1', nodes: [...], edges: [...] } " +
       "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
@@ -311,7 +321,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const created = await createWorkflowDefinition(getDeps(), owner, {
         name: name ?? "Untitled workflow",
         definition: routedDefinition,
-        ...(ctx.owner?.type === "team" ? { teamId: ctx.owner.id, skipMembershipCheck: true } : {}),
+        ...(owner.principal?.type === "team" ? { teamId: owner.principal.id } : {}),
       });
       return {
         success: true,
@@ -875,7 +885,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await createWorkflowSchedule(
         armDepsFrom(getDeps()),
         owner,
-        { workflowId: workflow_id, prompt, name, cron, timezone, input },
+        {
+          workflowId: workflow_id,
+          prompt,
+          name,
+          cron,
+          timezone,
+          input,
+          teamId: owner.principal?.type === "team" ? owner.principal.id : undefined,
+        },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.schedule };

@@ -62,7 +62,14 @@ describe("workflow explicit assistant routing", () => {
     expect(rows.find((r) => r.name === "Explicit")).toMatchObject({ definition: { assistantId: "default-a" } });
     const implicit = rows.find((r) => r.name === "Implicit");
     if (!implicit) throw new Error("Missing implicit workflow");
-    expect((await save.execute({ workflow_id: implicit.id, name: "Edited", definition: graph }, { ...ctx, userId: "team:team-a" })).success).toBe(true);
+    const teamContext = { ...ctx, userId: "team:team-a" };
+    expect((await save.execute({ workflow_id: implicit.id, name: "Rejected", definition: graph }, teamContext)).success).toBe(false);
+    expect((await save.execute({ workflow_id: implicit.id, name: "Edited", definition: graph }, {
+      ...teamContext, actor: { id: "local-user" },
+    })).success).toBe(true);
+    expect((await save.execute({ workflow_id: implicit.id, name: "Scheduled", definition: graph }, {
+      ...teamContext, sessionPurpose: "workflow",
+    })).success).toBe(true);
     // A team assistant has team reach, not its first user's other teams.
     const other = await createWorkflowDefinition(deps, owner, { name: "Other", teamId: "team-b", definition: graph });
     expect((await save.execute({ workflow_id: other.id, definition: graph }, ctx)).success).toBe(false);

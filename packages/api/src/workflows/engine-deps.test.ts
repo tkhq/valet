@@ -319,6 +319,56 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     });
   });
 
+  it("routes a team-owned run to the team's default assistant", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, {
+      orgId: LOCAL_ORG.id,
+      name: "orchestrator-routing-team",
+      creatorUserId: LOCAL_USER.id,
+    });
+    const workflowId = "wf_orch_team";
+    const runId = "wfrun_orch_team";
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      orgId: LOCAL_ORG.id,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "team-orchestrator-routing",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id },
+    );
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+
+    const receipt = await deps.promptOrchestrator("review team work", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: team.id },
+    });
+
+    const teamDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "team", id: team.id });
+    const personalDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
+    expect(receipt.sessionId).toBe(teamDefault.sessionId);
+    expect(receipt.sessionId).not.toBe(personalDefault.sessionId);
+  });
+
   it("is idempotent by dispatchId: a duplicate dispatch returns the original receipt", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
