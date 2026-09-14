@@ -407,7 +407,8 @@ export function toolApprovalGateContext(
   const argsPreview = typeof record.argsPreview === "string" && record.argsPreview.trim() !== ""
     ? record.argsPreview
     : undefined;
-  const complete = record.kind === "tool_approval" && toolId !== undefined && argsPreview !== undefined && record.reviewIncomplete !== true;
+  const validArgsPreview = (() => { try { const value: unknown = argsPreview && JSON.parse(argsPreview); return value !== null && typeof value === "object" && !Array.isArray(value); } catch { return false; } })();
+  const complete = record.kind === "tool_approval" && toolId !== undefined && validArgsPreview && record.reviewIncomplete !== true;
   return {
     toolId,
     riskLevel: typeof record.riskLevel === "string" ? record.riskLevel : undefined,
@@ -796,6 +797,7 @@ interface Catalog {
   dynamicPlugins: ActionPlugin[];
   /** TTL cache of resolved dynamic actions, keyed by plugin service. */
   resolved: Map<string, ResolvedDynamic>;
+  resolving: Map<string, Promise<ResolvedDynamic>>;
   now: () => number;
 }
 
@@ -834,7 +836,7 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     }
     if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId, dynamicPlugins, resolved: new Map(), now };
+  return { entries, byId, dynamicPlugins, resolved: new Map(), resolving: new Map(), now };
 }
 
 /**
@@ -849,26 +851,24 @@ async function resolveDynamic(
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
   const cached = catalog.resolved.get(plugin.service);
-  if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) {
-    return cached;
-  }
-  // resolveActions is guaranteed present on every entry of dynamicPlugins.
-  const resolveActions = plugin.resolveActions;
-  if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
-  const credentialService = plugin.credentialService ?? plugin.service;
-  const actions = await resolveActions({
-    credentials: scopedCredentialProvider(ctx, credentialService),
-  });
-  const built = buildEntries(plugin.service, plugin, actions);
-  for (const entry of built.entries) {
-    const id = qualifiedId(entry);
-    if (catalog.byId.has(id) || [...catalog.resolved.values()].some((resolved) => resolved.entries.some((other) => qualifiedId(other) === id))) {
-      throw new Error("duplicate plugin action id: " + id);
+  if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) return cached;
+  const inFlight = catalog.resolving.get(plugin.service);
+  if (inFlight) return inFlight;
+  const pending = (async (): Promise<ResolvedDynamic> => {
+    const resolveActions = plugin.resolveActions;
+    if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
+    const actions = await resolveActions({ credentials: scopedCredentialProvider(ctx, plugin.credentialService ?? plugin.service) });
+    const built = buildEntries(plugin.service, plugin, actions);
+    for (const entry of built.entries) {
+      const id = qualifiedId(entry);
+      if (catalog.byId.has(id) || [...catalog.resolved.entries()].some(([service, resolved]) => service !== plugin.service && resolved.entries.some((other) => qualifiedId(other) === id))) throw new Error("duplicate plugin action id: " + id);
     }
-  }
-  const result: ResolvedDynamic = { ...built, fetchedAt: now };
-  catalog.resolved.set(plugin.service, result);
-  return result;
+    const result: ResolvedDynamic = { ...built, fetchedAt: now };
+    catalog.resolved.set(plugin.service, result);
+    return result;
+  })();
+  catalog.resolving.set(plugin.service, pending);
+  try { return await pending; } finally { catalog.resolving.delete(plugin.service); }
 }
 
 // ── list_tools ───────────────────────────────────────────────────

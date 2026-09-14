@@ -15,7 +15,7 @@ import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
-import { toolApprovalGateContext } from "./plugin-catalog.js";
+import { isLegacyToolApprovalBody, toolApprovalGateContext } from "./plugin-catalog.js";
 import {
   DecisionGateExpiredError,
   DecisionGateWithdrawnError,
@@ -1482,7 +1482,7 @@ export class Thread {
       })
       .then((resolution) => {
         this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
-          this.replayBlocked({ suspended, resolution, approvalReplay: toolApprovalGateContext(gate.context) !== null || /(?:tool_id|args)=/.test(gate.body ?? "") }),
+          this.replayBlocked({ suspended, resolution, approvalReplay: toolApprovalGateContext(gate.context) !== null || isLegacyToolApprovalBody(gate.body) }),
         );
       })
       .catch((err) => {
@@ -3157,7 +3157,7 @@ export class Thread {
         this.replayBlocked({
           suspended,
           resolution,
-          approvalReplay: toolApprovalGateContext(gate.context) !== null || /(?:tool_id|args)=/.test(gate.body ?? ""),
+          approvalReplay: toolApprovalGateContext(gate.context) !== null || isLegacyToolApprovalBody(gate.body),
         }),
       );
     }
