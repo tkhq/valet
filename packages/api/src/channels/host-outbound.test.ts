@@ -28,7 +28,7 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -271,6 +271,69 @@ describe("ChannelHost outbound delivery", () => {
     faux.unregister();
     vi.unstubAllEnvs();
   });
+
+  async function seedWorkflowGate(args: {
+    workflowId: string;
+    runId: string;
+    workflowOrgId: string;
+    owner: { ownerType: "org" | "team" | "user"; ownerId: string };
+    gateId: string;
+    actions?: DecisionGate["actions"];
+  }): Promise<{ sessionId: string; ref: GatePromptRef }> {
+    const now = Date.now();
+    await testDb.appDb.insert(workflowDefinitions).values({
+      id: args.workflowId,
+      orgId: args.workflowOrgId,
+      ownerType: args.owner.ownerType,
+      ownerId: args.owner.ownerId,
+      name: args.workflowId,
+      definition: {},
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      args.runId,
+      { workflowId: args.workflowId, definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      args.owner,
+    );
+    const sessionId = `wf:${args.runId}:step`;
+    const session = await ensureWorkflowSession({
+      host: engineHost,
+      store: workflowStore,
+      db: testDb.appDb,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    }, sessionId);
+    const threadId = session.thread().id;
+    await engineStore.saveDecisionGate(sessionId, threadId, {
+      id: args.gateId,
+      sessionId,
+      threadId,
+      queueItemId: `q-${args.gateId}`,
+      resumeKey: `resume-${args.gateId}`,
+      ordinal: 0,
+      type: "approval",
+      title: "Approve workflow action?",
+      actions: args.actions ?? [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const ref = { conversationKey: `fake:dm:${args.gateId}`, messageId: `m-${args.gateId}` };
+    host.recordGatePrompt(args.gateId, ref, sessionId);
+    return { sessionId, ref };
+  }
+
+  async function callback(ref: GatePromptRef, callbackId: string, actionId = "approve"): Promise<void> {
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId, callbackId, ref },
+    }));
+  }
 
   it("automatically posts the first assistant text for a direct addressed turn", async () => {
     faux.setResponses([fauxAssistantMessage("internal response")]);
@@ -1136,6 +1199,68 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text === undefined)).toHaveLength(1);
     expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text?.includes("already resolved"))).toHaveLength(1);
+  });
+
+  it("rejects a cross-org workflow callback with the uniform expired response", async () => {
+    const { ref } = await seedWorkflowGate({
+      workflowId: "workflow-cross-org",
+      runId: "workflow-cross-org-run",
+      workflowOrgId: "other-org",
+      owner: { ownerType: "user", ownerId: USER_ID },
+      gateId: "cross-org-gate",
+    });
+
+    await callback(ref, "cross-org-callback");
+
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "cross-org-callback")?.text).toContain("expired");
+  });
+
+  it("rejects an org-owned workflow callback from a non-admin", async () => {
+    const { ref, sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-org-owned",
+      runId: "workflow-org-owned-run",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "org", ownerId: ORG_ID },
+      gateId: "org-owned-gate",
+    });
+
+    await callback(ref, "org-owned-callback");
+
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "org-owned-callback")?.text).toContain("expired");
+    expect((await engineStore.getDecisionGate(sessionId, "org-owned-gate"))?.status).toBe("pending");
+  });
+
+  it("rejects a team-owned workflow callback from a non-member", async () => {
+    await testDb.appDb.insert(teams).values({ id: "workflow-team", orgId: ORG_ID, name: "Workflow team", createdAt: 1 });
+    const { ref, sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-team-owned",
+      runId: "workflow-team-owned-run",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "team", ownerId: "workflow-team" },
+      gateId: "team-owned-gate",
+    });
+
+    await callback(ref, "team-owned-callback");
+
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "team-owned-callback")?.text).toContain("expired");
+    expect((await engineStore.getDecisionGate(sessionId, "team-owned-gate"))?.status).toBe("pending");
+  });
+
+  it("lets an org admin resolve an org-owned workflow always_allow action", async () => {
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG_ID, userId: USER_ID, role: "admin", createdAt: Date.now() });
+    const { ref, sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-admin-owned",
+      runId: "workflow-admin-owned-run",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "org", ownerId: ORG_ID },
+      gateId: "admin-always-allow-gate",
+      actions: [{ id: "always_allow", label: "Always allow", style: "primary" }],
+    });
+
+    await callback(ref, "admin-always-allow-callback", "always_allow");
+
+    expect((await engineStore.getDecisionGate(sessionId, "admin-always-allow-gate"))?.status).toBe("resolved");
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "admin-always-allow-callback" && answer.text === undefined)).toBeDefined();
   });
 
   it("gate_callback from a user who may not resolve the session answers 'expired'", async () => {

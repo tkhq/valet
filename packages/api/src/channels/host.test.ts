@@ -424,6 +424,15 @@ describe("ChannelHost.handleUpdate", () => {
     expect(drops.some((d) => d.reason === "duplicate")).toBe(true);
   });
 
+  it("malformed gate_callback answers expired so Slack clears the spinner", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await host.handleUpdate("fake", inbound({ kind: "gate_callback", gateCallback: undefined }));
+
+    expect(fakeTransport.answered).toEqual([{ callbackId: "", text: "This approval has expired — resolve it on the web." }]);
+    const drops = await testDb.appDb.select().from(eventDropLog);
+    expect(drops.some((d) => d.reason === "malformed_callback")).toBe(true);
+  });
+
   it("gate_callback with unknown ref answers 'expired' and drop-logs", async () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     await host.handleUpdate(
