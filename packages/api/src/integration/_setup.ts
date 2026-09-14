@@ -63,7 +63,7 @@ import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
-import { writeExecutionGrant } from "../policies/service.js";
+import { writeTrustedApprovalGrants } from "../plugins/approval-grants.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
@@ -507,22 +507,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
         .limit(1);
       const orgId = defRows[0]?.orgId;
       if (!orgId) return;
-      const now = Date.now();
-      for (const g of info.grants) {
-        const actionId = g.actionId.startsWith(`${g.service}.`) ? g.actionId.slice(g.service.length + 1) : g.actionId;
-        const action = actionPluginByService.get(g.service)?.actionPlugin.actions.find((candidate) => candidate.id === actionId);
-        if (!action) throw new Error(`Approval grant names unknown action ${g.service}.${actionId}.`);
-        await writeExecutionGrant(db, info.runId, {
-          orgId,
-          service: g.service,
-          actionId,
-          riskLevel: action.riskLevel,
-          sourceApprovalId: info.signalId,
-          expiresAt: now + 72 * 60 * 60 * 1000,
-          grantedBy: info.resolvedBy,
-          now,
-        });
-      }
+      await writeTrustedApprovalGrants(db, actionPluginByService, {
+        ...info,
+        orgId,
+        now: Date.now(),
+      });
     } catch (err) {
       console.error(`test harness: workflow approval grant write failed for run ${info.runId}:`, err);
     }
