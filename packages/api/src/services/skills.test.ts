@@ -323,18 +323,35 @@ describe("listSkillSourcesFor", () => {
     expect(sources[0]?.content).toBe(BODY);
   });
 
-  it("returns only the team's own skills for a team principal", async () => {
+  it("returns team skills before org-library skills, never personal skills, for a team principal", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
-    await createSkill(db, owner("u1"), { name: "mine", description: "Personal.", content: BODY });
+    await createSkill(db, owner("u1"), { name: "personal", description: "Personal.", content: BODY });
     await createSkill(db, owner("u1"), {
-      name: "ours",
-      description: "Shared.",
-      content: BODY,
+      name: "code-review",
+      description: "Team review.",
+      content: "# Team review\n",
       teamId: team.id,
     });
+    await createSkill(db, owner("u1"), {
+      name: "adversarial-code-review",
+      description: "Team adversarial review.",
+      content: "# Team adversarial review\n",
+      teamId: team.id,
+      origin: "repo",
+      sourceId: "source_tk_brain",
+      upstreamPath: "skills/adversarial-code-review/SKILL.md",
+    });
+    await insertOrgSkill(db, "code-review", "# Org review\n");
+    await insertOrgSkill(db, "basic-code-review", "# Org basic review\n");
 
     const sources = await listSkillSourcesFor(db, { type: "team", id: team.id }, ORG);
-    expect(sources.map((s) => s.name)).toEqual(["ours"]);
+    expect(sources.map((s) => s.name)).toEqual([
+      "adversarial-code-review",
+      "code-review",
+      "basic-code-review",
+    ]);
+    expect(sources.find((source) => source.name === "code-review")?.content).toBe("# Team review\n");
+    expect(sources.find((source) => source.name === "adversarial-code-review")?.source).toBe("repo");
   });
 
   it("drops the team copy when a personal skill claims the same name", async () => {

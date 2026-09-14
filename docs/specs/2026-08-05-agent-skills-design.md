@@ -104,7 +104,11 @@ A UNIQUE index on `(org_id, owner_type, owner_id, name)` stops two stored skills
 | `buildChildSession` | `opts.owner` | The child's own principal, copied from its parent. |
 | `buildWorkflowSession` | `opts.owner` | The run's principal, copied from the workflow definition at start time. |
 
-A `user` principal reads its own skills plus its teams' skills. A `team` or `org` principal reads only that team's or org's skills, so one member's personal skills never appear in a session other members read.
+A `user` principal reads its own skills, its teams' skills, then the org library.
+A `team` principal reads its team's skills, then the org library. An `org`
+principal reads only the org library. A shared team session never reads a
+member's personal skills. Within each shared team session, a team skill shadows
+an org-library skill of the same name. Plugin skills still shadow stored skills.
 
 ## Two skills, one name
 

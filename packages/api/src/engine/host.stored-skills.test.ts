@@ -20,6 +20,7 @@ import type {
   ToolDef,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { createAssistant, ensureAssistantSession } from "../assistants/service.js";
 import { createSkill } from "../services/skills.js";
 import { createTeam } from "../services/teams.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -159,6 +160,64 @@ describe("stored skills on a session", () => {
     });
 
     expect(child.options.skills?.map((s) => s.name)).toEqual(["shared"]);
+  });
+
+  it("delivers repository-synced team skills to team assistant and workflow sessions", async () => {
+    api = await bootTestApi({ plugins: [] });
+    const { db, engineHost } = api.providers;
+    const team = await createTeam(db, { orgId: ORG, name: "Applied AI", creatorUserId: USER });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      name: "personal-review",
+      description: "A personal review skill.",
+      content: "# Personal review\n",
+    });
+    for (const [name, content] of [
+      ["adversarial-code-review", "# Adversarial review\n"],
+      ["basic-code-review", "# Basic review\n"],
+    ] as const) {
+      await createSkill(db, { userId: USER, orgId: ORG }, {
+        name,
+        description: `Repository-synced ${name}.`,
+        content,
+        teamId: team.id,
+        origin: "repo",
+        sourceId: "source_tkhq_tk_brain",
+        upstreamPath: `skills/${name}/SKILL.md`,
+      });
+    }
+
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      name: "organization-review",
+      description: "An organization library skill.",
+      content: "# Organization review\n",
+      ownerType: "org",
+      isOrgAdmin: true,
+    });
+
+    const assistant = await createAssistant(db, ORG, { type: "team", id: team.id }, "Review bot");
+    const teamAssistant = await ensureAssistantSession({ db, engineHost }, assistant, {
+      actorUserId: USER,
+      orgId: ORG,
+    });
+    const workflowSession = await engineHost.workflowSessionFor("wf:team-review:run", {
+      actorUserId: USER,
+      orgId: ORG,
+      owner: { type: "team", id: team.id },
+      workspace: "/tmp",
+    });
+
+    for (const session of [teamAssistant.session, workflowSession]) {
+      expect(session.options.skills?.map((skill) => skill.name)).toEqual([
+        "adversarial-code-review",
+        "basic-code-review",
+        "organization-review",
+      ]);
+      const result = await findSkillTool(session.options.tools).execute(
+        { name: "adversarial-code-review" },
+        makeCtx(),
+      );
+      expect(result.text).toContain("# Adversarial review");
+    }
   });
 
   it("delivers a personal skill to a workflow session", async () => {
