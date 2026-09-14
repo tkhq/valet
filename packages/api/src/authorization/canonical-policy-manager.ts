@@ -157,7 +157,7 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
       await putBundle(tx, validated.sourceBundleDigest, bundle, this.now());
       const changed = await tx.update(policyActiveBundles).set({ digest: validated.sourceBundleDigest, generation: pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, organizationId), eq(policyActiveBundles.digest, pointer.digest), eq(policyActiveBundles.generation, pointer.generation))).returning({ orgId: policyActiveBundles.orgId });
       if (!changed[0]) throw new Error("Canonical policy candidate activation lost its compare-and-swap.");
-      const invocationId = activationAuditId(organizationId, pointer.digest, audit);
+      const invocationId = activationAuditId(organizationId, pointer.digest, pointer.generation + 1, audit);
       await tx.insert(actionInvocations).values({ invocationId, service: "canonical-policy", actionId: audit.operation, status: "completed", userId: audit.actorId, orgId: organizationId, params: { priorDigest: pointer.digest, sourceBundleDigest: validated.sourceBundleDigest, generation: pointer.generation + 1, canonicalCandidate: true }, createdAt: this.now() });
     });
   }
@@ -202,7 +202,7 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
       await putBundle(tx, identity.sourceBundleDigest, built.bundle, this.now());
       const changed = await tx.update(policyActiveBundles).set({ digest: identity.sourceBundleDigest, generation: pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, organizationId), eq(policyActiveBundles.digest, pointer.digest), eq(policyActiveBundles.generation, pointer.generation))).returning({ orgId: policyActiveBundles.orgId });
       if (!changed[0]) throw new Error("Canonical policy activation lost its compare-and-swap.");
-      await tx.insert(actionInvocations).values({ invocationId: activationAuditId(organizationId, pointer.digest, audit), service: "canonical-policy", actionId: audit.operation, status: "completed", userId: audit.actorId, orgId: organizationId, params: { priorDigest: pointer.digest, sourceBundleDigest: identity.sourceBundleDigest, generation: pointer.generation + 1 }, createdAt: this.now() });
+      await tx.insert(actionInvocations).values({ invocationId: activationAuditId(organizationId, pointer.digest, pointer.generation + 1, audit), service: "canonical-policy", actionId: audit.operation, status: "completed", userId: audit.actorId, orgId: organizationId, params: { priorDigest: pointer.digest, sourceBundleDigest: identity.sourceBundleDigest, generation: pointer.generation + 1 }, createdAt: this.now() });
       completed = true;
       return value;
     });
@@ -355,8 +355,8 @@ async function putBundle(db: AppQueryable, digest: string, bundle: CanonicalSour
     if (!row || canonicalJson(row.bundle) !== canonicalJson(bundle)) throw new Error("Canonical source bundle digest collision.");
   }
 }
-function activationAuditId(organizationId: string, priorDigest: string, audit: { operation: string; idempotencyKey: string }): string {
-  const digest = createHash("sha256").update(`${organizationId}\0${priorDigest}\0${audit.operation}\0${audit.idempotencyKey}`).digest("hex");
+function activationAuditId(organizationId: string, priorDigest: string, generation: number, audit: { operation: string; idempotencyKey: string }): string {
+  const digest = createHash("sha256").update(`${organizationId}\0${priorDigest}\0${generation}\0${audit.operation}\0${audit.idempotencyKey}`).digest("hex");
   return `policy:activation:${digest}`;
 }
 function canonicalPluginDefaults(plugins: ReadonlyMap<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>) {

@@ -619,7 +619,7 @@ Organization administrators can edit organization drafts under current policy. T
 
 Policy documents contain references and typed constraints, not secrets. Sensitive condition values use server-held references or one-way digests where comparison permits them. API responses, validation issues, diffs, explain traces, audit, and telemetry apply registered redaction rules.
 
-Each draft update, review action, publication, activation, rollback, and failed publication writes an audit event. Events identify actor, owner, document and version, source and result digests, review, validation summary, and reason. Published rule provenance then follows decisions into the decision audit.
+Each draft update, review action, publication, activation, rollback, and failed publication writes an audit event. Events identify actor, owner, document and version, source and result digests, activation generation, review, validation summary, and reason. The activation generation makes each event unique when a later rollback returns to the same digest. Published rule provenance then follows decisions into the decision audit.
 
 ### Migration of current authoring surfaces
 
