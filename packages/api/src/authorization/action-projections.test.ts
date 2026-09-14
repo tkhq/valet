@@ -40,6 +40,7 @@ describe("canonical action projection inventory", () => {
     const dynamic = new Map(); dynamic.set("github", plugin("github", [], true));
     expect(() => validateActionProjectionInventory(missing)).toThrow(/missing: github.not_registered/);
     expect(() => validateActionProjectionInventory(extra)).toThrow(/extra:/);
+    expect(() => validateActionProjectionInventory(extra, false)).not.toThrow();
     expect(() => validateActionProjectionInventory(dynamic)).toThrow(/Dynamic plugin/);
   });
 });

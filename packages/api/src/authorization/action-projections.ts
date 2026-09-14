@@ -213,7 +213,10 @@ export function actionProjection(actionId: string): SafeParameterProjectionV1 {
   throw new Error(`Missing canonical safe-parameter projection for ${actionId}.`);
 }
 
-export function validateActionProjectionInventory(plugins: ReadonlyMap<string, { actionPlugin: ActionPlugin }>): void {
+export function validateActionProjectionInventory(
+  plugins: ReadonlyMap<string, { actionPlugin: ActionPlugin }>,
+  requireExact = true,
+): void {
   const actual = new Set<string>();
   for (const [service, { actionPlugin }] of plugins) {
     if (actionPlugin.resolveActions) {
@@ -223,6 +226,6 @@ export function validateActionProjectionInventory(plugins: ReadonlyMap<string, {
     for (const action of actionPlugin.actions) actual.add(action.id.includes(".") ? action.id : `${service}.${action.id}`);
   }
   const missing = [...actual].filter((id) => !INVENTORY[id]).sort();
-  const extra = Object.keys(INVENTORY).filter((id) => !actual.has(id)).sort();
+  const extra = requireExact ? Object.keys(INVENTORY).filter((id) => !actual.has(id)).sort() : [];
   if (missing.length || extra.length) throw new Error(`Canonical action projection inventory mismatch (missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}).`);
 }

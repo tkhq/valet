@@ -379,7 +379,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         [workflowsActions, skillsActions, assistantsActions],
       ]);
 
-  validateActionProjectionInventory(actionPluginByService);
+  validateActionProjectionInventory(actionPluginByService, !opts.plugins);
   const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
   const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
   configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));
