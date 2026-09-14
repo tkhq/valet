@@ -85,8 +85,21 @@ pass "independent sandbox storage request and limit"
 # --- sandbox namespace ownership -----------------------------------------
 [ "$(grep -c '^kind: Namespace$' "$TMP_DIR/bundled.yaml")" -eq 1 ] \
   || fail "default render must include exactly one sandbox Namespace"
-grep -A3 '^kind: Namespace$' "$TMP_DIR/bundled.yaml" | grep -q 'name: valet-sandboxes' \
+NAMESPACE_BLOCK=$(awk '
+  /^---$/ {
+    if (is_namespace) printf "%s", block
+    block=""
+    is_namespace=0
+    next
+  }
+  { block=block $0 ORS }
+  $0 == "kind: Namespace" { is_namespace=1 }
+  END { if (is_namespace) printf "%s", block }
+' "$TMP_DIR/bundled.yaml")
+printf '%s\n' "$NAMESPACE_BLOCK" | grep -q '^  name: valet-sandboxes$' \
   || fail "default render does not create sandbox.namespace"
+printf '%s\n' "$NAMESPACE_BLOCK" | grep -q '^    helm.sh/resource-policy: keep$' \
+  || fail "default sandbox Namespace must carry the Helm keep annotation"
 if grep -q '^kind: Namespace$' "$TMP_DIR/platform-namespace.yaml"; then
   fail "sandbox.createNamespace=false must omit the Namespace manifest"
 fi
@@ -106,7 +119,19 @@ fi
 pass "no cluster-scoped RBAC objects"
 
 # Assert each rule against its source call sites.
-ROLE_BLOCK=$(awk 'BEGIN { RS="---" } /kind: Role\n/ && /name: valet-sandbox-operator/ { print }' "$TMP_DIR/bundled.yaml")
+ROLE_BLOCK=$(awk '
+  /^---$/ {
+    if (is_role && has_name) printf "%s", block
+    block=""
+    is_role=0
+    has_name=0
+    next
+  }
+  { block=block $0 ORS }
+  $0 == "kind: Role" { is_role=1 }
+  $0 == "  name: valet-sandbox-operator" { has_name=1 }
+  END { if (is_role && has_name) printf "%s", block }
+' "$TMP_DIR/bundled.yaml")
 RULE_COUNT=$(printf '%s\n' "$ROLE_BLOCK" | grep -c '^  - apiGroups:')
 [ "$RULE_COUNT" -eq 9 ] || fail "Role must contain exactly 9 audited rules, found $RULE_COUNT"
 
@@ -126,7 +151,7 @@ assert_rule sandboxes '"create", "get", "list", "update", "patch", "delete"'
 assert_rule pods '"get", "list", "delete"'
 assert_rule events '"list"'
 assert_rule persistentvolumeclaims '"get", "patch"'
-assert_rule pods/exec '"create"'
+assert_rule pods/exec '"get"'
 assert_rule pods/log '"get"'
 assert_rule jobs '"create", "get", "delete"'
 assert_rule configmaps '"create", "delete"'

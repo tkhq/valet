@@ -210,13 +210,37 @@ resource requests or PVC provisioning.
 ## Update (2026-09-14): chart-native namespace ownership
 
 Chart 0.10.11 adds `sandbox.createNamespace`. The default is `true`, which
-keeps local installs self-contained. When it is `false`, Helm omits the
-Namespace manifest and still renders all namespaced application resources.
-The platform must create `sandbox.namespace` before Helm reconciliation.
+keeps local installs self-contained. The rendered Namespace has
+`helm.sh/resource-policy: keep`. When the value is `false`, Helm omits the
+Namespace and still renders all namespaced application resources. The platform
+must create `sandbox.namespace` before Helm reconciliation.
+
 This mode lets Flux helm-controller render the OCI chart without a
 post-renderer or cluster-scoped Namespace access. An existing release must
-retain its old Namespace before the platform adopts it. Otherwise, the first
-upgrade that omits the manifest can delete the Namespace.
+complete these steps in order:
+
+1. Add `helm.sh/resource-policy=keep` to the live Namespace.
+2. Upgrade once with `sandbox.createNamespace=true`.
+3. Verify that `helm get manifest` contains the annotated Namespace.
+4. Transfer the live Namespace to the platform.
+5. Set `sandbox.createNamespace=false`.
+
+The stored-manifest check is required. A live annotation alone does not change
+an old Helm release manifest. Helm can delete the Namespace if the next
+upgrade omits a manifest that lacks the keep annotation.
+
+The reverse transfer does not delete the Namespace. The platform must stop
+reconciling it first. An operator then adds these Helm ownership fields:
+
+- Label `app.kubernetes.io/managed-by=Helm`.
+- Annotation `meta.helm.sh/release-name=<release>`.
+- Annotation `meta.helm.sh/release-namespace=<release namespace>`.
+- Annotation `helm.sh/resource-policy=keep`.
+
+After verification, an operator can upgrade with
+`sandbox.createNamespace=true`. The same adoption must occur before a rollback
+to a revision that renders the Namespace. The chart README contains the exact
+migration, verification, adoption, and rollback commands.
 
 Helm owns application resources, including the api configuration ConfigMap and
 sandbox RBAC. Platform configuration can use `api.extraEnvFrom` to reference
@@ -227,9 +251,11 @@ value changes.
 
 The RBAC audit removed unused watch verbs, pod creation, pod log writes, and
 unused Job verbs. Pod deletion remains for image and resource convergence.
-Secret get/update/patch remain for resource-version-safe credential rotation
-and owner references. Sandbox update and patch remain for adoption,
-hibernation, and retained-home resume.
+Secret get, update, and patch remain for credential rotation and owner
+references. Sandbox update and patch remain for adoption, hibernation, and
+retained-home resume. The client-node exec path uses an HTTP GET WebSocket
+upgrade. The `pods/exec` rule grants only `get` and does not grant the SPDY
+`create` path.
 
 ## Non-goals
 

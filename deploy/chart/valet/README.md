@@ -63,22 +63,83 @@ existence for API groups it does not own.
 
 The default `sandbox.createNamespace: true` keeps local install behavior.
 The chart creates `sandbox.namespace` before it creates namespaced resources.
-Set `sandbox.createNamespace: false` when the platform owns that namespace.
-The namespace must exist before helm-controller installs the chart. The chart
-omits the Namespace manifest entirely in this mode.
+The Namespace has `helm.sh/resource-policy: keep`. Helm does not delete it
+when an upgrade omits it or an operator uninstalls the release.
 
-Do not switch an existing release directly to `false`. Helm can delete the
-Namespace that the previous release managed. First retain the old Namespace
-through the ownership migration. Then transfer it to the platform and set this
-value to `false`.
+Set `sandbox.createNamespace: false` when the platform owns the Namespace.
+The platform must create the Namespace before helm-controller installs the
+chart. Helm omits only the Namespace manifest in this mode.
+
+### Move an existing Namespace to the platform
+
+Do not set `sandbox.createNamespace=false` before this procedure. The old
+release manifest must contain the keep annotation before Helm omits the
+Namespace.
+
+1. Set the release variables.
+
+   ```sh
+   release=valet
+   release_namespace=valet
+   sandbox_namespace=valet-sandboxes
+   chart_ref=oci://ghcr.io/tkhq/charts/valet
+   chart_version=0.10.11
+   ```
+
+2. Add the keep annotation to the live Namespace.
+
+   ```sh
+   kubectl annotate namespace "$sandbox_namespace" \
+     helm.sh/resource-policy=keep --overwrite
+   ```
+
+3. Verify the live annotation.
+
+   ```sh
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.helm\.sh/resource-policy}')" = keep
+   ```
+
+4. Upgrade once while Helm still renders the Namespace.
+
+   ```sh
+   helm upgrade "$release" "$chart_ref" \
+     --version "$chart_version" \
+     --namespace "$release_namespace" \
+     --reuse-values \
+     --set sandbox.createNamespace=true
+   ```
+
+5. Verify that Helm stored the annotated Namespace manifest.
+
+   ```sh
+   helm get manifest "$release" --namespace "$release_namespace" |
+     kubectl create --dry-run=client -f - -o json |
+     jq -e --arg namespace "$sandbox_namespace" '
+       (.items // [.])[] |
+       select(.apiVersion == "v1" and .kind == "Namespace") |
+       select(.metadata.name == $namespace) |
+       .metadata.annotations["helm.sh/resource-policy"] == "keep"
+     '
+   ```
+
+6. Apply the platform change that adopts the live Namespace.
+
+7. Verify that the platform owns the Namespace before the next Helm upgrade.
+
+8. Set `sandbox.createNamespace=false` in the Helm values.
 
 Helm owns the api resources, sandbox Role, and sandbox RoleBinding. The Role
-uses only namespaced permissions. A restricted Helm reconciler does not need
-Namespace access or RBAC `escalate` and `bind`. Kubernetes requires the
-reconciler to hold each permission that it writes into a Role. The Sandbox CR
-verbs are the exceptional grant because the built-in namespaced `admin` role
-does not include that custom API group. Grant those exact verbs to the
-reconciler before installation. Do not grant `escalate` or `bind`.
+uses only namespaced permissions. The client-node exec client opens an HTTP
+GET WebSocket upgrade on `pods/exec`. The Role grants `get` for that
+subresource. It does not grant the SPDY `create` path.
+
+A restricted Helm reconciler does not need Namespace access or RBAC
+`escalate` and `bind`. Kubernetes requires the reconciler to hold each
+permission that it writes into a Role. The Sandbox CR verbs are the
+exceptional grant because the built-in namespaced `admin` role does not
+include that custom API group. Grant those exact verbs to the reconciler
+before installation. Do not grant `escalate` or `bind`.
 
 `api.instanceConfig` is chart content. When it is set, Helm owns the instance
 ConfigMap and its checksum rolls the api Deployment. Use `api.extraEnvFrom`
@@ -86,6 +147,57 @@ for ConfigMaps and Secrets that the platform owns. An ExternalSecret can own a
 target Secret that this list references. The chart does not render or copy
 those external values. Their updates do not change a pod-template checksum,
 so restart the api Deployment after an external value changes.
+
+### Return Namespace ownership to Helm
+
+Do not delete or recreate the Namespace. Stop platform reconciliation for the
+Namespace before this procedure.
+
+1. Set the release variables from the migration procedure.
+
+2. Remove or disable the platform resource that owns the Namespace.
+
+3. Add the Helm ownership metadata to the live Namespace.
+
+   ```sh
+   kubectl label namespace "$sandbox_namespace" \
+     app.kubernetes.io/managed-by=Helm --overwrite
+   kubectl annotate namespace "$sandbox_namespace" \
+     meta.helm.sh/release-name="$release" \
+     meta.helm.sh/release-namespace="$release_namespace" \
+     helm.sh/resource-policy=keep \
+     --overwrite
+   ```
+
+4. Verify the Helm ownership metadata.
+
+   ```sh
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')" = Helm
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')" = "$release"
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}')" = "$release_namespace"
+   test "$(kubectl get namespace "$sandbox_namespace" \
+     -o jsonpath='{.metadata.annotations.helm\.sh/resource-policy}')" = keep
+   ```
+
+5. Upgrade with Namespace creation enabled.
+
+   ```sh
+   helm upgrade "$release" "$chart_ref" \
+     --version "$chart_version" \
+     --namespace "$release_namespace" \
+     --reuse-values \
+     --set sandbox.createNamespace=true
+   ```
+
+If a Helm rollback restores a revision that renders the Namespace, complete
+steps 1 through 4 first. Then run this command with the target revision:
+
+```sh
+helm rollback "$release" <revision> --namespace "$release_namespace"
+```
 
 ## Registry filesystem health
 
