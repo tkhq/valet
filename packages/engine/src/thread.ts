@@ -84,6 +84,7 @@ import {
   SummarizeOverflowError,
   usableTokens,
   walkTranscriptDag,
+  selectSummaryCheckpointTail,
   type PruneResult,
   type SummarizeResult,
 } from "./compaction.js";
@@ -271,6 +272,8 @@ export function buildSpilledInputMarker(args: {
  * prompt-too-long retry (TKAI-306).
  */
 const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
+const SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS = 8_000;
+const SUMMARY_INPUT_MAX_TOKENS = 64_000;
 
 let nextId = 1;
 function uid(prefix: string): string {
@@ -1936,6 +1939,16 @@ export class Thread {
     return append;
   }
 
+  private async transcriptSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(
+      this.session.id,
+      this.id,
+    );
+    if (!snapshot) throw new Error(`thread not found: ${this.id}`);
+    this.activeLeafEntryId = snapshot.thread.activeLeafEntryId;
+    return snapshot;
+  }
+
   /** Load restored history only when this thread needs an agent transcript. */
   private async ensureTranscript(): Promise<void> {
     if (!this.transcriptPending) return;
@@ -1944,9 +1957,9 @@ export class Thread {
         "thread.hydrate",
         { "valet.session.id": this.session.id, "valet.thread.id": this.id },
         async (span) => {
-          const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
-          span.setAttribute("valet.thread.entries_loaded", entries.length);
-          this.rehydrateTranscript(entries);
+          const snapshot = await this.transcriptSnapshot();
+          span.setAttribute("valet.thread.entries_loaded", snapshot.entries.length);
+          this.rehydrateTranscript(snapshot.entries);
         },
       ).finally(() => {
         this.transcriptLoad = undefined;
@@ -3279,7 +3292,8 @@ export class Thread {
       // toolResult-convertible, satisfying the continuation contract. No
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
-      const entries = await store.getEntries(this.session.id, this.id);
+      const snapshot = await this.transcriptSnapshot();
+      const entries = snapshot.entries;
       const resumeModel = this.effectiveModelLenient();
       this.replaceActiveSkillInvocations(entries);
       this.agent.state.messages = entriesToAgentMessages(
@@ -4138,6 +4152,7 @@ export class Thread {
       createdAt: Date.now(),
     };
     await this.fencedWrite(() => this.appendEntry(entry, this.fence));
+    if (this.staleFenceDetected) return;
     await this.runAgent(AUTO_CONTINUE_PROMPT);
   }
 
@@ -4229,10 +4244,8 @@ export class Thread {
 
     // Load the full DAG, then follow the active leaf to the root. Other
     // branches stay durable but must not enter this compaction pass.
-    const allEntries = await store.getEntries(session.id, this.id);
-    const threadData = await store.getThread(session.id, this.id);
-    this.activeLeafEntryId = threadData?.activeLeafEntryId;
-    const entries = walkTranscriptDag(allEntries, this.activeLeafEntryId);
+    const snapshot = await this.transcriptSnapshot();
+    const entries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
 
     // Step 1: pruning pass (cheap, no LLM).
     const protectedTools = new Set<string>();
@@ -4318,10 +4331,20 @@ export class Thread {
       // — under overflow duress losing the oldest detail from the summary
       // beats failing the compaction outright, and `previousSummary` still
       // anchors facts from earlier compactions.
-      // Include the bounded verbatim tail in the summarizer input so the
-      // persisted checkpoint records the current task state, not only the
-      // older prefix that the summary replaces.
-      let headForSummary = entries;
+      // Include recent tail evidence for the recovery checkpoint without
+      // sending the complete active path to the summarizer.
+      const checkpointTail = selectSummaryCheckpointTail(
+        effectiveEntries.slice(cut.cutIndex),
+        SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS,
+      );
+      const summaryInputBudget = Math.min(
+        Math.max(usableTokens(model), SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS),
+        SUMMARY_INPUT_MAX_TOKENS,
+      );
+      let headForSummary = selectSummaryCheckpointTail(
+        [...head, ...checkpointTail],
+        summaryInputBudget,
+      );
       for (let attempt = 0; ; attempt++) {
         try {
           summaryResult = await summarize({
@@ -4393,7 +4416,8 @@ export class Thread {
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
-      const updatedEntries = await store.getEntries(session.id, this.id);
+      const updatedSnapshot = await this.transcriptSnapshot();
+      const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.agent.state.messages = entriesToAgentMessages(
         updatedEntries,

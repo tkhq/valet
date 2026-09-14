@@ -248,15 +248,41 @@ export function walkTranscriptDag(
   }
   path.reverse();
 
-  // Entries written before TKAI-211 used null parents. If the linked path
-  // starts after a chronological prefix of those roots, keep that prefix.
-  // V1 had no branch controls, so insertion order is its durable path.
+  // Before TKAI-211, normal entries had null parents but compaction entries
+  // pointed at the covered head. Keep the latest legacy checkpoint and the
+  // chronological null-parent suffix that leads to this path's root. Linked
+  // entries in that range belong to inactive branches and stay excluded.
   const rootIndex = entries.findIndex((entry) => entry.id === path[0]?.id);
-  const legacyPrefix = entries.slice(0, rootIndex);
-  if (legacyPrefix.length > 0 && legacyPrefix.every((entry) => entry.parentId === null)) {
-    return [...legacyPrefix, ...path];
+  const prefix = entries.slice(0, rootIndex);
+  let checkpointIndex = -1;
+  for (let index = prefix.length - 1; index >= 0; index--) {
+    if (prefix[index].type === "compaction") {
+      checkpointIndex = index;
+      break;
+    }
   }
-  return path;
+  const legacyPrefix = prefix
+    .slice(checkpointIndex < 0 ? 0 : checkpointIndex)
+    .filter((entry, index) =>
+      entry.parentId === null || (checkpointIndex >= 0 && index === 0),
+    );
+  return [...legacyPrefix, ...path];
+}
+
+/** Keep a recent suffix for checkpoint evidence without resending the full tail. */
+export function selectSummaryCheckpointTail(
+  entries: readonly SessionEntry[],
+  maxTokens: number,
+): SessionEntry[] {
+  let start = entries.length;
+  let tokens = 0;
+  while (start > 0) {
+    const next = estimateEntryTokens(entries[start - 1]);
+    if (start < entries.length && tokens + next > maxTokens) break;
+    start--;
+    tokens += next;
+  }
+  return entries.slice(start);
 }
 
 // ── Turn segmentation ──────────────────────────────────────────────

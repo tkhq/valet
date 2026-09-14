@@ -251,6 +251,7 @@ export {
   tailBudget,
   inputSpillThreshold,
   walkTranscriptDag,
+  selectSummaryCheckpointTail,
   turns,
   selectCutPoint,
   planPrune,
