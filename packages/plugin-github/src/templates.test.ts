@@ -1266,12 +1266,15 @@ describe(`${ASSIGN_ID} — the coverage rule (branch A)`, () => {
 describe(`${ASSIGN_ID} — what it writes and who it tells (branch A)`, () => {
   const definition = definitionOf(ASSIGN_ID);
 
-  it("writes the assignees field, and never a reviewer request", () => {
+  it("writes the assignees field, and never creates a reviewer request", () => {
     const assign = toolNode(definition, "assign");
     expect(assign.action).toBe("update_pull_request");
     expect(assign.params.assignees).toBe("{{ nodes.select.result.output.assignees }}");
     expect(assign.params.pullNumber).toBe("{{ trigger.data.payload.pull_request.number }}");
-    expect(JSON.stringify(definition)).not.toContain("requested_reviewers");
+    const actions = definition.nodes
+      .filter((node): node is ToolNode => node.type === "tool")
+      .map((node) => node.action);
+    expect(actions).not.toContain("request_reviewers");
   });
 
   it("reaches the write only through the coverage gate", () => {
@@ -1377,13 +1380,30 @@ describe(`${ASSIGN_ID} — what it writes and who it tells (branch A)`, () => {
     expect(items).toEqual([{ handle: "reviewer-one", slackUserId: "U0REVIEWERONE" }]);
   });
 
-  it("leaves a pull request that somebody already owns alone", () => {
+  it("exits before selection when any reviewer is already requested", () => {
     const gate = assignIfNode("assignable");
     expect(gate.conditions.map((c) => `${c.left}:${c.operation}`)).toEqual([
       "nodes.pull_request.result.state:equals",
       "nodes.pull_request.result.draft:isFalse",
       "nodes.pull_request.result.assignees:isEmpty",
+      "nodes.pull_request.result.requested_reviewers:isEmpty",
+      "nodes.pull_request.result.requested_teams:isEmpty",
     ]);
+
+    const pullRequest = inspectResult();
+    pullRequest.requested_reviewers = ["already-requested-not-the-ideal-candidate"];
+    const ctx: TemplateContext = {
+      trigger: eventTrigger(webhookBody("opened")),
+      nodes: { pull_request: { result: pullRequest } },
+    };
+    expect(gate.conditions.every((condition) => evaluateAssignCondition(condition, ctx))).toBe(false);
+
+    // The false branch stops immediately. It cannot select, change assignees,
+    // request another reviewer, or create a public comment.
+    expect(definition.edges.filter((edge) => edge.from === "assignable" && edge.fromOutput === "false").map((edge) => edge.to)).toEqual(["not_assignable"]);
+    expect(definition.edges.filter((edge) => edge.from === "not_assignable")).toEqual([]);
+    const stop = nodeOf(definition, "not_assignable");
+    expect(isRecord(stop) && stop.outcome).toBe("failure");
   });
 
   it("names nobody real, and keeps its example groups to placeholders", () => {

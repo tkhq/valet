@@ -122,8 +122,10 @@ CODEOWNERS-matching and calendar-checking shape.
 exists and `trigger.data.payload.action` is `opened` or `ready_for_review`.
 Reads owner/repo/pull number from `trigger.data.payload.repository.*` /
 `trigger.data.payload.pull_request.number`. The rest is today's shape: read
-CODEOWNERS and the roster, read the pull request, shortlist candidates,
-check calendars, select, write `assignees`, read it back, report.
+CODEOWNERS and the roster, then read the pull request. A draft, a pull request
+with assignees, or a pull request with individual or team reviewer requests
+stops before shortlist and writes nothing. Otherwise, shortlist candidates,
+check calendars, select, write `assignees`, read it back, and report.
 
 **Branch B — decline swap.** Gate: `trigger.data.payload.comment` and
 `trigger.data.payload.issue.pull_request` both exist (the second is how a

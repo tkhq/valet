@@ -1060,6 +1060,8 @@ const assignReviewers: WorkflowDefinition = {
         { left: "nodes.pull_request.result.state", dataType: "string", operation: "equals", right: "open" },
         { left: "nodes.pull_request.result.draft", dataType: "boolean", operation: "isFalse" },
         { left: "nodes.pull_request.result.assignees", dataType: "array", operation: "isEmpty" },
+        { left: "nodes.pull_request.result.requested_reviewers", dataType: "array", operation: "isEmpty" },
+        { left: "nodes.pull_request.result.requested_teams", dataType: "array", operation: "isEmpty" },
       ],
     },
     {
@@ -1068,8 +1070,8 @@ const assignReviewers: WorkflowDefinition = {
       outcome: "failure",
       message:
         "Pull request {{ trigger.data.payload.pull_request.number }} was read, and it was not assigned. It is " +
-        "closed, it is a draft, or somebody is assigned to it already. Assigning replaces the whole assignee " +
-        "list, so this run never writes over one.",
+        "closed, it is a draft, somebody is assigned to it, or it already has a reviewer request. Assigning " +
+        "replaces the whole assignee list, so this run never writes over one.",
     },
     {
       // Two additions beyond the original shape: `candidates` now carries
