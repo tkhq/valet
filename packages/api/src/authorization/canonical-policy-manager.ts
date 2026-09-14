@@ -172,7 +172,10 @@ export async function ensureCanonicalPolicyReadiness(manager: CanonicalPolicyBun
     for (const item of missing) {
       await putBundle(tx, item.digest, item.bundle, now);
       const inserted = await tx.insert(policyActiveBundles).values({ orgId: item.organizationId, digest: item.digest, generation: 1, activatedAt: now }).onConflictDoNothing().returning({ orgId: policyActiveBundles.orgId });
-      if (!inserted[0]) throw new Error(`Canonical policy pointer for ${item.organizationId} changed during startup readiness.`);
+      if (!inserted[0]) {
+        const winner = (await tx.select().from(policyActiveBundles).where(eq(policyActiveBundles.orgId, item.organizationId)).limit(1))[0];
+        if (winner?.digest !== item.digest || winner.generation !== 1) throw new Error(`Canonical policy pointer for ${item.organizationId} changed during startup readiness.`);
+      }
     }
   });
 }

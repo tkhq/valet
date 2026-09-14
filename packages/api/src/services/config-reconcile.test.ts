@@ -8,7 +8,7 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionPolicies, invites, llmProviders, orgMembers, orgs, contentSources, skills, teams, teamMembers, users } from "../schema/index.js";
+import { actionPolicies, invites, llmProviders, orgMembers, orgs, policyActiveBundles, contentSources, skills, teams, teamMembers, users } from "../schema/index.js";
 import { configureCanonicalOrganizationProvisioner, ensureOrg } from "./org.js";
 import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import {
@@ -1299,6 +1299,21 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
   async function orgId(): Promise<string> {
     return (await ensureOrg(db)).id;
   }
+
+  it("bootstraps an existing organization before the first config policy cutover", async () => {
+    await db.insert(orgs).values({ id: "legacy-org", name: "Legacy", createdAt: 1 });
+    await db.insert(actionPolicies).values({
+      id: "legacy-row", orgId: "legacy-org", principalType: "org", principalId: "legacy-org",
+      service: "linear", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1,
+    });
+    const cfg: InstanceConfig = { version: 1, toolPolicies: [{ service: "github", mode: "deny" }] };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const first = (await db.select().from(policyActiveBundles))[0];
+    expect(first).toMatchObject({ orgId: "legacy-org", generation: 2 });
+    await reconcileInstanceConfig(deps(db), cfg);
+    expect((await db.select().from(policyActiveBundles))[0]).toEqual(first);
+    expect(await db.select().from(actionPolicies).where(eq(actionPolicies.id, "legacy-row"))).toHaveLength(1);
+  }, 120_000);
 
   it("creates a service-targeted org row with origin/managed_by set", async () => {
     const cfg: InstanceConfig = {

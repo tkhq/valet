@@ -848,6 +848,10 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig, manager
   const org = await ensureOrg(db);
   const orgId = org.id;
   if (!manager) throw new InstanceConfigError("toolPolicies require the canonical policy manager.");
+  // The first canonical upgrade can find an existing organization with policy
+  // rows but no active pointer. Install that exact database state before the
+  // config-owned transaction changes it.
+  await manager.ensureOrganizationReady(orgId);
   await manager.mutateAndActivate(orgId, { actorId: "config", operation: "config_reconcile", idempotencyKey: createHash("sha256").update(JSON.stringify(toolPolicies)).digest("hex") }, async (tx) => {
   const now = Date.now();
 

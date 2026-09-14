@@ -30,13 +30,16 @@ export class SourceBundleHost {
   ): Promise<ActiveBundlePointer> {
     await this.load(sourceBundleDigest);
     const active = await this.storage.compareAndSetActive(organizationId, expected, sourceBundleDigest);
-    if (active === undefined) {
-      throw new LocalEvaluatorError(
-        "bundle_replacement_conflict",
-        `The active policy bundle for ${organizationId} changed concurrently.`,
-      );
+    if (active !== undefined) return active;
+    const winner = await this.storage.getActive(organizationId);
+    if (winner?.sourceBundleDigest === sourceBundleDigest) {
+      await this.load(winner.sourceBundleDigest);
+      return winner;
     }
-    return active;
+    throw new LocalEvaluatorError(
+      "bundle_replacement_conflict",
+      `The active policy bundle for ${organizationId} changed concurrently.`,
+    );
   }
 
   async load(sourceBundleDigest: string): Promise<{

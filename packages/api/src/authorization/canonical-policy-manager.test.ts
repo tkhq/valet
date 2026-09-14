@@ -44,6 +44,18 @@ describe("canonical policy readiness", () => {
     } finally { await manager.close(); }
   }, 120_000);
 
+  it("accepts an identical first-boot compare-and-swap winner", async () => {
+    const db = await setup();
+    await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const first = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    const second = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await Promise.all([first.ensureOrganizationReady("org-a"), second.ensureOrganizationReady("org-a")]);
+      expect(await db.select().from(policyActiveBundles)).toHaveLength(1);
+      await Promise.all([ensureCanonicalPolicyReadiness(first), ensureCanonicalPolicyReadiness(second)]);
+    } finally { await Promise.all([first.close(), second.close()]); }
+  }, 120_000);
+
   it("blocks all readiness when one organization has corrupt content", async () => {
     const db = await setup();
     await db.insert(orgs).values([{ id: "org-a", name: "A", createdAt: 1 }, { id: "org-b", name: "B", createdAt: 1 }]);
