@@ -148,6 +148,22 @@ decision := {"effect":"deny","reasonCode":"marshaled","matchedRuleIds":[],"oblig
     });
   });
 
+  it("detects pointer changes and reuses immutable bundles without replacing the worker", async () => {
+    const { evaluator, host, identity, pointer } = await activeEvaluator(runtime);
+    const generation = runtime.generation;
+    const denyBundle = testBundle(`package valet.authz
+import rego.v1
+decision := {"effect":"deny","reasonCode":"changed_bundle","matchedRuleIds":["changed"],"obligations":[],"redactions":[]}
+`);
+    const replacement = await host.publish(denyBundle);
+    const changedPointer = await host.activate("org-1", pointer, replacement.sourceBundleDigest);
+    await expect(evaluator.evaluate(testRequest())).resolves.toMatchObject({ decision: { effect: "deny", reasonCode: "changed_bundle" } });
+
+    await host.activate("org-1", changedPointer, identity.sourceBundleDigest);
+    await expect(evaluator.evaluate(testRequest())).resolves.toMatchObject({ decision: { effect: "allow", reasonCode: "local_valet_test" } });
+    expect(runtime.generation).toBe(generation);
+  });
+
   it("canonicalizes typed objects and rejects byte-boundary-shaped commands", async () => {
     const { evaluator, identity } = await activeEvaluator(runtime);
     const request = testRequest();

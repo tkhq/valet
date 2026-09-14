@@ -159,6 +159,12 @@ describe("canonical policy readiness", () => {
       await db.delete(actionPolicies).where(eq(actionPolicies.id, "authored"));
       await manager.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });
       const before = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
+      const originalBundles = new Map<string, typeof authored.built.bundle>();
+      for (const pointer of before) {
+        const stored = (await db.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, pointer.digest)).limit(1))[0];
+        if (!stored) throw new Error(`missing test bundle ${pointer.digest}`);
+        originalBundles.set(pointer.orgId, stored.bundle);
+      }
       const authoredFiles = authored.built.bundle.files;
       const rewrite = async (input: { bundle: typeof authored.built.bundle }) => {
         const manifest = JSON.parse(input.bundle.manifestJson) as { source: { revision: string } };
@@ -186,6 +192,13 @@ describe("canonical policy readiness", () => {
       expect(migratedAuthored.files).toEqual(authoredFiles);
       await manager.migrateReleaseSet("release-2", rewrite);
       expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(after);
+
+      await manager.migrateReleaseSet("release-1-rollback", async (input) => originalBundles.get(input.organizationId)!);
+      const rolledBack = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
+      expect(rolledBack.map((row) => row.digest)).toEqual(before.map((row) => row.digest));
+      expect(rolledBack.every((row, index) => row.generation === before[index]!.generation + 2)).toBe(true);
+      await manager.migrateReleaseSet("release-1-rollback", async (input) => originalBundles.get(input.organizationId)!);
+      expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(rolledBack);
     } finally { await manager.close(); }
   }, 120_000);
 
