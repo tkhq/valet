@@ -1814,3 +1814,18 @@ describe("dynamic discovery collision serialization", () => {
     expect(payloads.filter((payload) => payload.warnings?.length === 1)).toHaveLength(1);
   });
 });
+
+describe("approval preview own-key fidelity", () => {
+  it("preserves __proto__ in both the review preview and executed args", async () => {
+    let preview = "";
+    let executed: Record<string, unknown> | undefined;
+    const plugin: ActionPlugin = { service: "safe", actions: [{ id: "safe.run", name: "Run", description: "Run", riskLevel: "high", parameters: Type.Object({ ["__proto__"]: Type.String() }), execute: async (args) => { executed = args; return { success: true }; } }] };
+    const [, call] = pluginCatalogTools({ plugins: [plugin] });
+    const params = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(params, "__proto__", { value: "kept", enumerable: true });
+    await call.execute({ tool_id: "safe.run", params, summary: "run" }, makeCtx({ requestDecision: async (gate) => { preview = String(gate.context?.argsPreview); return { actionId: "approve", resolvedBy: "test", resolvedAt: Date.now() }; } }));
+    expect(preview).toContain('"__proto__":"kept"');
+    expect(Object.hasOwn(executed ?? {}, "__proto__")).toBe(true);
+    expect(executed?.["__proto__"]).toBe("kept");
+  });
+});
