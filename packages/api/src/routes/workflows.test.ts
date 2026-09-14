@@ -6,11 +6,13 @@
  * elsewhere) so these tests assert on the routes' own logic — request
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import type { RunHost } from "@valet/workflow";
+import type { RunHost, WorkflowDefinition } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
+import { createLlmProvider } from "../services/llm-providers.js";
+import { setApprovedModels } from "../services/approved-models.js";
 import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import {
@@ -46,6 +48,7 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
 
 const VALID_DEFINITION = {
@@ -541,6 +544,126 @@ describe("PUT /api/workflows/:id", () => {
       body: JSON.stringify({ definition: { version: "dag/v1", nodes: [], edges: [] } }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("PATCH /api/workflows/:id/model", () => {
+  const MODEL_DEFINITION = {
+    version: "dag/v1",
+    nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "draft", type: "llm", model: "s", prompt: "Draft" },
+      { id: "review", type: "session", mode: "start", model: "m", prompt: "Review" },
+      { id: "stop", type: "stop" },
+    ],
+    edges: [
+      { from: "trigger", to: "draft" },
+      { from: "draft", to: "review" },
+      { from: "review", to: "stop" },
+    ],
+  };
+
+  async function createModelWorkflow(baseUrl: string): Promise<CreateWorkflowResponse> {
+    const res = await fetch(`${baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "model-workflow", definition: MODEL_DEFINITION }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as CreateWorkflowResponse;
+  }
+
+  it("updates selected model-capable nodes and persists the tier", async () => {
+    api = await bootTestApi();
+    const created = await createModelWorkflow(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "l", nodeIds: ["draft"] }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ workflowId: created.id, model: "l", nodeIds: ["draft"] });
+
+    const saved = await fetch(`${api.baseUrl}/api/workflows/${created.id}`).then(
+      (response) => response.json() as Promise<CreateWorkflowResponse>,
+    );
+    const definition = saved.definition as WorkflowDefinition;
+    const models = definition.nodes
+      .filter((node) => node.type === "llm" || node.type === "session")
+      .map((node) => [node.id, node.model]);
+    expect(models).toEqual([["draft", "l"], ["review", "m"]]);
+  });
+
+  it("round-trips an active custom catalog model through creation, editing, and focused updates", async () => {
+    api = await bootTestApi();
+    const provider = await createLlmProvider(api.providers.db, {
+      orgId: "local-org", kind: "openai_compatible", name: "Custom",
+      baseUrl: "https://models.example.test/v1", models: [{ id: "writer", name: "Writer" }],
+    });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, `llm:${provider.id}`, {
+      type: "api_key", apiKey: "test-custom-key",
+    });
+    const model = `${provider.id}/writer`;
+    const definition = {
+      ...MODEL_DEFINITION,
+      nodes: MODEL_DEFINITION.nodes.map((node) => node.type === "llm" ? { ...node, model } : node),
+    };
+    const create = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "custom-model", definition }),
+    });
+    expect(create.status).toBe(201);
+    const created = await create.json() as CreateWorkflowResponse;
+    const edit = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition }),
+    });
+    expect(edit.status).toBe(200);
+    const patch = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    expect(patch.status).toBe(200);
+    const saved = await fetch(`${api.baseUrl}/api/workflows/${created.id}`).then(
+      (response) => response.json() as Promise<CreateWorkflowResponse>,
+    );
+    expect(saved.definition).toMatchObject({ nodes: [
+      { id: "trigger" }, { id: "draft", model }, { id: "review", model }, { id: "stop" },
+    ] });
+  });
+
+  it("rejects a concrete model that the org did not approve", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    const created = await createModelWorkflow(api.baseUrl);
+    await setApprovedModels(api.providers.db, "local-org", []);
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "anthropic/claude-haiku-4-5" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("not approved") });
+  });
+
+  it("rejects unknown models and non-model-capable node ids without changing the workflow", async () => {
+    api = await bootTestApi();
+    const created = await createModelWorkflow(api.baseUrl);
+    for (const body of [
+      { model: "not-a-model" },
+      { model: "l", nodeIds: ["stop"] },
+    ]) {
+      const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+    }
+    const saved = await fetch(`${api.baseUrl}/api/workflows/${created.id}`).then(
+      (response) => response.json() as Promise<CreateWorkflowResponse>,
+    );
+    expect(saved.definition).toEqual(MODEL_DEFINITION);
   });
 });
 

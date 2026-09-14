@@ -225,6 +225,8 @@ import type {
   TestLlmProviderRequest,
   TestLlmProviderResponse,
   UpdateWorkflowEventTriggerRequest,
+  UpdateWorkflowModelRequest,
+  UpdateWorkflowModelResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowScheduleRequest,
   UsageSummaryResponse,
@@ -948,6 +950,8 @@ export const api = {
   },
   updateWorkflow: (id: string, body: UpdateWorkflowRequest) =>
     request<UpdateWorkflowResponse>("PUT", `/workflows/${encodeURIComponent(id)}`, body),
+  updateWorkflowModel: (id: string, body: UpdateWorkflowModelRequest) =>
+    request<UpdateWorkflowModelResponse>("PATCH", `/workflows/${encodeURIComponent(id)}/model`, body),
   deleteWorkflow: (id: string) =>
     request<{ ok: true }>("DELETE", `/workflows/${encodeURIComponent(id)}`),
   startWorkflowRun: (id: string, body: StartWorkflowRunRequest = {}) =>

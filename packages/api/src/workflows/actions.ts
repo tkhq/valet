@@ -36,8 +36,14 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import type { TeamServiceReadinessDeps } from "./team-service-readiness.js";
-import { buildValidateEnvironment } from "./validation-env.js";
-import { appendRemovedEdgeHint, applyWorkflowPatch, type WorkflowEdgeRef } from "./patch.js";
+import { buildValidateEnvironment, buildOrgValidateEnvironment } from "./validation-env.js";
+import {
+  appendRemovedEdgeHint,
+  applyWorkflowModelPatch,
+  applyWorkflowPatch,
+  type WorkflowEdgeRef,
+} from "./patch.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import {
   createWorkflowTrigger,
   deleteWorkflowTrigger,
@@ -276,13 +282,16 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // The validate env is best-effort: if deps aren't wired (early boot,
       // or a test that only exercises validation), lint without the
       // catalog hooks rather than failing the whole call.
-      let catalog: WorkflowServiceDeps["actionPluginByService"];
+      let validationDeps: WorkflowServiceDeps | undefined;
       try {
-        catalog = getDeps().actionPluginByService;
+        validationDeps = getDeps();
       } catch {
-        catalog = undefined;
+        validationDeps = undefined;
       }
-      const validation = validateDefinitionInput(definition, buildValidateEnvironment(catalog));
+      const env = validationDeps
+        ? await buildOrgValidateEnvironment(validationDeps, owner.orgId)
+        : buildValidateEnvironment();
+      const validation = validateDefinitionInput(definition, env);
       if (!validation.ok) {
         return {
           success: false,
@@ -600,7 +609,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         (remove_edges !== undefined && remove_edges.length > 0);
 
       if (changesGraph) {
-        const env = buildValidateEnvironment(deps.actionPluginByService);
+        const env = await buildOrgValidateEnvironment(deps, owner.orgId);
         const validation = validateDefinitionInput(patched.definition, env);
         if (!validation.ok) {
           // Validate the stored definition too, so the reply can say which
@@ -636,6 +645,55 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const updateModel = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      model: Type.String({ description: "An approved catalog model id or a size tier: xs, s, m, l, xl." }),
+      node_ids: Type.Optional(Type.Array(Type.String(), {
+        description: "Only these llm or session nodes. Omit to update all model-capable nodes.",
+      })),
+    }),
+  )({
+    id: "workflows.update_model",
+    name: "Update workflow model",
+    description:
+      "Change the model on selected llm or session nodes without replacing the workflow definition. " +
+      "Omit node_ids to update all such nodes, including foreach bodies. Orchestrator nodes use their " +
+      "assistant's saved model and are not changed. The model must be an approved active catalog model " +
+      "or an org model tier.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, model, node_ids }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const catalog = await buildOrgCatalog(deps.db, deps.credentials, owner.orgId);
+      if (!catalogValidIds(catalog).has(model)) {
+        return {
+          success: false,
+          error: `unknown or inactive model: ${model}. Pick an approved model from GET /api/models, or use xs, s, m, l, or xl.`,
+        };
+      }
+      const concrete = catalog.find((entry) =>
+        entry.id === model || (entry.id.startsWith("anthropic/") && entry.id.slice("anthropic/".length) === model),
+      );
+      if (concrete && !concrete.approved) {
+        return { success: false, error: `model ${model} is not approved. Choose an approved model or an org model tier.` };
+      }
+
+      const wf = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!wf) return { success: false, error: `workflow not found: ${workflow_id}` };
+      const stored = validateDefinitionInput(wf.definition);
+      if (!stored.ok) return { success: false, error: formatLintErrors(stored.errors) };
+      const patched = applyWorkflowModelPatch(stored.definition, model, node_ids);
+      if (!patched.ok) return { success: false, error: formatLintErrors(patched.errors) };
+      const validation = validateDefinitionInput(patched.definition, await buildOrgValidateEnvironment(deps, owner.orgId));
+      if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
+      const updated = await updateWorkflowDefinition(deps, owner, workflow_id, { definition: patched.definition });
+      if (!updated) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: updated.id, model, nodeIds: patched.nodeIds } };
+    },
+  });
+
   const addAggregate = action(
     Type.Object({
       workflow_id: Type.String(),
@@ -665,7 +723,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         owner,
         workflow_id,
         { mode, model, nodeId: node_id, sources, instructions },
-        buildValidateEnvironment(deps.actionPluginByService),
+        await buildOrgValidateEnvironment(deps, owner.orgId),
       );
       if (!result.ok) {
         if (result.reason === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };
@@ -1092,6 +1150,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       getWorkflow,
       saveWorkflow,
       patchWorkflow,
+      updateModel,
       addAggregate,
       deleteWorkflow,
       startRun,

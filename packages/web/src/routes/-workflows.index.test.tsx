@@ -172,6 +172,8 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("~/api/settings", () => ({
+  useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
+  useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({
     data: { features: { organizations: true } },

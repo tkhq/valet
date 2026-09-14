@@ -1,5 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type WorkflowDefinition } from "@valet/workflow";
 import {
   findingKey,
@@ -14,10 +14,16 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { teams, teamMembers, eventSubscriptions, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
+import { createLlmProvider } from "../services/llm-providers.js";
+import { setApprovedModels } from "../services/approved-models.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const noDeps = (): WorkflowServiceDeps => {
   throw new Error("deps not needed for this test");
@@ -61,6 +67,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.resolve_approval",
       "workflows.save_workflow",
       "workflows.start_run",
+      "workflows.update_model",
       "workflows.update_schedule",
       "workflows.update_trigger",
     ]);
@@ -225,6 +232,125 @@ describe("DB-backed actions", () => {
     );
     return created.id;
   }
+
+  it("updates selected workflow models through the focused assistant action", async () => {
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "model-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "draft", type: "llm", model: "s", prompt: "Draft" },
+            { id: "review", type: "session", mode: "start", model: "m", prompt: "Review" },
+            { id: "stop", type: "stop" },
+          ],
+          edges: [
+            { from: "trigger", to: "draft" },
+            { from: "draft", to: "review" },
+            { from: "review", to: "stop" },
+          ],
+        },
+      },
+    );
+    const update = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+
+    const result = await update.execute(
+      { workflow_id: created.id, model: "l", node_ids: ["review"] },
+      ctx(),
+    );
+    expect(result).toEqual({
+      success: true,
+      data: { workflowId: created.id, model: "l", nodeIds: ["review"] },
+    });
+    const saved = await getWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, created.id);
+    const definition = saved?.definition as WorkflowDefinition | undefined;
+    expect(definition?.nodes
+      .filter((node) => node.type === "llm" || node.type === "session")
+      .map((node) => [node.id, node.model])).toEqual([["draft", "s"], ["review", "l"]]);
+  });
+
+  it("saves and updates custom catalog models through assistant actions", async () => {
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    const provider = await createLlmProvider(db, {
+      orgId: "org1", kind: "openai_compatible", name: "Custom",
+      baseUrl: "https://models.example.test/v1", models: [{ id: "writer", name: "Writer" }],
+    });
+    await deps.credentials.save({ type: "org", id: "org1" }, `llm:${provider.id}`, {
+      type: "api_key", apiKey: "test-custom-key",
+    });
+    const model = `${provider.id}/writer`;
+    const definition = {
+      version: "dag/v1", nodes: [
+        { id: "trigger", type: "trigger" }, { id: "draft", type: "llm", model, prompt: "Draft" },
+      ], edges: [{ from: "trigger", to: "draft" }],
+    };
+    const created = await createWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, {
+      name: "custom-model", definition,
+    });
+    const actions = workflowsActionPlugin(() => deps).actions;
+    const save = actions.find((action) => action.id === "workflows.save_workflow");
+    const update = actions.find((action) => action.id === "workflows.update_model");
+    if (!save || !update) throw new Error("Expected workflow actions");
+    expect(await save.execute({ workflow_id: created.id, definition }, ctx())).toMatchObject({ success: true });
+    expect(await update.execute({ workflow_id: created.id, model }, ctx())).toMatchObject({ success: true });
+    const saved = await getWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, created.id);
+    expect(saved?.definition).toMatchObject({ nodes: [{ id: "trigger" }, { id: "draft", model }] });
+  });
+
+  it("rejects invalid model choices and node targets through the focused assistant action", async () => {
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "invalid-model-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [{ id: "trigger", type: "trigger" }, { id: "stop", type: "stop" }],
+          edges: [{ from: "trigger", to: "stop" }],
+        },
+      },
+    );
+    const workflowId = created.id;
+    const update = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+    expect(await update.execute({ workflow_id: workflowId, model: "not-a-model" }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("unknown or inactive model") });
+    expect(await update.execute({ workflow_id: workflowId, model: "l", node_ids: ["stop"] }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("not an llm or session node") });
+  });
+
+  it("rejects a concrete model that the org did not approve", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    const created = await createWorkflowDefinition(
+      deps,
+      { userId: "user1", orgId: "org1" },
+      {
+        name: "approval-target",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "draft", type: "llm", model: "s", prompt: "Draft" },
+          ],
+          edges: [{ from: "trigger", to: "draft" }],
+        },
+      },
+    );
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    await setApprovedModels(db, "org1", []);
+    const update = workflowsActionPlugin(() => deps).actions.find((action) => action.id === "workflows.update_model");
+    if (!update) throw new Error("update_model action missing");
+    const result = await update.execute(
+      { workflow_id: created.id, model: "anthropic/claude-haiku-4-5" },
+      ctx(),
+    );
+    await setApprovedModels(db, "org1", null);
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining("not approved") });
+  });
 
   it("copies a personal graph to a team through the agent action and rejects team assistant context", async () => {
     const workflowId = await seedWorkflow();

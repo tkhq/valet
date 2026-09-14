@@ -34,6 +34,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "~/components/primitives";
 import { RadioCard } from "~/components/settings/radio-card";
+import { ModelCombobox } from "~/components/settings/model-combobox";
 import { useCreateWorkflow } from "~/api/workflows";
 import { useAssistants } from "~/api/assistants";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
@@ -48,11 +49,9 @@ import { assistantLabel } from "~/lib/assistant-name";
 
 const DEFAULT_NAME = "Untitled workflow";
 
-/** The mid-tier model for writing, the small one for classifying. Both ids
- * are in the catalog the server's validator checks, so a rename upstream
- * fails at create time with a named node, not on the first run. */
-const WRITE_MODEL = "claude-sonnet-4-5";
-const CLASSIFY_MODEL = "claude-haiku-4-5";
+/** Presets save tier tokens. The org controls which catalog model each tier resolves to. */
+const WRITE_MODEL = "m";
+const CLASSIFY_MODEL = "xs";
 
 export interface WorkflowPreset {
   id: string;
@@ -61,6 +60,8 @@ export interface WorkflowPreset {
   description: string;
   /** The workflow name this preset suggests, until the person types one. */
   suggestedName: string;
+  /** A catalog-backed size tier selected for this preset's intended task. */
+  recommendedModel: string;
   build: () => WorkflowDefinition;
 }
 
@@ -77,6 +78,18 @@ function laidOut(definition: WorkflowDefinition): WorkflowDefinition {
   const nodes: Record<string, { position: { x: number; y: number } }> = {};
   for (const [id, position] of Object.entries(positions)) nodes[id] = { position };
   return { ...definition, ui: { nodes } };
+}
+
+/** Apply the visible creation choice to every model-capable starter node. */
+export function withWorkflowModel(definition: WorkflowDefinition, model: string): WorkflowDefinition {
+  const next = structuredClone(definition);
+  next.ui = { ...next.ui, nodes: next.ui?.nodes ?? {}, defaultModel: model };
+  const apply = (node: WorkflowNode): void => {
+    if (node.type === "llm" || node.type === "session") node.model = model;
+    if (node.type === "foreach") apply(node.body);
+  };
+  for (const node of next.nodes) apply(node);
+  return next;
 }
 
 /** Trigger → one llm step → stop. The shortest graph that reads an input
@@ -296,6 +309,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
     name: "Blank",
     description: "A trigger and a stop. Build the rest yourself.",
     suggestedName: DEFAULT_NAME,
+    recommendedModel: "s",
     build: createDefaultWorkflowDefinition,
   },
   {
@@ -303,6 +317,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
     name: "Simple",
     description: "One step: take a request, answer it, return the answer.",
     suggestedName: "Answer a request",
+    recommendedModel: WRITE_MODEL,
     build: buildSimple,
   },
   {
@@ -310,6 +325,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
     name: "Parallel with summary",
     description: "Examine one subject three ways at once, then merge the three into one brief.",
     suggestedName: "Three-angle brief",
+    recommendedModel: WRITE_MODEL,
     build: buildParallel,
   },
   {
@@ -317,6 +333,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
     name: "API automation",
     description: "Search GitHub, then report on the matches or say plainly that there were none.",
     suggestedName: "GitHub search report",
+    recommendedModel: CLASSIFY_MODEL,
     build: buildApiAutomation,
   },
 ];
@@ -350,6 +367,9 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
   // Choosing a preset renames an UNTOUCHED field, and never a typed one —
   // silently replacing a name somebody wrote is worse than a dull default.
   const [nameTouched, setNameTouched] = useState(false);
+  const [model, setModel] = useState(WORKFLOW_PRESETS[0]!.recommendedModel);
+  // A preset can update its recommendation only until the person overrides it.
+  const [modelTouched, setModelTouched] = useState(false);
   // The active workspace owns it. An Owner select here duplicated the nav's
   // workspace switcher and could contradict it.
   const assistantsQ = useAssistants({ enabled: open });
@@ -369,12 +389,15 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
   function selectPreset(next: WorkflowPreset): void {
     setPresetId(next.id);
     if (!nameTouched) setName(next.suggestedName);
+    if (!modelTouched) setModel(next.recommendedModel);
   }
 
   function reset(): void {
     setPresetId(WORKFLOW_PRESETS[0]!.id);
     setName(DEFAULT_NAME);
     setNameTouched(false);
+    setModel(WORKFLOW_PRESETS[0]!.recommendedModel);
+    setModelTouched(false);
     setSelectedAssistantId("");
   }
 
@@ -385,7 +408,7 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
     try {
       const created = await create.mutateAsync({
         name: trimmed,
-        definition: { ...preset.build(), assistantId },
+        definition: { ...withWorkflowModel(preset.build(), model), assistantId },
         ...(teamId === undefined ? {} : { teamId }),
       });
       // A workspace change unmounts this form. Its late response must not
@@ -451,6 +474,26 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
               />
             ))}
           </div>
+        </div>
+
+        <div className="grid gap-1">
+          <Label>Model</Label>
+          <ModelCombobox
+            value={model}
+            onSelect={(value) => {
+              setModel(value);
+              setModelTouched(true);
+            }}
+            onClear={() => {
+              setModel(preset.recommendedModel);
+              setModelTouched(false);
+            }}
+            emptyLabel="Use recommendation"
+            disabled={create.isPending}
+          />
+          <p className="text-xs text-muted">
+            {modelTouched ? "Your override applies to starter LLM and session nodes." : "Recommended for this starting shape."}
+          </p>
         </div>
 
         {create.error && (

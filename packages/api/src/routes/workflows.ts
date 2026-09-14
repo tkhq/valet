@@ -63,7 +63,9 @@ import {
   listWorkflowSchedules,
   type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
-import { buildValidateEnvironment } from "../workflows/validation-env.js";
+import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workflows/validation-env.js";
+import { applyWorkflowModelPatch } from "../workflows/patch.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
@@ -99,6 +101,8 @@ import type {
   RetryWorkflowRunResponse,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
+  UpdateWorkflowModelRequest,
+  UpdateWorkflowModelResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
   WorkflowWebhookResponse,
@@ -162,7 +166,8 @@ function serviceCtx(c: {
 // ── Definitions ───────────────────────────────────────────────────────────
 
 workflowsRouter.post("/", async (c) => {
-  const { deps, owner, env } = serviceCtx(c);
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
 
   let body: CreateWorkflowRequest;
   try {
@@ -482,7 +487,8 @@ workflowsRouter.get("/:id/file", async (c) => {
 });
 
 workflowsRouter.put("/:id", async (c) => {
-  const { deps, owner, env } = serviceCtx(c);
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
   const id = c.req.param("id");
 
   let body: UpdateWorkflowRequest;
@@ -506,6 +512,50 @@ workflowsRouter.put("/:id", async (c) => {
   if (!updated) return c.json({ error: "workflow not found" }, 404);
 
   const resp: UpdateWorkflowResponse = updated;
+  return c.json(resp);
+});
+
+/** Change only model-capable nodes. Existing models stay unchanged unless this route is called. */
+workflowsRouter.patch("/:id/model", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const env = await buildOrgValidateEnvironment(deps, owner.orgId);
+  let body: UpdateWorkflowModelRequest;
+  try {
+    body = (await c.req.json()) as UpdateWorkflowModelRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.model !== "string" || body.model.trim() === "") {
+    return c.json({ error: "model must be an approved model id or an org model tier" }, 400);
+  }
+  if (body.nodeIds !== undefined && (!Array.isArray(body.nodeIds) || body.nodeIds.some((id) => typeof id !== "string"))) {
+    return c.json({ error: "nodeIds must be an array of llm or session node ids" }, 400);
+  }
+  const catalog = await buildOrgCatalog(deps.db, deps.credentials, owner.orgId);
+  if (!catalogValidIds(catalog).has(body.model)) {
+    return c.json({ error: `unknown or inactive model: ${body.model}. Pick a model from GET /api/models, or use xs, s, m, l, or xl.` }, 400);
+  }
+  const concrete = catalog.find((entry) =>
+    entry.id === body.model || (entry.id.startsWith("anthropic/") && entry.id.slice("anthropic/".length) === body.model),
+  );
+  if (concrete && !concrete.approved) {
+    return c.json({ error: `model ${body.model} is not approved. Choose an approved model or an org model tier.` }, 400);
+  }
+  const wf = await getWorkflowDefinition(deps, owner, c.req.param("id"));
+  if (!wf) return c.json({ error: "workflow not found" }, 404);
+  const stored = validateDefinitionInput(wf.definition);
+  if (!stored.ok) return c.json({ error: "invalid stored workflow definition", errors: stored.errors }, 409);
+  const patched = applyWorkflowModelPatch(stored.definition, body.model, body.nodeIds);
+  if (!patched.ok) return c.json({ error: "model update is invalid", errors: patched.errors }, 400);
+  const validation = validateDefinitionInput(patched.definition, env);
+  if (!validation.ok) return c.json({ error: "model update is invalid", errors: validation.errors }, 400);
+  const updated = await updateWorkflowDefinition(deps, owner, c.req.param("id"), { definition: patched.definition });
+  if (!updated) return c.json({ error: "workflow not found" }, 404);
+  const resp: UpdateWorkflowModelResponse = {
+    workflowId: updated.id,
+    model: body.model,
+    nodeIds: patched.nodeIds,
+  };
   return c.json(resp);
 });
 

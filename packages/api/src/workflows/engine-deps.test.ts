@@ -17,6 +17,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import { createLlmProvider } from "../services/llm-providers.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
 
 let api: TestApi | undefined;
@@ -24,6 +25,7 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
 
 async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<void> {
@@ -423,7 +425,10 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 });
 
 describe("buildWorkflowEngineDeps: llmComplete", () => {
-  it.each(["openai/gpt-6-astra", "gpt-6-astra"])("completes with supplemental model %s", async (model) => {
+  it.each([
+    ["openai/gpt-6-astra", false], ["gpt-6-astra", false], ["gpt-6-astra", true],
+  ] as const)("completes with supplemental model %s (Anthropic disabled: %s)", async (model, disableAnthropic) => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
     const original = piAi.getApiProvider("openai-responses");
     if (!original) throw new Error("The OpenAI Responses transport must be registered.");
     const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
@@ -442,7 +447,14 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
         actionPluginByService, credentials: engineCredentials,
       });
 
-      const result = await deps.llmComplete({ model, prompt: "hi" });
+      if (disableAnthropic) {
+        await createLlmProvider(db, {
+          orgId: LOCAL_ORG.id, kind: "anthropic", name: "Anthropic", enabled: false,
+        });
+      }
+      const runId = `wfrun_llm_${model.includes("/") ? "namespaced" : "bare"}`;
+      await seedRun(api, runId, `wf_llm_${model.includes("/") ? "namespaced" : "bare"}`);
+      const result = await deps.llmComplete({ runId, model, prompt: "hi" });
       expect(result.text).toBe("ok");
       expect(stream).toHaveBeenCalledWith(expect.objectContaining({
         id: "gpt-6-astra", provider: "openai", contextWindow: 272_000,
@@ -465,9 +477,11 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       credentials: engineCredentials,
     });
 
+    const runId = "wfrun_llm_unknown";
+    await seedRun(api, runId, "wf_llm_unknown");
     await expect(
-      deps.llmComplete({ model: "definitely-not-a-real-model-id", prompt: "hi" }),
-    ).rejects.toThrow(/unknown model/);
+      deps.llmComplete({ runId, model: "definitely-not-a-real-model-id", prompt: "hi" }),
+    ).rejects.toThrow(/unknown or unavailable model/);
   });
 });
 

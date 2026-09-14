@@ -47,11 +47,13 @@ export function ModelCombobox({
   onSelect,
   onClear,
   emptyLabel = "System default",
+  ariaLabel = "Default model",
   disabled = false,
 }: {
   value: string | null;
   onSelect: (id: string) => void;
   onClear: () => void;
+  ariaLabel?: string;
   /** Names what the cleared state falls back to, for both the placeholder
    * and the clear row — the fallback differs per surface (personal: team
    * then the cascade's next tier; team: the cascade's next tier). */
@@ -125,7 +127,7 @@ export function ModelCombobox({
           // Delay so a click on a list item registers before we close.
           setTimeout(() => setOpen(false), 120);
         }}
-        aria-label="Default model"
+        aria-label={ariaLabel}
         role="combobox"
         aria-expanded={open}
         disabled={disabled}
