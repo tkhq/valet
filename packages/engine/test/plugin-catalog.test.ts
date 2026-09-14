@@ -1087,6 +1087,14 @@ describe("pluginCatalogTools: restart approval integrity", () => {
     expect(result.text).toContain("Approval replay rejected");
     expect(executed).toBe(false);
   });
+  it("fails closed on replay authority restored from a checkpoint without gate context", async () => {
+    let executed = false;
+    const plugin: ActionPlugin = { service: "test", actions: [{ id: "test.checkpoint", name: "Checkpoint", description: "requires approval", riskLevel: "high", parameters: Type.Object({ value: Type.String() }), execute: async () => { executed = true; return { success: true }; } }] };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute({ tool_id: "test.checkpoint", params: { value: "reviewed" }, summary: "run" }, makeCtx({ suspendedDecision: { gateId: "gate-1", ordinal: 0, resumeKey: "opaque", preparedToolId: "test.checkpoint", preparedArgsDigest: "0".repeat(64), approvalReplay: true, resolution: { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 } } }));
+    expect(result.text).toContain("Approval replay rejected");
+    expect(executed).toBe(false);
+  });
 });
 
 describe("pluginCatalogTools: approval gate terminal outcomes", () => {
