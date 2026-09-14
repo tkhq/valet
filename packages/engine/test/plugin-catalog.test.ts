@@ -1837,3 +1837,14 @@ describe("approval preview own-key fidelity", () => {
     expect(executed?.["__proto__"]).toBe("kept");
   });
 });
+
+describe("persisted approval outcomes", () => {
+  it("never executes a persisted denial after policy changes to allow", async () => {
+    let executed = false;
+    const plugin: ActionPlugin = { service: "test", actions: [{ id: "test.denied", name: "Denied", description: "x", riskLevel: "high", parameters: Type.Object({ value: Type.String() }), execute: async () => { executed = true; return { success: true }; } }] };
+    const [, call] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await call.execute({ tool_id: "test.denied", params: { value: "x" }, summary: "x" }, makeCtx({ policyResolver: { resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } }) }, suspendedDecision: { gateId: "g", ordinal: 0, resumeKey: "r", preparedToolId: "test.denied", preparedArgsDigest: "0".repeat(64), approvalReplay: true, resolution: { actionId: "deny", resolvedBy: "u", resolvedAt: 1 } } }));
+    expect(result.text).toContain("did not approve");
+    expect(executed).toBe(false);
+  });
+});
