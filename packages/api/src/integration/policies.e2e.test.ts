@@ -554,12 +554,14 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
           { id: "trigger", type: "trigger" },
           { id: "approve", type: "approval", prompt: "grant nuke for this run?" },
           { id: "call", type: "tool", service: "github", action: "merge_pull_request", params: {} },
+          { id: "call_again", type: "tool", service: "github", action: "merge_pull_request", params: {} },
           { id: "done", type: "stop" },
         ],
         edges: [
           { from: "trigger", to: "approve" },
           { from: "approve", to: "call" },
-          { from: "call", to: "done" },
+          { from: "call", to: "call_again" },
+          { from: "call_again", to: "done" },
         ],
       };
       const createWfGrantRes = await fetch(`${baseUrl}/api/workflows`, {
@@ -613,7 +615,9 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         15_000,
       );
 
-      // Resolve the tool gate with scope=run so downstream nodes get the grant.
+      // Stop the worker before resolution. The grant and signal must survive
+      // this process-like restart and authorize the downstream tool too.
+      await api.providers.workflowRunHost.stopHost();
       const approveGateRes = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}/approvals/call`, {
         method: "POST",
         headers: HEADERS,
@@ -621,6 +625,8 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       });
       expect(approveGateRes.status).toBe(200);
       expect(((await approveGateRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
+      api.providers.workflowRunHost.startHost();
+      await api.providers.workflowRunHost.wake(runGrant);
 
       const settledGrant = await poll(
         async () => {
@@ -633,8 +639,11 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       );
       expect(settledGrant.run.outcome).toBe("completed");
       const completedCheckpoint = settledGrant.checkpoints.find((c) => c.nodeId === "call");
+      const downstreamCheckpoint = settledGrant.checkpoints.find((c) => c.nodeId === "call_again");
       expect(completedCheckpoint?.status).toBe("completed");
       expect(completedCheckpoint?.result).toEqual({ nuked: true });
+      expect(downstreamCheckpoint?.status).toBe("completed");
+      expect(downstreamCheckpoint?.result).toEqual({ nuked: true });
 
       // ── (g) Every step's row appears in the Action Log with correct
       //      provenance — spot-check both workflow rows here (session rows
@@ -646,13 +655,10 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       // The gate audit row is written as "pending" when the run parks; the
       // denial resolves it — the HTTP route stamps "denied" via updateInvocationOutcome.
       expect(wfDeniedRow).toMatchObject({ resolvedMode: "require_approval", status: "denied" });
-      // The scope:run grant flow: the policy gate parks the run (pending), the
-      // human approves via HTTP, and the tool runs with the approval field.
-      // The audit row ends up require_approval/completed — the enforcer writes
-      // "approved" when the approval field is present, then updateInvocationOutcome
-      // stamps "completed" after the action actually executes.
+      // The scope:run grant flow parks the run first. After approval, the
+      // canonical grant changes the reevaluated decision to allow.
       const wfGrantedRow = wfRows.find((e) => e.workflowExecutionId === runGrant);
-      expect(wfGrantedRow).toMatchObject({ resolvedMode: "require_approval", status: "completed" });
+      expect(wfGrantedRow).toMatchObject({ resolvedMode: "allow", status: "completed" });
       // The decision row is stamped with the execution outcome + result when
       // the node eventually completes (spec Deviations T6 #6, fixed).
       expect(wfGrantedRow?.result).toEqual({ success: true, data: { nuked: true } });

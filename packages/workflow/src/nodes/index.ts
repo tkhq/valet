@@ -66,6 +66,9 @@ export type OnGateResolved = (info: {
  */
 export type OnApprovalGrant = (info: {
   runId: string;
+  nodeId: string;
+  iteration: number;
+  signalId: string;
   resolvedBy: string;
   grants: Array<{ service: string; actionId: string }>;
 }) => Promise<void> | void;

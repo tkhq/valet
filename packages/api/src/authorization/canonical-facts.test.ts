@@ -28,4 +28,39 @@ describe("canonical dynamic facts", () => {
     await pg.appDb.insert(runtimeGrants).values({ id: "grant-1", orgId: "org-1", sessionId: "session-1", policyKey: "gmail.send", grantedBy: "user-1", createdAt: 50, expiresAt: 200 });
     await expect(loadCanonicalDynamicFacts(pg.appDb, query)).rejects.toThrow(/incomplete/);
   });
+
+  it("accepts only an active grant for the exact workflow action and risk", async () => {
+    const workflowQuery = { ...query, appliesIn: "workflow" as const, scopeId: "run-1" };
+    const base = {
+      orgId: "org-1",
+      workflowExecutionId: "run-1",
+      policyKey: "gmail.send",
+      service: "gmail",
+      actionId: "gmail.send",
+      riskLevel: "high" as const,
+      sourceApprovalId: "approval-1",
+      expiresAt: 200,
+      grantedBy: "user-1",
+      createdAt: 50,
+    };
+
+    for (const [name, mutation, outcome] of [
+      ["exact", {}, "accepted"],
+      ["service", { service: "github" }, "rejected"],
+      ["action", { actionId: "gmail.delete" }, "rejected"],
+      ["risk", { riskLevel: "critical" }, "rejected"],
+      ["run", { workflowExecutionId: "run-2" }, "ignored"],
+      ["org", { orgId: "org-2" }, "ignored"],
+      ["expired", { expiresAt: 100 }, "ignored"],
+      ["revoked", { revokedAt: 90 }, "ignored"],
+    ] as const) {
+      pg = await freshTestPgDb();
+      await pg.appDb.insert(runtimeGrants).values({ id: `grant-${name}`, ...base, ...mutation });
+      const loaded = loadCanonicalDynamicFacts(pg.appDb, workflowQuery);
+      if (outcome === "rejected") await expect(loaded).rejects.toThrow(/malformed/);
+      else await expect(loaded).resolves.toMatchObject({ grants: outcome === "accepted" ? [expect.any(Array)] : [] });
+      await pg.cleanup();
+      pg = undefined;
+    }
+  });
 });

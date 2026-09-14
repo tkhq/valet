@@ -530,7 +530,16 @@ async function enforceCanonicalWorkflowPolicy(
     nodeId: workflowNodeId, invocationId: req.invocationId, evaluationTimeMs: now,
     action: { service: req.service, actionId, catalogActionId: actionId, sourcePluginService: req.service, sourceActionId: actionId, sourceToolId: workflowNodeId, riskLevel: action.riskLevel, parameters: req.params, parameterProjection: actionProjection(actionId) },
   };
-  const initial = adaptWorkflowAction({ ...common, dynamicFacts: {} });
+  const grantFacts = await loadCanonicalDynamicFacts(opts.db, {
+    organizationId: ctx.orgId,
+    service: req.service,
+    actionId,
+    riskLevel: action.riskLevel,
+    appliesIn: "workflow",
+    scopeId: workflowExecutionId,
+    evaluationTimeMs: now,
+  });
+  const initial = adaptWorkflowAction({ ...common, dynamicFacts: { currentPolicy: grantFacts } });
   let adapted = initial;
   if (req.approval) {
     const original = (await opts.db.select().from(authorizationDecisions).where(and(eq(authorizationDecisions.orgId, ctx.orgId), eq(authorizationDecisions.idempotencyKey, initial.request.idempotencyKey))).limit(1))[0];

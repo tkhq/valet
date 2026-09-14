@@ -33,6 +33,7 @@ const ADMIN = "user_admin";
 const MEMBER = "user_member";
 const SESSION = "sess_1";
 const RUN = "run_1";
+const grantEvidence = { riskLevel: "high" as const, sourceApprovalId: "approval-1", expiresAt: 10_000 };
 
 const pglite = new PGlite();
 const pg = pgDbFromPglite(pglite);
@@ -69,7 +70,7 @@ beforeEach(reset);
 
 describe("writeSessionGrant", () => {
   it("is idempotent under exact replay (one live row for the same key)", async () => {
-    const g = { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1000 };
+    const g = { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1000, ...grantEvidence };
     await writeSessionGrant(db, SESSION, g);
     await writeSessionGrant(db, SESSION, g); // replayed onResolution
     const rows = await db.select().from(runtimeGrants).where(eq(runtimeGrants.sessionId, SESSION));
@@ -78,7 +79,7 @@ describe("writeSessionGrant", () => {
   });
 
   it("inserts a fresh row when re-granted after a revoke", async () => {
-    const g = { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1000 };
+    const g = { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1000, ...grantEvidence };
     await writeSessionGrant(db, SESSION, g);
     await revokeSessionGrants(db, SESSION, 2000);
     await writeSessionGrant(db, SESSION, { ...g, now: 3000 });
@@ -86,6 +87,11 @@ describe("writeSessionGrant", () => {
     expect(all).toHaveLength(2);
     const live = all.filter((r) => r.revokedAt === null);
     expect(live).toHaveLength(1);
+  });
+
+  it("rejects missing or unbounded canonical grant evidence", async () => {
+    await expect(writeSessionGrant(db, SESSION, { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1 } as never)).rejects.toThrow(/identity|expiry/);
+    await expect(writeSessionGrant(db, SESSION, { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1, ...grantEvidence, expiresAt: 72 * 60 * 60 * 1000 + 2 })).rejects.toThrow(/72 hours/);
   });
 
   it("rejects a second live grant at the DB layer (partial unique index)", async () => {
@@ -104,7 +110,7 @@ describe("writeSessionGrant", () => {
 
 describe("writeExecutionGrant / revokeExecutionGrants", () => {
   it("upserts idempotently and revokes idempotently", async () => {
-    const g = { orgId: ORG, service: "slack", actionId: "post_message", grantedBy: ADMIN, now: 1 };
+    const g = { orgId: ORG, service: "slack", actionId: "post_message", grantedBy: ADMIN, now: 1, ...grantEvidence };
     await writeExecutionGrant(db, RUN, g);
     await writeExecutionGrant(db, RUN, g);
     let rows = await db.select().from(runtimeGrants).where(eq(runtimeGrants.workflowExecutionId, RUN));

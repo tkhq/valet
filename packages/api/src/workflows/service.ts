@@ -1630,6 +1630,17 @@ export async function resolveWorkflowApproval(
     scope: input.scope,
   };
   const signalId = `approval:${input.nodeId}${suffix}:resolution`;
+  const resolutionNow = Date.now();
+  let grantRisk: "low" | "medium" | "high" | "critical" | undefined;
+  if (input.approved && input.scope === "run" && isPolicyGate) {
+    const checkpoints = await deps.workflowStore.getCheckpoints(input.runId);
+    const intent = checkpoints.find((cp) => cp.nodeId === input.nodeId && cp.iteration === iter && cp.status === "intent");
+    const risk = intent?.effects?.riskLevel;
+    if (risk !== "low" && risk !== "medium" && risk !== "high" && risk !== "critical") {
+      throw new Error("Policy gate is missing its canonical risk evidence.");
+    }
+    grantRisk = risk;
+  }
   const stored = await deps.workflowStore.insertSignal({
     runId: input.runId,
     signalId,
@@ -1641,7 +1652,7 @@ export async function resolveWorkflowApproval(
       scope: input.scope,
       resolvedVia: input.via,
     },
-    createdAt: Date.now(),
+    createdAt: resolutionNow,
   });
   // Compare the returned row's payload to what we submitted. If another caller
   // won the race the stored payload will differ — do not stamp audit for the loser.
@@ -1659,7 +1670,7 @@ export async function resolveWorkflowApproval(
     const service = typeof n.service === "string" ? n.service : "";
     const action = typeof n.action === "string" ? n.action : "";
     const actionId = action.includes(".") ? action : `${service}.${action}`;
-    const now = Date.now();
+    const now = resolutionNow;
     if (input.scope === "always") {
       // Admin eligibility was already checked above (before the signal insert).
       // AlwaysAllowNotAdminError should not fire here, but re-throw defensively
@@ -1672,11 +1683,15 @@ export async function resolveWorkflowApproval(
         throw err;
       }
     }
-    if (input.scope === "always" || input.scope === "run") {
+    if (input.scope === "run") {
+      if (!grantRisk) throw new Error("Policy gate is missing its canonical risk evidence.");
       await writeExecutionGrant(deps.db, input.runId, {
         orgId,
         service,
         actionId,
+        riskLevel: grantRisk,
+        sourceApprovalId: signalId,
+        expiresAt: now + 72 * 60 * 60 * 1000,
         grantedBy: owner.userId,
         now,
       });

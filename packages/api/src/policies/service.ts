@@ -78,9 +78,18 @@ export interface GrantWrite {
   actionId: string;
   grantedBy: string;
   now: number;
-  riskLevel?: RiskLevel;
-  sourceApprovalId?: string;
-  expiresAt?: number;
+  riskLevel: RiskLevel;
+  sourceApprovalId: string;
+  expiresAt: number;
+}
+
+const MAX_GRANT_TTL_MS = 72 * 60 * 60 * 1000;
+
+function validateGrantWrite(scopeId: string, grant: GrantWrite): void {
+  const actionId = grantPolicyKey(grant.service, grant.actionId);
+  if (!scopeId || !grant.orgId || !grant.grantedBy || !grant.sourceApprovalId) throw new TypeError("Canonical grant identity is incomplete.");
+  if (!/^[a-z][a-z0-9_-]*$/.test(grant.service) || (grant.actionId.includes(".") && !grant.actionId.startsWith(`${grant.service}.`)) || !/^[a-z][a-z0-9_-]*\.[a-z0-9][a-z0-9_.:-]*$/.test(actionId)) throw new TypeError("Canonical grant action is invalid.");
+  if (!Number.isSafeInteger(grant.now) || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= grant.now || grant.expiresAt > grant.now + MAX_GRANT_TTL_MS) throw new TypeError("Canonical grant expiry must be within 72 hours.");
 }
 
 /**
@@ -92,6 +101,7 @@ export interface GrantWrite {
  * from the partial index), which is correct.
  */
 export async function writeSessionGrant(db: AppDb, sessionId: string, grant: GrantWrite): Promise<void> {
+  validateGrantWrite(sessionId, grant);
   await db
     .insert(runtimeGrants)
     .values({
@@ -100,11 +110,11 @@ export async function writeSessionGrant(db: AppDb, sessionId: string, grant: Gra
       sessionId,
       workflowExecutionId: null,
       policyKey: grantPolicyKey(grant.service, grant.actionId),
-      service: grant.riskLevel ? grant.service : null,
-      actionId: grant.riskLevel ? grantPolicyKey(grant.service, grant.actionId) : null,
-      riskLevel: grant.riskLevel ?? null,
-      sourceApprovalId: grant.sourceApprovalId ?? null,
-      expiresAt: grant.expiresAt ?? null,
+      service: grant.service,
+      actionId: grantPolicyKey(grant.service, grant.actionId),
+      riskLevel: grant.riskLevel,
+      sourceApprovalId: grant.sourceApprovalId,
+      expiresAt: grant.expiresAt,
       mode: "allow",
       grantedBy: grant.grantedBy,
       createdAt: grant.now,
@@ -123,6 +133,7 @@ export async function writeExecutionGrant(
   workflowExecutionId: string,
   grant: GrantWrite,
 ): Promise<void> {
+  validateGrantWrite(workflowExecutionId, grant);
   await db
     .insert(runtimeGrants)
     .values({
@@ -131,11 +142,11 @@ export async function writeExecutionGrant(
       sessionId: null,
       workflowExecutionId,
       policyKey: grantPolicyKey(grant.service, grant.actionId),
-      service: grant.riskLevel ? grant.service : null,
-      actionId: grant.riskLevel ? grantPolicyKey(grant.service, grant.actionId) : null,
-      riskLevel: grant.riskLevel ?? null,
-      sourceApprovalId: grant.sourceApprovalId ?? null,
-      expiresAt: grant.expiresAt ?? null,
+      service: grant.service,
+      actionId: grantPolicyKey(grant.service, grant.actionId),
+      riskLevel: grant.riskLevel,
+      sourceApprovalId: grant.sourceApprovalId,
+      expiresAt: grant.expiresAt,
       mode: "allow",
       grantedBy: grant.grantedBy,
       createdAt: grant.now,

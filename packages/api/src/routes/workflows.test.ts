@@ -1004,6 +1004,17 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       "v1",
       { ownerType: "user", ownerId: "local-user" },
     );
+    if (opts.nodeType === "tool") {
+      await localApi.providers.workflowStore.putIntent({
+        runId,
+        nodeId: "gate",
+        iteration: 0,
+        attempt: 0,
+        status: "intent",
+        effects: { riskLevel: "high", invocationId: `pol:wf:workflow:${runId}:gate` },
+        createdAt: Date.now(),
+      });
+    }
     return { localApi, stub, wf, runId };
   }
 
@@ -1130,9 +1141,9 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     // Assert action_policies row written with the deterministic id
     const policies = await localApi.providers.db.select().from(actionPolicies);
     expect(policies.some((p) => p.id === "pol:approval:local-org:widgets.nuke")).toBe(true);
-    // Assert runtime_grants row also written (scope=always implies scope=run grant too)
+    // Static activation is the only authority written for an always decision.
     const grants = await localApi.providers.db.select().from(runtimeGrants);
-    expect(grants.some((g) => g.workflowExecutionId === runId && g.policyKey === "widgets.nuke")).toBe(true);
+    expect(grants).toHaveLength(0);
   });
 
   it("policy gate + scope=always + non-admin → 403", async () => {

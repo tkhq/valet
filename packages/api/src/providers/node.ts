@@ -668,10 +668,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!orgId) return;
       const now = Date.now();
       for (const g of info.grants) {
+        const actionId = g.actionId.startsWith(`${g.service}.`) ? g.actionId.slice(g.service.length + 1) : g.actionId;
+        const action = actionPluginByService.get(g.service)?.actionPlugin.actions.find((candidate) => candidate.id === actionId);
+        if (!action) throw new Error(`Approval grant names unknown action ${g.service}.${actionId}.`);
         await writeExecutionGrant(db, info.runId, {
           orgId,
           service: g.service,
-          actionId: g.actionId,
+          actionId,
+          riskLevel: action.riskLevel,
+          sourceApprovalId: info.signalId,
+          expiresAt: now + 72 * 60 * 60 * 1000,
           grantedBy: info.resolvedBy,
           now,
         });

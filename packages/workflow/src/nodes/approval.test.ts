@@ -362,6 +362,9 @@ describe('executeApproval: onApprovalGrant', () => {
     expect(onApprovalGrant).toHaveBeenCalledTimes(1);
     expect(onApprovalGrant).toHaveBeenCalledWith({
       runId: 'run-g1',
+      nodeId: 'ap',
+      iteration: 0,
+      signalId: 'approval:ap:resolution',
       resolvedBy: 'alice',
       grants: [{ service: 'github', actionId: 'create_issue' }],
     });
