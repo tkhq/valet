@@ -30,16 +30,20 @@ export class LocalValetEvaluator implements AuthorizationEvaluator {
 
   async evaluate(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> {
     const loaded = await this.host.loadActive(request.subject.orgId);
+    return this.evaluateAt(request, loaded.identity);
+  }
+
+  async evaluateAt(request: AuthorizationRequest, expected: { sourceBundleDigest: string; policyDigest: string }): Promise<PolicyDecisionEnvelope> {
     const result = await this.runtime.run<RuntimeEvaluation>({
       operation: "evaluate",
-      sourceBundleDigest: loaded.identity.sourceBundleDigest,
+      sourceBundleDigest: expected.sourceBundleDigest,
       input: request,
       explain: "off",
     });
     if (
       result.engineDigest !== this.identity.engineDigest ||
-      result.sourceBundleDigest !== loaded.identity.sourceBundleDigest ||
-      result.policyDigest !== loaded.identity.policyDigest
+      result.sourceBundleDigest !== expected.sourceBundleDigest ||
+      result.policyDigest !== expected.policyDigest
     ) {
       throw new LocalEvaluatorError("worker_failure", "Policy evaluation identity did not match the loaded bundle.");
     }

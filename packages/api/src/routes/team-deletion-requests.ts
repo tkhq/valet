@@ -49,7 +49,7 @@ teamDeletionRequestsRouter.post("/:id/deletion-requests/:requestId/:decision", a
     return c.json({ error: "Send a JSON object with an optional note of at most 2000 characters." }, 400);
   }
   const p = c.var.providers;
-  const result = await decideDeletionRequest({ db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials },
+  const result = await decideDeletionRequest({ db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, canonicalPolicyManager: p.canonicalPolicyManager },
     { orgId: c.var.user.orgId, userId: c.var.user.id, teamId: c.req.param("id") }, c.req.param("requestId"), decision,
     "note" in body && typeof body.note === "string" ? body.note : undefined);
   if (result.refusal) return c.json({ error: result.refusal }, 409);

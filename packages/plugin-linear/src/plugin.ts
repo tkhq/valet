@@ -13,6 +13,7 @@ const plugin: ValetPlugin = {
       mcpUrl: 'https://mcp.linear.app/mcp',
       serviceName: 'linear',
       defaultRiskLevel: 'medium',
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     }),
   ],
   triggers: linearTriggerDefs,

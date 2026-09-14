@@ -2687,13 +2687,14 @@ securityRouter.get("/:id/security/export", async (c) => {
  * the acting user's credentials. `webBaseUrl` prefers the configured public
  * URL (the channels' rule); dev and tests fall back to the request origin. */
 function buildIssuesDeps(c: Context<AppEnv>): SecurityIssuesDeps {
-  const { db, engineCredentials, actionPluginByService, plugins, encryptionKey } = c.var.providers;
+  const { db, engineCredentials, actionPluginByService, plugins, encryptionKey, canonicalAuthorizationService } = c.var.providers;
   const invokeAction = buildActionInvoker({
     db,
     credentials: engineCredentials,
     actionPluginByService,
     plugins,
     githubTokenDeps: { key: deriveSecretKey(encryptionKey) },
+    canonicalAuthorizationService,
   });
   const webBaseUrl = publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
   return { db, invokeAction, webBaseUrl };

@@ -54,7 +54,8 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "smoke:session": "tsx scripts/smoke-session.ts",
-    "smoke:orchestrator": "tsx scripts/smoke-orchestrator.ts"
+    "smoke:orchestrator": "tsx scripts/smoke-orchestrator.ts",
+    "policy:compatibility": "tsx scripts/policy-compatibility.ts"
   },
   "dependencies": {
     "@1password/sdk": "^0.4.1",

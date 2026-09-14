@@ -19,6 +19,7 @@ import {
   type InboundChannelEvent,
   type OutboundChannelAttachment,
   type OutboundChannelMessage,
+  type ActionPlugin,
   type QueueItem,
   type SessionEntry,
   type ValetPlugin,
@@ -34,6 +35,8 @@ import type { AttentionEvent } from "../orchestrator/attention.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -162,6 +165,7 @@ describe("ChannelHost outbound delivery", () => {
   let faux: FauxProviderRegistration;
   let eventStream: PgEventStream;
   let engineStore: PgSessionStore;
+  let canonicalPolicyManager: CanonicalPolicyBundleManager;
 
   beforeEach(async () => {
     // See host.test.ts / task-6-report.md: registerFauxProvider overwrites
@@ -185,6 +189,28 @@ describe("ChannelHost outbound delivery", () => {
 
     fakeTransport = new FakeTransport();
     keyedTransport = new KeyedTransport();
+    const actionPlugin: ActionPlugin = {
+      service: "github",
+      safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
+      actions: [
+        {
+          id: "github.create_release",
+          name: "Do thing",
+          description: "a risky action that requires approval",
+          riskLevel: "high",
+          parameters: Type.Object({}),
+          execute: async () => ({ success: true, data: "done" }),
+        },
+        {
+          id: "github.get_issue",
+          name: "Lookup",
+          description: "a low-risk action that runs without approval",
+          riskLevel: "low",
+          parameters: Type.Object({}),
+          execute: async () => ({ success: true, data: "found" }),
+        },
+      ],
+    };
     const fakePlugin: ValetPlugin = {
       name: "fake",
       version: "0",
@@ -192,29 +218,7 @@ describe("ChannelHost outbound delivery", () => {
         { channelType: "fake", create: () => fakeTransport },
         { channelType: "keyed", create: () => keyedTransport },
       ],
-      actions: [
-        {
-          service: "fake",
-          actions: [
-            {
-              id: "fake.do_thing",
-              name: "Do thing",
-              description: "a risky action that requires approval",
-              riskLevel: "high",
-              parameters: Type.Object({}),
-              execute: async () => ({ success: true, data: "done" }),
-            },
-            {
-              id: "fake.lookup",
-              name: "Lookup",
-              description: "a low-risk action that runs without approval",
-              riskLevel: "low",
-              parameters: Type.Object({}),
-              execute: async () => ({ success: true, data: "found" }),
-            },
-          ],
-        },
-      ],
+      actions: [actionPlugin],
     };
 
     await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", {
@@ -226,6 +230,11 @@ describe("ChannelHost outbound delivery", () => {
       accessToken: "keyed-bot-token",
     });
 
+    const actionPluginByService = new Map([["github", { plugin: fakePlugin, actionPlugin }]]);
+    canonicalPolicyManager = new CanonicalPolicyBundleManager(appDb, actionPluginByService);
+    await canonicalPolicyManager.provisionOrganization(ORG_ID);
+    const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
+
     engineHost = new EngineHost({
       engineStore,
       sandboxProvider,
@@ -234,6 +243,8 @@ describe("ChannelHost outbound delivery", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [fakePlugin],
+      actionPluginByService,
+      canonicalAuthorizationService,
     });
 
     host = new ChannelHost({
@@ -253,6 +264,7 @@ describe("ChannelHost outbound delivery", () => {
   afterEach(async () => {
     host.stopOutbound();
     await engineHost.destroyAll();
+    await canonicalPolicyManager.close();
     faux.unregister();
     vi.unstubAllEnvs();
   });
@@ -845,7 +857,7 @@ describe("ChannelHost outbound delivery", () => {
   it("gate_callback round trip resolves the real gate", async () => {
 
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "do the thing" }, { id: "tc1" })], {
+      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "github.create_release", params: {}, summary: "do the thing" }, { id: "tc1" })], {
         stopReason: "toolUse",
       }),
       fauxAssistantMessage("acknowledged"),
@@ -902,7 +914,7 @@ describe("ChannelHost outbound delivery", () => {
     // The gate is raised on a web thread — no channel thread, so no
     // channel-thread card. The attention DM's prompt is the only handle.
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "do the thing" }, { id: "tc2" })], {
+      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "github.create_release", params: {}, summary: "do the thing" }, { id: "tc2" })], {
         stopReason: "toolUse",
       }),
       fauxAssistantMessage("acknowledged"),

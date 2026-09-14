@@ -86,7 +86,7 @@ mePolicyOverridesRouter.get("/", async (c) => {
 // ── PUT /api/me/policy-overrides — upsert by target ──────────────────────
 
 mePolicyOverridesRouter.put("/", async (c) => {
-  const { db, actionPluginByService } = c.var.providers;
+  const { db, canonicalAuthorizationService, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
 
   let body: PutPolicyOverrideRequest;
@@ -118,20 +118,19 @@ mePolicyOverridesRouter.put("/", async (c) => {
     return c.json({ error: (err as Error).message }, 400);
   }
 
-  const result = await upsertOverride(
-    db,
-    user.orgId,
-    user.id,
-    {
+  const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
+  const result = await canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: "override_upsert", idempotencyKey }, async (tx, context) => {
+    const bounds = await canonicalAuthorizationService.validateOverrideBounds(user.orgId, user.id, body, body.mode, await context.overrideBoundsIdentity(), context.overrideBoundPolicyReferences());
+    if (!bounds.ok) return bounds;
+    return upsertOverride(tx, user.orgId, user.id, {
       service: body.service,
       actionId: body.actionId,
       riskLevel: body.riskLevel,
       mode: body.mode,
       paramMatchers,
       now: Date.now(),
-    },
-    actionPluginByService,
-  );
+    });
+  });
   if (!result.ok) return c.json({ error: result.error }, 400);
 
   const resp: PutPolicyOverrideResponse = toOverrideWire(result.row);
@@ -141,7 +140,7 @@ mePolicyOverridesRouter.put("/", async (c) => {
 // ── DELETE /api/me/policy-overrides — delete by target ───────────────────
 
 mePolicyOverridesRouter.delete("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
 
   let body: DeletePolicyOverrideRequest;
@@ -155,7 +154,8 @@ mePolicyOverridesRouter.delete("/", async (c) => {
   const targetCheck = validateTarget(body);
   if (!targetCheck.ok) return c.json({ error: targetCheck.error }, 400);
 
-  const deleted = await deleteOverrideByTarget(db, user.orgId, user.id, body);
+  const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
+  const deleted = await canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: "override_delete", idempotencyKey }, (tx) => deleteOverrideByTarget(tx, user.orgId, user.id, body));
   if (!deleted) return c.json({ error: "override not found" }, 404);
 
   const resp: DeletePolicyOverrideResponse = { ok: true };

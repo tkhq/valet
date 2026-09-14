@@ -89,6 +89,7 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
         mcpUrl: entry.url,
         serviceName: entry.name,
         defaultRiskLevel: entry.riskLevel ?? "medium",
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
         noAuth: entry.auth === "none",
         staticToken,
         authQueryParam: entry.authQueryParam,

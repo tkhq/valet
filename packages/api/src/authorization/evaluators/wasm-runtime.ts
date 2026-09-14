@@ -1,6 +1,7 @@
-import { Worker } from "node:worker_threads";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 import type { CanonicalSourceBundle, ValidatedBundleIdentity } from "../bundles/types.js";
 import { policyWorkerUrl } from "../../assets/base.js";
+import { isBunRuntime } from "../../server-adapter.js";
 import { LocalEvaluatorError, type LocalEvaluatorErrorCode } from "./errors.js";
 
 export const MAX_WALL_TIME_MS = 100;
@@ -10,6 +11,16 @@ const MAX_READY_TIME_MS = 5_000;
 const MAX_QUEUE_TIME_MS = 5_000;
 const MAX_START_TIME_MS = 1_000;
 const MAX_CONTROL_TIME_MS = 10_000;
+
+/**
+ * Node uses an old-generation heap limit as defense in depth. Bun 1.2.17
+ * accepts this option but ignores it and emits ERR_NOT_IMPLEMENTED, so the Bun
+ * path omits it. Both paths retain the authoritative 64 MiB WebAssembly linear
+ * memory cap, deterministic fuel, and the 100 ms host deadline.
+ */
+export function policyWorkerOptions(bunRuntime = isBunRuntime()): WorkerOptions {
+  return bunRuntime ? {} : { resourceLimits: { maxOldGenerationSizeMb: MAX_WORKER_HEAP_MIB } };
+}
 
 export interface RuntimeIdentity {
   readonly engineDigest: string;
@@ -57,6 +68,12 @@ interface QueueEntry {
   timer?: NodeJS.Timeout;
   reject: (error: Error) => void;
 }
+interface LoadedBundle {
+  readonly revision: string;
+  readonly sourceBundleDigest: string;
+  readonly bundle: CanonicalSourceBundle;
+  readonly identity: ValidatedBundleIdentity;
+}
 interface WorkerState {
   readonly worker: Worker;
   readonly generation: number;
@@ -77,7 +94,7 @@ export class WasmPolicyRuntime {
   private queue: Promise<void> = Promise.resolve();
   private readonly queued = new Set<QueueEntry>();
   private pending?: PendingRequest;
-  private readonly loaded = new Map<string, ValidatedBundleIdentity>();
+  private readonly loaded = new Map<string, LoadedBundle>();
 
   constructor(private readonly workerUrl: WorkerUrl = policyWorkerUrl()) {
     this.state = this.spawn(0);
@@ -94,25 +111,31 @@ export class WasmPolicyRuntime {
     return identity;
   }
 
-  async loadBundle(
+  loadBundle(
     expectedSourceBundleDigest: string,
     bundle: CanonicalSourceBundle,
   ): Promise<ValidatedBundleIdentity> {
-    const cached = this.loaded.get(expectedSourceBundleDigest);
-    if (cached !== undefined) return cached;
-    const identity = await this.run<ValidatedBundleIdentity>({
-      operation: "load_bundle",
-      expected_source_bundle_digest: expectedSourceBundleDigest,
-      bundle,
-    });
-    if (identity.sourceBundleDigest !== expectedSourceBundleDigest) {
-      throw new LocalEvaluatorError("bundle_digest_mismatch", "The loaded policy bundle digest changed.");
-    }
-    this.loaded.set(expectedSourceBundleDigest, identity);
-    return identity;
+    return this.cacheBundle("staging", expectedSourceBundleDigest, expectedSourceBundleDigest, bundle);
+  }
+
+  loadBundleForOrganization(
+    organizationId: string,
+    revision: string,
+    expectedSourceBundleDigest: string,
+    bundle: CanonicalSourceBundle,
+  ): Promise<ValidatedBundleIdentity> {
+    return this.cacheBundle(`organization:${organizationId}`, revision, expectedSourceBundleDigest, bundle);
+  }
+
+  get loadedBundleCount(): number {
+    return this.loaded.size;
   }
 
   run<T>(command: EngineCommand): Promise<T> {
+    return this.schedule(() => this.execute<T>(command));
+  }
+
+  private schedule<T>(operation: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(closedError());
 
     const predecessor = this.queue;
@@ -148,7 +171,7 @@ export class WasmPolicyRuntime {
         return;
       }
       try {
-        settleResolve(entry, await this.execute<T>(command), resolveVisible);
+        settleResolve(entry, await operation(), resolveVisible);
       } catch (error) {
         entry.reject(asError(error));
       } finally {
@@ -160,6 +183,51 @@ export class WasmPolicyRuntime {
       () => undefined,
     );
     return visible;
+  }
+
+  private cacheBundle(
+    key: string,
+    revision: string,
+    expectedSourceBundleDigest: string,
+    bundle: CanonicalSourceBundle,
+  ): Promise<ValidatedBundleIdentity> {
+    return this.schedule(async () => {
+      const cached = this.loaded.get(key);
+      if (cached?.revision === revision && cached.sourceBundleDigest === expectedSourceBundleDigest) return cached.identity;
+      if (cached !== undefined) await this.restartForBundleReplacement(key);
+      const identity = await this.loadIntoCurrentWorker(expectedSourceBundleDigest, bundle);
+      this.loaded.set(key, { revision, sourceBundleDigest: expectedSourceBundleDigest, bundle, identity });
+      return identity;
+    });
+  }
+
+  private async restartForBundleReplacement(replacedKey: string): Promise<void> {
+    const prior = this.state;
+    const retained = [...this.loaded.entries()].filter(([key]) => key !== replacedKey);
+    const replacement = this.spawn(prior.generation + 1);
+    this.starting = replacement;
+    try {
+      await this.waitUntilReady(replacement);
+      this.assertOpen();
+      this.state = replacement;
+      await prior.worker.terminate();
+      this.loaded.clear();
+      for (const [key, entry] of retained) {
+        const identity = await this.loadIntoCurrentWorker(entry.sourceBundleDigest, entry.bundle);
+        this.loaded.set(key, { ...entry, identity });
+      }
+    } catch (error) {
+      await replacement.worker.terminate().catch(() => undefined);
+      throw error;
+    } finally {
+      if (this.starting === replacement) this.starting = undefined;
+    }
+  }
+
+  private async loadIntoCurrentWorker(expectedSourceBundleDigest: string, bundle: CanonicalSourceBundle): Promise<ValidatedBundleIdentity> {
+    const identity = await this.execute<ValidatedBundleIdentity>({ operation: "load_bundle", expected_source_bundle_digest: expectedSourceBundleDigest, bundle });
+    if (identity.sourceBundleDigest !== expectedSourceBundleDigest) throw new LocalEvaluatorError("bundle_digest_mismatch", "The loaded policy bundle digest changed.");
+    return identity;
   }
 
   close(): Promise<void> {
@@ -235,9 +303,7 @@ export class WasmPolicyRuntime {
     });
     void ready.catch(() => undefined);
     const url = typeof this.workerUrl === "function" ? this.workerUrl(generation) : this.workerUrl;
-    const worker = new Worker(url, {
-      resourceLimits: { maxOldGenerationSizeMb: MAX_WORKER_HEAP_MIB },
-    });
+    const worker = new Worker(url, policyWorkerOptions());
     const state: WorkerState = {
       worker,
       generation,

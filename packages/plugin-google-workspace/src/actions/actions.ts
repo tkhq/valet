@@ -216,6 +216,7 @@ const allActions: PluginAction[] = [...driveActions, ...docsActions, ...sheetsAc
 // worker resolvers) — this is the credential lookup key.
 export const googleWorkspacePlugin: ActionPlugin = {
   service: 'google_workspace',
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description: 'Google Workspace integration — Drive, Docs, and Sheets with unified OAuth and labels-based access guard',
   actions: allActions,
 };

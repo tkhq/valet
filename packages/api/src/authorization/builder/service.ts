@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, count, eq, gt } from "drizzle-orm";
 import type { AuthorizationRequest, JsonValue } from "@valet/engine/authorization";
+import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import { policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringOperations, policyAuthoringReviews, policyAuthoringRevisions } from "../../schema/index.js";
 import { buildCurrentPolicySource } from "../bundles/current-policy-source.js";
@@ -83,6 +84,7 @@ interface ServiceDeps {
   compiler?: PolicyAuthoringCompiler;
   now?: () => number;
   auditWrite?: typeof writeAudit;
+  canonicalPolicyManager?: CanonicalPolicyBundleManager;
 }
 type DocumentRow = typeof policyAuthoringDocuments.$inferSelect;
 type RevisionRow = typeof policyAuthoringRevisions.$inferSelect;
@@ -315,12 +317,9 @@ export class PolicyAuthoringService {
         !sameStoredIdentity(rebuilt.identity, review)
       )
         throw conflict("The approved candidate identity changed. Submit it for a new review before preparation.");
-      return {
-        document: toDocument(row),
-        draft: revision.draft,
-        bundle: rebuilt.bundle,
-        notice: "This candidate has no enforcement effect. PR 9 owns publication and activation.",
-      };
+      if (!this.deps.canonicalPolicyManager) throw new Error("Canonical policy manager is unavailable.");
+      await this.deps.canonicalPolicyManager.activateCandidate(scope.organizationId, rebuilt.identity, rebuilt.bundle, { actorId: actor, operation: "policy_authoring_publish", idempotencyKey: `${id}:${row.revision}:${row.stateVersion}` });
+      return { document: toDocument(row), draft: revision.draft, bundle: rebuilt.bundle, notice: "This candidate is the active canonical policy bundle." };
     });
   }
   async preview(actor: string, scope: PolicyAuthoringScope, input: PolicyPreviewServerRequest) {
@@ -484,7 +483,11 @@ export class PolicyAuthoringService {
     try {
       return await work();
     } catch (error) {
-      if (error instanceof PolicyAuthoringError) throw error;
+      if (
+        error instanceof PolicyAuthoringError ||
+        error instanceof CanonicalPolicyConfigManagedError ||
+        error instanceof CanonicalPolicySourceReadOnlyError
+      ) throw error;
       throw internal();
     }
   }

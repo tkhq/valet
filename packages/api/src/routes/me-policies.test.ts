@@ -4,7 +4,7 @@
  * `routes/me-policies.ts` doc comment); the write-time bounds check on
  * overrides is what stops a member self-granting past an org policy —
  * across EVERY org-policy dimension the override could be outranked by at
- * real invocation time (`resolvePolicyDecision` puts a per-user override at
+ * real invocation time (the canonical policy puts a per-user override at
  * rung 2, above org allow/require_approval at rung 3 — see
  * `policies/admin.ts`'s `validateOverrideBounds` doc comment), not just the
  * override's own target dimension.
@@ -13,7 +13,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, RiskLevel, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { runtimeGrants } from "../schema/index.js";
+import { authorizationDecisions, authorizationExecutionAttempts, runtimeGrants } from "../schema/index.js";
 import type {
   DeleteGrantResponse,
   DeletePolicyOverrideResponse,
@@ -43,10 +43,12 @@ function testCatalogAction(id: string, riskLevel: RiskLevel): PluginAction {
 function testPolicyPlugin(): ValetPlugin {
   const github: ActionPlugin = {
     service: "github",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     actions: [testCatalogAction("github.create_issue", "medium"), testCatalogAction("github.create_repository", "high")],
   };
   const slack: ActionPlugin = {
     service: "slack",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     actions: [testCatalogAction("slack.post_message", "low")],
   };
   return { name: "test-policy-plugin", version: "0.0.1", actions: [github, slack] };
@@ -280,6 +282,22 @@ describe("PUT /api/me/policy-overrides — cross-dimension bounds", () => {
     expect(body.error).toContain("deny");
   });
 
+  it("a service-scoped allow override is bounded for a future catalog risk", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const orgRes = await putOrgPolicy({ riskLevel: "critical", mode: "require_approval" });
+    expect(orgRes.status).toBe(201);
+
+    // Slack currently declares only a low-risk action. The service override
+    // must also cover a critical action added after this override is stored.
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ service: "slack", mode: "allow" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: expect.stringContaining("critical") });
+  });
+
   it("a service-scoped allow override is blocked by an org riskLevel require_approval policy", async () => {
     api = await bootTestApi({ plugins: PLUGINS });
     const orgRes = await putOrgPolicy({ riskLevel: "high", mode: "require_approval" });
@@ -364,7 +382,7 @@ describe("PUT /api/me/policy-overrides — cross-dimension bounds", () => {
 // rung 2 whenever the params DID match at real invocation. The fix strips
 // `paramMatchers` from org rows ("might match" ⇒ treat as matching) before
 // resolving. These pin that a matcher-carrying org policy still blocks the
-// override; a refactor back to the matcher-blind resolveActionPolicy path
+// override; a refactor back to the matcher-blind policy resolution path
 // would fail here instead of silently reopening the bypass.
 
 describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C1)", () => {
@@ -393,6 +411,26 @@ describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("require_approval");
+  });
+
+  it("a matcher-scoped session-only org policy blocks without persisting an authorization decision", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const orgRes = await putOrgPolicy({
+      actionId: "github.create_issue",
+      mode: "require_approval",
+      appliesIn: "session",
+      paramMatchers: [{ path: "repo", op: "eq", value: "prod" }],
+    });
+    expect(orgRes.status).toBe(201);
+
+    const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(0);
+    expect(await api.providers.db.select().from(authorizationExecutionAttempts)).toHaveLength(0);
   });
 
   it("a matcher-scoped workflow-only org require_approval also blocks the allow override", async () => {

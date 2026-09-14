@@ -26,6 +26,8 @@ import {
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
+import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
@@ -83,6 +85,8 @@ export interface WorkflowServiceDeps {
   /** Full plugin list — trigger tools need the event catalogs
    * (`plugin.triggers`) for event-key validation and discovery. */
   plugins?: ValetPlugin[];
+  canonicalAuthorizationService?: CanonicalAuthorizationService;
+  canonicalPolicyManager?: CanonicalPolicyBundleManager;
 }
 
 export interface WorkflowOwner {
@@ -1626,6 +1630,17 @@ export async function resolveWorkflowApproval(
     scope: input.scope,
   };
   const signalId = `approval:${input.nodeId}${suffix}:resolution`;
+  const resolutionNow = Date.now();
+  let grantRisk: "low" | "medium" | "high" | "critical" | undefined;
+  if (input.approved && input.scope === "run" && isPolicyGate) {
+    const checkpoints = await deps.workflowStore.getCheckpoints(input.runId);
+    const intent = checkpoints.find((cp) => cp.nodeId === input.nodeId && cp.iteration === iter && cp.status === "intent");
+    const risk = intent?.effects?.riskLevel;
+    if (risk !== "low" && risk !== "medium" && risk !== "high" && risk !== "critical") {
+      throw new Error("Policy gate is missing its canonical risk evidence.");
+    }
+    grantRisk = risk;
+  }
   const stored = await deps.workflowStore.insertSignal({
     runId: input.runId,
     signalId,
@@ -1637,7 +1652,7 @@ export async function resolveWorkflowApproval(
       scope: input.scope,
       resolvedVia: input.via,
     },
-    createdAt: Date.now(),
+    createdAt: resolutionNow,
   });
   // Compare the returned row's payload to what we submitted. If another caller
   // won the race the stored payload will differ — do not stamp audit for the loser.
@@ -1655,23 +1670,28 @@ export async function resolveWorkflowApproval(
     const service = typeof n.service === "string" ? n.service : "";
     const action = typeof n.action === "string" ? n.action : "";
     const actionId = action.includes(".") ? action : `${service}.${action}`;
-    const now = Date.now();
+    const now = resolutionNow;
     if (input.scope === "always") {
       // Admin eligibility was already checked above (before the signal insert).
       // AlwaysAllowNotAdminError should not fire here, but re-throw defensively
       // for unexpected cases.
       try {
-        await writeAlwaysAllowPolicy(deps.db, { orgId, actionId, grantedBy: owner.userId, now });
+        if (!deps.canonicalPolicyManager) throw new Error("Canonical policy manager is unavailable.");
+        await deps.canonicalPolicyManager.mutateAndActivate(orgId, { actorId: owner.userId, operation: "workflow_always_allow", idempotencyKey: signalId }, (tx) => writeAlwaysAllowPolicy(tx, { orgId, actionId, grantedBy: owner.userId, now }));
       } catch (err) {
         if (err instanceof AlwaysAllowNotAdminError) return "forbidden_always";
         throw err;
       }
     }
-    if (input.scope === "always" || input.scope === "run") {
+    if (input.scope === "run") {
+      if (!grantRisk) throw new Error("Policy gate is missing its canonical risk evidence.");
       await writeExecutionGrant(deps.db, input.runId, {
         orgId,
         service,
         actionId,
+        riskLevel: grantRisk,
+        sourceApprovalId: signalId,
+        expiresAt: now + 72 * 60 * 60 * 1000,
         grantedBy: owner.userId,
         now,
       });

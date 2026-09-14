@@ -13,6 +13,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionInvocations, actionPolicies } from "../schema/index.js";
+import { previewProvenanceSource } from "./policies.js";
 import type {
   ActionPolicyWire,
   CreateOrgPolicyResponse,
@@ -26,6 +27,26 @@ const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
 
 let api: TestApi | undefined;
+
+function githubPolicyPlugin(defaultApprovalMode?: "allow" | "require_approval" | "deny"): ValetPlugin {
+  return {
+    name: "github-policy-fixture",
+    version: "0.0.1",
+    actions: [{
+      service: "github",
+      safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
+      ...(defaultApprovalMode ? { defaultApprovalMode } : {}),
+      actions: [{
+        id: "github.create_issue",
+        name: "Create issue",
+        description: "Create an issue.",
+        riskLevel: "high",
+        parameters: Type.Object({}),
+        execute: async () => ({ success: true as const, data: {} }),
+      }],
+    }],
+  };
+}
 
 afterEach(async () => {
   await api?.cleanup();
@@ -191,19 +212,20 @@ describe("PATCH /api/org/policies/:id", () => {
   }
 
   it("updates mode/paramMatchers/appliesIn/expiresAt", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPolicyPlugin()] });
     const created = await createPolicy();
 
+    const expiresAt = Date.now() + 60_000;
     const res = await fetch(`${api.baseUrl}/api/org/policies/${created.id}`, {
       method: "PATCH",
       headers: HEADERS,
-      body: JSON.stringify({ mode: "deny", appliesIn: "session", expiresAt: 12345 }),
+      body: JSON.stringify({ mode: "deny", appliesIn: "session", expiresAt }),
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as PatchOrgPolicyResponse;
     expect(body.mode).toBe("deny");
     expect(body.appliesIn).toBe("session");
-    expect(body.expiresAt).toBe(12345);
+    expect(body.expiresAt).toBe(expiresAt);
     // Target identity is immutable — untouched by the patch.
     expect(body.actionId).toBe("github.create_issue");
   });
@@ -318,14 +340,27 @@ describe("DELETE /api/org/policies/:id — soft revoke", () => {
 // ── Preview endpoint ─────────────────────────────────────────────────────
 
 describe("POST /api/org/policies/preview", () => {
+  it.each([
+    ["organization_policy", "org_policy"],
+    ["team_policy", "team_policy"],
+    ["dynamic_grant", "runtime_grant"],
+    ["personal_override", "override"],
+    ["plugin_default", "plugin_default"],
+    ["risk_default", "risk_default"],
+    ["bundle_default", "bundle_default"],
+  ])("keeps reason code %s compatible as %s", (reasonCode, expected) => {
+    expect(previewProvenanceSource(reasonCode)).toBe(expected);
+  });
+
   it("dry-runs the resolver without writing anything", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPolicyPlugin()] });
     await fetch(`${api.baseUrl}/api/org/policies`, {
       method: "POST",
       headers: HEADERS,
       body: JSON.stringify({ actionId: "github.create_issue", mode: "deny" }),
     });
 
+    const beforePreview = await api.providers.db.select().from(actionInvocations);
     const res = await fetch(`${api.baseUrl}/api/org/policies/preview`, {
       method: "POST",
       headers: HEADERS,
@@ -339,10 +374,9 @@ describe("POST /api/org/policies/preview", () => {
     expect(body.mode).toBe("deny");
     expect(body.provenance.source).toBe("org_policy");
 
-    // No invocation audit row, no policy row mutation — a pure read.
-    const { db } = api.providers;
-    const invocations = await db.select().from(actionInvocations);
-    expect(invocations).toHaveLength(0);
+    // Preview adds no decision or invocation row. The create activation remains.
+    const invocations = await api.providers.db.select().from(actionInvocations);
+    expect(invocations).toHaveLength(beforePreview.length);
   });
 
   it("400s when appliesIn=session but sessionId is missing", async () => {
@@ -359,26 +393,13 @@ describe("POST /api/org/policies/preview", () => {
     // A plugin whose `defaultApprovalMode` is require_approval on a LOW-risk
     // action (risk default would be allow). With no org policy/override, the
     // preview must surface the plugin default, not the risk default — I4.
-    const lowAction = {
-      id: "widgets.ping",
-      name: "Ping",
-      description: "low-risk fixture action",
-      riskLevel: "low" as const,
-      parameters: Type.Object({}),
-      execute: async () => ({ success: true as const, data: {} }),
-    };
-    const plugin: ValetPlugin = {
-      name: "preview-fixture",
-      version: "0.0.1",
-      actions: [{ service: "widgets", actions: [lowAction], defaultApprovalMode: "require_approval" }],
-    };
-    api = await bootTestApi({ plugins: [plugin] });
+    api = await bootTestApi({ plugins: [githubPolicyPlugin("require_approval")] });
 
     const res = await fetch(`${api.baseUrl}/api/org/policies/preview`, {
       method: "POST",
       headers: HEADERS,
       body: JSON.stringify({
-        service: "widgets", actionId: "widgets.ping", riskLevel: "low",
+        service: "github", actionId: "github.create_issue", riskLevel: "high",
         appliesIn: "session", sessionId: "s1",
       }),
     });

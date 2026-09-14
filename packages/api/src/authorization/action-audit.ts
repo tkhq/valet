@@ -24,6 +24,7 @@ export interface DecisionAuditEvidenceV1 {
   readonly contractDigest: string;
   readonly decisionDigest: string;
   readonly obligationDigest: string;
+  readonly approvalReplay?: { readonly evaluationTimeMs: number };
 }
 export interface DecisionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationDecisionRow; readonly evidence: DecisionAuditEvidenceV1 }
 
@@ -47,6 +48,12 @@ export function buildDecisionAuditPlan(input: {
   for (const value of [input.profileDigest, input.interpreterDigest, input.contractDigest, envelope.inputDigest, envelope.policyDigest, envelope.sourceBundleDigest, envelope.evaluator.engineDigest]) digest(value);
   if (new Set(envelope.decision.matchedRuleIds).size !== envelope.decision.matchedRuleIds.length) fail("invalid_identity");
   const decisionDigest = decisionDigestOf(envelope.decision), obligationDigest = obligationDigestOf(envelope.decision);
+  let approvalReplay: DecisionAuditEvidenceV1["approvalReplay"];
+  if (envelope.decision.effect === "require_approval") {
+    const evaluationTimeMs = request.context.evaluationTimeMs;
+    timestamp(evaluationTimeMs);
+    approvalReplay = { evaluationTimeMs };
+  }
   const tvc = envelope.evaluator.kind === "tvc_attested";
   if (tvc !== Boolean(envelope.proof) || tvc !== Boolean(input.proofVerification)) fail("invalid_proof");
   if (envelope.proof) {
@@ -69,9 +76,10 @@ export function buildDecisionAuditPlan(input: {
     proofVerificationStatus: verification?.status ?? "not_required", proofVerifiedAt: verification?.atMs ?? null,
     proofVerificationError: verification?.errorCode ? safeCode(verification.errorCode) : null,
     identityFactProvenance: identityFactProvenance.map(copy), policyFactProvenance: policyFactProvenance.map(copy),
+    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}) },
     evaluatedAt: envelope.evaluatedAtMs, createdAt: input.createdAtMs,
   };
-  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest } });
+  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}) } });
 }
 
 export interface ExecutionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationExecutionAttemptRow; readonly requestSubjectDigest: string; readonly resultDigest: string | null }
@@ -107,7 +115,7 @@ export function buildExecutionAuditPlan(input: {
 function copy<T>(value: T): T { try { return trustedJsonClone(value); } catch { fail("invalid_identity"); } }
 function digest(value: unknown): void { if (typeof value !== "string" || !HEX.test(value)) fail("digest_mismatch"); }
 function validId(value: unknown): void { if (typeof value !== "string" || !ID.test(value)) fail("invalid_identity"); }
-function timestamp(value: unknown): void { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) fail("invalid_attempt"); }
+function timestamp(value: unknown): asserts value is number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) fail("invalid_attempt"); }
 function safeCode(value: string): string { return /^[a-z0-9_.-]{1,64}$/.test(value) ? value : "proof_verification_failed"; }
 function exact(value: object, keys: readonly string[]): void { if (Object.keys(value).some((key) => !keys.includes(key))) fail("invalid_proof"); }
 function validateProvenance(values: readonly FactProvenance[]): void { for (const value of values) { const fact = copy(value); exact(fact, ["source", "issuer", "digest"]); if ((fact.source !== "host_asserted" && fact.source !== "trusted_issuer") || (fact.issuer !== undefined && typeof fact.issuer !== "string") || (fact.digest !== undefined && (typeof fact.digest !== "string" || !HEX.test(fact.digest)))) fail("invalid_proof"); } }

@@ -10,6 +10,7 @@ import {
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -118,6 +119,7 @@ describe("long-poll mode", () => {
   let testDb: TestPgDb;
   let engineHost: EngineHost;
   let faux: FauxProviderRegistration;
+  let canonical: Awaited<ReturnType<typeof canonicalPolicyForTest>>;
 
   beforeEach(async () => {
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
@@ -126,10 +128,12 @@ describe("long-poll mode", () => {
     // it just has to exist for the turn to start (env scrubbed by setup).
     vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
     testDb = await freshTestPgDb();
+    canonical = await canonicalPolicyForTest(testDb.appDb, ORG_ID);
   });
 
   afterEach(async () => {
     await engineHost?.destroyAll();
+    await canonical.manager.close();
     faux.unregister();
     vi.unstubAllEnvs();
   });
@@ -153,6 +157,8 @@ describe("long-poll mode", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [fakePlugin],
+      actionPluginByService: canonical.actionPluginByService,
+      canonicalAuthorizationService: canonical.canonicalAuthorizationService,
     });
     return new ChannelHost({
       db: appDb,
@@ -220,6 +226,8 @@ describe("long-poll mode", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [fakePlugin],
+      actionPluginByService: canonical.actionPluginByService,
+      canonicalAuthorizationService: canonical.canonicalAuthorizationService,
     });
     const host = new ChannelHost({
       db: appDb,

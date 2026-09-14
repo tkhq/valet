@@ -115,6 +115,7 @@ export function securityDeclaredMcpPlugins(decls: readonly ToolDecl[]): ValetPlu
           mcpUrl: decl.mcp.url,
           serviceName: service,
           defaultRiskLevel: "high",
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
           // A self-hosted scanner MCP server on the sandbox network is not a
           // per-user credentialed connector; the egress allowlist is the guard.
           noAuth: true,

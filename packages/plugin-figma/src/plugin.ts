@@ -10,6 +10,7 @@ const plugin: ValetPlugin = {
       mcpUrl: 'https://mcp.figma.com/mcp',
       serviceName: 'figma',
       defaultRiskLevel: 'medium',
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     }),
   ],
   credentials: [

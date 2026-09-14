@@ -10,6 +10,7 @@ const plugin: ValetPlugin = {
       mcpUrl: 'https://mcp.sentry.dev/mcp',
       serviceName: 'sentry',
       defaultRiskLevel: 'medium',
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     }),
   ],
   credentials: [

@@ -24,7 +24,12 @@ async function senderFor(session: { options: { resolveOutboundSender?: () => Pro
 
 async function allowSlackSend(api: TestApi): Promise<void> {
   const now = Date.now();
-  await api.providers.db.insert(actionPolicies).values({
+  await api.providers.canonicalPolicyManager.mutateAndActivate(ORG, {
+    actorId: USER,
+    operation: "test_allow_slack_send",
+    idempotencyKey: "slack.send_message",
+  }, async (tx) => {
+    await tx.insert(actionPolicies).values({
     id: "test:allow:slack.send_message",
     orgId: ORG,
     principalType: "org",
@@ -41,6 +46,7 @@ async function allowSlackSend(api: TestApi): Promise<void> {
     revokedAt: null,
     createdAt: now,
     updatedAt: now,
+    });
   });
   await api.providers.engineCredentials.save(
     { type: "org", id: ORG },

@@ -112,7 +112,6 @@ interface RequestIdentityInput {
 export function requestSubjectDigest(input: RequestIdentityInput): string {
   return digest({
     kind: input.kind,
-    idempotencyKey: input.idempotencyKey,
     subject: input.subject,
     action: input.action,
     ...(input.resource === undefined ? {} : { resource: input.resource }),

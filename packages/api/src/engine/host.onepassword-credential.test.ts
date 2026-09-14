@@ -25,6 +25,7 @@ import {
 } from "../services/onepassword.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgs } from "../schema/index.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
 import { EngineHost, type EngineHostOpts } from "./host.js";
 
 const orgId = "op-org";
@@ -52,9 +53,12 @@ function fakeOnePassword(
 
 describe("EngineHost session 1Password credential resolution", () => {
   let host: EngineHost | undefined;
+  let canonical: Awaited<ReturnType<typeof canonicalPolicyForTest>> | undefined;
 
-  afterEach(() => {
+  afterEach(async () => {
     host?.evictAll();
+    await canonical?.manager.close();
+    canonical = undefined;
     host = undefined;
   });
 
@@ -286,6 +290,7 @@ describe("EngineHost session 1Password credential resolution", () => {
   it("db wired + 1Password openai row resolves through the service (LLM-provider probe does not skip it)", async () => {
     const { appDb } = await freshTestPgDb();
     await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+    canonical = await canonicalPolicyForTest(appDb, orgId);
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "user", id: userId }, "openai", {
       type: "api_key",
@@ -296,7 +301,12 @@ describe("EngineHost session 1Password credential resolution", () => {
       sawRow = row;
       return { type: row.type, metadata: row.metadata, apiKey: "sk-from-1password" };
     });
-    const h = makeHost(credentials, { db: appDb, onePassword });
+    const h = makeHost(credentials, {
+      db: appDb,
+      onePassword,
+      actionPluginByService: canonical.actionPluginByService,
+      canonicalAuthorizationService: canonical.canonicalAuthorizationService,
+    });
 
     const session = await h.sessionFor("sess-op-openai-db", { userId, orgId, workspace: "/tmp" });
     const cred = await session.credentialProvider().get("openai");

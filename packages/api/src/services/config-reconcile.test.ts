@@ -8,8 +8,9 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionPolicies, invites, llmProviders, orgMembers, orgs, contentSources, skills, teams, teamMembers, users } from "../schema/index.js";
-import { ensureOrg } from "./org.js";
+import { actionPolicies, invites, llmProviders, orgMembers, orgs, policyActiveBundles, contentSources, skills, teams, teamMembers, users } from "../schema/index.js";
+import { configureCanonicalOrganizationProvisioner, ensureOrg } from "./org.js";
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import {
   reconcileInstanceConfig,
   configInviteId,
@@ -30,8 +31,18 @@ async function seedUser(db: AppDb, id: string, email: string) {
   await db.insert(users).values({ id, email, name: id, role: "member" });
 }
 
+const managers = new WeakMap<AppDb, CanonicalPolicyBundleManager>();
+
+async function freshConfigDb(): Promise<AppDb> {
+  const { appDb } = await freshTestPgDb();
+  const manager = new CanonicalPolicyBundleManager(appDb, new Map());
+  managers.set(appDb, manager);
+  configureCanonicalOrganizationProvisioner(appDb, (id, name) => manager.provisionOrganization(id, name));
+  return appDb;
+}
+
 function deps(db: AppDb): ReconcileDeps {
-  return { db };
+  return { db, canonicalPolicyManager: managers.get(db) };
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +87,7 @@ describe("reconcileInstanceConfig — org pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("empty org section (no org key) is a no-op — ensureOrg creates the org", async () => {
@@ -427,7 +438,7 @@ describe("reconcileInstanceConfig — teams pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("marks a team it creates as config-owned", async () => {
@@ -645,7 +656,7 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("creates a known-kind provider row on first run", async () => {
@@ -761,7 +772,7 @@ describe("reconcileInstanceConfig — contentSources pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("inserts a declared source with org ownership and pending status", async () => {
@@ -1191,7 +1202,7 @@ describe("reconcileInstanceConfig — conflict guards", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   it("succeeds when an org_members row for a declared member already exists (partial prior run)", async () => {
@@ -1282,12 +1293,60 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
   let db: AppDb;
 
   beforeEach(async () => {
-    ({ appDb: db } = await freshTestPgDb());
+    db = await freshConfigDb();
   });
 
   async function orgId(): Promise<string> {
     return (await ensureOrg(db)).id;
   }
+
+  it("bootstraps an existing organization before the first config policy cutover", async () => {
+    await db.insert(orgs).values({ id: "legacy-org", name: "Legacy", createdAt: 1 });
+    await db.insert(actionPolicies).values({
+      id: "legacy-row", orgId: "legacy-org", principalType: "org", principalId: "legacy-org",
+      service: "linear", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1,
+    });
+    const cfg: InstanceConfig = { version: 1, toolPolicies: [{ service: "github", mode: "deny" }] };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const first = (await db.select().from(policyActiveBundles))[0];
+    expect(first).toMatchObject({ orgId: "legacy-org", generation: 2 });
+    await reconcileInstanceConfig(deps(db), cfg);
+    expect((await db.select().from(policyActiveBundles))[0]).toEqual(first);
+    expect(await db.select().from(actionPolicies).where(eq(actionPolicies.id, "legacy-row"))).toHaveLength(1);
+  }, 120_000);
+
+  it("classifies a reboot conflict with a published candidate and supports config removal recovery", async () => {
+    const org = await orgId();
+    const first = managers.get(db)!;
+    await first.ensureOrganizationReady(org);
+    await db.insert(actionPolicies).values({
+      id: "candidate-rule", orgId: org, principalType: "org", principalId: org,
+      service: "github", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1,
+    });
+    const candidate = await first.buildCurrent(org);
+    await db.delete(actionPolicies).where(eq(actionPolicies.id, "candidate-rule"));
+    await first.activateCandidate(org, candidate.identity, candidate.built.bundle, {
+      actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "candidate",
+    });
+    const pointer = await first.host.activePointer(org);
+    const rebooted = new CanonicalPolicyBundleManager(db, new Map());
+    managers.set(db, rebooted);
+
+    await expect(reconcileInstanceConfig({ ...deps(db), configPath: "/etc/valet.yaml" }, {
+      version: 1, toolPolicies: [{ service: "github", mode: "allow" }],
+    })).rejects.toThrow(
+      "/etc/valet.yaml: toolPolicies conflicts with the active published policy candidate. Remove toolPolicies from this file and restart to keep the candidate active.",
+    );
+    expect(await rebooted.host.activePointer(org)).toEqual(pointer);
+    expect(await db.select().from(actionPolicies)).toHaveLength(0);
+
+    const recovered = new CanonicalPolicyBundleManager(db, new Map());
+    managers.set(db, recovered);
+    await expect(reconcileInstanceConfig(deps(db), { version: 1 })).resolves.toBeUndefined();
+    await expect(recovered.ensureOrganizationReady(org)).resolves.toBeUndefined();
+    expect(await recovered.host.activePointer(org)).toEqual(pointer);
+    await Promise.all([first.close(), rebooted.close(), recovered.close()]);
+  }, 120_000);
 
   it("creates a service-targeted org row with origin/managed_by set", async () => {
     const cfg: InstanceConfig = {
@@ -1409,7 +1468,7 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
     const org = await orgId();
     const now = Date.now();
     const uiId = randomUUID();
-    await db.insert(actionPolicies).values({
+    await managers.get(db)!.mutateAndActivate(org, { actorId: "admin", operation: "ui_create", idempotencyKey: uiId }, (tx) => tx.insert(actionPolicies).values({
       id: uiId,
       orgId: org,
       principalType: "org",
@@ -1426,7 +1485,7 @@ describe("reconcileInstanceConfig — toolPolicies pass", () => {
       revokedAt: null,
       createdAt: now,
       updatedAt: now,
-    });
+    }));
 
     // A config run declaring a different target must not revoke the UI row.
     await reconcileInstanceConfig(deps(db), {

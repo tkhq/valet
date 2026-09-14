@@ -140,7 +140,14 @@ async function resolveViaSignal(
     // host's grant write is itself idempotent — so at-least-once here is
     // safe.
     if (payload.grantActions && payload.grantActions.length > 0 && onApprovalGrant) {
-      await onApprovalGrant({ runId: run.runId, resolvedBy: payload.resolvedBy, grants: payload.grantActions });
+      await onApprovalGrant({
+        runId: run.runId,
+        nodeId: node.id,
+        iteration,
+        signalId: signal.signalId,
+        resolvedBy: payload.resolvedBy,
+        grants: payload.grantActions,
+      });
     }
     const result: ApprovalResult = { approved: true, resolvedBy: payload.resolvedBy };
     const checkpoint: NodeCheckpoint = {

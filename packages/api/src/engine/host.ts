@@ -45,7 +45,7 @@ import {
   type SandboxStatus,
   type SkillSource,
 } from "@valet/engine";
-import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
+import { revokeSessionGrants } from "../policies/service.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import type { AssistantBehavior, RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
@@ -90,6 +90,8 @@ import { clampToMax, getOrgReasoningSettings, type ReasoningLevel } from "../ser
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import { canonicalInteractivePolicyResolver } from "../authorization/canonical-interactive-resolver.js";
 import {
   agentSessions,
   orgs,
@@ -291,6 +293,7 @@ export interface EngineHostOpts {
    * means the plugin-default rung falls through to the risk default.
    */
   actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
+  canonicalAuthorizationService?: CanonicalAuthorizationService;
   /**
    * Deps for resolving a session's `github` credential through the canonical
    * token service (`services/github-tokens.ts`'s `resolveGitHubToken`, via
@@ -1651,10 +1654,8 @@ export class EngineHost {
   private getPolicyResolver(): PolicyResolver | undefined {
     if (!this.opts.db) return undefined;
     if (!this.policyResolverInstance) {
-      this.policyResolverInstance = buildPolicyResolver({
-        db: this.opts.db,
-        actionPluginByService: this.opts.actionPluginByService ?? new Map(),
-      });
+      if (!this.opts.canonicalAuthorizationService) throw new Error("Canonical authorization service is unavailable.");
+      this.policyResolverInstance = canonicalInteractivePolicyResolver({ db: this.opts.db, service: this.opts.canonicalAuthorizationService, plugins: this.opts.actionPluginByService ?? new Map() });
     }
     return this.policyResolverInstance;
   }

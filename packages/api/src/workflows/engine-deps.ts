@@ -73,6 +73,7 @@ import {
   resolveDefaultAssistant,
 } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { workflowAssistantId } from "./service.js";
 
 type PiModel = Model<Api>;
@@ -103,6 +104,7 @@ export interface WorkflowEngineDepsOpts {
    * wired.
    */
   onePassword?: OnePasswordService;
+  canonicalAuthorizationService?: CanonicalAuthorizationService;
 }
 
 /**
@@ -168,6 +170,8 @@ interface RunContext {
   actorUserId: string;
   owner: Principal;
   assistantId?: string;
+  workflowDefinitionId: string;
+  workflowVersion: string;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -193,7 +197,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   }
 
   return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
-    assistantId: workflowAssistantId(run.definition) };
+    assistantId: workflowAssistantId(run.definition), workflowDefinitionId: run.params.workflowId, workflowVersion: run.definitionVersionId };
 }
 
 /**
@@ -321,6 +325,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     plugins: opts.plugins,
     githubTokenDeps: opts.githubTokenDeps,
     onePassword: opts.onePassword,
+    canonicalAuthorizationService: opts.canonicalAuthorizationService,
   });
 
   return {
@@ -512,6 +517,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
+        workflowDefinitionId: ctx.workflowDefinitionId,
+        workflowVersion: ctx.workflowVersion,
+        workflowNodeId: req.invocationId.split(":")[2],
       });
     },
 

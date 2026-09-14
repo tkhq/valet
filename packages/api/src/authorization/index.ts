@@ -10,3 +10,9 @@ export {
   WasmPolicyRuntime,
   type RuntimeIdentity,
 } from "./evaluators/wasm-runtime.js";
+
+export * from "./canonical-policy-manager.js";
+export * from "./canonical-facts.js";
+
+export * from "./canonical-authorization-service.js";
+export * from "./action-projections.js";

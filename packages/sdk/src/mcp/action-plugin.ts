@@ -2,6 +2,7 @@ import { decode as decodeToon } from '@toon-format/toon';
 import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
 import type { ActionPlugin, CredentialProvider, PluginAction, RiskLevel } from '@valet/engine';
+import type { SafeParameterProjectionV1 } from '@valet/engine/authorization';
 import { hasToonCollectionMarker } from '@valet/shared';
 import { McpClient } from './client.js';
 import type { McpTool, McpToolResult } from './types.js';
@@ -10,6 +11,8 @@ export interface McpActionPluginOptions {
   mcpUrl: string;
   serviceName: string;
   defaultRiskLevel: RiskLevel;
+  /** Explicit projection for every dynamically discovered action. */
+  safeParameterProjection?: SafeParameterProjectionV1;
   /** When true, calls MCP server without authentication (for public services). */
   noAuth?: boolean;
   /**
@@ -54,6 +57,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
     service: serviceName,
     description: opts.description,
     actions: [],
+    safeParameterProjection: opts.safeParameterProjection,
     requiresCredential: !noAuth && staticToken === undefined,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
       const token = await resolveToken(credentials, serviceName, noAuth, staticToken);

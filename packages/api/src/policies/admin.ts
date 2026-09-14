@@ -10,10 +10,10 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
-import type { ActionPlugin, ApprovalMode, RiskLevel, ValetPlugin } from "@valet/engine";
+import type { ApprovalMode, RiskLevel } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
-  agentSessions, workflowRuns, workflowDefinitions,
+  ACTION_POLICY_AUTHORIZATION_KIND, agentSessions, workflowRuns, workflowDefinitions,
   actionInvocations,
   actionPolicies,
   actionPolicyOverrides,
@@ -24,13 +24,7 @@ import {
   type RuntimeGrantRow,
 } from "../schema/index.js";
 import { type ParamMatcher } from "./matchers.js";
-import { grantPolicyKey, resolvePolicyDecision, type PolicyResolutionRows } from "./resolution.js";
-import { loadPolicyRows } from "./service.js";
 
-/** Service→plugin index shape `validateOverrideBounds` needs to look up an
- *  actionId's `service`/`riskLevel`/plugin default — same map shape as
- *  `Providers.actionPluginByService` (`providers/types.ts`). */
-export type ActionPluginByService = Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
 
 /** One-of-three target shape shared by `action_policies` and
  *  `action_policy_overrides` — mirrors the DB CHECK constraint. */
@@ -70,6 +64,7 @@ export function isApprovalMode(v: unknown): v is ApprovalMode {
 function overrideTargetEquals(target: PolicyTarget) {
   if (target.service !== undefined) {
     return and(
+      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
       eq(actionPolicyOverrides.service, target.service),
       isNull(actionPolicyOverrides.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -77,6 +72,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.actionId !== undefined) {
     return and(
+      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
       isNull(actionPolicyOverrides.service),
       eq(actionPolicyOverrides.actionId, target.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -84,6 +80,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.riskLevel !== undefined) {
     return and(
+      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
       isNull(actionPolicyOverrides.service),
       isNull(actionPolicyOverrides.actionId),
       eq(actionPolicyOverrides.riskLevel, target.riskLevel),
@@ -95,7 +92,7 @@ function overrideTargetEquals(target: PolicyTarget) {
 export interface PolicyScope { orgId: string; type: "org" | "team"; id: string }
 
 function policyScopeFilter(scope: PolicyScope) {
-  return and(eq(actionPolicies.orgId, scope.orgId), eq(actionPolicies.principalType, scope.type), eq(actionPolicies.principalId, scope.id));
+  return and(eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND), eq(actionPolicies.orgId, scope.orgId), eq(actionPolicies.principalType, scope.type), eq(actionPolicies.principalId, scope.id));
 }
 
 // ── action_policies CRUD ────────────────────────────────────────────
@@ -124,6 +121,7 @@ export async function createPolicy(db: AppQueryable, scope: PolicyScope, input: 
   const row = {
     id: randomUUID(),
     orgId: scope.orgId,
+    authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
     principalType: scope.type,
     principalId: scope.id,
     service: input.service ?? null,
@@ -200,278 +198,6 @@ export async function revokePolicy(db: AppQueryable, scope: PolicyScope, id: str
 }
 
 export const listOrgPolicies = (db: AppDb, orgId: string) => listPolicies(db, { orgId, type: "org", id: orgId });
-export const createOrgPolicy = (db: AppDb, orgId: string, input: CreateOrgPolicyInput) => createPolicy(db, { orgId, type: "org", id: orgId }, input);
-export const updateOrgPolicy = (db: AppDb, orgId: string, id: string, patch: UpdateOrgPolicyInput) => updatePolicy(db, { orgId, type: "org", id: orgId }, id, patch);
-export const revokeOrgPolicy = (db: AppDb, orgId: string, id: string, now: number) => revokePolicy(db, { orgId, type: "org", id: orgId }, id, now);
-
-// ── Override write-time bounds (spec decision 3) ────────────────────
-
-/** Minimal shape read off `action_policies` for the cross-dimension bounds
- *  walk below — every live, unexpired org policy, any target dimension. */
-interface OrgPolicyDimensionRow {
-  id: string;
-  service: string | null;
-  actionId: string | null;
-  riskLevel: RiskLevel | null;
-  mode: ApprovalMode;
-}
-
-async function loadLiveOrgPolicyDimensionRows(db: AppQueryable, orgId: string, now: number): Promise<OrgPolicyDimensionRow[]> {
-  return db
-    .select({
-      id: actionPolicies.id,
-      service: actionPolicies.service,
-      actionId: actionPolicies.actionId,
-      riskLevel: actionPolicies.riskLevel,
-      mode: actionPolicies.mode,
-    })
-    .from(actionPolicies)
-    .where(
-      and(
-        eq(actionPolicies.orgId, orgId),
-        eq(actionPolicies.principalType, "org"),
-        isNull(actionPolicies.revokedAt),
-        or(isNull(actionPolicies.expiresAt), sql`${actionPolicies.expiresAt} > ${now}`),
-      ),
-    );
-}
-
-/** Looks up an actionId in the assembled plugin catalog (static `actions`
- *  list only — an action only reachable via a plugin's dynamic
- *  `resolveActions` seam is, by construction, unverifiable here and treated
- *  the same as "not found"). Returns the action's `service`/`riskLevel` plus
- *  its plugin's `defaultApprovalMode`, everything `resolveActionPolicy` needs
- *  to derive the same base decision (rungs 3-5) real invocation would. */
-function findCatalogAction(
-  actionPluginByService: ActionPluginByService,
-  actionId: string,
-): { service: string; riskLevel: RiskLevel; pluginDefault: ApprovalMode | undefined } | undefined {
-  for (const { actionPlugin } of actionPluginByService.values()) {
-    // Match raw `a.id` OR its fqid — the canonical policy-facing id is the
-    // fully-qualified `service.action` form (spec T6 #3), but a plugin may
-    // declare bare action ids.
-    const action = actionPlugin.actions.find(
-      (a) => a.id === actionId || (a.id.includes(".") ? a.id : `${actionPlugin.service}.${a.id}`) === actionId,
-    );
-    if (action) {
-      return { service: actionPlugin.service, riskLevel: action.riskLevel, pluginDefault: actionPlugin.defaultApprovalMode };
-    }
-  }
-  return undefined;
-}
-
-function blockedByOrgPolicy(row: OrgPolicyDimensionRow): TargetValidation {
-  const label =
-    row.actionId !== null ? `actionId="${row.actionId}"` : row.service !== null ? `service="${row.service}"` : `riskLevel="${row.riskLevel}"`;
-  return {
-    ok: false,
-    error: `cannot set override mode "allow": conflicts with org policy (${label}, mode="${row.mode}"); ask an org admin`,
-  };
-}
-
-/**
- * actionId-scoped override bound: resolves the exact action's FULL org-side
- * decision (every org-policy dimension — service/actionId/riskLevel — via
- * `resolveActionPolicy`, same precedence real invocation uses) with the
- * user's own overrides and any runtime grant EXCLUDED (`resolveActionPolicy`
- * is called with no `userId`/`sessionId`/`workflowExecutionId`, so
- * `loadPolicyRows` returns empty `grants`/`overrides` — org policy alone).
- * Blocks only when an ORG policy (not a plugin default or the engine's risk
- * default) resolves deny/require_approval — matching spec decision 3, which
- * bounds the override against the org's OWN policy, never against a mere
- * default. An actionId absent from the static plugin catalog fails CLOSED
- * (this also covers an action only reachable via a plugin's dynamic
- * `resolveActions` seam — intentional, same "unverifiable ⇒ refuse" logic,
- * not an oversight): with no way to know its real service/riskLevel, a
- * service- or riskLevel-scoped org policy could silently apply to it at
- * invocation time with nothing here to catch it.
- *
- * Matcher-blind resolution (finding C1): the bounds check resolves with
- * `params: undefined`, so an org policy carrying `paramMatchers` would
- * evaluate every matcher to false and silently drop out of precedence —
- * letting a member's `allow` override be accepted, then outrank that same
- * org `require_approval` at rung 2 whenever the params DID match at real
- * invocation. To close it, org policy rows are stripped of their
- * `paramMatchers` before resolution here ("a matcher MIGHT match" ⇒ treat
- * the row as matching). Full-precedence resolution is preserved, so a
- * genuinely more-specific org `allow` still legitimately unblocks the
- * override. This resolves the pure core directly (not `resolveActionPolicy`)
- * precisely so the row set can be transformed before precedence runs.
- *
- * Resolved TWICE, once per `appliesIn` context (`"session"` and
- * `"workflow"`), and blocked if EITHER resolves org deny/require_approval —
- * fix round 2 (Important). A per-user override carries no `appliesIn` of its
- * own (`matchesOverrideRow` never filters on it — see `resolution.ts`), so
- * it applies to BOTH session and workflow invocations, but an org policy's
- * `appliesIn` DOES filter which context it matches
- * (`action-invoker.ts` resolves workflow-side actions with
- * `appliesIn: "workflow"` and a real `userId`, so the override IS consulted
- * there too). Checking only `"session"` left an org policy scoped
- * `appliesIn: "workflow"` invisible to this bound while still being
- * outranked by the override at real workflow invocation time — the same
- * class of permanent bypass finding 1 closed for the target-dimension axis,
- * reopened one axis over.
- */
-async function validateActionIdOverrideBounds(
-  db: AppQueryable,
-  orgId: string,
-  actionId: string,
-  now: number,
-  actionPluginByService: ActionPluginByService,
-): Promise<TargetValidation> {
-  const found = findCatalogAction(actionPluginByService, actionId);
-  if (!found) {
-    return {
-      ok: false,
-      error: `cannot set override mode "allow": action "${actionId}" is not in the plugin catalog and can't be verified against org policy`,
-    };
-  }
-  // Org policy alone: no userId/sessionId scope, so `loadPolicyRows` returns
-  // empty grants/overrides. Strip `paramMatchers` so a matcher-scoped org
-  // policy is treated as "might match" instead of silently dropping out when
-  // we resolve with `params: undefined` (C1).
-  const loaded = await loadPolicyRows(db, { orgId });
-  const matcherBlind: PolicyResolutionRows = {
-    ...loaded,
-    policies: loaded.policies.map((p) => (p.paramMatchers.length > 0 ? { ...p, paramMatchers: [] } : p)),
-  };
-  for (const appliesIn of ["session", "workflow"] as const) {
-    const decision = resolvePolicyDecision(
-      matcherBlind,
-      {
-        service: found.service,
-        actionId,
-        riskLevel: found.riskLevel,
-        params: undefined,
-        appliesIn,
-        now,
-      },
-      found.pluginDefault,
-    );
-    if (decision.provenance.source === "org_policy" && (decision.mode === "deny" || decision.mode === "require_approval")) {
-      return {
-        ok: false,
-        error: `cannot set override mode "allow": org policy for action "${actionId}" currently resolves "${decision.mode}" (appliesIn: "${appliesIn}")`,
-      };
-    }
-  }
-  return { ok: true };
-}
-
-/**
- * service-scoped override bound. Provable disjointness is narrow (binding —
- * see finding writeup): a service-scoped override is disjoint from an org
- * actionId-dimension policy only when the catalog proves that action belongs
- * to a DIFFERENT service; it is NEVER provably disjoint from an org
- * riskLevel-dimension policy (a service can contain actions of any risk
- * level). Over-strict rejection (blocking when disjointness merely can't be
- * PROVEN) is the accepted trade-off over under-strict — see the `ask an org
- * admin` wording in `blockedByOrgPolicy`.
- */
-async function validateServiceOverrideBounds(
-  db: AppQueryable,
-  orgId: string,
-  service: string,
-  now: number,
-  actionPluginByService: ActionPluginByService,
-): Promise<TargetValidation> {
-  const rows = await loadLiveOrgPolicyDimensionRows(db, orgId, now);
-  for (const row of rows) {
-    if (row.mode !== "deny" && row.mode !== "require_approval") continue;
-    if (row.service !== null) {
-      if (row.service === service) return blockedByOrgPolicy(row);
-      continue; // different service — provably disjoint
-    }
-    if (row.actionId !== null) {
-      const found = findCatalogAction(actionPluginByService, row.actionId);
-      if (!found || found.service === service) return blockedByOrgPolicy(row);
-      continue; // catalog proves a different service — disjoint
-    }
-    // row.riskLevel dimension — never provably disjoint from a service scope.
-    return blockedByOrgPolicy(row);
-  }
-  return { ok: true };
-}
-
-/**
- * riskLevel-scoped override bound. Per the same provable-disjointness rule:
- * a riskLevel-scoped override is never provably disjoint from an org
- * service- or actionId-dimension policy (either could cover actions at this
- * risk level) — those always block. An org riskLevel-dimension policy only
- * blocks when it targets the SAME risk level (a different risk level is
- * genuinely disjoint, no catalog lookup needed).
- */
-async function validateRiskLevelOverrideBounds(
-  db: AppQueryable,
-  orgId: string,
-  riskLevel: RiskLevel,
-  now: number,
-): Promise<TargetValidation> {
-  const rows = await loadLiveOrgPolicyDimensionRows(db, orgId, now);
-  for (const row of rows) {
-    if (row.mode !== "deny" && row.mode !== "require_approval") continue;
-    if (row.riskLevel !== null) {
-      if (row.riskLevel === riskLevel) return blockedByOrgPolicy(row);
-      continue; // different risk level — disjoint
-    }
-    // service or actionId dimension — never provably disjoint from a
-    // riskLevel scope.
-    return blockedByOrgPolicy(row);
-  }
-  return { ok: true };
-}
-
-/**
- * Enforces spec decision 3: a per-user override may only LOOSEN to `allow`
- * where the org's own policy CANNOT resolve tighter than `allow` for
- * anything the override could cover — not just the override's own exact
- * target dimension. `resolvePolicyDecision` (`resolution.ts`) places a
- * per-user override at rung 2, ABOVE org allow/require_approval (rung 3): an
- * actionId-scoped override that only bounds itself against actionId-
- * dimension org policies leaves service- and riskLevel-dimension org
- * policies for that same action free to be silently outranked at real
- * invocation time (the CRITICAL cross-dimension bypass this function used to
- * have). Tightening (`require_approval`/`deny`) is never restricted — a user
- * can always self-restrict further than the org allows.
- *
- * TOCTOU disclosure: this reads `action_policies` fresh but not inside the
- * same transaction as the override insert/update below, so a concurrent
- * admin write between this check and the write below is possible in
- * principle. Accepted, not fixed: the real resolution path (`resolution.ts`)
- * re-derives the decision from live rows on EVERY invocation — it never
- * trusts this write-time check — so a stale assessment here doesn't grant a
- * stale outcome for lingering invocations. The worst outcome of losing this
- * race is a transient window where a bypass override exists that a
- * subsequent admin write immediately re-supersedes on the next invocation,
- * not a permanent hole — unlike the cross-dimension gap this function now
- * closes, which WAS a permanent hole (the override, once written, stays at
- * rung 2 forever, so nothing at invocation time would ever re-check it
- * against the org policy it bypassed).
- */
-export async function validateOverrideBounds(
-  db: AppQueryable,
-  orgId: string,
-  target: PolicyTarget,
-  mode: ApprovalMode,
-  now: number,
-  actionPluginByService: ActionPluginByService,
-): Promise<TargetValidation> {
-  if (mode !== "allow") return { ok: true };
-  if (target.actionId !== undefined) {
-    return validateActionIdOverrideBounds(db, orgId, target.actionId, now, actionPluginByService);
-  }
-  if (target.service !== undefined) {
-    return validateServiceOverrideBounds(db, orgId, target.service, now, actionPluginByService);
-  }
-  if (target.riskLevel !== undefined) {
-    return validateRiskLevelOverrideBounds(db, orgId, target.riskLevel, now);
-  }
-  // Unreachable when `target` already passed `validateTarget` — every call
-  // site validates first. Defensive fallback rather than a type assertion.
-  throw new Error("target must have exactly one of service, actionId, riskLevel set");
-}
-
-// ── action_policy_overrides upsert/delete-by-target ─────────────────
 
 export interface UpsertOverrideInput extends PolicyTarget {
   mode: ApprovalMode;
@@ -484,19 +210,15 @@ export type UpsertOverrideResult = { ok: true; row: ActionPolicyOverrideRow } | 
 /** Upsert-by-target (not by row id — see `routes/me-policies.ts` doc comment
  *  for why): finds the caller's existing override for this exact
  *  (org, user, target) triple and updates it in place, or inserts a fresh
- *  row. Enforces `validateOverrideBounds` before either path. */
+ *  row. The caller must enforce canonical override bounds first. */
 export async function upsertOverride(
-  db: AppDb,
+  db: AppQueryable,
   orgId: string,
   userId: string,
   input: UpsertOverrideInput,
-  actionPluginByService: ActionPluginByService,
 ): Promise<UpsertOverrideResult> {
   const targetCheck = validateTarget(input);
   if (!targetCheck.ok) return targetCheck;
-
-  const boundsCheck = await validateOverrideBounds(db, orgId, input, input.mode, input.now, actionPluginByService);
-  if (!boundsCheck.ok) return boundsCheck;
 
   const existing = await db
     .select()
@@ -508,7 +230,7 @@ export async function upsertOverride(
     const [updated] = await db
       .update(actionPolicyOverrides)
       .set({ mode: input.mode, paramMatchers: input.paramMatchers ?? [], updatedAt: input.now })
-      .where(eq(actionPolicyOverrides.id, existing[0].id))
+      .where(and(eq(actionPolicyOverrides.id, existing[0].id), eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND)))
       .returning();
     return { ok: true, row: updated };
   }
@@ -518,6 +240,7 @@ export async function upsertOverride(
     .values({
       id: randomUUID(),
       orgId,
+      authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
       userId,
       service: input.service ?? null,
       actionId: input.actionId ?? null,
@@ -535,7 +258,7 @@ export async function listMyOverrides(db: AppDb, orgId: string, userId: string):
   return db
     .select()
     .from(actionPolicyOverrides)
-    .where(and(eq(actionPolicyOverrides.orgId, orgId), eq(actionPolicyOverrides.userId, userId)))
+    .where(and(eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND), eq(actionPolicyOverrides.orgId, orgId), eq(actionPolicyOverrides.userId, userId)))
     .orderBy(desc(actionPolicyOverrides.createdAt));
 }
 
@@ -543,7 +266,7 @@ export async function listMyOverrides(db: AppDb, orgId: string, userId: string):
  *  `action_policies`/`runtime_grants`, there's no audit reason to keep a
  *  tombstone for a user's own preference row). Returns `false` when no
  *  matching row exists (caller 404s). */
-export async function deleteOverrideByTarget(db: AppDb, orgId: string, userId: string, target: PolicyTarget): Promise<boolean> {
+export async function deleteOverrideByTarget(db: AppQueryable, orgId: string, userId: string, target: PolicyTarget): Promise<boolean> {
   const targetCheck = validateTarget(target);
   if (!targetCheck.ok) return false;
   const deleted = await db
@@ -599,7 +322,7 @@ export async function revokeMyGrant(
         eq(runtimeGrants.grantedBy, grantedBy),
         isNull(runtimeGrants.revokedAt),
         scope,
-        eq(runtimeGrants.policyKey, grantPolicyKey(target.service, target.actionId)),
+        eq(runtimeGrants.policyKey, (target.actionId.startsWith(`${target.service}.`) ? target.actionId : `${target.service}.${target.actionId}`)),
       ),
     )
     .returning({ id: runtimeGrants.id });

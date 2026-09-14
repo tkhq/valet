@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AuthorizationRequest, PolicyDecisionV1 } from "@valet/engine/authorization";
-import { resolvePolicyDecision, type ActionPolicyOverrideRow, type ActionPolicyRow } from "../../policies/resolution.js";
 import { SourceBundleHost } from "./host.js";
 import { InMemorySourceBundleStorage } from "./in-memory-storage.js";
 import { LocalValetEvaluator } from "../evaluators/local-valet.js";
@@ -156,15 +155,6 @@ describe("current policy source builder", () => {
     expect(result.decision.effect).toBe(effect);
     expect(result.decision.matchedRuleIds).toContain(winner);
 
-    const legacy: ActionPolicyRow[] = policies.map((row) => ({
-      id: row.id, principalType: "org", service: row.service ?? null, actionId: row.actionId ?? null,
-      riskLevel: row.riskLevel ?? null, mode: row.mode, paramMatchers: [...row.paramMatchers], appliesIn: row.appliesIn,
-      expiresAt: row.expiresAtMs, revokedAt: row.revokedAtMs, updatedAt: row.updatedAtMs,
-    }));
-    expect(resolvePolicyDecision({ policies: legacy, grants: [], overrides: [] }, {
-      service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: { to: "a@example.com", count: 5 },
-      appliesIn: "session", sessionId: "session-1", now: NOW,
-    }, undefined).mode).toBe(effect);
   });
 
   it("encodes all matcher operators with AND semantics", async () => {
@@ -192,9 +182,7 @@ describe("current policy source builder", () => {
   it("preserves plugin, risk, and bundle default authority", async () => {
     const plugin = await evaluate(snapshot({ pluginDefaults: [{ id: "plugin:gmail", service: "gmail", mode: "deny", sourcePath: "plugins/gmail" }] }));
     expect(plugin.decision).toMatchObject({ effect: "deny", reasonCode: "plugin_default", matchedRuleIds: ["plugin:gmail"] });
-    expect(resolvePolicyDecision({ policies: [], grants: [], overrides: [] }, {
-      service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: {}, appliesIn: "session", sessionId: "session-1", now: NOW,
-    }, "deny")).toMatchObject({ mode: "deny", provenance: { source: "plugin_default" } });
+
 
     const low = await evaluate(snapshot(), request({ action: { service: "gmail", id: "gmail.send_email", riskLevel: "low" } }));
     expect(low.decision).toMatchObject({ effect: "allow", reasonCode: "risk_default", matchedRuleIds: ["risk:low"] });
@@ -203,9 +191,7 @@ describe("current policy source builder", () => {
     // The legacy resolver hard-codes low risk to allow when no risk row exists.
     const fallback = await evaluate(snapshot({ riskDefaults: [] }), request({ action: { service: "gmail", id: "gmail.send_email", riskLevel: "low" } }));
     expect(fallback.decision).toMatchObject({ effect: "require_approval", reasonCode: "bundle_default" });
-    expect(resolvePolicyDecision({ policies: [], grants: [], overrides: [] }, {
-      service: "gmail", actionId: "gmail.send_email", riskLevel: "low", params: {}, appliesIn: "session", sessionId: "session-1", now: NOW,
-    }, undefined).mode).toBe("allow");
+
   });
 
   it("filters appliesIn and preserves personal workflow overrides", async () => {

@@ -1,3 +1,5 @@
+import { CanonicalPolicyBundleManager, ensureCanonicalPolicyReadiness } from "../authorization/canonical-policy-manager.js";
+import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 /**
  * Shared boot harness for API integration tests.
  *
@@ -55,13 +57,13 @@ import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createOnePasswordService } from "../services/onepassword.js";
-import { getAllowPersonalOnePassword } from "../services/org.js";
+import { configureCanonicalOrganizationProvisioner, getAllowPersonalOnePassword } from "../services/org.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
-import { writeExecutionGrant } from "../policies/service.js";
+import { writeTrustedApprovalGrants } from "../plugins/approval-grants.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
@@ -316,6 +318,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     seededPlugins.push(securityPlugin);
   }
   const { plugins, actionPluginByService } = assemblePlugins([seededPlugins]);
+  const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+  configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));
+  await ensureCanonicalPolicyReadiness(canonicalPolicyManager);
+  const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
 
   // Same circular-construction indirection as providers/node.ts — see its
   // comment. Test callers that want to unit-test the spawner/watcher/reader
@@ -358,6 +364,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     apiBaseUrl,
     plugins,
     actionPluginByService,
+    canonicalAuthorizationService,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -481,6 +488,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     // the whole path was untestable.
     githubTokenDeps: opts.githubTokenDeps ?? { key: deriveSecretKey("test-key") },
     onePassword,
+    canonicalAuthorizationService,
   });
   // "Grant the rest of this run" (action-policies plan, Task 3/6): mirrors
   // `providers/node.ts`'s real-boot `onApprovalGrant` wiring so integration
@@ -499,10 +507,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
         .limit(1);
       const orgId = defRows[0]?.orgId;
       if (!orgId) return;
-      const now = Date.now();
-      for (const g of info.grants) {
-        await writeExecutionGrant(db, info.runId, { orgId, service: g.service, actionId: g.actionId, grantedBy: info.resolvedBy, now });
-      }
+      await writeTrustedApprovalGrants(db, actionPluginByService, {
+        ...info,
+        orgId,
+        now: Date.now(),
+      });
     } catch (err) {
       console.error(`test harness: workflow approval grant write failed for run ${info.runId}:`, err);
     }
@@ -563,6 +572,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const providers: Providers = {
     db,
+    canonicalPolicyManager,
+    canonicalAuthorizationService,
     blobs,
     encryptionKey: "test-key",
     engineStore,
@@ -623,6 +634,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       autoTitleHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
+      await canonicalPolicyManager.close();
       rmSync(blobsRoot, { recursive: true, force: true });
       if (opts.auth) {
         if (prevAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;

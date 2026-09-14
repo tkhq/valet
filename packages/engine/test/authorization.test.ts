@@ -58,7 +58,7 @@ describe("authorization identities", () => {
     const subject = routeAuthorizationSubject({ orgId: "org-1", principal, operationId: "operation-1" });
     const identity = authorizationIdentity({ kind: "route.access", subject, action: { id: "route.read" } });
 
-    expect(identity.requestSubjectDigest).toBe("9c041a0dc5ded60269c3256b0ad13b22889165a6ea0f5112137e276bf352ad1b");
+    expect(identity.requestSubjectDigest).toBe("6528037cfb8df579d960eb15e8245d861769a5f3fc2cbb171cb77f0aed5a9950");
   });
 
   it("omits optional undefined object properties recursively", () => {

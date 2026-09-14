@@ -71,10 +71,9 @@ export function GrantsList({ grants, title, canEdit, pending, revoke }: {
   );
 }
 
-/** `policyKey` is `${service}.${actionId}` (see `grantPolicyKey` in
- *  `policies/resolution.ts`) — `actionId` itself may contain further dots
- *  (e.g. `gmail.send_email`), so split on the FIRST dot only, never the
- *  service name. */
+/** `policyKey` is `${service}.${actionId}`. The `actionId` itself can contain
+ *  more dots (for example, `gmail.send_email`), so split on the first dot
+ *  only, never the service name. */
 function splitPolicyKey(policyKey: string): [string, string] {
   const idx = policyKey.indexOf(".");
   if (idx === -1) return [policyKey, ""];

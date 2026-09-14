@@ -11,6 +11,8 @@ import { createAssistant, loadAssistant } from "../assistants/service.js";
 import { eq } from "drizzle-orm";
 import { assistants, users, eventDropLog } from "../schema/index.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
+import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 
 const ORG = "org-1";
 const USER = "user-1";
@@ -36,6 +38,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
   let testDb: TestPgDb;
   let engineHost: EngineHost;
   let faux: FauxProviderRegistration;
+  let canonicalPolicyManager: CanonicalPolicyBundleManager;
 
   beforeEach(async () => {
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
@@ -43,6 +46,8 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
+    const canonical = await canonicalPolicyForTest(appDb, ORG);
+    canonicalPolicyManager = canonical.manager;
     engineHost = new EngineHost({
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
@@ -51,11 +56,14 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [],
+      actionPluginByService: canonical.actionPluginByService,
+      canonicalAuthorizationService: canonical.canonicalAuthorizationService,
     });
   });
 
   afterEach(async () => {
     await engineHost.destroyAll();
+    await canonicalPolicyManager.close();
     faux.unregister();
     vi.unstubAllEnvs();
   });
@@ -233,6 +241,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
   let testDb: TestPgDb;
   let engineHost: EngineHost;
   let faux: FauxProviderRegistration;
+  let canonicalPolicyManager: CanonicalPolicyBundleManager;
 
   beforeEach(async () => {
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
@@ -240,6 +249,8 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
+    const canonical = await canonicalPolicyForTest(appDb, ORG);
+    canonicalPolicyManager = canonical.manager;
     engineHost = new EngineHost({
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
@@ -248,11 +259,14 @@ describe("deliverToAssistantThread — which assistant answers", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [],
+      actionPluginByService: canonical.actionPluginByService,
+      canonicalAuthorizationService: canonical.canonicalAuthorizationService,
     });
   });
 
   afterEach(async () => {
     await engineHost.destroyAll();
+    await canonicalPolicyManager.close();
     faux.unregister();
     vi.unstubAllEnvs();
   });

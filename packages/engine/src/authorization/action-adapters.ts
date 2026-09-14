@@ -39,7 +39,7 @@ export function adaptInteractiveAction(input: InteractiveActionAdapterInputV1): 
   exact(input, ["schemaVersion", "organizationId", "actor", "owner", "teamId", "requestId", "action", "evaluationTimeMs", "dynamicFacts", "approvalBindingContext", "sessionId", "threadId", "queueItemId", "resumeKey", "gateOrdinal"]);
   common(input);
   for (const value of [input.sessionId, input.threadId, input.queueItemId]) validId(value);
-  if (typeof input.resumeKey !== "string" || input.resumeKey.length === 0 || input.resumeKey.length > 512 || /[\u0000-\u001f\u007f]/.test(input.resumeKey) || !Number.isSafeInteger(input.gateOrdinal) || input.gateOrdinal < 0) fail("invalid_identity");
+  if (typeof input.resumeKey !== "string" || input.resumeKey.length === 0 || input.resumeKey.length > 512 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.resumeKey) || !Number.isSafeInteger(input.gateOrdinal) || input.gateOrdinal < 0) fail("invalid_identity");
   const subject = interactiveAuthorizationSubject({ orgId: input.organizationId, principal: input.owner, actorUserId: input.actor.id, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal });
   return output(input, "tool.action", subject, "session", input.sessionId, { appliesIn: "session" });
 }
@@ -57,7 +57,7 @@ function common(input: CommonInput): void {
   exact(input.actor, ["type", "id"]); exact(input.owner, ["type", "id"]); exact(input.action, ["service", "actionId", "catalogActionId", "sourcePluginService", "sourceActionId", "sourceToolId", "riskLevel", "parameters", "parameterProjection"]);
   validId(input.organizationId); validId(input.actor.id); validId(input.owner.id); validId(input.requestId);
   if (input.actor.type !== "user" || !["user", "team", "org"].includes(input.owner.type)) fail("invalid_identity");
-  if (input.owner.type === "user" && input.owner.id !== input.actor.id) fail("identity_conflict");
+  if (input.owner.type === "user" && input.owner.id !== input.actor.id) fail("invalid_identity");
   if (input.owner.type === "org" && input.owner.id !== input.organizationId) fail("cross_scope");
   if ((input.owner.type === "team") !== (input.teamId !== undefined) || (input.teamId && input.teamId !== input.owner.id)) fail("cross_scope");
   action(input.action);

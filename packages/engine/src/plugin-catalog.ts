@@ -20,6 +20,7 @@ import type {
 } from "./types.js";
 import { isDecisionGateExpired } from "./decision-gate.js";
 import { encodeToolOutput } from "./tool-output.js";
+import type { SafeParameterProjectionV1 } from "./authorization/action-adapters.js";
 
 /**
  * Plugin catalog: indirection layer that exposes plugin actions to the LLM
@@ -67,6 +68,8 @@ export interface PluginAction<TParams extends TSchema = TSchema> {
   description: string;
   riskLevel: RiskLevel;
   parameters: TParams;
+  /** Overrides the service projection for this action. Missing metadata disables canonical authorization. */
+  safeParameterProjection?: SafeParameterProjectionV1;
   execute: (
     args: Static<TParams>,
     ctx: PluginActionContext,
@@ -110,6 +113,8 @@ export interface ActionPlugin {
   service: string;
   description?: string;
   actions: PluginAction[];
+  /** Versioned, secret-safe parameter projection shared by this service's actions. */
+  safeParameterProjection?: SafeParameterProjectionV1;
   /** Override credential service name (defaults to `service`). */
   credentialService?: string;
   /**
@@ -318,6 +323,7 @@ export type InvokeActionResult =
   | { kind: "pending-approval" }
   | { kind: "missing-credential"; service: string }
   | { kind: "error"; message: string }
+  | { kind: "indeterminate-execution"; message: string }
   | { kind: "resolve-failed"; service: string; message: string };
 
 /**
@@ -492,12 +498,17 @@ export async function invokeAction(
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
+    parameterProjection: entry.action.safeParameterProjection ?? entry.plugin.safeParameterProjection,
     params: args,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId: ctx.sessionId,
     threadId: ctx.threadId,
     appliesIn: "session",
+    owner: ctx.owner,
+    queueItemId: ctx.queueItemId,
+    resumeKey,
+    gateOrdinal: ctx.suspendedDecision?.ordinal ?? 0,
   };
   const baseRecord: BaseInvocationRecord = {
     service: entry.service,
@@ -519,16 +530,18 @@ export async function invokeAction(
   try {
     decision = await resolver.resolve(input);
   } catch {
-    // A failed read cannot establish whether the team has an absolute deny.
-    if (ctx.owner?.type === "team") {
-      return { kind: "error", message: "Could not check this team's action policies. Retry the action when policy checks are available." };
-    }
-    // Fail closed but keep a human in the loop — degrade to an approval
-    // gate rather than hard-deny on a transient resolver/store error.
     decision = {
-      mode: "require_approval",
-      provenance: { baseMode: "require_approval", source: "resolver_error" },
+      mode: "deny",
+      provenance: { baseMode: "deny", source: "resolver_error" },
     };
+  }
+
+  if (decision.canonical) {
+    const owner = ctx.owner ?? { type: "user" as const, id: ctx.userId };
+    for (const obligation of decision.canonical.obligations) {
+      if (obligation.type === "credential_owner" && (obligation.ownerType !== owner.type || obligation.ownerId !== owner.id)) return { kind: "denied-policy" };
+      if (obligation.type === "target_idempotency" && resumeKey.length === 0) return { kind: "denied-policy" };
+    }
   }
 
   if (decision.mode === "deny") {
@@ -609,6 +622,15 @@ export async function invokeAction(
     }
     const approved =
       !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
+    if (approved) {
+      try {
+        const resumed = await resolver.resolve(input);
+        if (resumed.mode !== "allow") return { kind: "denied-approval", reason: "approval-processing-failed" };
+        decision = resumed;
+      } catch {
+        return { kind: "denied-approval", reason: "approval-processing-failed" };
+      }
+    }
     if (!approved) {
       emitInvocation(resolver, {
         ...baseRecord,
@@ -626,10 +648,14 @@ export async function invokeAction(
   // allow, or an approved require_approval → execute with audit.
   return executeAction(entry, actionId, args, summary, ctx, {
     resolver,
+    input,
+    decision,
+    redactions: decision.canonical?.redactions,
     record: {
       ...baseRecord,
       resolvedMode: decision.mode,
       provenance: decision.provenance,
+      ...(decision.canonical?.executionAttemptId ? { canonicalExecutionAttemptId: decision.canonical.executionAttemptId } : {}),
       gateOrdinal,
     },
   });
@@ -968,6 +994,8 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       };
     case "error":
       return { text: `error: ${outcome.message}` };
+    case "indeterminate-execution":
+      return { text: outcome.message, ok: false };
   }
 }
 
@@ -1200,7 +1228,10 @@ type BaseInvocationRecord = Omit<
  * the result. When `audit` is supplied (present-resolver path), emit exactly
  * one fire-and-forget `onInvocation` record for the terminal disposition
  * (`error` for a param-validation failure or a thrown execute, `completed`
- * otherwise). Absent-resolver callers pass no `audit` and emit nothing.
+ * for every returned handler result). Durable outcome replays also emit the
+ * same idempotent completed record, which repairs a crash after settlement
+ * and before the Action Log write. Absent-resolver callers pass no `audit`
+ * and emit nothing.
  */
 async function executeAction(
   entry: CatalogEntry,
@@ -1208,7 +1239,7 @@ async function executeAction(
   args: Record<string, unknown> | undefined,
   summary: string,
   ctx: ToolContext,
-  audit?: { resolver: PolicyResolver; record: BaseAuditedRecord },
+  audit?: { resolver: PolicyResolver; input: PolicyResolveInput; decision: PolicyDecision; record: BaseAuditedRecord; redactions?: import("./authorization/types.js").RedactionDirective[] },
 ): Promise<InvokeActionResult> {
   // Validate (and apply schema defaults to) LLM-supplied params before they
   // reach the plugin action's execute body — closes the gap where unvalidated
@@ -1223,6 +1254,30 @@ async function executeAction(
       });
     }
     return { kind: "invalid-args", error: prepared.error };
+  }
+
+  let attemptId: string | undefined;
+  if (audit?.resolver.reserveExecution) {
+    let reservation: Awaited<ReturnType<NonNullable<PolicyResolver["reserveExecution"]>>>;
+    try {
+      reservation = await audit.resolver.reserveExecution(audit.input, audit.decision);
+    } catch (err) {
+      return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+    }
+    if (reservation.kind === "completed") {
+      const result = storedPluginResult(reservation.result);
+      emitCompletedInvocation(audit, result);
+      return { kind: "ok", result };
+    }
+    if (reservation.kind === "indeterminate") return { kind: "indeterminate-execution", message: reservation.error };
+    if (reservation.kind === "failed") {
+      const result = reservation.result === undefined
+        ? { success: false, error: reservation.error }
+        : storedPluginResult(reservation.result);
+      emitCompletedInvocation(audit, result);
+      return { kind: "ok", result };
+    }
+    attemptId = reservation.attemptId;
   }
 
   // Build the plugin action context. credentialService routing is per-plugin;
@@ -1248,17 +1303,41 @@ async function executeAction(
       prepared.args as Static<typeof entry.action.parameters>,
       actionCtx,
     );
-    if (audit) {
-      emitInvocation(audit.resolver, {
-        ...audit.record,
-        status: "completed",
-        durationMs: Date.now() - startedAt,
-        result,
-      });
+    let userResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "user_output") ?? []) : result;
+    const auditResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "audit") ?? []) : result;
+    if (audit && audit.resolver.completeExecution && attemptId) {
+      try {
+        const settlement = result.success
+          ? await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "completed", result: userResult })
+          : await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "failed", error: result.error ?? "Action execution failed.", result: userResult });
+        if (settlement.outcome === "failed") {
+          if (settlement.error.startsWith("indeterminate_execution:")) {
+            return { kind: "indeterminate-execution", message: settlement.error };
+          }
+          emitCompletedInvocation(audit, auditResult, startedAt);
+          return { kind: "ok", result: userResult };
+        }
+        // The durable copy is only for replay. The first caller keeps the
+        // handler's full result after settlement confirms it was persisted.
+      } catch {
+        return { kind: "indeterminate-execution", message: "indeterminate_execution: the action may have run. Do not retry automatically." };
+      }
     }
-    return { kind: "ok", result };
+    if (audit) emitCompletedInvocation(audit, auditResult, startedAt);
+    return { kind: "ok", result: userResult };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    let message = err instanceof Error ? err.message : String(err);
+    let indeterminate = false;
+    if (audit && audit.resolver.completeExecution && attemptId) {
+      try {
+        const settlement = await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "failed", error: message });
+        if (settlement.outcome === "failed") message = settlement.error;
+        else { message = "indeterminate_execution: the action may have run. Do not retry automatically."; indeterminate = true; }
+      } catch {
+        message = "indeterminate_execution: the action may have run. Do not retry automatically.";
+        indeterminate = true;
+      }
+    }
     if (audit) {
       emitInvocation(audit.resolver, {
         ...audit.record,
@@ -1267,6 +1346,7 @@ async function executeAction(
         error: message,
       });
     }
+    if (indeterminate) return { kind: "indeterminate-execution", message };
     // A plugin action that needs a credential calls `credentials.request`,
     // which throws "credential <service> not connected: <reason>" (store
     // present, no cred) or "credential <service> not available (no store)"
@@ -1277,6 +1357,31 @@ async function executeAction(
     }
     return { kind: "error", message };
   }
+}
+
+function emitCompletedInvocation(
+  audit: NonNullable<Parameters<typeof executeAction>[5]>,
+  result: PluginActionResult,
+  startedAt?: number,
+): void {
+  emitInvocation(audit.resolver, {
+    ...audit.record,
+    status: "completed",
+    ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }),
+    result,
+  });
+}
+
+function storedPluginResult(value: unknown): PluginActionResult {
+  if (!value || typeof value !== "object" || !("success" in value) || typeof value.success !== "boolean") {
+    throw new Error("Canonical interactive execution result is invalid.");
+  }
+  const result = value as Record<string, unknown>;
+  return {
+    success: result.success === true,
+    ...(result.data !== undefined ? { data: result.data } : {}),
+    ...(typeof result.error === "string" ? { error: result.error } : {}),
+  };
 }
 
 /** Base record plus the resolved mode + provenance carried into execution. */
@@ -1356,6 +1461,10 @@ function scopedCredentialProvider(
   };
 }
 
+function isTruncatedReplay(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as Record<string, unknown>).truncated === true;
+}
+
 function actionResultToToolResult(
   result: PluginActionResult,
   toolId: string,
@@ -1363,7 +1472,7 @@ function actionResultToToolResult(
   const attachments = result.attachments;
   if (!result.success) {
     return {
-      text: `${toolId} failed: ${result.error ?? "unknown error"}`,
+      text: `${toolId} failed: ${result.error ?? "unknown error"}${isTruncatedReplay(result.data) ? " (replay result truncated)" : ""}`,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
       ok: false,
     };
@@ -1375,8 +1484,9 @@ function actionResultToToolResult(
       ok: true,
     };
   }
+  const text = typeof result.data === "string" ? result.data : encodeToolOutput(result.data);
   return {
-    text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
+    text: isTruncatedReplay(result.data) ? `replay result truncated\n${text}` : text,
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
   };
@@ -1420,4 +1530,16 @@ function fnv1a64Hex(bytes: Uint8Array): string {
     hash = (hash * 0x100000001b3n) & mask;
   }
   return hash.toString(16).padStart(16, "0");
+}
+
+function redactResult<T>(value: T, directives: import("./authorization/types.js").RedactionDirective[]): T {
+  if (directives.length === 0) return value;
+  const copy = JSON.parse(JSON.stringify(value)) as T;
+  for (const directive of directives) for (const path of directive.jsonPaths) {
+    if (!/^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(path)) throw new Error("Unsupported canonical redaction path.");
+    const parts = path.slice(2).split("."); let parent: any = copy;
+    for (const part of parts.slice(0, -1)) { if (!parent || typeof parent !== "object") break; parent = parent[part]; }
+    if (parent && typeof parent === "object") delete parent[parts.at(-1)!];
+  }
+  return copy;
 }

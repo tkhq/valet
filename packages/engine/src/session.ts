@@ -156,6 +156,8 @@ function formatPluginOutcome(
       };
     case "error":
       return { ok: false, output: `Action failed. ${outcome.message}` };
+    case "indeterminate-execution":
+      return { ok: false, output: outcome.message };
   }
 }
 

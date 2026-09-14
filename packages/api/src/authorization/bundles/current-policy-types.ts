@@ -55,6 +55,7 @@ export interface CurrentPersonalOverrideV1 extends CurrentPolicyTargetV1 {
   readonly userId: string;
   readonly mode: CurrentPolicyMode;
   readonly paramMatchers: readonly CurrentPolicyMatcherV1[];
+  readonly revokedAtMs?: number | null;
   readonly createdAtMs: number;
   readonly updatedAtMs: number;
   readonly sourceTable: "action_policy_overrides";

@@ -4,7 +4,12 @@ import { SourceBundleHost } from "../bundles/host.js";
 import { InMemorySourceBundleStorage } from "../bundles/in-memory-storage.js";
 import { testBundle, testRequest } from "../test-bundle.js";
 import { LocalValetEvaluator } from "./local-valet.js";
-import { MAX_WASM_LINEAR_MEMORY_BYTES, WasmPolicyRuntime } from "./wasm-runtime.js";
+import {
+  MAX_WASM_LINEAR_MEMORY_BYTES,
+  MAX_WORKER_HEAP_MIB,
+  policyWorkerOptions,
+  WasmPolicyRuntime,
+} from "./wasm-runtime.js";
 
 async function activeEvaluator(runtime: WasmPolicyRuntime, bundle = testBundle()) {
   const storage = new InMemorySourceBundleStorage();
@@ -16,6 +21,13 @@ async function activeEvaluator(runtime: WasmPolicyRuntime, bundle = testBundle()
 
 describe("local Valet evaluator containment", () => {
   let runtime: WasmPolicyRuntime;
+
+  it("keeps the Node heap limit and omits Bun's ignored worker option", () => {
+    expect(policyWorkerOptions(false)).toEqual({
+      resourceLimits: { maxOldGenerationSizeMb: MAX_WORKER_HEAP_MIB },
+    });
+    expect(policyWorkerOptions(true)).toEqual({});
+  });
 
   beforeEach(() => {
     runtime = new WasmPolicyRuntime();
@@ -146,6 +158,22 @@ decision := {"effect":"deny","reasonCode":"marshaled","matchedRuleIds":[],"oblig
     await expect(evaluator.evaluate(testRequest())).resolves.toMatchObject({
       decision: { effect: "allow" },
     });
+  });
+
+  it("replaces stale runtime generations when active pointers change", async () => {
+    const { evaluator, host, identity, pointer } = await activeEvaluator(runtime);
+    const generation = runtime.generation;
+    const denyBundle = testBundle(`package valet.authz
+import rego.v1
+decision := {"effect":"deny","reasonCode":"changed_bundle","matchedRuleIds":["changed"],"obligations":[],"redactions":[]}
+`);
+    const replacement = await host.publish(denyBundle);
+    const changedPointer = await host.activate("org-1", pointer, replacement.sourceBundleDigest);
+    await expect(evaluator.evaluate(testRequest())).resolves.toMatchObject({ decision: { effect: "deny", reasonCode: "changed_bundle" } });
+
+    await host.activate("org-1", changedPointer, identity.sourceBundleDigest);
+    await expect(evaluator.evaluate(testRequest())).resolves.toMatchObject({ decision: { effect: "allow", reasonCode: "local_valet_test" } });
+    expect(runtime.generation).toBe(generation + 2);
   });
 
   it("canonicalizes typed objects and rejects byte-boundary-shaped commands", async () => {

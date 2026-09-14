@@ -1,4 +1,5 @@
 export { SourceBundleHost } from "./host.js";
+export { PostgresSourceBundleStorage } from "./postgres-storage.js";
 export { InMemorySourceBundleStorage } from "./in-memory-storage.js";
 export {
   buildCurrentPolicyDynamicFacts,

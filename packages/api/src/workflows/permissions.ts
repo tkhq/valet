@@ -3,7 +3,7 @@
  *
  * `analyzeWorkflowPermissions` predicts, per tool node in the stored
  * definition, how the policy ladder would resolve the node's action for its
- * stored owner if a run started now. It runs the same `resolveActionPolicy` core as
+ * stored owner if a run started now. It uses the same canonical evaluator as
  * the run-time invoker (`plugins/action-invoker.ts`) with `appliesIn:
  * "workflow"` and NO execution id — a run that has not started has no
  * exec-scoped grants, so the grant rung never matches here.
@@ -21,9 +21,10 @@
  * node is an intended gate, not a permission requirement.
  */
 import { upsertOverride } from "../policies/admin.js";
-import { resolvePolicyDecision } from "../policies/resolution.js";
-import { loadPolicyRows } from "../policies/service.js";
-import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
+import { adaptWorkflowAction, authorizationSha256Hex, canonicalAuthorizationJson } from "@valet/engine/authorization";
+import { actionProjection } from "../authorization/action-projections.js";
+import { findAction } from "../plugins/action-invoker.js";
+import { qualifiedActionId } from "../plugins/action-id.js";
 import type {
   AllowWorkflowPermissionsResponse,
   WorkflowNodePermissionWire,
@@ -107,46 +108,20 @@ async function analyzeDefinitionPermissions(
   if (refs.length === 0) return [];
 
   const now = Date.now();
-  // One row load for the whole definition: the scope has no per-node
-  // component (no session/execution id — a run that has not started has no
-  // grants), so a per-node `resolveActionPolicy` would re-read the same two
-  // row sets N times. The pure core then decides per node from one
-  // consistent snapshot.
-  const rows = await loadPolicyRows(deps.db, {
-    orgId: owner.orgId,
-    userId: owner.userId,
-    teamId: summary.ownerType === "team" ? summary.ownerId : undefined,
-  });
+  const service = deps.canonicalAuthorizationService;
+  if (!service) throw new Error("Canonical authorization service is unavailable.");
   const nodes: WorkflowNodePermissionWire[] = [];
+  const workflowVersion = authorizationSha256Hex(canonicalAuthorizationJson(summary.definition));
   for (const ref of refs) {
     const entry = deps.actionPluginByService?.get(ref.service);
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
-    if (!entry || !action) {
-      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown" });
-      continue;
-    }
+    if (!entry || !action) { nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown" }); continue; }
     const actionId = qualifiedActionId(ref.service, action);
-    const decision = resolvePolicyDecision(
-      rows,
-      {
-        service: ref.service,
-        actionId,
-        riskLevel: action.riskLevel,
-        params: ref.params,
-        appliesIn: "workflow",
-        now,
-      },
-      entry.actionPlugin.defaultApprovalMode,
-    );
-    nodes.push({
-      nodeId: ref.nodeId,
-      service: ref.service,
-      action: ref.action,
-      actionId,
-      riskLevel: action.riskLevel,
-      mode: decision.mode,
-      provenance: decision.provenance.source,
-    });
+    const invocationId = authorizationSha256Hex(canonicalAuthorizationJson({ workflowId: summary.id, workflowVersion, nodeId: ref.nodeId, owner: summary.ownerId }));
+    const adapted = adaptWorkflowAction({ schemaVersion: 1, organizationId: owner.orgId, actor: { type: "user", id: owner.userId }, owner: { type: summary.ownerType, id: summary.ownerId }, ...(summary.ownerType === "team" ? { teamId: summary.ownerId } : {}), requestId: invocationId, workflowDefinitionId: summary.id, workflowVersion, workflowExecutionId: `analysis:${summary.id}`, nodeId: ref.nodeId, invocationId, action: { service: ref.service, actionId, catalogActionId: actionId, sourcePluginService: ref.service, sourceActionId: actionId, sourceToolId: ref.nodeId, riskLevel: action.riskLevel, parameters: ref.params ?? {}, parameterProjection: actionProjection(entry.actionPlugin, action) }, evaluationTimeMs: now, dynamicFacts: {} });
+    const envelope = await service.preview(adapted.request);
+    const provenance = envelope.decision.reasonCode === "organization_policy" ? "org_policy" : envelope.decision.reasonCode === "personal_override" ? "override" : envelope.decision.reasonCode;
+    nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId, riskLevel: action.riskLevel, mode: envelope.decision.effect, provenance });
   }
   return nodes;
 }
@@ -200,19 +175,26 @@ export async function allowWorkflowPermissions(
     targets = [...new Set(actionIds)];
   }
 
-  const now = Date.now();
-  const allowed: string[] = [];
-  const blocked: { actionId: string; reason: string }[] = [];
-  for (const actionId of targets) {
-    const result = await upsertOverride(
-      deps.db,
-      owner.orgId,
-      owner.userId,
-      { actionId, mode: "allow", now },
-      deps.actionPluginByService ?? new Map(),
-    );
-    if (result.ok) allowed.push(actionId);
-    else blocked.push({ actionId, reason: result.error });
-  }
+  const manager = deps.canonicalPolicyManager;
+  const service = deps.canonicalAuthorizationService;
+  if (!manager || !service) throw new Error("Canonical authorization service is unavailable.");
+  const idempotencyKey = authorizationSha256Hex(canonicalAuthorizationJson({ workflowId, owner: owner.userId, targets }));
+  const { allowed, blocked } = await manager.mutateAndActivate(owner.orgId, { actorId: owner.userId, operation: "workflow_preapproval", idempotencyKey }, async (tx, context) => {
+    const activeIdentity = await context.overrideBoundsIdentity();
+    const now = Date.now();
+    const allowed: string[] = [];
+    const blocked: { actionId: string; reason: string }[] = [];
+    for (const actionId of targets) {
+      const bounds = await service.validateOverrideBounds(owner.orgId, owner.userId, { actionId }, "allow", activeIdentity, context.overrideBoundPolicyReferences());
+      if (!bounds.ok) {
+        blocked.push({ actionId, reason: bounds.error });
+        continue;
+      }
+      const result = await upsertOverride(tx, owner.orgId, owner.userId, { actionId, mode: "allow", now });
+      if (result.ok) allowed.push(actionId);
+      else blocked.push({ actionId, reason: result.error });
+    }
+      return { allowed, blocked };
+  });
   return { ok: true, result: { allowed, blocked } };
 }

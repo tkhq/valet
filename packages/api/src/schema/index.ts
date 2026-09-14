@@ -1426,7 +1426,7 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
 // rows remain reserved; personal overrides use `action_policy_overrides`.
 // `runtime_grants` (ephemeral "allow for this session/run" quiets, always
 // `mode: "allow"`), `action_policy_overrides` (durable per-user overrides).
-// All three feed `policies/resolution.ts`'s pure `resolvePolicyDecision` —
+// All three feed the canonical policy bundle evaluator.
 // see that module's doc comment for the full precedence order. The
 // "exactly one of service/actionId/riskLevel" and "exactly one of
 // sessionId/workflowExecutionId" CHECK constraints below are the DB-level
@@ -1434,11 +1434,14 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
 // service layer (T3-T5) is expected to validate the same shape before
 // insert so a bad row never reaches the DB in the first place.
 
+export const ACTION_POLICY_AUTHORIZATION_KIND = "tool.action";
+
 export const actionPolicies = pgTable(
   "action_policies",
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
+    authorizationKind: text("authorization_kind").notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
     principalType: text("principal_type", { enum: ["org", "user", "team"] }).notNull(),
     principalId: text("principal_id").notNull(),
     service: text("service"),
@@ -1472,7 +1475,7 @@ export const actionPolicies = pgTable(
 // transition of the parent context (no FK cascade — matches the sibling
 // tables' convention of "cascade by code, not by constraint"). `policyKey`
 // is the exact `service.actionId` idempotency/match key computed by
-// `policies/resolution.ts`'s `grantPolicyKey` — grants quiet ONE exact
+// `grantPolicyKey` identifies one exact action. Grants quiet one exact
 // action, not a broader service/risk-level target.
 export const runtimeGrants = pgTable(
   "runtime_grants",
@@ -1482,6 +1485,11 @@ export const runtimeGrants = pgTable(
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
     policyKey: text("policy_key").notNull(),
+    service: text("service"),
+    actionId: text("action_id"),
+    riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
+    sourceApprovalId: text("source_approval_id"),
+    expiresAt: bigint("expires_at", { mode: "number" }),
     mode: text("mode", { enum: ["allow"] }).notNull().default("allow"),
     grantedBy: text("granted_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -1505,6 +1513,7 @@ export const actionPolicyOverrides = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
+    authorizationKind: text("authorization_kind").notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
     userId: text("user_id").notNull(),
     service: text("service"),
     actionId: text("action_id"),
@@ -1575,6 +1584,23 @@ export const actionInvocations = pgTable(
 );
 
 
+
+// Canonical source bundles are global immutable content. Active pointers are tenant-owned.
+export const policySourceBundles = pgTable("policy_source_bundles", {
+  digest: text("digest").primaryKey(),
+  bundle: jsonb("bundle").$type<CanonicalSourceBundle>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const policyActiveBundles = pgTable(
+  "policy_active_bundles",
+  {
+    orgId: text("org_id").primaryKey().references(() => orgs.id),
+    digest: text("digest").notNull().references(() => policySourceBundles.digest),
+    generation: integer("generation").notNull(),
+    activatedAt: bigint("activated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [check("policy_active_bundles_generation", sql`${t.generation}>0`), index("policy_active_bundles_digest").on(t.digest)],
+);
 
 // Inert canonical policy authoring. These rows never select an active bundle.
 export const policyAuthoringDocuments = pgTable(
@@ -1729,12 +1755,13 @@ export const authorizationDecisions = pgTable(
     proofVerificationError: text("proof_verification_error"),
     identityFactProvenance: jsonb("identity_fact_provenance").$type<FactProvenance[]>().notNull(),
     policyFactProvenance: jsonb("policy_fact_provenance").$type<FactProvenance[]>().notNull(),
+    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string; approvalReplay?: { evaluationTimeMs: number } }>(),
     evaluatedAt: bigint("evaluated_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [
     index("authorization_decisions_org_created").on(t.orgId, t.createdAt),
-    index("authorization_decisions_idempotency_key").on(t.idempotencyKey),
+    uniqueIndex("authorization_decisions_org_idempotency").on(t.orgId, t.idempotencyKey),
     index("authorization_decisions_request").on(t.requestId),
     index("authorization_decisions_subject").on(t.requestSubjectDigest),
     check("authorization_decisions_evaluator_kind", sql`${t.evaluatorKind} IN ('local_valet', 'tvc_attested')`),
@@ -1747,6 +1774,34 @@ export const authorizationDecisions = pgTable(
       "authorization_decisions_proof_kind",
       sql`(${t.evaluatorKind} = 'tvc_attested' AND ${t.proof} IS NOT NULL AND ${t.proofVerificationStatus} IN ('verified', 'failed')) OR (${t.evaluatorKind} = 'local_valet' AND ${t.proof} IS NULL AND ${t.proofVerificationStatus} = 'not_required')`,
     ),
+  ],
+);
+
+export const canonicalApprovalResolutions = pgTable(
+  "canonical_approval_resolutions",
+  {
+    resolutionId: text("resolution_id").primaryKey(),
+    approvalId: text("approval_id").notNull(),
+    gateId: text("gate_id").notNull(),
+    orgId: text("org_id").notNull(),
+    requestSubjectDigest: text("request_subject_digest").notNull(),
+    originalDecisionDigest: text("original_decision_digest").notNull(),
+    approverId: text("approver_id").notNull(),
+    verdict: text("verdict", { enum: ["approved", "rejected"] }).notNull(),
+    appliesIn: text("applies_in", { enum: ["session", "workflow"] }).notNull(),
+    sessionId: text("session_id"),
+    workflowExecutionId: text("workflow_execution_id"),
+    resolvedAt: bigint("resolved_at", { mode: "number" }).notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+    resolutionVersion: integer("resolution_version").notNull(),
+    revokedAt: bigint("revoked_at", { mode: "number" }),
+  },
+  (t) => [
+    uniqueIndex("canonical_approval_gate_version").on(t.orgId, t.gateId, t.resolutionVersion),
+    index("canonical_approval_subject").on(t.orgId, t.requestSubjectDigest, t.expiresAt),
+    check("canonical_approval_scope", sql`(${t.sessionId} IS NOT NULL)::int + (${t.workflowExecutionId} IS NOT NULL)::int = 1`),
+    check("canonical_approval_version", sql`${t.resolutionVersion} = 1`),
+    check("canonical_approval_expiry", sql`${t.expiresAt} > ${t.resolvedAt}`),
   ],
 );
 
@@ -2296,6 +2351,7 @@ export type RuntimeGrantRow = typeof runtimeGrants.$inferSelect;
 export type ActionPolicyOverrideRow = typeof actionPolicyOverrides.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type AuthorizationDecisionRow = typeof authorizationDecisions.$inferSelect;
+export type CanonicalApprovalResolutionRow = typeof canonicalApprovalResolutions.$inferSelect;
 export type AuthorizationExecutionAttemptRow = typeof authorizationExecutionAttempts.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
 export type ModelRegistryCacheRow = typeof modelRegistryCache.$inferSelect;

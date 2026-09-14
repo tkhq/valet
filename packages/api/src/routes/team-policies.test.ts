@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, workflowDefinitions, workflowRuns, runtimeGrants, actionPolicies, teamMembers, teams } from "../schema/index.js";
-import { resolveActionPolicy } from "../policies/service.js";
 import type { ActionPolicyWire } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -68,14 +67,7 @@ describe("team policies", () => {
     expect(await (await fetch(url, { headers })).json()).toEqual({ policies: [] });
   });
 
-  it("enforces a team rule for workflow tool calls without leaking it to another team", async () => {
-    const app = await setup();
-    await fetch(`${app.baseUrl}/api/teams/policy-a/policies`, { method: "POST", headers, body: JSON.stringify({ service: "gmail", mode: "deny" }) });
-    const input = { orgId: "local-org", service: "gmail", actionId: "gmail.send_email", riskLevel: "low" as const, params: undefined, appliesIn: "workflow" as const, workflowExecutionId: "run", pluginDefault: undefined, now: Date.now() };
-    expect(await resolveActionPolicy(app.providers.db, { ...input, teamId: "policy-a" })).toMatchObject({ mode: "deny", provenance: { source: "team_policy" } });
-    expect((await resolveActionPolicy(app.providers.db, { ...input, teamId: "policy-b" })).mode).toBe("allow");
-    expect((await resolveActionPolicy(app.providers.db, input)).mode).toBe("allow");
-  });
+
 });
 
 
@@ -102,8 +94,7 @@ describe("team policy flow parity", () => {
     const refused = await save("allow");
     expect(refused.status).toBe(400);
     expect(await refused.json()).toMatchObject({ error: expect.stringContaining("org") });
-    const decision = await resolveActionPolicy(app.providers.db, { orgId: "local-org", teamId: "policy-a", service: "gmail", actionId: "gmail.send", riskLevel: "low", params: {}, appliesIn: "session", pluginDefault: undefined, now: Date.now() });
-    expect(decision).toMatchObject({ mode: "deny", provenance: { source: "org_policy" } });
+
     expect((await fetch(`${base}/policies/${advanced[0].id}`, { method: "DELETE", headers })).status).toBe(200);
   });
 

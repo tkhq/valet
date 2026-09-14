@@ -41,6 +41,7 @@ const replyToOrigin: PluginAction<typeof replyParameters> = {
 
 export const telegramPlugin: ActionPlugin = {
   service: "telegram",
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description: "Telegram channel actions",
   actions: [replyToOrigin],
 };

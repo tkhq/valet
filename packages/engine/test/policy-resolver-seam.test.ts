@@ -86,6 +86,9 @@ function makeResolver(
       over.resolve ??
       (async (input) => {
         resolveInputs.push(input);
+        if (decision.mode === "require_approval" && resolveInputs.length % 2 === 0) {
+          return { mode: "allow", provenance: { baseMode: "allow", source: "approval_fact" } };
+        }
         return decision;
       }),
     onResolution:
@@ -175,6 +178,11 @@ describe("policyResolver seam: resolve()", () => {
       sessionId: "S",
       threadId: "T",
       appliesIn: "session",
+      teamId: undefined,
+      owner: undefined,
+      queueItemId: undefined,
+      resumeKey: "github.get_issue:{\n  \"n\": 7\n}",
+      gateOrdinal: 0,
     });
   });
 
@@ -286,7 +294,7 @@ describe("policyResolver seam: require_approval gate", () => {
     ]);
   });
 
-  it("approve → executes; completed record shows resolvedMode require_approval", async () => {
+  it("re-evaluates approval facts before execution", async () => {
     let executed = false;
     const { resolver, invocations, onResolutionCalls } = makeResolver({
       decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
@@ -305,7 +313,7 @@ describe("policyResolver seam: require_approval gate", () => {
     expect(onResolutionCalls).toHaveLength(1);
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("completed");
-    expect(invocations[0].resolvedMode).toBe("require_approval");
+    expect(invocations[0].resolvedMode).toBe("allow");
   });
 
   it("extra action with approves:true is treated as approval AFTER onResolution", async () => {
@@ -349,7 +357,9 @@ describe("policyResolver seam: require_approval gate", () => {
       }),
     );
     expect(executed).toBe(false);
-    expect(result.text).toContain("did not approve");
+    expect(result.text).toBe(
+      "denied: user did not approve github.get_issue. This denial is final for the current turn — do not call github.get_issue again, with these or modified arguments. Tell the user what was denied; they can ask again in a new message.",
+    );
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("rejected");
   });
@@ -371,35 +381,56 @@ describe("policyResolver seam: require_approval gate", () => {
       }),
     );
     expect(executed).toBe(false);
-    expect(result.text.toLowerCase()).toContain("approval");
+    expect(result.text).toBe("denied: approval processing failed, so github.get_issue did not approve");
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("rejected");
+  });
+
+  it("an unknown resolution action fails closed as a processing error", async () => {
+    let executed = false;
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
+      onResolution: async () => { throw new Error("unknown resolution action"); },
+    });
+    const [, callTool] = pluginCatalogTools({
+      plugins: [makePlugin(makeAction({ execute: async () => { executed = true; return { success: true, data: {} }; } }))],
+    });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async () => ({ actionId: "unknown", resolvedBy: "u1", resolvedAt: Date.now() }),
+      }),
+    );
+    expect(executed).toBe(false);
+    expect(result.text).toBe("denied: approval processing failed, so github.get_issue did not approve");
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({ status: "rejected", resolvedMode: "require_approval" });
   });
 });
 
 describe("policyResolver seam: fail-closed + audit edges", () => {
-  it("resolve() throw → fails closed to require_approval with provenance source resolver_error", async () => {
-    let gateReq: DecisionGateRequest | undefined;
+  it("resolve() errors deny without opening an approval gate", async () => {
+    let gateOpened = false;
     const { invocations } = makeResolver();
     const resolver: PolicyResolver = {
       resolve: async () => { throw new Error("resolver exploded"); },
-      onInvocation: async (r) => { invocations.push(r); },
+      onInvocation: async (record) => { invocations.push(record); },
     };
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
     const result = await callTool.execute(
       { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
       makeCtx({
         policyResolver: resolver,
-        requestDecision: async (req) => {
-          gateReq = req;
+        requestDecision: async () => {
+          gateOpened = true;
           return { actionId: "deny", resolvedBy: "u1", resolvedAt: Date.now() };
         },
       }),
     );
-    expect(gateReq).toBeDefined();
-    expect((gateReq?.context as Record<string, unknown>)?.provenance).toMatchObject({ source: "resolver_error" });
-    expect(result.text).toContain("did not approve");
-    expect(invocations[0].status).toBe("rejected");
+    expect(gateOpened).toBe(false);
+    expect(result.text).toContain("blocked by org policy");
+    expect(invocations[0].status).toBe("denied");
     expect(invocations[0].provenance.source).toBe("resolver_error");
   });
 

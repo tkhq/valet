@@ -814,6 +814,7 @@ CREATE TABLE "mcp_oauth_clients" (
 CREATE TABLE "action_policies" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
+	"authorization_kind" text DEFAULT 'tool.action' NOT NULL,
 	"principal_type" text NOT NULL,
 	"principal_id" text NOT NULL,
 	"service" text,
@@ -839,6 +840,11 @@ CREATE TABLE "runtime_grants" (
 	"session_id" text,
 	"workflow_execution_id" text,
 	"policy_key" text NOT NULL,
+	"service" text,
+	"action_id" text,
+	"risk_level" text,
+	"source_approval_id" text,
+	"expires_at" bigint,
 	"mode" text DEFAULT 'allow' NOT NULL,
 	"granted_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
@@ -853,6 +859,7 @@ CREATE UNIQUE INDEX "runtime_grants_execution_policy_key" ON "runtime_grants" ("
 CREATE TABLE "action_policy_overrides" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
+	"authorization_kind" text DEFAULT 'tool.action' NOT NULL,
 	"user_id" text NOT NULL,
 	"service" text,
 	"action_id" text,
@@ -919,6 +926,7 @@ CREATE TABLE "authorization_decisions" (
 	"proof_verification_error" text,
 	"identity_fact_provenance" jsonb NOT NULL,
 	"policy_fact_provenance" jsonb NOT NULL,
+	"evidence" jsonb,
 	"evaluated_at" bigint NOT NULL,
 	"created_at" bigint NOT NULL,
 	CONSTRAINT "authorization_decisions_evaluator_kind" CHECK ("evaluator_kind" IN ('local_valet', 'tvc_attested')),
@@ -929,11 +937,24 @@ CREATE TABLE "authorization_decisions" (
 --> statement-breakpoint
 CREATE INDEX "authorization_decisions_org_created" ON "authorization_decisions" ("org_id","created_at");
 --> statement-breakpoint
-CREATE INDEX "authorization_decisions_idempotency_key" ON "authorization_decisions" ("idempotency_key");
+CREATE UNIQUE INDEX "authorization_decisions_org_idempotency" ON "authorization_decisions" ("org_id","idempotency_key");
 --> statement-breakpoint
 CREATE INDEX "authorization_decisions_request" ON "authorization_decisions" ("request_id");
 --> statement-breakpoint
 CREATE INDEX "authorization_decisions_subject" ON "authorization_decisions" ("request_subject_digest");
+--> statement-breakpoint
+CREATE TABLE "canonical_approval_resolutions" (
+	"resolution_id" text PRIMARY KEY NOT NULL, "approval_id" text NOT NULL, "gate_id" text NOT NULL, "org_id" text NOT NULL,
+	"request_subject_digest" text NOT NULL, "original_decision_digest" text NOT NULL, "approver_id" text NOT NULL, "verdict" text NOT NULL,
+	"applies_in" text NOT NULL, "session_id" text, "workflow_execution_id" text, "resolved_at" bigint NOT NULL, "expires_at" bigint NOT NULL,
+	"resolution_version" integer NOT NULL, "revoked_at" bigint,
+	CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int = 1),
+	CONSTRAINT "canonical_approval_version" CHECK ("resolution_version" = 1), CONSTRAINT "canonical_approval_expiry" CHECK ("expires_at" > "resolved_at")
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "canonical_approval_gate_version" ON "canonical_approval_resolutions" ("org_id","gate_id","resolution_version");
+--> statement-breakpoint
+CREATE INDEX "canonical_approval_subject" ON "canonical_approval_resolutions" ("org_id","request_subject_digest","expires_at");
 --> statement-breakpoint
 CREATE TABLE "authorization_execution_attempts" (
 	"attempt_id" text PRIMARY KEY NOT NULL,
@@ -1588,3 +1609,16 @@ CREATE TABLE IF NOT EXISTS "policy_authoring_audit" (
 CREATE UNIQUE INDEX IF NOT EXISTS "policy_authoring_audit_idempotency" ON "policy_authoring_audit" ("org_id","scope_key","actor_id","operation","document_id","idempotency_key");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "policy_authoring_audit_document" ON "policy_authoring_audit" ("org_id","scope_key","document_id","created_at");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_source_bundles" (
+  "digest" text PRIMARY KEY NOT NULL, "bundle" jsonb NOT NULL, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_active_bundles" (
+  "org_id" text PRIMARY KEY NOT NULL REFERENCES "orgs"("id"),
+  "digest" text NOT NULL REFERENCES "policy_source_bundles"("digest"),
+  "generation" integer NOT NULL, "activated_at" bigint NOT NULL,
+  CONSTRAINT "policy_active_bundles_generation" CHECK ("generation">0)
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "policy_active_bundles_digest" ON "policy_active_bundles" ("digest");

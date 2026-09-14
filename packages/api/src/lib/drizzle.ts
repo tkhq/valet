@@ -219,6 +219,20 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "action policies authorization kind", probe: { kind: "column", table: "action_policies", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policies\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
+  { describe: "action policy overrides authorization kind", probe: { kind: "column", table: "action_policy_overrides", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policy_overrides\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
+  { describe: "runtime grants service", probe: { kind: "column", table: "runtime_grants", column: "service" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "service" text' },
+  { describe: "runtime grants action", probe: { kind: "column", table: "runtime_grants", column: "action_id" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "action_id" text' },
+  { describe: "runtime grants risk", probe: { kind: "column", table: "runtime_grants", column: "risk_level" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "risk_level" text' },
+  { describe: "runtime grants approval", probe: { kind: "column", table: "runtime_grants", column: "source_approval_id" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "source_approval_id" text' },
+  { describe: "runtime grants expiry", probe: { kind: "column", table: "runtime_grants", column: "expires_at" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "expires_at" bigint' },
+  { describe: "authorization decision evidence", probe: { kind: "column", table: "authorization_decisions", column: "evidence" }, sql: 'ALTER TABLE "authorization_decisions" ADD COLUMN "evidence" jsonb' },
+  { describe: "canonical approval resolutions", probe: { kind: "table", table: "canonical_approval_resolutions" }, sql: 'CREATE TABLE IF NOT EXISTS "canonical_approval_resolutions" ("resolution_id" text PRIMARY KEY NOT NULL, "approval_id" text NOT NULL, "gate_id" text NOT NULL, "org_id" text NOT NULL, "request_subject_digest" text NOT NULL, "original_decision_digest" text NOT NULL, "approver_id" text NOT NULL, "verdict" text NOT NULL, "applies_in" text NOT NULL, "session_id" text, "workflow_execution_id" text, "resolved_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "resolution_version" integer NOT NULL, "revoked_at" bigint, CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int = 1), CONSTRAINT "canonical_approval_version" CHECK ("resolution_version" = 1), CONSTRAINT "canonical_approval_expiry" CHECK ("expires_at" > "resolved_at"))' },
+  { describe: "canonical approval gate version", probe: { kind: "index", index: "canonical_approval_gate_version" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "canonical_approval_gate_version" ON "canonical_approval_resolutions" ("org_id","gate_id","resolution_version")' },
+  { describe: "canonical approval subject", probe: { kind: "index", index: "canonical_approval_subject" }, sql: 'CREATE INDEX IF NOT EXISTS "canonical_approval_subject" ON "canonical_approval_resolutions" ("org_id","request_subject_digest","expires_at")' },
+  { describe: "policy source bundles table", probe: { kind: "table", table: "policy_source_bundles" }, sql: 'CREATE TABLE IF NOT EXISTS "policy_source_bundles" ("digest" text PRIMARY KEY NOT NULL, "bundle" jsonb NOT NULL, "created_at" bigint NOT NULL)' },
+  { describe: "policy active bundles table", probe: { kind: "table", table: "policy_active_bundles" }, sql: 'CREATE TABLE IF NOT EXISTS "policy_active_bundles" ("org_id" text PRIMARY KEY NOT NULL REFERENCES "orgs"("id"), "digest" text NOT NULL REFERENCES "policy_source_bundles"("digest"), "generation" integer NOT NULL, "activated_at" bigint NOT NULL, CONSTRAINT "policy_active_bundles_generation" CHECK ("generation">0))' },
+  { describe: "policy active bundles digest index", probe: { kind: "index", index: "policy_active_bundles_digest" }, sql: 'CREATE INDEX IF NOT EXISTS "policy_active_bundles_digest" ON "policy_active_bundles" ("digest")' },
   {
     describe: "authorization decisions table",
     probe: { kind: "table", table: "authorization_decisions" },
@@ -242,7 +256,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     )`,
   },
   { describe: "authorization_decisions_org_created index", probe: { kind: "index", index: "authorization_decisions_org_created" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_org_created" ON "authorization_decisions" ("org_id","created_at")' },
-  { describe: "authorization_decisions_idempotency_key index", probe: { kind: "index", index: "authorization_decisions_idempotency_key" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_idempotency_key" ON "authorization_decisions" ("idempotency_key")' },
+  { describe: "authorization decisions org idempotency", probe: { kind: "index", index: "authorization_decisions_org_idempotency" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "authorization_decisions_org_idempotency" ON "authorization_decisions" ("org_id","idempotency_key")' },
   { describe: "authorization_decisions_request index", probe: { kind: "index", index: "authorization_decisions_request" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_request" ON "authorization_decisions" ("request_id")' },
   { describe: "authorization_decisions_subject index", probe: { kind: "index", index: "authorization_decisions_subject" }, sql: 'CREATE INDEX IF NOT EXISTS "authorization_decisions_subject" ON "authorization_decisions" ("request_subject_digest")' },
   {

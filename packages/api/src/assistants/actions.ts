@@ -292,6 +292,7 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
 
   return {
     service: "assistants",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     description: "Manage assistant profiles: names, personas, behavior configs, defaults, archive.",
     actions: [listAction, createAction, updateAction, archiveAction],
   };

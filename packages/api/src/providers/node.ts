@@ -1,3 +1,7 @@
+import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
+import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import { quarantineMissingActionProjections } from "../authorization/action-projections.js";
+import { configureCanonicalOrganizationProvisioner } from "../services/org.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
@@ -16,7 +20,8 @@ import {
 } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
-import { writeExecutionGrant, updateInvocationOutcome } from "../policies/service.js";
+import { updateInvocationOutcome } from "../policies/service.js";
+import { writeTrustedApprovalGrants } from "../plugins/approval-grants.js";
 import { EngineHost } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import {
@@ -261,22 +266,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   const db = buildAppDb(source);
 
-  // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
-  // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
-  // `authConfig` resolves) — see `NodeProviderOpts.seedLocalIdentity`.
-  if (opts.seedLocalIdentity ?? true) {
-    const now = Date.now();
-    await db.insert(orgs).values({ id: LOCAL_ORG.id, name: LOCAL_ORG.name, createdAt: now }).onConflictDoNothing();
-    await db
-      .insert(users)
-      .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
-      .onConflictDoNothing();
-    await db
-      .insert(orgMembers)
-      .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
-      .onConflictDoNothing();
-  }
-
   // Store tracing (distributed tracing): only when the OTLP SDK will be
   // registered — the proxy is pure overhead otherwise. `store.*` spans time
   // every Postgres round trip inside the request/submission trees.
@@ -391,6 +380,33 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         [workflowsActions, skillsActions, assistantsActions],
       ]);
 
+  const reportProjectionDiagnostic = (diagnostic: ReturnType<typeof quarantineMissingActionProjections>[number]) => {
+    console.error(`[action-projection:${diagnostic.code}] ${diagnostic.actionId}: ${diagnostic.correctiveAction}`);
+  };
+  for (const diagnostic of quarantineMissingActionProjections(actionPluginByService, reportProjectionDiagnostic)) {
+    reportProjectionDiagnostic(diagnostic);
+  }
+  const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+  const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
+  configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));
+
+  // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
+  // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
+  // `authConfig` resolves) — see `NodeProviderOpts.seedLocalIdentity`.
+  if (opts.seedLocalIdentity ?? true) {
+    const now = Date.now();
+    const existingOrg = await db.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, LOCAL_ORG.id)).limit(1);
+    if (!existingOrg[0]) await canonicalPolicyManager.provisionOrganization(LOCAL_ORG.id, LOCAL_ORG.name);
+    await db
+      .insert(users)
+      .values({ id: LOCAL_USER.id, email: LOCAL_USER.email, name: LOCAL_USER.name, role: LOCAL_USER.role })
+      .onConflictDoNothing();
+    await db
+      .insert(orgMembers)
+      .values({ orgId: LOCAL_ORG.id, userId: LOCAL_USER.id, role: "admin", createdAt: now })
+      .onConflictDoNothing();
+  }
+
   // Declared plugin-store expression indexes (plugin-store design). Idempotent
   // `CREATE INDEX IF NOT EXISTS`, run once per boot after the plugin set is
   // known — no plugin declares one yet, so this is a no-op today.
@@ -452,6 +468,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
     actionPluginByService,
+    canonicalAuthorizationService,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
@@ -601,6 +618,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
     onePassword,
+    canonicalAuthorizationService,
   });
 
   // Approval attention (decision 12): the FIRST park on an approval node
@@ -654,16 +672,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         .limit(1);
       const orgId = defRows[0]?.orgId;
       if (!orgId) return;
-      const now = Date.now();
-      for (const g of info.grants) {
-        await writeExecutionGrant(db, info.runId, {
-          orgId,
-          service: g.service,
-          actionId: g.actionId,
-          grantedBy: info.resolvedBy,
-          now,
-        });
-      }
+      await writeTrustedApprovalGrants(db, actionPluginByService, {
+        ...info,
+        orgId,
+        now: Date.now(),
+      });
     } catch (err) {
       console.error(`workflow approval grant write failed for run ${info.runId}:`, err);
     }
@@ -729,6 +742,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     plugins,
     credentials: engineCredentials,
+    canonicalAuthorizationService,
+    canonicalPolicyManager,
   };
 
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
@@ -807,6 +822,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   return {
     db,
+    canonicalPolicyManager,
+    canonicalAuthorizationService,
     blobs,
     encryptionKey: opts.encryptionKey,
     engineStore,

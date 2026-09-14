@@ -21,6 +21,8 @@ import { linkIdentity, mintLinkCode } from "./identity-links.js";
 import { ChannelHost } from "./host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { canonicalPolicyForTest } from "../test-helpers/canonical-policy.js";
+import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -122,6 +124,7 @@ describe("ChannelHost.handleUpdate", () => {
   let engineStore: PgSessionStore;
   let eventStream: PgEventStream;
   let engineCredentials: PgCredentialStore;
+  let canonicalPolicyManager: CanonicalPolicyBundleManager;
 
   beforeEach(async () => {
     // Hijack the real anthropic-messages api so EngineHost's own model
@@ -163,6 +166,9 @@ describe("ChannelHost.handleUpdate", () => {
       });
     }
 
+    const canonical = await canonicalPolicyForTest(appDb, ORG_ID);
+    canonicalPolicyManager = canonical.manager;
+
     engineHost = new EngineHost({
       engineStore,
       sandboxProvider,
@@ -171,6 +177,8 @@ describe("ChannelHost.handleUpdate", () => {
       db: appDb,
       apiBaseUrl: "http://127.0.0.1:1",
       plugins: [fakePlugin],
+      actionPluginByService: canonical.actionPluginByService,
+      canonicalAuthorizationService: canonical.canonicalAuthorizationService,
     });
 
     host = new ChannelHost({
@@ -187,6 +195,7 @@ describe("ChannelHost.handleUpdate", () => {
 
   afterEach(async () => {
     await engineHost.destroyAll();
+    await canonicalPolicyManager.close();
     faux.unregister();
     vi.unstubAllEnvs();
   });

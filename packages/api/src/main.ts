@@ -13,6 +13,7 @@ import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { ensureCanonicalPolicyReadiness, migrateCanonicalPolicyReleaseSet } from "./authorization/canonical-policy-manager.js";
 import { createApp, type AuthWiring } from "./app.js";
 import { selectServerAdapter } from "./server-adapter.js";
 import { buildNodeProviders, shouldSeedLocalIdentity } from "./providers/node.js";
@@ -310,6 +311,40 @@ try {
   throw e;
 }
 
+// Explicit release-set migration is offline: it completes for every tenant
+// under one advisory lock before config writes, readiness, or the listener.
+const policyReleaseMigration = process.env.VALET_POLICY_RELEASE_MIGRATION;
+if (policyReleaseMigration) {
+  try {
+    await migrateCanonicalPolicyReleaseSet(providers.canonicalPolicyManager, policyReleaseMigration);
+  } catch (error) {
+    console.error(`FATAL: canonical policy release migration failed: ${error}`);
+    await providers.canonicalPolicyManager.close();
+    process.exit(1);
+  }
+}
+
+// Effective configuration must settle before canonical policy compilation and before the listener exists.
+if (instanceConfig) {
+  try {
+    await reconcileInstanceConfig(
+      { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService, canonicalPolicyManager: providers.canonicalPolicyManager },
+      instanceConfig,
+    );
+  } catch (error) {
+    console.error(error instanceof InstanceConfigError ? error.message : `FATAL: instance config reconcile failed: ${error}`);
+    await providers.canonicalPolicyManager.close();
+    process.exit(1);
+  }
+}
+try {
+  await ensureCanonicalPolicyReadiness(providers.canonicalPolicyManager);
+} catch (error) {
+  console.error(`FATAL: canonical policy readiness failed: ${error}`);
+  await providers.canonicalPolicyManager.close();
+  process.exit(1);
+}
+
 // Attention router (Phase 4 decision 19): subscribes submission_stuck →
 // escalation and child-session decision_gate → approval onto the shared
 // EventStream. Wired BEFORE the boot-reconciliation passes below — both
@@ -487,33 +522,6 @@ async function runBootChain(): Promise<void> {
   // nudges instead of looping. No-op when the interval is <= 0.
   providers.securityRunnerDriver.start();
 
-  // Instance config reconciliation: apply the declarative config to the live
-  // database (org name, members, teams, skill sources, etc.). Runs after the
-  // restore passes so the db is settled before we write to it, and BEFORE the
-  // ready flip so a bad config exits a still-NotReady pod: the rollout
-  // crash-loops with the corrective message and traffic never moves. It only
-  // needs `prebuildService` as a passive collaborator (`seedDefaultBasesIfMissing`
-  // is plain DB writes), so it does not wait for the service starts below.
-  if (instanceConfig) {
-    // Reconcile can throw `InstanceConfigError` (e.g. org.members would leave
-    // no admin, or duplicate skill sources). Exit with the corrective-action
-    // message only — no stack spam; an unexpected error exits with its detail.
-    // The pre-reorder code rethrew non-InstanceConfigError and relied on the
-    // direct-entry guard to exit 1; the chain has no such guard, so both
-    // shapes exit here directly — same outcome, done locally.
-    try {
-      await reconcileInstanceConfig(
-        { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
-        instanceConfig,
-      );
-    } catch (e) {
-      console.error(e instanceof InstanceConfigError ? e.message : `FATAL: instance config reconcile failed: ${e}`);
-      process.exit(1);
-    }
-    // Config rows are inserted pending and due. Poll once here so they do
-    // not wait for `contentSync.start()` later in this chain.
-    void providers.contentSync.pollOnce();
-  }
   // Teams from before every writer seeded a default assistant get one now,
   // once, through the same seed (`services/teams.ts`). Runs with or without
   // an instance config, after the reconcile so config-declared teams are
@@ -752,6 +760,11 @@ async function close(): Promise<void> {
     providers.engineHost.evictAll();
   } catch (err) {
     console.error("evictAll failed:", err);
+  }
+  try {
+    await providers.canonicalPolicyManager.close();
+  } catch (err) {
+    console.error("canonicalPolicyManager.close failed:", err);
   }
   try {
     // Flush any batched spans before the process goes away.

@@ -4,14 +4,14 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse }
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, gt, lt, lte, ne, or } from "drizzle-orm";
 import { NotFoundError, RepoOwnedWorkflowError } from "@valet/shared";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppDb, AppTx } from "../lib/drizzle.js";
 import { apikey, contentSources, credentials, skills, teamDeletionRequests, teams, users, workflowDefinitions } from "../schema/index.js";
 import { canViewTeam, ConfigManagedTeamError, getTeamInOrg, IdpManagedTeamError, isLiveIdpMirror, isTeamMember } from "./teams.js";
 import { lockTeamDeletionAccess, type DeletionResourceType } from "./team-deletion-access.js";
 import { deleteSkill } from "./skills.js";
 import { deleteContentSource } from "./content-sources.js";
 import { deleteWorkflowDefinition, type WorkflowServiceDeps } from "../workflows/service.js";
-import { deleteTeamApiKey, deleteTeamCredential, deleteTeamResources } from "./team-resource-deletion.js";
+import { deleteTeamApiKey, deleteTeamCredential, deleteTeamResourcesInTransaction } from "./team-resource-deletion.js";
 import { markAttentionNotificationsRead, routeAttention } from "../orchestrator/attention.js";
 
 export type RequestActor = { orgId: string; userId: string; teamId: string };
@@ -21,9 +21,10 @@ export class DeletionRequestError extends Error {
   constructor(message: string, readonly statusCode: 400 | 403 | 409 = 409) { super(message); }
 }
 const activeRunRefusal = "workflow has runs that are not settled. Cancel them first, then delete.";
+type DeletionDeps = Omit<WorkflowServiceDeps, "db"> & { db: AppTx };
 interface ResourceAdapter {
-  read(db: AppDb, actor: RequestActor, id: string): Promise<string>;
-  delete(deps: WorkflowServiceDeps, actor: RequestActor, id: string): Promise<string[]>;
+  read(db: AppTx, actor: RequestActor, id: string): Promise<string>;
+  delete(deps: DeletionDeps, actor: RequestActor, id: string): Promise<string[]>;
 }
 function missing(): never { throw new NotFoundError("resource", "requested resource"); }
 function checkResult(result: string | boolean) {
@@ -89,7 +90,7 @@ export const deletionResourceRegistry: Record<DeletionResourceType, ResourceAdap
       if (row.origin === "config") throw new ConfigManagedTeamError(row.name);
       return row.name;
     },
-    async delete(deps, a, id) { return deleteTeamResources(deps.db, a, id); },
+    async delete(deps, a, id) { return deleteTeamResourcesInTransaction(deps.db, a, id); },
   },
 };
 export function isDeletionResourceType(value: unknown): value is DeletionResourceType {
@@ -151,7 +152,7 @@ export async function submitDeletionRequest(db: AppDb, a: RequestActor, resource
   });
 }
 export async function decideDeletionRequest(deps: WorkflowServiceDeps, a: RequestActor, id: string, decision: "approve" | "decline" | "withdraw", note?: string) {
-  return deps.db.transaction(async (tx) => {
+  const run = async (tx: AppTx) => {
     const admin = await lockTeamDeletionAccess(tx, a, a.teamId);
     const where = and(requestScope(a), eq(teamDeletionRequests.id, id));
     const [row] = await tx.select().from(teamDeletionRequests).where(where).for("update");
@@ -179,7 +180,17 @@ export async function decideDeletionRequest(deps: WorkflowServiceDeps, a: Reques
       decidedBy: a.userId, decidedAt: Date.now(), decisionNote: note, lastRefusal: null }).where(where);
     await markAttentionNotificationsRead(tx, "review", row.id);
     return { sessions, resourceType: row.resourceType };
-  });
+  };
+  if (decision === "approve") {
+    const [target] = await deps.db.select({ resourceType: teamDeletionRequests.resourceType })
+      .from(teamDeletionRequests).where(and(requestScope(a), eq(teamDeletionRequests.id, id))).limit(1);
+    if (target?.resourceType === "team") {
+      const manager = deps.canonicalPolicyManager;
+      if (!manager) throw new Error("Canonical policy manager is unavailable.");
+      return manager.mutateAndActivate(a.orgId, { actorId: a.userId, operation: "team_delete", idempotencyKey: id }, run);
+    }
+  }
+  return deps.db.transaction(run);
 }
 
 /** Safe labels only; the request form never reads credential or key material. */

@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AuthorizationRequest, JsonValue, PolicyDecisionV1 } from "@valet/engine/authorization";
-import { resolvePolicyDecision, type ActionPolicyRow } from "../../policies/resolution.js";
 import { InMemorySourceBundleStorage } from "./in-memory-storage.js";
 import { SourceBundleHost } from "./host.js";
 import { WasmPolicyRuntime } from "../evaluators/wasm-runtime.js";
@@ -54,12 +53,6 @@ async function evaluate(source: CurrentPolicySourceSnapshotV1, input = request()
   await host.activate(ORG, undefined, identity.sourceBundleDigest);
   return runtime.run<EvaluationResult>({ operation: "evaluate", sourceBundleDigest: identity.sourceBundleDigest, input, explain: "off" });
 }
-function legacyMatcherEffect(path: string, parameters: Record<string, JsonValue>, op: "eq" | "regex" = "eq", value = "hit"): string {
-  return resolvePolicyDecision({ policies: [{ id: "legacy-path", principalType: "org", service: null, actionId: "gmail.send_email", riskLevel: null,
-    mode: "deny", paramMatchers: [{ path, op, value }], appliesIn: "any", expiresAt: null, revokedAt: null, updatedAt: 1 }], grants: [], overrides: [] },
-  { service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: parameters, appliesIn: "session", sessionId: "session-1", now: NOW }, undefined).mode;
-}
-
 async function wasmRegexMatches(pattern: string, value: string): Promise<boolean> {
   const source = `package valet.authz\nimport rego.v1\ndecision := {"effect":"allow","reasonCode":"regex_match","matchedRuleIds":[],"obligations":[],"redactions":[]} if { regex.match(${JSON.stringify(pattern)}, input.value) }\nelse := {"effect":"deny","reasonCode":"regex_no_match","matchedRuleIds":[],"obligations":[],"redactions":[]} if { true }\n`;
   const bundle = testBundle(source, "{}");
@@ -184,9 +177,9 @@ describe("current policy source review regressions", () => {
   });
 
   it.each([1, true, null, Array.from({ length: 1_000 }, () => "x"), Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => [`k${i}`, "x"]))])
-  ("keeps non-string regex target %j on legacy no-match semantics", async (selector) => {
+  ("does not match non-string regex target %j", async (selector) => {
     const source = snapshot({ organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: [{ path: "selector", op: "regex", value: "^x+$" }] })] });
-    expect((await evaluate(source, request({ selector }))).decision.effect).toBe(legacyMatcherEffect("selector", { selector }, "regex", "^x+$"));
+    expect((await evaluate(source, request({ selector }))).decision.effect).toBe("require_approval");
   });
 
   it.each([
@@ -439,8 +432,7 @@ describe("current policy source review regressions", () => {
     ["name9", { name9: "hit" }],
     ["nested.value", { nested: { value: "hit" } }],
     ["items[0].name", { items: [{ name: "hit" }] }],
-  ])("matches safe path %s exactly in legacy and WASM", async (path, parameters) => {
-    expect(legacyMatcherEffect(path, parameters)).toBe("deny");
+  ])("matches safe path %s in the canonical evaluator", async (path, parameters) => {
     const source = snapshot({
       organizationPolicies: [orgRule(1, { mode: "deny", paramMatchers: [{ path, op: "eq", value: "hit" }] })],
     });
@@ -458,8 +450,7 @@ describe("current policy source review regressions", () => {
     ["nul\0key", { "nul\0key": "hit" }],
     ['x"]; true', { 'x"]; true': "hit" }],
     ['x"} else := allow if { true } #', { 'x"} else := allow if { true } #': "hit" }],
-  ])("rejects non-lossless legacy path %j before WASM", (path, parameters) => {
-    expect(legacyMatcherEffect(path, parameters)).toBe("deny");
+  ])("rejects non-lossless path %j before evaluation", (path, _parameters) => {
     expect(() => buildCurrentPolicySource(snapshot({
       organizationPolicies: [orgRule(1, { paramMatchers: [{ path, op: "eq", value: "hit" }] })],
     }))).toThrow(expect.objectContaining({ code: "non_lossless_path" }));
@@ -497,7 +488,7 @@ describe("current policy source review regressions", () => {
     expect(ranges.size).toBe(provenance.entries.length);
   });
 
-  it("has zero unexpected mismatches in a seeded resolver sweep", async () => {
+  it("is deterministic across a seeded canonical resolver sweep", async () => {
     let state = 0x679;
     const random = (): number => ((state = (state * 1664525 + 1013904223) >>> 0) / 0x1_0000_0000);
     for (let iteration = 0; iteration < 160; iteration++) {
@@ -512,29 +503,8 @@ describe("current policy source review regressions", () => {
       }));
       const params = { selector: Math.floor(random() * 2) };
       const canonical = await evaluate(snapshot({ organizationPolicies: rows }), request(params));
-      const legacyRows: ActionPolicyRow[] = rows.map((row) => ({
-        id: row.id,
-        principalType: "org",
-        service: row.service ?? null,
-        actionId: row.actionId ?? null,
-        riskLevel: row.riskLevel ?? null,
-        mode: row.mode,
-        paramMatchers: [...row.paramMatchers],
-        appliesIn: row.appliesIn,
-        expiresAt: row.expiresAtMs,
-        revokedAt: row.revokedAtMs,
-        updatedAt: row.updatedAtMs,
-      }));
-      const legacy = resolvePolicyDecision({ policies: legacyRows, grants: [], overrides: [] }, {
-        service: "gmail",
-        actionId: "gmail.send_email",
-        riskLevel: "high",
-        params,
-        appliesIn: "session",
-        sessionId: "session-1",
-        now: NOW,
-      }, undefined);
-      expect(canonical.decision.effect, `seed iteration ${iteration}`).toBe(legacy.mode);
+      const reversed = await evaluate(snapshot({ organizationPolicies: [...rows].reverse() }), request(params));
+      expect(reversed.decision, `seed iteration ${iteration}`).toEqual(canonical.decision);
       expect(canonical.usage.work_units).toBeLessThan(1_000_000);
     }
   });

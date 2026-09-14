@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
+import type { CanonicalPolicyMutationContext } from "../authorization/canonical-policy-manager.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { canViewTeam, getTeamInOrg } from "../services/teams.js";
-import { validateOverrideBounds, upsertSimpleTeamPolicy, listTeamGrants, revokeTeamGrant, createPolicy, updatePolicy, revokePolicy, listPolicies, type UpdateOrgPolicyInput, isApprovalMode, isRiskLevel, validateTarget } from "../policies/admin.js";
+import { upsertSimpleTeamPolicy, listTeamGrants, revokeTeamGrant, createPolicy, updatePolicy, revokePolicy, listPolicies, type UpdateOrgPolicyInput, isApprovalMode, isRiskLevel, validateTarget } from "../policies/admin.js";
 import { validateParamMatchers } from "../policies/matchers.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
 import { toGrantWire } from "./me-policies.js";
@@ -50,13 +51,14 @@ teamPoliciesRouter.get("/:id/policies", async (c) => {
 teamPoliciesRouter.on(["POST", "PATCH", "DELETE"], ["/:id/policies", "/:id/policies/:policyId"], async (c) => {
   const user = requireActingUser(c);
   if (!user) return c.json({ error: "Sign in as a team admin to manage policies." }, 403);
-  const { db } = c.var.providers;
+  const { db, canonicalPolicyManager } = c.var.providers;
   const id = c.req.param("id");
   const policyId = c.req.param("policyId");
   const method = c.req.method;
   if ((method === "POST") === (policyId !== undefined)) return c.json(NOT_FOUND, 404);
   // Serialize creation with team deletion, and check roles inside the write.
-  return db.transaction(async (tx) => {
+  const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
+  return canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: `team_policy_${method.toLowerCase()}`, idempotencyKey }, async (tx) => {
     if (!(await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, id))) return c.json({ error: "Ask a team admin to change action policies." }, 403);
     const scope = { orgId: user.orgId, type: "team" as const, id };
     if (method === "DELETE" && policyId) {
@@ -98,7 +100,7 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
   const id = c.req.param("id");
   const grantId = c.req.param("grantId");
   if ((c.req.method === "DELETE") !== (grantId !== undefined)) return c.json(NOT_FOUND, 404);
-  return c.var.providers.db.transaction(async (tx) => {
+  const operation = async (tx: import("../lib/drizzle.js").AppTx, context?: CanonicalPolicyMutationContext) => {
     // Shared authority lock protects against role revocation and team deletion.
     if (!(await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, id))) return c.json({ error: "Ask a team admin to change policies or grants." }, 403);
     if (grantId) {
@@ -117,9 +119,14 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
       return c.json({ error: error instanceof Error ? error.message : "Send a valid override." }, 400);
     }
     if (!fields.mode) return c.json({ error: "Choose a mode." }, 400);
-    const bounds = await validateOverrideBounds(tx, user.orgId, target, fields.mode, Date.now(), c.var.providers.actionPluginByService);
+    if (!context) throw new Error("Canonical policy identity is unavailable.");
+    const boundsOptions = { includeTeamPolicies: false };
+    const bounds = await c.var.providers.canonicalAuthorizationService.validateOverrideBounds(user.orgId, user.id, target, fields.mode, await context.overrideBoundsIdentity(boundsOptions), context.overrideBoundPolicyReferences(boundsOptions));
     if (!bounds.ok) return c.json({ error: bounds.error }, 400);
     const row = await upsertSimpleTeamPolicy(tx, { orgId: user.orgId, type: "team", id }, { ...target, mode: fields.mode, managedBy: user.id, now: Date.now() });
     return row ? c.json(toPolicyWire(row)) : c.json(NOT_FOUND, 404);
-  });
+  };
+  if (grantId) return c.var.providers.db.transaction(operation);
+  const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
+  return c.var.providers.canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: "team_override_upsert", idempotencyKey }, operation);
 });

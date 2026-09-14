@@ -982,12 +982,18 @@ export interface PolicyResolveInput {
   service: string;
   actionId: string;
   riskLevel: RiskLevel;
+  /** Projection attached by the resolved catalog action, including dynamic actions. */
+  parameterProjection?: import("./authorization/action-adapters.js").SafeParameterProjectionV1;
   params: Record<string, unknown> | undefined;
   userId?: string;
   orgId?: string;
   sessionId: string;
   threadId: string;
   appliesIn: "session" | "workflow";
+  owner?: Principal;
+  queueItemId?: string;
+  resumeKey?: string;
+  gateOrdinal?: number;
 }
 
 /**
@@ -996,7 +1002,7 @@ export interface PolicyResolveInput {
  * forward) so the host resolver + audit sink share one closed vocabulary:
  * `resolver_error` is the synthetic fail-closed source the engine stamps when
  * a host `resolve()` throws (see `call_tool`); every other member is produced
- * by the host's pure precedence core (`policies/resolution.ts`). This is a
+ * by the host's canonical policy evaluator. This is a
  * type-narrowing only — the runtime string values are unchanged.
  */
 export type PolicyProvenanceSource =
@@ -1044,7 +1050,14 @@ export interface PolicyDecision {
     sourceBundleDigest: string;
     evaluatorKind: import("./authorization/types.js").EvaluatorIdentity["kind"];
     engineDigest: string;
+    profileDigest?: string;
+    interpreterDigest?: string;
+    contractDigest?: string;
     decisionDigest: string;
+    /** Binds durable dispatch to the exact engine execution input. */
+    executionInputDigest?: string;
+    decisionId?: string;
+    executionAttemptId?: string;
   };
 }
 
@@ -1114,6 +1127,7 @@ export interface PolicyInvocationRecord {
    */
   params?: Record<string, unknown>;
   result?: unknown;
+  canonicalExecutionAttemptId?: string;
 }
 
 /**
@@ -1121,8 +1135,22 @@ export interface PolicyInvocationRecord {
  * riskLevel→approvalMode fallback (`approvalModeFor`), byte-identical to
  * pre-policy behavior. Present === `call_tool` consults it per invocation.
  */
+export type PolicyExecutionReservation =
+  | { kind: "execute"; attemptId: string }
+  | { kind: "completed"; result: unknown }
+  | { kind: "failed"; error: string; result?: unknown }
+  | { kind: "indeterminate"; error: string };
+
+export type PolicyExecutionSettlement =
+  | { outcome: "completed"; result: unknown }
+  | { outcome: "failed"; error: string; result?: unknown };
+
 export interface PolicyResolver {
   resolve(input: PolicyResolveInput): Promise<PolicyDecision>;
+  /** Reserve the durable attempt immediately before action dispatch. */
+  reserveExecution?(input: PolicyResolveInput, decision: PolicyDecision): Promise<PolicyExecutionReservation>;
+  /** Persist the bounded action outcome before it is returned to the caller. */
+  completeExecution?(input: PolicyResolveInput, decision: PolicyDecision, attemptId: string, settlement: PolicyExecutionSettlement): Promise<PolicyExecutionSettlement>;
   /**
    * Host side effects on gate resolution (grant/policy writes). Awaited by
    * `call_tool` BEFORE it interprets the resolution; a throw fails the
