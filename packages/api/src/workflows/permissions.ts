@@ -185,7 +185,7 @@ export async function allowWorkflowPermissions(
     const allowed: string[] = [];
     const blocked: { actionId: string; reason: string }[] = [];
     for (const actionId of targets) {
-      const bounds = await service.validateOverrideBounds(owner.orgId, owner.userId, { actionId }, "allow", activeIdentity);
+      const bounds = await service.validateOverrideBounds(owner.orgId, owner.userId, { actionId }, "allow", activeIdentity, context.overrideBoundPolicyReferences());
       if (!bounds.ok) {
         blocked.push({ actionId, reason: bounds.error });
         continue;

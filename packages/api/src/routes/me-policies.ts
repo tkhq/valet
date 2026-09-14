@@ -120,7 +120,7 @@ mePolicyOverridesRouter.put("/", async (c) => {
 
   const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
   const result = await canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: "override_upsert", idempotencyKey }, async (tx, context) => {
-    const bounds = await canonicalAuthorizationService.validateOverrideBounds(user.orgId, user.id, body, body.mode, await context.overrideBoundsIdentity());
+    const bounds = await canonicalAuthorizationService.validateOverrideBounds(user.orgId, user.id, body, body.mode, await context.overrideBoundsIdentity(), context.overrideBoundPolicyReferences());
     if (!bounds.ok) return bounds;
     return upsertOverride(tx, user.orgId, user.id, {
       service: body.service,

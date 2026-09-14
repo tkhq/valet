@@ -1,12 +1,20 @@
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { adaptInteractiveAction, adaptWorkflowAction } from "@valet/engine/authorization";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { authorizationDecisions, orgs } from "../schema/index.js";
-import { CanonicalPolicyBundleManager } from "./canonical-policy-manager.js";
+import { actionPolicies, authorizationDecisions, orgs, teams } from "../schema/index.js";
+import { CanonicalPolicyBundleManager, type CanonicalOverrideBoundPolicyReference } from "./canonical-policy-manager.js";
 import { CanonicalAuthorizationService } from "./canonical-authorization-service.js";
 
 let pg: TestPgDb | undefined;
 afterEach(async () => { await pg?.cleanup(); pg = undefined; });
+
+function plugins() {
+  const actionPlugin: ActionPlugin = { service: "github", safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [{ id: "github.create_issue", name: "Create issue", description: "Create issue", riskLevel: "medium", parameters: Type.Object({}), execute: async () => ({ success: true }) }] };
+  const plugin = { name: "github", version: "1", actions: [actionPlugin] } as ValetPlugin;
+  return new Map([["github", { plugin, actionPlugin }]]);
+}
 
 function request(params: Record<string, unknown>) {
   return adaptWorkflowAction({
@@ -31,6 +39,32 @@ describe("CanonicalAuthorizationService", () => {
       expect((await restarted.authorize(request({ value: 1 }))).decision).toEqual(first.decision);
       expect(await pg.appDb.select().from(authorizationDecisions)).toHaveLength(1);
       await expect(service.authorize(request({ value: 2 }))).rejects.toThrow(/idempotency conflict/);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it.each([
+    ["blocks a broad service allow for an absent org action", "org", { actionId: "future.hidden" }, { service: "future" }, null, false],
+    ["blocks a broad risk allow for an absent team action", "team", { actionId: "future.hidden" }, { riskLevel: "high" }, null, false],
+    ["permits a provably disjoint service allow", "org", { actionId: "slack.hidden" }, { service: "github" }, null, true],
+    ["ignores a revoked absent action reference", "org", { actionId: "future.hidden" }, { service: "future" }, 9, true],
+    ["keeps a known action at its catalog risk", "org", { riskLevel: "critical" }, { actionId: "github.create_issue" }, null, true],
+    ["keeps a matching catalog risk bound", "org", { riskLevel: "medium" }, { actionId: "github.create_issue" }, null, false],
+  ] as const)("%s", async (_name, principalType, policyTarget, overrideTarget, revokedAt, expected) => {
+    pg = await freshTestPgDb();
+    await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    await pg.appDb.insert(teams).values({ id: "team-1", orgId: "org-1", name: "Team", createdAt: 1 });
+    await pg.appDb.insert(actionPolicies).values({ id: "bound", orgId: "org-1", principalType, principalId: principalType === "org" ? "org-1" : "team-1", ...policyTarget, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", revokedAt, createdAt: 2, updatedAt: 2 });
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, plugins(), () => 10);
+    try {
+      await manager.ensureOrganizationReady("org-1");
+      const service = await CanonicalAuthorizationService.create(manager, () => 200);
+      let boundsIdentity!: { sourceBundleDigest: string; policyDigest: string };
+      let policyReferences: readonly CanonicalOverrideBoundPolicyReference[] = [];
+      await manager.mutateAndActivate("org-1", { actorId: "user-1", operation: "bounds_test", idempotencyKey: "bounds" }, async (_tx, context) => {
+        boundsIdentity = await context.overrideBoundsIdentity();
+        policyReferences = context.overrideBoundPolicyReferences();
+      });
+      expect((await service.validateOverrideBounds("org-1", "user-1", overrideTarget, "allow", boundsIdentity, policyReferences)).ok).toBe(expected);
     } finally { await manager.close(); }
   }, 120_000);
 

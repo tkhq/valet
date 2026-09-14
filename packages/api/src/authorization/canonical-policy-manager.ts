@@ -53,8 +53,16 @@ export async function currentPolicySnapshot(db: AppQueryable, organizationId: st
   return { ...base, ...source, sourceRevision: revision(activeSource) } as CurrentPolicySourceSnapshotV1;
 }
 
+export interface CanonicalOverrideBoundPolicyReference {
+  readonly principalType: "org" | "team";
+  readonly principalId: string;
+  readonly service: string | null;
+  readonly actionId: string | null;
+}
+
 export interface CanonicalPolicyMutationContext {
-  overrideBoundsIdentity(): Promise<ValidatedBundleIdentity>;
+  overrideBoundsIdentity(options?: { includeTeamPolicies?: boolean }): Promise<ValidatedBundleIdentity>;
+  overrideBoundPolicyReferences(options?: { includeTeamPolicies?: boolean }): readonly CanonicalOverrideBoundPolicyReference[];
 }
 
 /** A reviewed authored bundle is the active source of truth, so row-backed
@@ -166,14 +174,24 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
         if (await isRecordedCandidate(tx, organizationId, pointer.digest)) throw new CanonicalPolicySourceReadOnlyError(organizationId);
         throw new Error(`Canonical policy pointer for ${organizationId} is stale.`);
       }
-      let boundsIdentity: Promise<ValidatedBundleIdentity> | undefined;
+      const boundsIdentities = new Map<boolean, Promise<ValidatedBundleIdentity>>();
+      const activeOrganizationPolicies = before.organizationPolicies.filter((row) => row.revokedAtMs === null);
+      const activeTeamPolicies = before.teamPolicies.filter((row) => row.revokedAtMs === null);
       const context: CanonicalPolicyMutationContext = {
-        overrideBoundsIdentity: () => boundsIdentity ??= (async () => {
-          const boundsBuilt = buildCurrentPolicySource({ ...before, teamPolicies: [], personalOverrides: [], organizationPolicies: before.organizationPolicies.map((row) => ({ ...row, paramMatchers: [] })) });
-          const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: boundsBuilt.bundle });
-          await this.runtime.loadBundle(identity.sourceBundleDigest, boundsBuilt.bundle);
+        overrideBoundPolicyReferences: ({ includeTeamPolicies = true } = {}) => [...activeOrganizationPolicies, ...(includeTeamPolicies ? activeTeamPolicies : [])].map((row) => ({ principalType: row.principalType, principalId: row.principalId, service: row.service ?? null, actionId: row.actionId ?? null })),
+        overrideBoundsIdentity: ({ includeTeamPolicies = true } = {}) => {
+          let identity = boundsIdentities.get(includeTeamPolicies);
+          if (!identity) {
+            identity = (async () => {
+              const boundsBuilt = buildCurrentPolicySource({ ...before, personalOverrides: [], organizationPolicies: before.organizationPolicies.map((row) => ({ ...row, paramMatchers: [] })), teamPolicies: includeTeamPolicies ? before.teamPolicies.map((row) => ({ ...row, paramMatchers: [] })) : [] });
+              const validated = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: boundsBuilt.bundle });
+              await this.runtime.loadBundle(validated.sourceBundleDigest, boundsBuilt.bundle);
+              return validated;
+            })();
+            boundsIdentities.set(includeTeamPolicies, identity);
+          }
           return identity;
-        })(),
+        },
       };
       const value = await mutate(tx, context);
       const after = await currentPolicySnapshot(tx, organizationId, this.plugins);

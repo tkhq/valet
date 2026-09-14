@@ -120,7 +120,8 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
     }
     if (!fields.mode) return c.json({ error: "Choose a mode." }, 400);
     if (!context) throw new Error("Canonical policy identity is unavailable.");
-    const bounds = await c.var.providers.canonicalAuthorizationService.validateOverrideBounds(user.orgId, user.id, target, fields.mode, await context.overrideBoundsIdentity());
+    const boundsOptions = { includeTeamPolicies: false };
+    const bounds = await c.var.providers.canonicalAuthorizationService.validateOverrideBounds(user.orgId, user.id, target, fields.mode, await context.overrideBoundsIdentity(boundsOptions), context.overrideBoundPolicyReferences(boundsOptions));
     if (!bounds.ok) return c.json({ error: bounds.error }, 400);
     const row = await upsertSimpleTeamPolicy(tx, { orgId: user.orgId, type: "team", id }, { ...target, mode: fields.mode, managedBy: user.id, now: Date.now() });
     return row ? c.json(toPolicyWire(row)) : c.json(NOT_FOUND, 404);

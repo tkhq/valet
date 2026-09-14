@@ -8,10 +8,42 @@ import { authorizationDecisions, type AuthorizationDecisionRow } from "../schema
 import { buildDecisionAuditPlan } from "./action-audit.js";
 import type { AuthorizationService } from "./contracts.js";
 import { LocalValetEvaluator } from "./evaluators/local-valet.js";
-import type { CanonicalPolicyBundleManager, CanonicalPolicyMutationContext } from "./canonical-policy-manager.js";
+import type { CanonicalOverrideBoundPolicyReference, CanonicalPolicyBundleManager, CanonicalPolicyMutationContext } from "./canonical-policy-manager.js";
 
 export function canonicalDecisionId(orgId: string, idempotencyKey: string): string {
   return `decision:${createHash("sha256").update(`${orgId}\0${idempotencyKey}`).digest("hex")}`;
+}
+
+const OVERRIDE_BOUND_RISKS: readonly RiskLevel[] = ["low", "medium", "high", "critical"];
+type OverrideBoundAction = { service: string; actionId: string; riskLevel: RiskLevel; parameterProjection: ReturnType<typeof actionProjection> };
+
+function overrideBoundUniverse(catalog: readonly OverrideBoundAction[], policies: readonly CanonicalOverrideBoundPolicyReference[], target: { service?: string; actionId?: string; riskLevel?: RiskLevel }): OverrideBoundAction[] {
+  const actions = new Map<string, OverrideBoundAction>();
+  const services = new Set<string>(["future_catalog", ...catalog.map((action) => action.service)]);
+  const add = (action: OverrideBoundAction) => actions.set(`${action.actionId}\0${action.riskLevel}`, action);
+  for (const action of catalog) add(action);
+  for (const row of policies) {
+    if (row.service) services.add(row.service);
+    if (!row.actionId) continue;
+    const service = actionService(row.actionId);
+    if (!service) continue;
+    services.add(service);
+    if (!catalog.some((action) => action.actionId === row.actionId)) {
+      for (const riskLevel of OVERRIDE_BOUND_RISKS) add(syntheticBoundAction(service, row.actionId, riskLevel));
+    }
+  }
+  if (target.service) services.add(target.service);
+  for (const service of services) for (const riskLevel of OVERRIDE_BOUND_RISKS) add(syntheticBoundAction(service, `${service}.override_bounds_${riskLevel}`, riskLevel));
+  return [...actions.values()].filter((action) => target.actionId ? action.actionId === target.actionId : target.service ? action.service === target.service : action.riskLevel === target.riskLevel);
+}
+
+function syntheticBoundAction(service: string, actionId: string, riskLevel: RiskLevel): OverrideBoundAction {
+  return { service, actionId, riskLevel, parameterProjection: { schemaVersion: 1, mode: "all_safe" } };
+}
+
+function actionService(actionId: string): string | undefined {
+  const separator = actionId.indexOf(".");
+  return separator > 0 ? actionId.slice(0, separator) : undefined;
 }
 
 export class CanonicalAuthorizationService implements AuthorizationService {
@@ -43,7 +75,7 @@ export class CanonicalAuthorizationService implements AuthorizationService {
     return envelope;
   }
 
-  async validateOverrideBounds(orgId: string, userId: string, target: { service?: string; actionId?: string; riskLevel?: RiskLevel }, mode: ApprovalMode, activeIdentity: { sourceBundleDigest: string; policyDigest: string }): Promise<{ ok: true } | { ok: false; error: string }> {
+  async validateOverrideBounds(orgId: string, userId: string, target: { service?: string; actionId?: string; riskLevel?: RiskLevel }, mode: ApprovalMode, activeIdentity: { sourceBundleDigest: string; policyDigest: string }, policyReferences: readonly CanonicalOverrideBoundPolicyReference[]): Promise<{ ok: true } | { ok: false; error: string }> {
     if (mode !== "allow") return { ok: true };
     const catalog = [...this.manager.plugins.values()].flatMap(({ actionPlugin }) => actionPlugin.actions.map((action) => ({
       service: actionPlugin.service,
@@ -51,33 +83,20 @@ export class CanonicalAuthorizationService implements AuthorizationService {
       riskLevel: action.riskLevel,
       parameterProjection: actionProjection(actionPlugin, action),
     })));
-    let actions = target.actionId ? catalog.filter((action) => action.actionId === target.actionId)
-      : target.service ? catalog.filter((action) => action.service === target.service)
-      : catalog.filter((action) => action.riskLevel === target.riskLevel);
-    if (target.actionId && actions.length === 0) return { ok: false, error: `cannot set override mode "allow": action "${target.actionId}" is not in the plugin catalog and cannot be verified against org policy` };
-    const synthetic = (service: string, riskLevel: RiskLevel) => ({ service, actionId: `${service}.override_bounds_${riskLevel}`, riskLevel, parameterProjection: { schemaVersion: 1, mode: "all_safe" } as const });
-    if (target.service) {
-      for (const riskLevel of ["low", "medium", "high", "critical"] as const) {
-        if (!actions.some((action) => action.riskLevel === riskLevel)) actions.push(synthetic(target.service, riskLevel));
-      }
-    }
-    if (target.riskLevel) {
-      const services = [...this.manager.plugins.keys()];
-      if (services.length === 0) services.push("future_catalog");
-      actions.push(...services.filter((service) => !actions.some((action) => action.service === service)).map((service) => synthetic(service, target.riskLevel!)));
-    }
+    if (target.actionId && !catalog.some((action) => action.actionId === target.actionId)) return { ok: false, error: `cannot set override mode "allow": action "${target.actionId}" is not in the plugin catalog and cannot be verified against org policy` };
+    const universe = overrideBoundUniverse(catalog, policyReferences, target);
+    const principals = [{ type: "user" as const, id: userId }, ...[...new Set(policyReferences.filter((row) => row.principalType === "team").map((row) => row.principalId))].sort().map((id) => ({ type: "team" as const, id }))];
     const now = this.now();
-    for (const action of actions) for (const appliesIn of ["session", "workflow"] as const) {
-      const requestId = createHash("sha256").update(canonicalAuthorizationJson({ orgId, userId, target, action, appliesIn, now })).digest("hex");
-      const parameterProjection = action.actionId.includes(".override_bounds_") ? { schemaVersion: 1, mode: "all_safe" } as const : action.parameterProjection;
-      const common = { ...action, catalogActionId: action.actionId, sourcePluginService: action.service, sourceActionId: action.actionId, sourceToolId: "override_bounds", parameters: {}, parameterProjection };
+    for (const action of universe) for (const principal of principals) for (const appliesIn of ["session", "workflow"] as const) {
+      const requestId = createHash("sha256").update(canonicalAuthorizationJson({ orgId, userId, target, action, principal, appliesIn, now })).digest("hex");
+      const common = { ...action, catalogActionId: action.actionId, sourcePluginService: action.service, sourceActionId: action.actionId, sourceToolId: "override_bounds", parameters: {} };
       const adapted = appliesIn === "session"
-        ? adaptInteractiveAction({ schemaVersion: 1, organizationId: orgId, actor: { type: "user", id: userId }, owner: { type: "user", id: userId }, requestId, sessionId: `override:${requestId}`, threadId: requestId, queueItemId: requestId, resumeKey: requestId, gateOrdinal: 0, action: common, evaluationTimeMs: now, dynamicFacts: {} })
-        : adaptWorkflowAction({ schemaVersion: 1, organizationId: orgId, actor: { type: "user", id: userId }, owner: { type: "user", id: userId }, requestId, workflowDefinitionId: "override-bounds", workflowVersion: "1", workflowExecutionId: `override:${requestId}`, nodeId: "override-bounds", invocationId: requestId, action: common, evaluationTimeMs: now, dynamicFacts: {} });
+        ? adaptInteractiveAction({ schemaVersion: 1, organizationId: orgId, actor: { type: "user", id: userId }, owner: principal, ...(principal.type === "team" ? { teamId: principal.id } : {}), requestId, sessionId: `override:${requestId}`, threadId: requestId, queueItemId: requestId, resumeKey: requestId, gateOrdinal: 0, action: common, evaluationTimeMs: now, dynamicFacts: {} })
+        : adaptWorkflowAction({ schemaVersion: 1, organizationId: orgId, actor: { type: "user", id: userId }, owner: principal, ...(principal.type === "team" ? { teamId: principal.id } : {}), requestId, workflowDefinitionId: "override-bounds", workflowVersion: "1", workflowExecutionId: `override:${requestId}`, nodeId: "override-bounds", invocationId: requestId, action: common, evaluationTimeMs: now, dynamicFacts: {} });
       const envelope = assertEnvelope(adapted.request, await this.evaluator.evaluateAt(adapted.request, activeIdentity));
       buildActionObligationPlan(envelope.decision);
       const decision = envelope.decision;
-      if (decision.reasonCode === "organization_policy" && decision.effect !== "allow") return { ok: false, error: `cannot set override mode "allow": org policy currently resolves "${decision.effect}" for ${action.actionId} (appliesIn: "${appliesIn}")` };
+      if ((decision.reasonCode === "organization_policy" || decision.reasonCode === "team_policy") && decision.effect !== "allow") return { ok: false, error: `cannot set override mode "allow": org or team policy currently resolves "${decision.effect}" for ${action.actionId} (appliesIn: "${appliesIn}")` };
     }
     return { ok: true };
   }
