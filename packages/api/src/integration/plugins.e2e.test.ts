@@ -96,7 +96,7 @@ function makeDemoPingPlugin(
   const plugin: ValetPlugin = {
     name: "demo",
     version: "0.0.1",
-    actions: [{ service, actions: [action] }],
+    actions: [{ service, safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [action] }],
     credentials: [{ service, type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }],
   };
   return { plugin, calls: () => calls };

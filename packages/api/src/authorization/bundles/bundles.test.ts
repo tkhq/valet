@@ -31,12 +31,10 @@ describe("source bundle host", () => {
     expect((await host.load(first.sourceBundleDigest)).identity).toEqual(first);
   });
 
-  it("uses atomic generation CAS and retains the winner", async () => {
+  it("reloads an identical atomic generation CAS winner", async () => {
     const identity = await host.publish(testBundle());
     const first = await host.activate("org-1", undefined, identity.sourceBundleDigest);
-    await expect(host.activate("org-1", undefined, identity.sourceBundleDigest)).rejects.toMatchObject({
-      code: "bundle_replacement_conflict",
-    });
+    await expect(host.activate("org-1", undefined, identity.sourceBundleDigest)).resolves.toEqual(first);
     expect(await storage.getActive("org-1")).toEqual(first);
   });
 

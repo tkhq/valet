@@ -191,6 +191,7 @@ describe("ChannelHost outbound delivery", () => {
     keyedTransport = new KeyedTransport();
     const actionPlugin: ActionPlugin = {
       service: "github",
+      safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
       actions: [
         {
           id: "github.create_release",
