@@ -78,6 +78,7 @@ function toActionLogWire(row: ActionInvocationRow): ActionLogEntryWire {
     matchedPolicyId: row.matchedPolicyId,
     matchedGrantId: row.matchedGrantId,
     matchedOverrideId: row.matchedOverrideId,
+    matchedWorkflowApprovalId: row.matchedWorkflowApprovalId,
     status: row.status,
     sessionId: row.sessionId,
     workflowExecutionId: row.workflowExecutionId,

@@ -2,7 +2,7 @@
  * Pending policy-gate card for `/workflows/runs/$runId`.
  * Rendered for each `WorkflowPendingGate` with `kind === "policy_gate"`.
  *
- * Split-button: "Approve once" (primary) + chevron trigger opening a
+ * Split-button: workflow-scoped approval (primary) + chevron trigger opening a
  * DropdownMenu with "Approve for rest of run" and "Always allow" (admin
  * only). Deny is a separate danger button. Note field rides whichever action
  * fires. On 409 the query key is invalidated so the stale card disappears.
@@ -35,8 +35,8 @@ export interface PolicyGateCardProps {
 export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGateCardProps): ReactElement {
   const [note, setNote] = useState("");
   const [confirmAlways, setConfirmAlways] = useState(false);
-  const [busyScope, setBusyScope] = useState<"once" | "run" | "always" | "deny" | null>(null);
-  const [confirmation, setConfirmation] = useState<"once" | "run" | "deny" | null>(null);
+  const [busyScope, setBusyScope] = useState<"once" | "run" | "workflow" | "always" | "deny" | null>(null);
+  const [confirmation, setConfirmation] = useState<"once" | "run" | "workflow" | "deny" | null>(null);
   const resolve = useResolveApproval(runId);
   const meQ = useMe();
   const isAdmin = meQ.data?.orgRole === "admin";
@@ -47,7 +47,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
 
   const busy = resolve.isPending;
 
-  function fireApprove(scope: "once" | "run" | "always") {
+  function fireApprove(scope: "once" | "run" | "workflow" | "always") {
     if (confirmActions && scope !== "always") {
       setConfirmation(scope);
       return;
@@ -55,7 +55,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
     submitApprove(scope);
   }
 
-  function submitApprove(scope: "once" | "run" | "always") {
+  function submitApprove(scope: "once" | "run" | "workflow" | "always") {
     setBusyScope(scope);
     resolve.mutate({
       nodeId: gate.nodeId,
@@ -196,11 +196,11 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           <Button
             size="sm"
             className="rounded-r-none"
-            onClick={() => fireApprove("once")}
+            onClick={() => fireApprove("workflow")}
             disabled={busy}
           >
-            {busy && busyScope === "once" ? <Spinner size={12} /> : null}
-            Approve once
+            {busy && busyScope === "workflow" ? <Spinner size={12} /> : null}
+            Approve for this workflow
           </Button>
 
           <DropdownMenu>
@@ -215,6 +215,12 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
+              <DropdownMenuItem onSelect={() => fireApprove("once")} disabled={busy}>
+                <div>
+                  <div>Approve once</div>
+                  <div className="text-xs text-muted">Covers only this action invocation.</div>
+                </div>
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onSelect={() => fireApprove("run")}
                 disabled={busy}
@@ -262,7 +268,9 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         }}
         title={confirmation === "deny" ? "Deny this tool action?" : "Allow this tool action?"}
         description={
-          confirmation === "run"
+          confirmation === "workflow"
+            ? `Valet runs ${serviceAction} now and remembers this exact action for this workflow for up to 90 days.`
+            : confirmation === "run"
             ? `Valet runs ${serviceAction} now and allows later calls in this run.`
             : confirmation === "deny"
               ? denyMicrocopy

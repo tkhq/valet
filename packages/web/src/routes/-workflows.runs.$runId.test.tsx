@@ -274,7 +274,7 @@ describe("RunDetailBody", () => {
     );
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.getByText("linear.save_issue")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve for this workflow" })).toBeTruthy();
   });
 
   it("renders RunStatusChip showing 'Needs approval' when parked with pending gates", () => {

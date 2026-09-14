@@ -22,7 +22,9 @@
  * `PluginActionContext` since there is no live session/thread/turn behind a
  * workflow tool-node dispatch.
  */
+import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
+import { canonicalJson } from "../lib/canonical-json.js";
 import {
   prepareActionArgs,
   type ActionPlugin,
@@ -63,7 +65,8 @@ import {
 } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
+import { persistInvocationAudit, resolveActionPolicyWithRevision, updateInvocationOutcome } from "../policies/service.js";
+import { findWorkflowToolApproval, resolveWorkflowCredentialIdentity, workflowApprovalFingerprint } from "../workflows/tool-approvals.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -103,6 +106,10 @@ export interface ActionInvocationContext {
    * context), so the action executes as before.
    */
   workflowExecutionId?: string;
+  /** Immutable workflow identity used only for narrowly scoped reusable approvals. */
+  workflowId?: string;
+  definitionVersionId?: string;
+  nodeId?: string;
 }
 
 export interface ActionInvokerOpts {
@@ -304,10 +311,26 @@ async function computeResult(
   // runs only: a team/org-owned run has no single person whose channel
   // membership could authorize the read, so its credential stays bare and
   // those actions keep failing closed.
-  const credentials =
+  const scopedCredentials =
     credentialService === "slack" && ctx.owner.type === "user"
       ? withOwnerSlackIdentity(baseProvider, opts.db, ctx.owner.id)
       : baseProvider;
+  // Fingerprinting and execution must observe the same resolved credential,
+  // even if refresh or replacement changes the backing store mid-invocation.
+  const credentialReads = new Map<string, Promise<Credential | null>>();
+  const credentials: CredentialProvider = {
+    get(service) {
+      const key = service ?? credentialService;
+      const cached = credentialReads.get(key);
+      if (cached) return cached;
+      const pending = scopedCredentials.get(key);
+      credentialReads.set(key, pending);
+      return pending;
+    },
+    request(service, reason) {
+      return scopedCredentials.request(service, reason);
+    },
+  };
 
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
   // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
@@ -370,6 +393,35 @@ async function computeResult(
   // straight to `allow`. The policy-facing actionId
   // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
   // canonical id matches both the session and workflow paths.
+  const credentialIdentity = async () => {
+    const identity = await resolveWorkflowCredentialIdentity({
+      db: opts.db,
+      orgId: ctx.orgId,
+      owner: ctx.owner,
+      service: credentialService,
+      ...(req.credential !== undefined ? { credential: req.credential } : {}),
+      params: req.params,
+      orgProvided: declared?.requires?.orgCredential === true,
+      credentialRequired: declared !== null || credentialService === "github",
+      now: (opts.clock ?? Date.now)(),
+    });
+    if (!identity) return undefined;
+    try {
+      const resolved = await credentials.get();
+      if (!resolved && identity !== "not-required") return undefined;
+      // list_repos can fall back from the user endpoint to installation
+      // credentials. Bind and pin both identities before it executes.
+      const installation = credentialService === "github" && action.id === "github.list_repos" && req.params.scope !== "user"
+        ? await credentials.get(GITHUB_INSTALLATION_CREDENTIAL_SERVICE)
+        : undefined;
+      return createHash("sha256").update(canonicalJson({ identity, resolved, installation })).digest("hex");
+    } catch {
+      // A failed lookup cannot authorize a remembered action. The normal
+      // approval/execution path still reports the credential failure.
+      return undefined;
+    }
+  };
+
   const policyActionId = qualifiedActionId(req.service, action);
   // Set only when enforceWorkflowPolicy wrote a decision row (org + run
   // context present); also the org scope for the outcome-stamp UPDATE.
@@ -381,6 +433,8 @@ async function computeResult(
     action.riskLevel,
     entry.actionPlugin.defaultApprovalMode,
     policyActionId,
+    entry.plugin.version,
+    credentialIdentity,
   );
   if (denial) return denial;
 
@@ -495,13 +549,16 @@ async function enforceWorkflowPolicy(
   riskLevel: RiskLevel,
   pluginDefault: ApprovalMode | undefined,
   policyActionId: string,
+  pluginVersion: string,
+  resolveCredentialIdentity: () => Promise<string | undefined>,
 ): Promise<WorkflowInvokeActionResult | null> {
   if (!ctx.orgId || !ctx.workflowExecutionId) return null;
   const now = (opts.clock ?? Date.now)();
 
-  let decision: Awaited<ReturnType<typeof resolveActionPolicy>>;
+  let decision: Awaited<ReturnType<typeof resolveActionPolicyWithRevision>>["decision"];
+  let policyRevision: string;
   try {
-    decision = await resolveActionPolicy(opts.db, {
+    ({ decision, policyRevision } = await resolveActionPolicyWithRevision(opts.db, {
       orgId: ctx.orgId,
       teamId: ctx.owner.type === "team" ? ctx.owner.id : undefined,
       userId: ctx.userId,
@@ -513,7 +570,7 @@ async function enforceWorkflowPolicy(
       workflowExecutionId: ctx.workflowExecutionId,
       pluginDefault,
       now,
-    });
+    }));
   } catch (err) {
     console.error("action-invoker: policy resolution failed:", err);
     if (req.approval && ctx.owner.type !== "team") {
@@ -587,6 +644,48 @@ async function enforceWorkflowPolicy(
   }
 
   // decision.mode === "require_approval"
+  const credentialIdentity = await resolveCredentialIdentity();
+  let reusableFingerprint: string | undefined;
+  if (ctx.workflowId && ctx.definitionVersionId && ctx.nodeId && credentialIdentity) {
+    reusableFingerprint = workflowApprovalFingerprint({
+      orgId: ctx.orgId,
+      owner: ctx.owner,
+      workflowId: ctx.workflowId,
+      definitionVersionId: ctx.definitionVersionId,
+      nodeId: ctx.nodeId,
+      service: req.service,
+      actionId: policyActionId,
+      pluginVersion,
+      ...(req.credential !== undefined ? { credential: req.credential } : {}),
+      credentialIdentity,
+      params: req.params,
+      policyRevision,
+    });
+    const remembered = await findWorkflowToolApproval(opts.db, reusableFingerprint, now);
+    if (remembered) {
+      await persistInvocationAudit(opts.db, {
+        invocationId: `pol:wf:${req.invocationId}`,
+        service: req.service,
+        actionId: policyActionId,
+        riskLevel,
+        resolvedMode: decision.mode,
+        baseMode: decision.provenance.baseMode,
+        matchedPolicyId: decision.provenance.matchedPolicyId ?? null,
+        matchedGrantId: null,
+        matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
+        matchedWorkflowApprovalId: remembered.id,
+        status: "approved",
+        workflowExecutionId: ctx.workflowExecutionId,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        params: req.params,
+        resolvedBy: remembered.approvedBy,
+        createdAt: now,
+      });
+      return null;
+    }
+  }
+
   if (req.approval) {
     // The tool executor holds an approved, unconsumed signal — treat as authorized.
     await persistInvocationAudit(opts.db, {
@@ -629,7 +728,13 @@ async function enforceWorkflowPolicy(
     params: req.params,
     createdAt: now,
   });
-  return { ok: false, requiresApproval: true, riskLevel, provenance: decision.provenance.source };
+  return {
+    ok: false,
+    requiresApproval: true,
+    riskLevel,
+    provenance: decision.provenance.source,
+    ...(reusableFingerprint !== undefined ? { approvalFingerprint: reusableFingerprint, policyRevision } : {}),
+  };
 }
 
 export { qualifiedActionId };

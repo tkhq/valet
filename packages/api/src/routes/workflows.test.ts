@@ -7,7 +7,7 @@
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { RunHost, WorkflowDefinition } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
@@ -25,6 +25,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
+  workflowToolApprovals,
   workflowVersions,
 } from "../schema/index.js";
 import {
@@ -353,6 +354,95 @@ describe("GET /api/workflows?ownerType=&ownerId=", () => {
     expect(res.status).toBe(200);
     const { workflows } = (await res.json()) as ListWorkflowsResponse;
     expect(workflows.map((w) => w.name)).toEqual(["personal"]);
+  });
+});
+
+describe("remembered workflow approvals", () => {
+  async function insertApproval(workflowId: string, principalType: "user" | "org", principalId: string, approvalId = `approval-${workflowId}`, orgId = "local-org") {
+    await api!.providers.db.insert(workflowToolApprovals).values({
+      id: approvalId, fingerprint: `fingerprint-${approvalId}`, orgId,
+      principalType, principalId, workflowId, definitionVersionId: "version-1", nodeId: "post",
+      service: "slack", actionId: "slack.send_message", credential: null, paramsHash: "params",
+      policyRevision: "policy", approvedBy: "local-user", sourceRunId: "run-1",
+      expiresAt: Date.now() + 60_000, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+  }
+
+  it("lists and revokes a personal workflow approval only for its owner", async () => {
+    api = await bootTestApi();
+    const workflow = await createWorkflow(api.baseUrl);
+    await insertApproval(workflow.id, "user", "local-user");
+
+    const listed = await fetch(`${api.baseUrl}/api/workflows/${workflow.id}/tool-approvals`);
+    expect(listed.status).toBe(200);
+    expect(((await listed.json()) as { approvals: Array<{ id: string }> }).approvals)
+      .toEqual([expect.objectContaining({ id: `approval-${workflow.id}` })]);
+
+    const hidden = await fetch(`${api.baseUrl}/api/workflows/${workflow.id}/tool-approvals`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(hidden.status).toBe(404);
+
+    const revoked = await fetch(
+      `${api.baseUrl}/api/workflows/${workflow.id}/tool-approvals/approval-${workflow.id}`,
+      { method: "DELETE" },
+    );
+    expect(revoked.status).toBe(200);
+    expect(await revoked.json()).toEqual({ revoked: true });
+  });
+
+  it("lets members manage their own approvals on an org workflow and hides other principals", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(workflowDefinitions).values({
+      id: "wf-shared", orgId: "local-org", ownerType: "org", ownerId: "local-org",
+      name: "Shared workflow", definition: VALID_DEFINITION, createdAt: now, updatedAt: now,
+    });
+    await insertApproval("wf-shared", "user", "test-member", "own-approval");
+    await insertApproval("wf-shared", "user", "local-user", "other-approval");
+    await insertApproval("wf-shared", "user", "test-member", "foreign-org-approval", "foreign-org");
+    const headers = { "x-valet-test-user-id": "test-member" };
+    const listed = await fetch(`${api.baseUrl}/api/workflows/wf-shared/tool-approvals`, { headers });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({ approvals: [{ id: "own-approval" }] });
+    const adminList = await fetch(`${api.baseUrl}/api/workflows/wf-shared/tool-approvals`);
+    expect(await adminList.json()).toMatchObject({ approvals: [{ id: "other-approval" }] });
+    for (const approvalId of ["other-approval", "foreign-org-approval"]) {
+      const denied = await fetch(`${api.baseUrl}/api/workflows/wf-shared/tool-approvals/${approvalId}`, {
+        method: "DELETE", headers,
+      });
+      expect(denied.status).toBe(404);
+    }
+    const revoked = await fetch(`${api.baseUrl}/api/workflows/wf-shared/tool-approvals/own-approval`, {
+      method: "DELETE", headers,
+    });
+    expect(revoked.status).toBe(200);
+    const after = await fetch(`${api.baseUrl}/api/workflows/wf-shared/tool-approvals`, { headers });
+    expect(await after.json()).toEqual({ approvals: [] });
+  });
+
+  it("lets org members view approvals but only org admins revoke them", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(workflowDefinitions).values({
+      id: "wf-org", orgId: "local-org", ownerType: "org", ownerId: "local-org",
+      name: "Org workflow", definition: VALID_DEFINITION, createdAt: now, updatedAt: now,
+    });
+    await insertApproval("wf-org", "org", "local-org");
+
+    const memberHeaders = { "x-valet-test-user-id": "test-member" };
+    const listed = await fetch(`${api.baseUrl}/api/workflows/wf-org/tool-approvals`, { headers: memberHeaders });
+    expect(listed.status).toBe(200);
+    const refused = await fetch(`${api.baseUrl}/api/workflows/wf-org/tool-approvals/approval-wf-org`, {
+      method: "DELETE", headers: memberHeaders,
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "Ask an org admin to revoke this workflow approval." });
+
+    const revoked = await fetch(`${api.baseUrl}/api/workflows/wf-org/tool-approvals/approval-wf-org`, {
+      method: "DELETE",
+    });
+    expect(revoked.status).toBe(200);
   });
 });
 
@@ -1392,6 +1482,23 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       { runId, nodeId: "gate", approved: true, via: "agent" },
     );
     expect(result).toBe("human_only");
+  });
+
+  it("rejects an invalid stored owner before inserting a workflow approval signal", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [
+      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+    ]);
+    await localApi.providers.db.execute(sql`UPDATE workflow_runs SET owner_type = 'invalid' WHERE id = ${runId}`);
+    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const result = await resolveWorkflowApproval(
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { userId: "local-user", orgId: "local-org" },
+      { runId, nodeId: "gate", approved: true, scope: "workflow", via: "web" },
+    );
+    expect(result).toBe("not_found");
+    expect(await workflowStore.listSignals(runId)).toHaveLength(0);
   });
 
   it("foreach body gate: park on approval:body1:3, resolve with iteration: 3 → signal approval:body1:3:resolution", async () => {

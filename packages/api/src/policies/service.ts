@@ -21,7 +21,7 @@
  * `resolveActionPolicy` + the grant/audit writers directly for its
  * non-interactive `appliesIn: "workflow"` enforcement path.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type {
   ActionPlugin,
@@ -35,6 +35,7 @@ import type {
   ValetPlugin,
 } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import { canonicalJson } from "../lib/canonical-json.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import {
@@ -212,6 +213,15 @@ export interface ResolveActionPolicyInput {
  * both enforce identical precedence.
  */
 export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyInput): Promise<PolicyDecision> {
+  return (await resolveActionPolicyWithRevision(db, input)).decision;
+}
+
+/** Resolves a policy and hashes the durable policy inputs that produced it.
+ * Runtime grants are excluded because they expire with one run or session. */
+export async function resolveActionPolicyWithRevision(
+  db: AppDb,
+  input: ResolveActionPolicyInput,
+): Promise<{ decision: PolicyDecision; policyRevision: string }> {
   const rows = await loadPolicyRows(db, {
     orgId: input.orgId,
     teamId: input.teamId,
@@ -219,7 +229,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
     sessionId: input.sessionId,
     workflowExecutionId: input.workflowExecutionId,
   });
-  return resolvePolicyDecision(
+  const decision = resolvePolicyDecision(
     rows,
     {
       service: input.service,
@@ -233,6 +243,14 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
     },
     input.pluginDefault,
   );
+  const policyRevision = createHash("sha256")
+    .update(canonicalJson({
+      policies: [...rows.policies].sort((a, b) => a.id.localeCompare(b.id)),
+      overrides: [...rows.overrides].sort((a, b) => a.id.localeCompare(b.id)),
+      pluginDefault: input.pluginDefault ?? null,
+    }))
+    .digest("hex");
+  return { decision, policyRevision };
 }
 
 // ── Grant writes ────────────────────────────────────────────────────
@@ -427,6 +445,7 @@ export interface AuditInvocationRow {
   matchedPolicyId?: string | null;
   matchedGrantId?: string | null;
   matchedOverrideId?: string | null;
+  matchedWorkflowApprovalId?: string | null;
   status?: PolicyInvocationRecord["status"] | null;
   sessionId?: string | null;
   workflowExecutionId?: string | null;
@@ -437,6 +456,7 @@ export interface AuditInvocationRow {
   error?: string | null;
   durationMs?: number | null;
   startedAt?: number | null;
+  resolvedBy?: string | null;
   createdAt?: number;
 }
 
@@ -469,6 +489,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         matchedPolicyId: row.matchedPolicyId ?? null,
         matchedGrantId: row.matchedGrantId ?? null,
         matchedOverrideId: row.matchedOverrideId ?? null,
+        matchedWorkflowApprovalId: row.matchedWorkflowApprovalId ?? null,
         status: row.status ?? null,
         sessionId: row.sessionId ?? null,
         workflowExecutionId: row.workflowExecutionId ?? null,
@@ -481,6 +502,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         error,
         durationMs: row.durationMs ?? null,
         startedAt: row.startedAt ?? null,
+        resolvedBy: row.resolvedBy ?? null,
       })
       .onConflictDoNothing();
   } catch (err) {
