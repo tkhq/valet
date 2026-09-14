@@ -690,7 +690,7 @@ An interactive `deny` resolution is an intentional no-op in the host adapter. It
 
 After approval, Valet re-evaluates the request with the approval fact or grant included. It does not execute only because a UI callback said yes. The new decision must bind the same request subject. A changed parameter, resource, actor, or target produces a different subject and requires a new decision.
 
-If a restart occurs after approval but before execution, the same idempotency key returns the stored post-approval decision. The interactive path reserves an attempt immediately before credential or action dispatch. It stores a bounded redacted result before it returns that result. An exact completed redelivery returns the stored result without credential or action dispatch. A redelivery of a started attempt returns `indeterminate_execution: the action may have run. Do not retry automatically.` Valet does not retry that attempt.
+If a restart occurs after approval but before execution, the same idempotency key returns the stored post-approval decision. The interactive path reserves an attempt immediately before credential or action dispatch. It stores a bounded redacted replay copy before it returns the full live result. An exact completed or handled-failure redelivery returns the bounded copy without credential or action dispatch. The returned marker states when replay truncation occurred. A redelivery of a started attempt returns `indeterminate_execution: the action may have run. Do not retry automatically.` Valet does not retry that attempt.
 
 ## Obligations and redaction
 

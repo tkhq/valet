@@ -50,6 +50,11 @@ describe("canonical workflow action invocation", () => {
       expect(execute).toHaveBeenCalledOnce();
 
       await pg.appDb.delete(actionInvocations).where(eq(actionInvocations.invocationId, request.invocationId));
+      await pg.appDb.update(authorizationExecutionAttempts).set({ outcome: "completed", redactedResult: { ok: true, result: { value: "x".repeat(70_000) } }, redactedError: null, finishedAt: 30 });
+      await expect(invoke(request, context)).resolves.toMatchObject({ ok: true, result: { truncated: true } });
+      expect(execute).toHaveBeenCalledOnce();
+
+      await pg.appDb.delete(actionInvocations).where(eq(actionInvocations.invocationId, request.invocationId));
       await pg.appDb.update(authorizationExecutionAttempts).set({ outcome: "started", redactedResult: null, redactedError: null, finishedAt: null });
       await expect(invoke(request, context)).resolves.toEqual({ ok: false, error: "indeterminate_execution: the action may have run. Do not retry automatically." });
       expect((await pg.appDb.select().from(authorizationExecutionAttempts))[0]?.outcome).toBe("indeterminate");

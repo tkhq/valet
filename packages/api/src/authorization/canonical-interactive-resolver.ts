@@ -59,7 +59,7 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
       const persisted = boundedSettlement(settlement);
       const updated = await opts.db.update(authorizationExecutionAttempts).set(persisted.outcome === "completed"
         ? { outcome: "completed", redactedResult: persisted.result, redactedError: null, finishedAt: now() }
-        : { outcome: "failed", redactedResult: null, redactedError: persisted.error, finishedAt: now() })
+        : { outcome: "failed", redactedResult: persisted.result ?? null, redactedError: persisted.error, finishedAt: now() })
         .where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.outcome, "started")))
         .returning({ attemptId: authorizationExecutionAttempts.attemptId });
       if (!updated[0]) return settlementFromAttempt(await loadAttempt(opts.db, attemptId), identity.decisionId, identity.idempotencyKey);
@@ -140,14 +140,18 @@ function assertAttemptIdentity(attempt: AttemptRow | undefined, decisionId: stri
 function replayAttempt(attempt: AttemptRow | undefined, decisionId: string, idempotencyKey: string): Awaited<ReturnType<NonNullable<PolicyResolver["reserveExecution"]>>> {
   assertAttemptIdentity(attempt, decisionId, idempotencyKey);
   if (attempt.outcome === "completed") return { kind: "completed", result: pluginResult(attempt.redactedResult) };
-  if (attempt.outcome === "failed" && attempt.redactedError) return { kind: "failed", error: attempt.redactedError };
+  if (attempt.outcome === "failed" && attempt.redactedError) return {
+    kind: "failed",
+    error: attempt.redactedError,
+    ...(attempt.redactedResult === null ? {} : { result: pluginResult(attempt.redactedResult) }),
+  };
   return { kind: "indeterminate", error: INDETERMINATE_EXECUTION };
 }
 
 function settlementFromAttempt(attempt: AttemptRow | undefined, decisionId: string, idempotencyKey: string): PolicyExecutionSettlement {
   const replay = replayAttempt(attempt, decisionId, idempotencyKey);
   if (replay.kind === "completed") return { outcome: "completed", result: replay.result };
-  if (replay.kind === "failed") return { outcome: "failed", error: replay.error };
+  if (replay.kind === "failed") return { outcome: "failed", error: replay.error, ...(replay.result === undefined ? {} : { result: replay.result }) };
   return { outcome: "failed", error: INDETERMINATE_EXECUTION };
 }
 
@@ -158,11 +162,13 @@ function pluginResult(value: unknown): PluginActionResult {
 }
 
 function boundedSettlement(settlement: PolicyExecutionSettlement): PolicyExecutionSettlement {
-  if (settlement.outcome === "failed") return { outcome: "failed", error: settlement.error.slice(0, POLICY_AUDIT_FIELD_CAP) };
-  const result = pluginResult(settlement.result);
-  const capped = capAuditField(result);
-  if (!capped.truncated) return { outcome: "completed", result };
-  return { outcome: "completed", result: { success: true, data: capped.value } satisfies PluginActionResult };
+  const result = settlement.outcome === "completed" ? pluginResult(settlement.result) : settlement.result === undefined ? undefined : pluginResult(settlement.result);
+  const capped = result === undefined ? undefined : capAuditField(result);
+  const replayResult = capped?.truncated
+    ? { success: result!.success, ...(result!.error === undefined ? {} : { error: result!.error.slice(0, POLICY_AUDIT_FIELD_CAP) }), data: capped.value } satisfies PluginActionResult
+    : result;
+  if (settlement.outcome === "failed") return { outcome: "failed", error: settlement.error.slice(0, POLICY_AUDIT_FIELD_CAP), ...(replayResult === undefined ? {} : { result: replayResult }) };
+  return { outcome: "completed", result: replayResult! };
 }
 
 function policyDecision(envelope: PolicyDecisionEnvelope, decisionId: string, executionInputDigest: string, grantIds: readonly string[] = []): PolicyDecision {

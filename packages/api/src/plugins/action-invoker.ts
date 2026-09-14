@@ -453,7 +453,7 @@ async function replayCanonicalAttempt(
   }
   if (attempt.outcome === "completed") {
     const bytes = new TextEncoder().encode(canonicalAuthorizationJson(attempt.redactedResult)).length;
-    if (bytes > 65_536) throw new Error("Canonical execution outcome exceeds the replay limit.");
+    if (bytes > 65_536) return { ok: true, result: { truncated: true, preview: canonicalAuthorizationJson(attempt.redactedResult).slice(0, 8192) } };
     return parseStoredResult(attempt.redactedResult);
   }
   if (attempt.outcome === "failed" && attempt.redactedError) return { ok: false, error: attempt.redactedError };

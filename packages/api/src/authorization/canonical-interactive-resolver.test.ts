@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pluginCatalogTools, type ActionPlugin, type CredentialProvider, type PolicyResolveInput, type Sandbox, type ToolContext, type ValetPlugin } from "@valet/engine";
 import {
+  actionInvocations,
   actionPolicies,
   authorizationDecisions,
   authorizationExecutionAttempts,
@@ -100,6 +101,83 @@ describe("canonicalInteractivePolicyResolver", () => {
       }
       expect((await pg.appDb.select().from(authorizationExecutionAttempts)).map((row) => row.outcome).sort()).toEqual(["completed", "completed", "started", "started"]);
     } finally { releaseDispatch?.(); await manager.close(); }
+  }, 120_000);
+
+  it("keeps live results full and replays bounded audit-safe results", async () => {
+    pg = await freshTestPgDb();
+    await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    const payload = "x".repeat(20_000);
+    const credentialGet = vi.fn(async () => null);
+    const execute = vi.fn(async (args: unknown, context: { credentials: CredentialProvider }) => {
+      if (!args || typeof args !== "object" || !("value" in args) || typeof args.value !== "string") throw new Error("invalid test input");
+      await context.credentials.get();
+      return args.value === "success"
+        ? { success: true, data: payload }
+        : { success: false, error: payload };
+    });
+    const actionPlugin: ActionPlugin = { service: "github", safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [{ id: "github.create_issue", name: "Action", description: "Action", riskLevel: "low", parameters: Type.Object({ value: Type.String() }), execute }] };
+    const plugin = { name: "github", version: "1", actions: [actionPlugin] } as ValetPlugin;
+    const map = new Map([["github", { plugin, actionPlugin }]]);
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, map, () => 10);
+    const credentials: CredentialProvider = { get: credentialGet, request: async () => { throw new Error("not connected"); } };
+    const context = (resolver: ReturnType<typeof canonicalInteractivePolicyResolver>, queueItemId: string): ToolContext => ({
+      userId: "user-1", orgId: "org-1", sessionId: "session-1", threadId: "thread-1", owner: { type: "user", id: "user-1" }, queueItemId,
+      credentials, sandbox: { id: "sandbox-1" } as Sandbox, policyResolver: resolver, signal: new AbortController().signal,
+      requestDecision: async () => { throw new Error("unexpected approval"); }, threadRead: async () => [], listThreads: async () => [], setModel: async ({ model }) => ({ fromModel: model, toModel: model }),
+    });
+    const waitForActionLog = async (count: number) => {
+      for (let i = 0; i < 100; i += 1) {
+        const rows = await pg!.appDb.select().from(actionInvocations);
+        if (rows.length === count) return rows;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      throw new Error(`Action Log did not contain ${count} rows.`);
+    };
+    try {
+      await manager.ensureOrganizationReady("org-1");
+      const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const restart = () => canonicalInteractivePolicyResolver({ db: pg!.appDb, service, plugins: map, clock: () => 30 });
+      const call = pluginCatalogTools({ plugins: [actionPlugin] })[1]!;
+
+      const first = await call.execute({ tool_id: "github.create_issue", params: { value: "success" }, summary: "create" }, context(restart(), "queue-success"));
+      expect(first.text).toBe(payload);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(credentialGet).toHaveBeenCalledTimes(1);
+      expect((await pg.appDb.select().from(authorizationExecutionAttempts))[0]?.redactedResult).toMatchObject({ success: true, data: { truncated: true } });
+      expect(await waitForActionLog(1)).toMatchObject([{ status: "completed", result: { truncated: true } }]);
+
+      const replay = await call.execute({ tool_id: "github.create_issue", params: { value: "success" }, summary: "create" }, context(restart(), "queue-success"));
+      expect(replay.text).toContain("replay result truncated");
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(credentialGet).toHaveBeenCalledTimes(1);
+      expect(await waitForActionLog(1)).toHaveLength(1);
+
+      const auditCrash = { ...restart(), onInvocation: async () => { throw new Error("process stopped after settlement"); } };
+      const crashed = await call.execute({ tool_id: "github.create_issue", params: { value: "failure" }, summary: "create" }, context(auditCrash, "queue-failure"));
+      expect(crashed.text).toBe(`github.create_issue failed: ${payload}`);
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(credentialGet).toHaveBeenCalledTimes(2);
+      expect((await pg.appDb.select().from(authorizationExecutionAttempts))[1]?.redactedResult).toMatchObject({ success: false, data: { truncated: true } });
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      expect(await pg.appDb.select().from(actionInvocations)).toHaveLength(1);
+
+      const repaired = await call.execute({ tool_id: "github.create_issue", params: { value: "failure" }, summary: "create" }, context(restart(), "queue-failure"));
+      expect(repaired.text).toContain("replay result truncated");
+      expect(repaired.text.length).toBeLessThan(payload.length);
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(credentialGet).toHaveBeenCalledTimes(2);
+      expect(await waitForActionLog(2)).toMatchObject([
+        { status: "completed", result: { truncated: true } },
+        { status: "completed", result: { truncated: true } },
+      ]);
+
+      await call.execute({ tool_id: "github.create_issue", params: { value: "failure" }, summary: "create" }, context(restart(), "queue-failure"));
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(credentialGet).toHaveBeenCalledTimes(2);
+      expect(await waitForActionLog(2)).toHaveLength(2);
+    } finally {
+      await manager.close();
+    }
   }, 120_000);
 
   it("survives crashes at every interactive execution boundary", async () => {

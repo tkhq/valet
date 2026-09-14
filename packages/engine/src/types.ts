@@ -1135,12 +1135,12 @@ export interface PolicyInvocationRecord {
 export type PolicyExecutionReservation =
   | { kind: "execute"; attemptId: string }
   | { kind: "completed"; result: unknown }
-  | { kind: "failed"; error: string }
+  | { kind: "failed"; error: string; result?: unknown }
   | { kind: "indeterminate"; error: string };
 
 export type PolicyExecutionSettlement =
   | { outcome: "completed"; result: unknown }
-  | { outcome: "failed"; error: string };
+  | { outcome: "failed"; error: string; result?: unknown };
 
 export interface PolicyResolver {
   resolve(input: PolicyResolveInput): Promise<PolicyDecision>;

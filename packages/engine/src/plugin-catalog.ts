@@ -1228,7 +1228,10 @@ type BaseInvocationRecord = Omit<
  * the result. When `audit` is supplied (present-resolver path), emit exactly
  * one fire-and-forget `onInvocation` record for the terminal disposition
  * (`error` for a param-validation failure or a thrown execute, `completed`
- * otherwise). Absent-resolver callers pass no `audit` and emit nothing.
+ * for every returned handler result). Durable outcome replays also emit the
+ * same idempotent completed record, which repairs a crash after settlement
+ * and before the Action Log write. Absent-resolver callers pass no `audit`
+ * and emit nothing.
  */
 async function executeAction(
   entry: CatalogEntry,
@@ -1261,9 +1264,19 @@ async function executeAction(
     } catch (err) {
       return { kind: "error", message: err instanceof Error ? err.message : String(err) };
     }
-    if (reservation.kind === "completed") return { kind: "ok", result: storedPluginResult(reservation.result) };
+    if (reservation.kind === "completed") {
+      const result = storedPluginResult(reservation.result);
+      emitCompletedInvocation(audit, result);
+      return { kind: "ok", result };
+    }
     if (reservation.kind === "indeterminate") return { kind: "indeterminate-execution", message: reservation.error };
-    if (reservation.kind === "failed") return { kind: "error", message: reservation.error };
+    if (reservation.kind === "failed") {
+      const result = reservation.result === undefined
+        ? { success: false, error: reservation.error }
+        : storedPluginResult(reservation.result);
+      emitCompletedInvocation(audit, result);
+      return { kind: "ok", result };
+    }
     attemptId = reservation.attemptId;
   }
 
@@ -1292,25 +1305,30 @@ async function executeAction(
     );
     let userResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "user_output") ?? []) : result;
     const auditResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "audit") ?? []) : result;
-    if (audit?.resolver.completeExecution && attemptId) {
+    if (audit && audit.resolver.completeExecution && attemptId) {
       try {
         const settlement = result.success
           ? await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "completed", result: userResult })
-          : await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "failed", error: result.error ?? "Action execution failed." });
-        if (settlement.outcome === "failed") return settlement.error.startsWith("indeterminate_execution:")
-          ? { kind: "indeterminate-execution", message: settlement.error }
-          : { kind: "error", message: settlement.error };
-        userResult = storedPluginResult(settlement.result);
+          : await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "failed", error: result.error ?? "Action execution failed.", result: userResult });
+        if (settlement.outcome === "failed") {
+          if (settlement.error.startsWith("indeterminate_execution:")) {
+            return { kind: "indeterminate-execution", message: settlement.error };
+          }
+          emitCompletedInvocation(audit, auditResult, startedAt);
+          return { kind: "ok", result: userResult };
+        }
+        // The durable copy is only for replay. The first caller keeps the
+        // handler's full result after settlement confirms it was persisted.
       } catch {
         return { kind: "indeterminate-execution", message: "indeterminate_execution: the action may have run. Do not retry automatically." };
       }
     }
-    if (audit) emitInvocation(audit.resolver, { ...audit.record, status: "completed", durationMs: Date.now() - startedAt, result: auditResult });
+    if (audit) emitCompletedInvocation(audit, auditResult, startedAt);
     return { kind: "ok", result: userResult };
   } catch (err) {
     let message = err instanceof Error ? err.message : String(err);
     let indeterminate = false;
-    if (audit?.resolver.completeExecution && attemptId) {
+    if (audit && audit.resolver.completeExecution && attemptId) {
       try {
         const settlement = await audit.resolver.completeExecution(audit.input, audit.decision, attemptId, { outcome: "failed", error: message });
         if (settlement.outcome === "failed") message = settlement.error;
@@ -1339,6 +1357,19 @@ async function executeAction(
     }
     return { kind: "error", message };
   }
+}
+
+function emitCompletedInvocation(
+  audit: NonNullable<Parameters<typeof executeAction>[5]>,
+  result: PluginActionResult,
+  startedAt?: number,
+): void {
+  emitInvocation(audit.resolver, {
+    ...audit.record,
+    status: "completed",
+    ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }),
+    result,
+  });
 }
 
 function storedPluginResult(value: unknown): PluginActionResult {
@@ -1430,6 +1461,10 @@ function scopedCredentialProvider(
   };
 }
 
+function isTruncatedReplay(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as Record<string, unknown>).truncated === true;
+}
+
 function actionResultToToolResult(
   result: PluginActionResult,
   toolId: string,
@@ -1437,7 +1472,7 @@ function actionResultToToolResult(
   const attachments = result.attachments;
   if (!result.success) {
     return {
-      text: `${toolId} failed: ${result.error ?? "unknown error"}`,
+      text: `${toolId} failed: ${result.error ?? "unknown error"}${isTruncatedReplay(result.data) ? " (replay result truncated)" : ""}`,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
       ok: false,
     };
@@ -1449,8 +1484,9 @@ function actionResultToToolResult(
       ok: true,
     };
   }
+  const text = typeof result.data === "string" ? result.data : encodeToolOutput(result.data);
   return {
-    text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
+    text: isTruncatedReplay(result.data) ? `replay result truncated\n${text}` : text,
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
   };
