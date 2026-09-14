@@ -79,7 +79,11 @@ function echoTokenAction(): PluginAction {
 }
 
 function echoTokenPlugin(): ValetPlugin {
-  const actionPlugin: ActionPlugin = { service: "github", actions: [echoTokenAction()] };
+  const actionPlugin: ActionPlugin = {
+    service: "github",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
+    actions: [echoTokenAction()],
+  };
   return { name: "github-echo", version: "0.0.1", actions: [actionPlugin] };
 }
 
