@@ -1,4 +1,4 @@
-import { toolApprovalGateContext } from "@valet/engine";
+import { isLegacyToolApprovalBody, toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -54,7 +54,7 @@ const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_appr
  */
 function gateApprovalDetails(context: Record<string, unknown> | undefined, body?: string): WireDecisionGate["approval"] | undefined {
   const approval = toolApprovalGateContext(context);
-  if (!approval) return /(?:tool_id|args)=/.test(body ?? "") ? { reviewIncomplete: true } : undefined;
+  if (!approval) return isLegacyToolApprovalBody(body) ? { reviewIncomplete: true } : undefined;
   return {
     ...(approval.toolId !== undefined ? { toolId: approval.toolId } : {}),
     riskLevel: approval.riskLevel,

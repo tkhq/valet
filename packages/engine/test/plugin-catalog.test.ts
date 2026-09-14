@@ -1784,3 +1784,12 @@ describe("pluginCatalogTools duplicate action identity", () => {
     ] })).toThrow("duplicate plugin action id: shared.run");
   });
 });
+
+describe("legacy approval body recognition", () => {
+  it("recognizes only the structured tool body, not ordinary prose", async () => {
+    const { isLegacyToolApprovalBody } = await import("../src/plugin-catalog.js");
+    expect(isLegacyToolApprovalBody('Approve it; args=the requested options.')).toBe(false);
+    expect(isLegacyToolApprovalBody('The user said tool_id=not-a-tool.')).toBe(false);
+    expect(isLegacyToolApprovalBody('Approve it\n\ntool_id=github.create_issue\nargs={"title":"x"}')).toBe(true);
+  });
+});

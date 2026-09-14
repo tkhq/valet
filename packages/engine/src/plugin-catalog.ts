@@ -480,7 +480,12 @@ function approvalArgsPreview(args: Record<string, unknown>): { preview: string; 
 }
 
 /** Stable, non-reversible commitment to the exact prepared argument values. */
-export function preparedArgsDigest(args: Record<string, unknown>): string {
+/** Recognize only the old machine-generated approval body, never incidental prose. */
+export function isLegacyToolApprovalBody(body: string | undefined): boolean {
+  return /(?:^|\r?\n\r?\n)tool_id=[^\r\n]+\r?\nargs=(?:\{.*|\[.*)$(?:\r?\n)?/s.test(body ?? "");
+}
+
+function preparedArgsDigest(args: Record<string, unknown>): string {
   const canonicalize = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(canonicalize);
     if (value !== null && typeof value === "object") {
@@ -805,6 +810,7 @@ function buildEntries(
     const entry: CatalogEntry = { service, plugin, action };
     entries.push(entry);
     const fqid = action.id.includes(".") ? action.id : `${service}.${action.id}`;
+    if (byId.has(fqid)) throw new Error("duplicate plugin action id: " + fqid);
     byId.set(fqid, entry);
     // Allow a bare id lookup when unambiguous.
     if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);
@@ -854,6 +860,12 @@ async function resolveDynamic(
     credentials: scopedCredentialProvider(ctx, credentialService),
   });
   const built = buildEntries(plugin.service, plugin, actions);
+  for (const entry of built.entries) {
+    const id = qualifiedId(entry);
+    if (catalog.byId.has(id) || [...catalog.resolved.values()].some((resolved) => resolved.entries.some((other) => qualifiedId(other) === id))) {
+      throw new Error("duplicate plugin action id: " + id);
+    }
+  }
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
   catalog.resolved.set(plugin.service, result);
   return result;

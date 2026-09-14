@@ -148,6 +148,7 @@ export {
   type ToolApprovalGateContext,
   pinnedToolName,
   MAX_PINNED_ACTIONS,
+  isLegacyToolApprovalBody,
   RESOLVE_TTL_MS,
   type ActionPlugin,
   type ApprovalMode,
