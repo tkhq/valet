@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { assertEnvelope, buildActionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, obligationDigestOf, requestSubjectDigest, type AuthorizationRequest, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
-import type { AppDb } from "../lib/drizzle.js";
+import type { AppDb, AppTx } from "../lib/drizzle.js";
 import { authorizationDecisions, type AuthorizationDecisionRow } from "../schema/index.js";
 import { buildDecisionAuditPlan } from "./action-audit.js";
 import type { AuthorizationService } from "./contracts.js";
@@ -14,6 +14,7 @@ export function canonicalDecisionId(orgId: string, idempotencyKey: string): stri
 
 export class CanonicalAuthorizationService implements AuthorizationService {
   private constructor(
+    private readonly manager: CanonicalPolicyBundleManager,
     private readonly db: AppDb,
     private readonly evaluator: LocalValetEvaluator,
     private readonly evidence: { profileDigest: string; interpreterDigest: string; contractDigest: string },
@@ -23,11 +24,15 @@ export class CanonicalAuthorizationService implements AuthorizationService {
   static async create(manager: CanonicalPolicyBundleManager, now: () => number = Date.now): Promise<CanonicalAuthorizationService> {
     const identity = await manager.runtime.identity();
     const digest = (value: unknown) => createHash("sha256").update(canonicalAuthorizationJson(value)).digest("hex");
-    return new CanonicalAuthorizationService(manager.db, await LocalValetEvaluator.create(manager.host, manager.runtime), {
+    return new CanonicalAuthorizationService(manager, manager.db, await LocalValetEvaluator.create(manager.host, manager.runtime), {
       profileDigest: digest({ capabilityProfileVersion: identity.capabilityProfileVersion, maxWallTimeMs: identity.maxWallTimeMs, maxEngineMemoryBytes: identity.maxEngineMemoryBytes }),
       interpreterDigest: digest({ name: identity.interpreterName, version: identity.interpreterVersion, revision: identity.interpreterRevision, regoVersion: identity.regoVersion }),
       contractDigest: digest({ contractVersion: identity.contractVersion }),
     }, now);
+  }
+
+  async mutateAndActivate<T>(organizationId: string, audit: { actorId: string; operation: string; idempotencyKey: string }, mutate: (tx: AppTx) => Promise<T>): Promise<T> {
+    return this.manager.mutateAndActivate(organizationId, audit, mutate);
   }
 
   async preview(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> {

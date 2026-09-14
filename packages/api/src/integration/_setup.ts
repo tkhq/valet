@@ -318,6 +318,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     seededPlugins.push(securityPlugin);
   }
   const { plugins, actionPluginByService } = assemblePlugins([seededPlugins]);
+  const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
+  await ensureCanonicalPolicyReadiness(canonicalPolicyManager);
+  const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
 
   // Same circular-construction indirection as providers/node.ts — see its
   // comment. Test callers that want to unit-test the spawner/watcher/reader
@@ -360,6 +363,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     apiBaseUrl,
     plugins,
     actionPluginByService,
+    canonicalAuthorizationService,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -483,6 +487,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     // the whole path was untestable.
     githubTokenDeps: opts.githubTokenDeps ?? { key: deriveSecretKey("test-key") },
     onePassword,
+    canonicalAuthorizationService,
   });
   // "Grant the rest of this run" (action-policies plan, Task 3/6): mirrors
   // `providers/node.ts`'s real-boot `onApprovalGrant` wiring so integration
@@ -563,9 +568,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),
   });
 
-  const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
-  await ensureCanonicalPolicyReadiness(canonicalPolicyManager);
-  const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
   const providers: Providers = {
     db,
     canonicalPolicyManager,

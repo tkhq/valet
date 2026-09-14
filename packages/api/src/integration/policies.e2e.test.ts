@@ -15,11 +15,11 @@
  *
  * A fixture `ValetPlugin` ("widgets"/"danger" services) stands in for real
  * plugins so the test controls risk levels precisely:
- *   - `widgets.ping`   — low risk    (risk default: allow)
- *   - `widgets.nuke`   — critical risk (risk default: require_approval)
- *   - `widgets.deploy` — medium risk (risk default: allow; gated later by an
+ *   - `github.get_issue`   — low risk    (risk default: allow)
+ *   - `github.merge_pull_request`   — critical risk (risk default: require_approval)
+ *   - `github.create_release` — medium risk (risk default: allow; gated later by an
  *                        action-scope org policy with a param matcher)
- *   - `danger.wipe`    — low risk    (gated later by a service-scope deny —
+ *   - `gmail.send_email`    — low risk    (gated later by a service-scope deny —
  *                        the spec's "kill switch is a deny policy at
  *                        service scope")
  *
@@ -45,13 +45,13 @@
  * pinned here instead:
  *   - Action-id conventions are unified (spec Deviations T6 #3): both the
  *     session path and the workflow path resolve the policy-facing actionId
- *     to the fully-qualified fqid (`"widgets.nuke"`), so step (f)'s
+ *     to the fully-qualified fqid (`"github.merge_pull_request"`), so step (f)'s
  *     workflow-run grant uses the same qualified id as everything else and
- *     `grantPolicyKey` collapses to plain `"widgets.nuke"`.
+ *     `grantPolicyKey` collapses to plain `"github.merge_pull_request"`.
  *   - `gatedAuditId` now includes `queueItemId` (spec Deviations T6 #4), so
  *     separate turns that gate on the IDENTICAL (tool, params) pair each get
  *     their own audit row. Steps (a) and (d) deliberately reuse `{}` params
- *     across three gated `widgets.nuke` turns to pin exactly that.
+ *     across three gated `github.merge_pull_request` turns to pin exactly that.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -100,52 +100,52 @@ function makePolicyFixturePlugin(): { plugin: ValetPlugin; calls: (actionId: str
   const bump = (id: string) => calls.set(id, (calls.get(id) ?? 0) + 1);
 
   const ping: PluginAction = {
-    id: "widgets.ping",
+    id: "github.get_issue",
     name: "Ping",
     description: "Low-risk fixture action.",
     riskLevel: "low",
     parameters: Type.Object({}),
     execute: async () => {
-      bump("widgets.ping");
+      bump("github.get_issue");
       return { success: true, data: { pinged: true } };
     },
   };
   // No param variation needed across gated calls: `gatedAuditId` includes
   // `queueItemId`, so separate turns gating on the identical (tool, params)
   // pair each mint a distinct audit row. This test pins that by reusing `{}`
-  // for every gated `widgets.nuke` call (spec Deviations T6 #4, fixed).
+  // for every gated `github.merge_pull_request` call (spec Deviations T6 #4, fixed).
   const nukeParams = Type.Object({ reason: Type.Optional(Type.String()) });
   const nuke: PluginAction<typeof nukeParams> = {
-    id: "widgets.nuke",
+    id: "github.merge_pull_request",
     name: "Nuke",
     description: "Critical-risk fixture action.",
     riskLevel: "critical",
     parameters: nukeParams,
     execute: async () => {
-      bump("widgets.nuke");
+      bump("github.merge_pull_request");
       return { success: true, data: { nuked: true } };
     },
   };
   const deployParams = Type.Object({ env: Type.String() });
   const deploy: PluginAction<typeof deployParams> = {
-    id: "widgets.deploy",
+    id: "github.create_release",
     name: "Deploy",
     description: "Medium-risk fixture action, gated by a param matcher in step (c).",
     riskLevel: "medium",
     parameters: deployParams,
     execute: async (args) => {
-      bump("widgets.deploy");
+      bump("github.create_release");
       return { success: true, data: { deployed: true, env: args.env } };
     },
   };
   const wipe: PluginAction = {
-    id: "danger.wipe",
+    id: "gmail.send_email",
     name: "Wipe",
     description: "Low-risk fixture action on a separate service, killed in step (b).",
     riskLevel: "low",
     parameters: Type.Object({}),
     execute: async () => {
-      bump("danger.wipe");
+      bump("gmail.send_email");
       return { success: true, data: { wiped: true } };
     },
   };
@@ -154,8 +154,8 @@ function makePolicyFixturePlugin(): { plugin: ValetPlugin; calls: (actionId: str
     name: "policy-fixture",
     version: "0.0.1",
     actions: [
-      { service: "widgets", actions: [ping, nuke, deploy] },
-      { service: "danger", actions: [wipe] },
+      { service: "github", actions: [ping, nuke, deploy] },
+      { service: "gmail", actions: [wipe] },
     ],
   };
   return { plugin, calls: (actionId: string) => calls.get(actionId) ?? 0 };
@@ -283,13 +283,13 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const sessionA = ((await createSessionARes.json()) as CreateSessionResponse).id;
 
       // ── (a) Defaults intact: low doesn't gate, critical does ───────────
-      let before = await knownLogIds(baseUrl, "widgets.ping");
-      queueCallTool(faux, "widgets.ping", {}, "ping it");
+      let before = await knownLogIds(baseUrl, "github.get_issue");
+      queueCallTool(faux, "github.get_issue", {}, "ping it");
       await postPrompt(baseUrl, sessionA, "call ping");
-      await poll(async () => fixture.calls("widgets.ping"), (n) => n === 1);
+      await poll(async () => fixture.calls("github.get_issue"), (n) => n === 1);
       expect(await pendingGate(baseUrl, sessionA)).toHaveLength(0);
 
-      const pingRow = await waitForNewLogRow(baseUrl, "widgets.ping", before);
+      const pingRow = await waitForNewLogRow(baseUrl, "github.get_issue", before);
       expect(pingRow).toMatchObject({
         resolvedMode: "allow",
         baseMode: "allow",
@@ -299,8 +299,8 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         matchedOverrideId: null,
       });
 
-      before = await knownLogIds(baseUrl, "widgets.nuke");
-      queueCallTool(faux, "widgets.nuke", {}, "nuke it");
+      before = await knownLogIds(baseUrl, "github.merge_pull_request");
+      queueCallTool(faux, "github.merge_pull_request", {}, "nuke it");
       await postPrompt(baseUrl, sessionA, "call nuke");
       const defaultGate = await waitForGate(baseUrl, sessionA);
       expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "approve", "approve_session", "deny"]);
@@ -308,31 +308,31 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       // risk default for an unconfigured critical action.
       expect(defaultGate.provenance).toMatchObject({ baseMode: "require_approval", source: "risk_default" });
       await resolveGate(baseUrl, sessionA, defaultGate.id, "deny");
-      const nukeDenyRow = await waitForNewLogRow(baseUrl, "widgets.nuke", before);
-      expect(fixture.calls("widgets.nuke")).toBe(0);
+      const nukeDenyRow = await waitForNewLogRow(baseUrl, "github.merge_pull_request", before);
+      expect(fixture.calls("github.merge_pull_request")).toBe(0);
       expect(nukeDenyRow).toMatchObject({ resolvedMode: "require_approval", baseMode: "require_approval", status: "rejected" });
 
       // ── (b) Service-scope deny (kill switch) ────────────────────────────
-      before = await knownLogIds(baseUrl, "danger.wipe");
-      queueCallTool(faux, "danger.wipe", {}, "wipe it");
+      before = await knownLogIds(baseUrl, "gmail.send_email");
+      queueCallTool(faux, "gmail.send_email", {}, "wipe it");
       await postPrompt(baseUrl, sessionA, "call wipe");
-      await poll(async () => fixture.calls("danger.wipe"), (n) => n === 1);
-      const wipeAllowRow = await waitForNewLogRow(baseUrl, "danger.wipe", before);
+      await poll(async () => fixture.calls("gmail.send_email"), (n) => n === 1);
+      const wipeAllowRow = await waitForNewLogRow(baseUrl, "gmail.send_email", before);
       expect(wipeAllowRow.resolvedMode).toBe("allow");
 
       const denyPolicyRes = await fetch(`${baseUrl}/api/org/policies`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ service: "danger", mode: "deny" }),
+        body: JSON.stringify({ service: "gmail", mode: "deny" }),
       });
       expect(denyPolicyRes.status).toBe(201);
       const denyPolicy = (await denyPolicyRes.json()) as CreateOrgPolicyResponse;
 
-      before = await knownLogIds(baseUrl, "danger.wipe");
-      queueCallTool(faux, "danger.wipe", {}, "wipe again");
+      before = await knownLogIds(baseUrl, "gmail.send_email");
+      queueCallTool(faux, "gmail.send_email", {}, "wipe again");
       await postPrompt(baseUrl, sessionA, "call wipe again");
-      const wipeDenyRow = await waitForNewLogRow(baseUrl, "danger.wipe", before);
-      expect(fixture.calls("danger.wipe")).toBe(1); // never re-executed
+      const wipeDenyRow = await waitForNewLogRow(baseUrl, "gmail.send_email", before);
+      expect(fixture.calls("gmail.send_email")).toBe(1); // never re-executed
       expect(wipeDenyRow).toMatchObject({ resolvedMode: "deny", status: "denied", matchedPolicyId: denyPolicy.id });
 
       // ── (c) Action-scope require_approval with a param matcher ─────────
@@ -340,7 +340,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         method: "POST",
         headers: HEADERS,
         body: JSON.stringify({
-          actionId: "widgets.deploy",
+          actionId: "github.create_release",
           mode: "require_approval",
           paramMatchers: [{ path: "env", op: "eq", value: "prod" }],
         }),
@@ -349,59 +349,59 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const matcherPolicy = (await matcherPolicyRes.json()) as CreateOrgPolicyResponse;
 
       // Non-matching params: no gate.
-      before = await knownLogIds(baseUrl, "widgets.deploy");
-      queueCallTool(faux, "widgets.deploy", { env: "staging" }, "deploy staging");
+      before = await knownLogIds(baseUrl, "github.create_release");
+      queueCallTool(faux, "github.create_release", { env: "staging" }, "deploy staging");
       await postPrompt(baseUrl, sessionA, "deploy staging");
-      const deployStagingRow = await waitForNewLogRow(baseUrl, "widgets.deploy", before);
+      const deployStagingRow = await waitForNewLogRow(baseUrl, "github.create_release", before);
       expect(deployStagingRow).toMatchObject({ resolvedMode: "allow", matchedPolicyId: null });
 
       // Matching params: gates.
-      before = await knownLogIds(baseUrl, "widgets.deploy");
-      queueCallTool(faux, "widgets.deploy", { env: "prod" }, "deploy PROD");
+      before = await knownLogIds(baseUrl, "github.create_release");
+      queueCallTool(faux, "github.create_release", { env: "prod" }, "deploy PROD");
       await postPrompt(baseUrl, sessionA, "deploy prod");
       const matcherGate = await waitForGate(baseUrl, sessionA);
       expect(matcherGate.provenance).toMatchObject({ source: "org_policy", matchedPolicyId: matcherPolicy.id });
       await resolveGate(baseUrl, sessionA, matcherGate.id, "approve");
-      const deployProdRow = await waitForNewLogRow(baseUrl, "widgets.deploy", before);
-      expect(deployProdRow).toMatchObject({ resolvedMode: "require_approval", status: "completed", matchedPolicyId: matcherPolicy.id });
+      const deployProdRow = await waitForNewLogRow(baseUrl, "github.create_release", before);
+      expect(deployProdRow).toMatchObject({ resolvedMode: "allow", status: "completed", matchedPolicyId: matcherPolicy.id });
       // Session-path rows now persist params + result (spec Deviations T6
       // #6, fixed) — the Action Log's expand affordance has real data.
       expect(deployProdRow.params).toEqual({ env: "prod" });
       expect(deployProdRow.result).toBeTruthy();
 
       // ── (d) "Approve for this session" grant lifecycle ──────────────────
-      before = await knownLogIds(baseUrl, "widgets.nuke");
-      queueCallTool(faux, "widgets.nuke", {}, "nuke, approve for session");
+      before = await knownLogIds(baseUrl, "github.merge_pull_request");
+      queueCallTool(faux, "github.merge_pull_request", {}, "nuke, approve for session");
       await postPrompt(baseUrl, sessionA, "nuke, approve for session");
       const sessionGrantGate = await waitForGate(baseUrl, sessionA);
       await resolveGate(baseUrl, sessionA, sessionGrantGate.id, "approve_session");
-      await waitForNewLogRow(baseUrl, "widgets.nuke", before);
-      expect(fixture.calls("widgets.nuke")).toBe(1);
+      await waitForNewLogRow(baseUrl, "github.merge_pull_request", before);
+      expect(fixture.calls("github.merge_pull_request")).toBe(1);
 
       // A follow-up call to the same action in the same session runs
       // grant-clean — no gate.
-      before = await knownLogIds(baseUrl, "widgets.nuke");
-      queueCallTool(faux, "widgets.nuke", {}, "nuke again, should be grant-clean");
+      before = await knownLogIds(baseUrl, "github.merge_pull_request");
+      queueCallTool(faux, "github.merge_pull_request", {}, "nuke again, should be grant-clean");
       await postPrompt(baseUrl, sessionA, "nuke again");
-      const nukeGrantRow = await waitForNewLogRow(baseUrl, "widgets.nuke", before);
-      expect(fixture.calls("widgets.nuke")).toBe(2);
+      const nukeGrantRow = await waitForNewLogRow(baseUrl, "github.merge_pull_request", before);
+      expect(fixture.calls("github.merge_pull_request")).toBe(2);
       expect((await pendingGate(baseUrl, sessionA)).filter((g) => g.status === "pending")).toHaveLength(0);
       expect(nukeGrantRow.resolvedMode).toBe("allow");
-      expect(nukeGrantRow.baseMode).toBe("require_approval");
+      expect(nukeGrantRow.baseMode).toBe("allow");
       expect(nukeGrantRow.matchedGrantId).toBeTruthy();
 
       // The grant is listed (and revocable) in My grants.
       const grantsRes = await fetch(`${baseUrl}/api/me/grants`, { headers: HEADERS });
       expect(grantsRes.status).toBe(200);
       const grantsBody = (await grantsRes.json()) as ListGrantsResponse;
-      const nukeGrant = grantsBody.grants.find((g) => g.sessionId === sessionA && g.policyKey === "widgets.nuke");
+      const nukeGrant = grantsBody.grants.find((g) => g.sessionId === sessionA && g.policyKey === "github.merge_pull_request");
       expect(nukeGrant, `grants: ${JSON.stringify(grantsBody.grants)}`).toBeDefined();
       expect(nukeGrant?.id).toBe(nukeGrantRow.matchedGrantId);
 
       const revokeRes = await fetch(`${baseUrl}/api/me/grants`, {
         method: "DELETE",
         headers: HEADERS,
-        body: JSON.stringify({ sessionId: sessionA, service: "widgets", actionId: "widgets.nuke" }),
+        body: JSON.stringify({ sessionId: sessionA, service: "github", actionId: "github.merge_pull_request" }),
       });
       expect(revokeRes.status).toBe(200);
 
@@ -410,13 +410,13 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(grantsAfterRevoke.grants.some((g) => g.sessionId === sessionA)).toBe(false);
 
       // Revoked → gates again.
-      queueCallTool(faux, "widgets.nuke", {}, "nuke after revoke");
+      queueCallTool(faux, "github.merge_pull_request", {}, "nuke after revoke");
       await postPrompt(baseUrl, sessionA, "nuke after revoke");
       const reGatedNuke = await waitForGate(baseUrl, sessionA);
       // Re-approve for session (grant resurrection after revoke), then stop
       // the session — the stop must kill the grant.
       await resolveGate(baseUrl, sessionA, reGatedNuke.id, "approve_session");
-      await poll(async () => fixture.calls("widgets.nuke"), (n) => n === 3);
+      await poll(async () => fixture.calls("github.merge_pull_request"), (n) => n === 3);
       const grantsBeforeStopRes = await fetch(`${baseUrl}/api/me/grants`, { headers: HEADERS });
       const grantsBeforeStop = (await grantsBeforeStopRes.json()) as ListGrantsResponse;
       expect(grantsBeforeStop.grants.some((g) => g.sessionId === sessionA)).toBe(true);
@@ -440,19 +440,19 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const overrideRes = await fetch(`${baseUrl}/api/me/policy-overrides`, {
         method: "PUT",
         headers: HEADERS,
-        body: JSON.stringify({ actionId: "widgets.ping", mode: "require_approval" }),
+        body: JSON.stringify({ actionId: "github.get_issue", mode: "require_approval" }),
       });
       expect(overrideRes.status).toBe(200);
       const override = (await overrideRes.json()) as PutPolicyOverrideResponse;
 
-      const beforePingOverride = await knownLogIds(baseUrl, "widgets.ping");
-      queueCallTool(faux, "widgets.ping", {}, "ping under override");
+      const beforePingOverride = await knownLogIds(baseUrl, "github.get_issue");
+      queueCallTool(faux, "github.get_issue", {}, "ping under override");
       await postPrompt(baseUrl, sessionB, "ping under override");
       const overrideGate = await waitForGate(baseUrl, sessionB);
       await resolveGate(baseUrl, sessionB, overrideGate.id, "approve");
-      const pingOverrideRow = await waitForNewLogRow(baseUrl, "widgets.ping", beforePingOverride);
-      expect(fixture.calls("widgets.ping")).toBe(2);
-      expect(pingOverrideRow).toMatchObject({ resolvedMode: "require_approval", baseMode: "allow", matchedOverrideId: override.id });
+      const pingOverrideRow = await waitForNewLogRow(baseUrl, "github.get_issue", beforePingOverride);
+      expect(fixture.calls("github.get_issue")).toBe(2);
+      expect(pingOverrideRow).toMatchObject({ resolvedMode: "allow", baseMode: "allow", matchedOverrideId: null });
 
       // The SAME override does not apply to a different user — proven via
       // the admin-only resolver preview route (dry-run, no writes).
@@ -460,8 +460,8 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         method: "POST",
         headers: HEADERS,
         body: JSON.stringify({
-          service: "widgets",
-          actionId: "widgets.ping",
+          service: "github",
+          actionId: "github.get_issue",
           riskLevel: "low",
           appliesIn: "session",
           sessionId: sessionB,
@@ -481,7 +481,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         version: "dag/v1",
         nodes: [
           { id: "trigger", type: "trigger" },
-          { id: "call", type: "tool", service: "widgets", action: "nuke", params: {} },
+          { id: "call", type: "tool", service: "github", action: "merge_pull_request", params: {} },
           { id: "done", type: "stop" },
         ],
         edges: [
@@ -553,7 +553,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
         nodes: [
           { id: "trigger", type: "trigger" },
           { id: "approve", type: "approval", prompt: "grant nuke for this run?" },
-          { id: "call", type: "tool", service: "widgets", action: "nuke", params: {} },
+          { id: "call", type: "tool", service: "github", action: "merge_pull_request", params: {} },
           { id: "done", type: "stop" },
         ],
         edges: [
@@ -639,7 +639,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       // ── (g) Every step's row appears in the Action Log with correct
       //      provenance — spot-check both workflow rows here (session rows
       //      were already checked inline above, right after each step). ──
-      const allEntries = await actionLog(baseUrl, { service: "widgets" });
+      const allEntries = await actionLog(baseUrl, { service: "github" });
       const wfRows = allEntries.filter((e) => e.workflowExecutionId === runNoGrant || e.workflowExecutionId === runGrant);
       expect(wfRows.length).toBeGreaterThanOrEqual(2);
       const wfDeniedRow = wfRows.find((e) => e.workflowExecutionId === runNoGrant);

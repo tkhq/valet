@@ -78,6 +78,9 @@ export interface GrantWrite {
   actionId: string;
   grantedBy: string;
   now: number;
+  riskLevel?: RiskLevel;
+  sourceApprovalId?: string;
+  expiresAt?: number;
 }
 
 /**
@@ -97,6 +100,11 @@ export async function writeSessionGrant(db: AppDb, sessionId: string, grant: Gra
       sessionId,
       workflowExecutionId: null,
       policyKey: grantPolicyKey(grant.service, grant.actionId),
+      service: grant.riskLevel ? grant.service : null,
+      actionId: grant.riskLevel ? grantPolicyKey(grant.service, grant.actionId) : null,
+      riskLevel: grant.riskLevel ?? null,
+      sourceApprovalId: grant.sourceApprovalId ?? null,
+      expiresAt: grant.expiresAt ?? null,
       mode: "allow",
       grantedBy: grant.grantedBy,
       createdAt: grant.now,
@@ -123,6 +131,11 @@ export async function writeExecutionGrant(
       sessionId: null,
       workflowExecutionId,
       policyKey: grantPolicyKey(grant.service, grant.actionId),
+      service: grant.riskLevel ? grant.service : null,
+      actionId: grant.riskLevel ? grantPolicyKey(grant.service, grant.actionId) : null,
+      riskLevel: grant.riskLevel ?? null,
+      sourceApprovalId: grant.sourceApprovalId ?? null,
+      expiresAt: grant.expiresAt ?? null,
       mode: "allow",
       grantedBy: grant.grantedBy,
       createdAt: grant.now,

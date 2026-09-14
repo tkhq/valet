@@ -523,15 +523,9 @@ export async function invokeAction(
   try {
     decision = await resolver.resolve(input);
   } catch {
-    // A failed read cannot establish whether the team has an absolute deny.
-    if (ctx.owner?.type === "team") {
-      return { kind: "error", message: "Could not check this team's action policies. Retry the action when policy checks are available." };
-    }
-    // Fail closed but keep a human in the loop — degrade to an approval
-    // gate rather than hard-deny on a transient resolver/store error.
     decision = {
-      mode: "require_approval",
-      provenance: { baseMode: "require_approval", source: "resolver_error" },
+      mode: "deny",
+      provenance: { baseMode: "deny", source: "resolver_error" },
     };
   }
 

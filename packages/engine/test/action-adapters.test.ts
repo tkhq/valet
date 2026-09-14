@@ -47,6 +47,12 @@ describe("canonical action request adapters", () => {
     expect(left.subject.invocation.type).toBe("interactive"); expect(right.subject.invocation.type).toBe("workflow");
   });
 
+  it("accepts queued actors and the engine's pretty-printed resume keys", () => {
+    expect(interactive({ owner: { type: "user", id: "credential-owner" } }).request.subject.principal.id).toBe("credential-owner");
+    expect(interactive({ resumeKey: "github.create_issue:{\n  \"title\": \"x\"\n}" }).request.subject.invocation.type).toBe("interactive");
+    expect(() => interactive({ resumeKey: "github.create_issue:\u0000" })).toThrowError(expect.objectContaining({ code: "invalid_identity" }));
+  });
+
   it("is deterministic under object permutations and changes semantic digests", () => {
     const a = interactive(), b = interactive({ action: { ...base.action, parameters: { rows: [{ password: "SECRET-CANARY", visible: 2 }], nested: { token: "SECRET-CANARY", visible: 1 }, title: "x" } } });
     expect(a.canonicalBytes).toBe(b.canonicalBytes); expect(a.requestSubjectDigest).toBe(b.requestSubjectDigest);
@@ -55,7 +61,6 @@ describe("canonical action request adapters", () => {
 
   it.each([
     [{ organizationId: "bad org" }, "invalid_identity"],
-    [{ owner: { type: "user", id: "other" } }, "identity_conflict"],
     [{ owner: { type: "team", id: "team-1" } }, "cross_scope"],
     [{ owner: { type: "team", id: "team-1" }, teamId: "team-2" }, "cross_scope"],
     [{ action: { ...base.action, actionId: "slack.create_issue" } }, "invalid_action"],

@@ -53,6 +53,7 @@ import type { CanonicalAuthorizationService } from "../authorization/canonical-a
 import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
 import { actionProjection } from "../authorization/action-projections.js";
 import { loadCanonicalDynamicFacts } from "../authorization/canonical-facts.js";
+import { persistInvocationAudit, updateInvocationOutcome } from "../policies/service.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   isUsableGithubUserRow,
@@ -380,6 +381,7 @@ async function computeResult(
 
   const prepared = prepareActionArgs(action.parameters, req.params);
   if (!prepared.ok) {
+    if (canonicalEnvelope) await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, ctx.orgId, { status: "error", error: prepared.error });
     return { ok: false, error: prepared.error };
   }
 
@@ -405,6 +407,7 @@ async function computeResult(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: "failed", redactedError: "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
+    if (canonicalEnvelope) await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, ctx.orgId, { status: "error", error: message, durationMs: (opts.clock ?? Date.now)() - startedAt });
     return { ok: false, error: message };
   }
 
@@ -415,6 +418,7 @@ async function computeResult(
   // path's `PolicyInvocationRecord.result` carries.
 
   if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: result.success ? "completed" : "failed", redactedResult: result.success ? { completed: true } : null, redactedError: result.success ? null : "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
+  if (canonicalEnvelope) await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, ctx.orgId, { status: result.success ? "completed" : "error", result, error: result.success ? undefined : (result.error ?? "failed with no error detail"), durationMs: (opts.clock ?? Date.now)() - startedAt });
 
   if (!result.success) {
     return { ok: false, error: result.error ?? `${req.service}.${req.action} failed with no error detail` };
@@ -507,6 +511,24 @@ async function enforceCanonicalWorkflowPolicy(
   const envelope = await service.authorize(adapted.request);
   buildActionObligationPlan(envelope.decision);
   redactCanonicalResult({}, envelope.decision.redactions);
+  const matchedId = envelope.decision.matchedRuleIds[0];
+  await persistInvocationAudit(opts.db, {
+    invocationId: `pol:wf:${req.invocationId}`,
+    service: req.service,
+    actionId,
+    riskLevel: action.riskLevel,
+    resolvedMode: envelope.decision.effect,
+    baseMode: envelope.decision.effect,
+    ...(envelope.decision.reasonCode === "organization_policy" || envelope.decision.reasonCode === "team_policy" ? { matchedPolicyId: matchedId } : {}),
+    ...(envelope.decision.reasonCode === "personal_override" ? { matchedOverrideId: matchedId } : {}),
+    status: envelope.decision.effect === "deny" ? "denied" : envelope.decision.effect === "require_approval" ? "pending" : "approved",
+    workflowExecutionId,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    params: req.params,
+    startedAt: now,
+    createdAt: now,
+  });
   if (envelope.decision.effect === "deny") return { ok: false, error: "Action denied by canonical policy." };
   if (envelope.decision.effect === "require_approval") return { ok: false, requiresApproval: true, riskLevel: action.riskLevel, provenance: envelope.decision.reasonCode };
   for (const obligation of envelope.decision.obligations) {
