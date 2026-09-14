@@ -144,9 +144,11 @@ export {
   prepareActionArgs,
   approvalModeForAction,
   toolApprovalGateContext,
+  truncateApprovalText,
   type ToolApprovalGateContext,
   pinnedToolName,
   MAX_PINNED_ACTIONS,
+  isLegacyToolApprovalBody,
   RESOLVE_TTL_MS,
   type ActionPlugin,
   type ApprovalMode,
@@ -215,6 +217,7 @@ export {
   GATE_EXPIRY_DEFAULT_MS,
   deterministicGateId,
   findStickyTerminalGate,
+  resolutionApproves,
 } from "./decision-gate.js";
 export {
   BUILTIN_COMMAND_NAMES,

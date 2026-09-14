@@ -14,6 +14,7 @@ import { ExitCode } from "../exit.js";
 import { emitNdjson, parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession, type StreamSessionOpts } from "../stream.js";
+import { approvalPreviewLines } from "./approval-review.js";
 import type { CliContext } from "../types.js";
 import type {
   DecisionGate,
@@ -75,6 +76,7 @@ export function renderToolEnd(toolName: string, isError: boolean): string {
 export function renderGate(gate: DecisionGate): string {
   const lines = [`decision required: ${gate.title} [${gate.type}]`];
   if (gate.body) lines.push(gate.body);
+  lines.push(...approvalPreviewLines(gate));
   for (const a of gate.actions) lines.push(`  - ${a.id}: ${a.label}`);
   lines.push(`resolve with: valet gates resolve ${gate.id} <actionId>`);
   return lines.join("\n");

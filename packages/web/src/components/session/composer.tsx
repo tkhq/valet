@@ -88,6 +88,11 @@ const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
   queue: "Add a follow-up…",
 };
 
+/** Phone keyboards use Return for text entry. Width matches the mobile layout. */
+export function isMobileComposerViewport(): boolean {
+  return typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches === true;
+}
+
 export function Composer({
   sessionId,
   threadId,
@@ -684,6 +689,10 @@ export function Composer({
         return;
       }
     }
+
+    // On the phone layout, Return enters text unless the popup claimed it.
+    // This uses the responsive breakpoint, not browser or user-agent sniffing.
+    if (e.key === "Enter" && isMobileComposerViewport()) return;
 
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of

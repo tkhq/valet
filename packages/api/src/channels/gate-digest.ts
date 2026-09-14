@@ -22,7 +22,12 @@
  * model/third-party controlled. Values arrive bounded; a reader who needs
  * the full payload opens the session in Valet.
  */
-import { toolApprovalGateContext, type DecisionGate } from "@valet/engine";
+import {
+  isLegacyToolApprovalBody,
+  toolApprovalGateContext,
+  type DecisionAction,
+  type DecisionGate,
+} from "@valet/engine";
 
 export interface GateField {
   label: string;
@@ -34,13 +39,14 @@ export interface GateDigest {
   /** Markdown body without the raw JSON dump. */
   body?: string;
   fields?: GateField[];
+  /** True when this channel projection omits any review fact. */
+  reviewIncomplete?: true;
 }
 
 /** Slack renders at most 10 fields per section; leave room for Tool + Risk. */
 const MAX_ARG_FIELDS = 8;
-/** Fields are for scanning, not reading — the web session has the full args. */
+/** Fields are for scanning, not reading. */
 const MAX_VALUE_CHARS = 120;
-/** Labels are arg keys; a runaway key must not blow a transport's field cap. */
 const MAX_LABEL_CHARS = 60;
 
 /** Code-point-safe truncation: never splits a surrogate pair at the cap. */
@@ -49,11 +55,6 @@ function truncate(text: string, max: number): string {
   return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
 }
 
-/**
- * One markdown value per arg. Scalars render plain; structured values render
- * as single-line JSON in inline code (embedded backticks swapped for a
- * curly quote so they cannot terminate the code span early).
- */
 function argValue(value: unknown): string {
   if (typeof value === "string") return truncate(value, MAX_VALUE_CHARS);
   if (value === null || typeof value === "number" || typeof value === "boolean") return String(value);
@@ -61,30 +62,51 @@ function argValue(value: unknown): string {
   return `\`${truncate(json, MAX_VALUE_CHARS)}\``;
 }
 
+export function safeChannelActions(
+  gate: Pick<DecisionGate, "actions">,
+  reviewIncomplete: boolean,
+): DecisionAction[] {
+  if (!reviewIncomplete) return gate.actions;
+  return gate.actions.filter((action) => action.id !== "approve" && action.approves !== true);
+}
+
 export function digestGate(gate: Pick<DecisionGate, "type" | "title" | "body" | "context">): GateDigest {
   const ctx = gate.type === "approval" ? toolApprovalGateContext(gate.context) : null;
   if (ctx === null) {
-    return { title: gate.title, body: gate.body };
+    return { title: gate.title, body: gate.body, ...((gate.type === "approval" && isLegacyToolApprovalBody(gate.body)) ? { reviewIncomplete: true } : {}) };
   }
 
-  const fields: GateField[] = [{ label: "Tool", value: `\`${ctx.toolId}\`` }];
+  const fields: GateField[] = [{ label: "Tool", value: ctx.toolId === undefined ? "Unavailable" : `\`${ctx.toolId}\`` }];
+  let reviewIncomplete = ctx.reviewIncomplete === true || ctx.toolId === undefined;
   if (ctx.riskLevel !== undefined && ctx.riskLevel !== "") {
     fields.push({ label: "Risk", value: ctx.riskLevel });
   }
 
-  if (ctx.args !== undefined) {
-    const entries = Object.entries(ctx.args).filter(([, v]) => v !== undefined);
+  if (ctx.argsPreview !== undefined) {
+    const escaped = ctx.argsPreview.replaceAll("`", "ʼ");
+    const value = truncate(escaped, MAX_VALUE_CHARS);
+    if (value !== escaped) reviewIncomplete = true;
+    fields.push({ label: "Parameters", value: `\`${value}\`` });
+  } else if (ctx.args !== undefined) {
+    const entries = Object.entries(ctx.args).filter(([, value]) => value !== undefined);
     for (const [key, value] of entries.slice(0, MAX_ARG_FIELDS)) {
       fields.push({ label: truncate(key, MAX_LABEL_CHARS), value: argValue(value) });
     }
     const overflow = entries.length - MAX_ARG_FIELDS;
-    if (overflow > 0) {
-      fields.push({ label: "More", value: `+${overflow} more parameter${overflow === 1 ? "" : "s"} in Valet` });
-    }
+    if (overflow > 0) fields.push({ label: "More", value: `+${overflow} more parameter${overflow === 1 ? "" : "s"} in Valet` });
+  }
+  if (ctx.argsPreview === undefined) reviewIncomplete = true;
+  if (reviewIncomplete) {
+    fields.push({ label: "Review", value: "Incomplete. Reject and ask the agent to retry with a smaller request." });
   }
 
   // A blank summary must not leave the durable notification row (and the
   // card) with no body at all — fall back to naming the requested tool.
   const summary = ctx.summary !== undefined && ctx.summary.trim() !== "" ? ctx.summary.trim() : undefined;
-  return { title: gate.title, body: summary ?? `Requested: \`${ctx.toolId}\``, fields };
+  return {
+    title: gate.title,
+    body: summary ?? (ctx.toolId === undefined ? "Requested tool identity is unavailable." : `Requested: \`${ctx.toolId}\``),
+    fields,
+    ...(reviewIncomplete ? { reviewIncomplete: true } : {}),
+  };
 }

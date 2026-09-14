@@ -1,3 +1,4 @@
+import { sha256 } from "@noble/hashes/sha2.js";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -364,26 +365,50 @@ async function requestApprovalDecision(
  * reader then share this one definition and cannot silently drift.
  */
 export interface ToolApprovalGateContext {
-  toolId: string;
+  /** Absent or blank means the tool identity is unsafe to approve. */
+  toolId?: string;
   riskLevel?: string;
   service?: string;
+  /** Legacy gate contexts may contain raw args; new gates never write them. */
   args?: Record<string, unknown>;
+  argsPreview?: string;
+  reviewIncomplete?: true;
+  /** SHA-256 of the defaulted arguments; never exposes the arguments themselves. */
+  preparedArgsDigest?: string;
+  preparedToolId?: string;
   summary?: string;
 }
 
 /** Narrow a gate's context to {@link ToolApprovalGateContext}; `null` when
  * the gate is not a tool approval (e.g. `ask_approval`, question gates). */
 export function toolApprovalGateContext(
-  context: Record<string, unknown> | undefined,
+  context: unknown,
 ): ToolApprovalGateContext | null {
-  if (!context || typeof context.tool_id !== "string") return null;
-  const args = context.args;
+  if (context === undefined) return null;
+  if (context === null || typeof context !== "object" || Array.isArray(context)) {
+    return { reviewIncomplete: true };
+  }
+  const record = context as Record<string, unknown>;
+  const isToolApproval = record.kind === "tool_approval";
+  if (!isToolApproval) return null;
+  const toolId = typeof record.tool_id === "string" && record.tool_id.trim() !== ""
+    ? record.tool_id
+    : undefined;
+  const argsPreview = typeof record.argsPreview === "string" && record.argsPreview.trim() !== ""
+    ? record.argsPreview
+    : undefined;
+  const validArgsPreview = (() => { try { const value: unknown = argsPreview && JSON.parse(argsPreview); return value !== null && typeof value === "object" && !Array.isArray(value); } catch { return false; } })();
+  const complete = record.kind === "tool_approval" && toolId !== undefined && validArgsPreview && record.reviewIncomplete !== true;
   return {
-    toolId: context.tool_id,
-    riskLevel: typeof context.riskLevel === "string" ? context.riskLevel : undefined,
-    service: typeof context.service === "string" ? context.service : undefined,
-    args: args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined,
-    summary: typeof context.summary === "string" ? context.summary : undefined,
+    toolId,
+    riskLevel: typeof record.riskLevel === "string" ? record.riskLevel : undefined,
+    service: typeof record.service === "string" ? record.service : undefined,
+    args: record.args !== null && typeof record.args === "object" && !Array.isArray(record.args) ? record.args as Record<string, unknown> : undefined,
+    argsPreview,
+    reviewIncomplete: complete ? undefined : true,
+    preparedArgsDigest: typeof record.preparedArgsDigest === "string" ? record.preparedArgsDigest : undefined,
+    preparedToolId: typeof record.preparedToolId === "string" ? record.preparedToolId : undefined,
+    summary: typeof record.summary === "string" ? record.summary : undefined,
   };
 }
 
@@ -394,27 +419,104 @@ export function toolApprovalGateContext(
  * dodge a deny/expiry. Safe for the prefix rule because every approval
  * resumeKey is `${qualifiedId}:<argsHash>`.
  */
+/** Truncate on code-point boundaries and count UTF-8 bytes, not UTF-16 units. */
+export function truncateApprovalText(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  const encoder = new TextEncoder();
+  const suffix = "…";
+  if (encoder.encode(text).length <= maxBytes) return { text, truncated: false };
+  const suffixBytes = encoder.encode(suffix).length;
+  if (maxBytes <= suffixBytes) return { text: "", truncated: text.length > 0 };
+  let bytes = 0;
+  let output = "";
+  for (const point of text) {
+    const pointBytes = encoder.encode(point).length;
+    if (bytes + pointBytes > maxBytes - suffixBytes) return { text: `${output}${suffix}`, truncated: true };
+    output += point;
+    bytes += pointBytes;
+  }
+  return { text, truncated: false };
+}
+
+/** Build a bounded display projection without serializing the full argument tree. */
+function approvalArgsPreview(args: Record<string, unknown>): { preview: string; incomplete: boolean } {
+  let incomplete = false;
+  const copy = (value: unknown, depth: number): unknown => {
+    if (depth > 8) { incomplete = true; return "[nested value omitted]"; }
+    if (typeof value === "string") {
+      const bounded = truncateApprovalText(value, 1_024);
+      if (bounded.truncated) incomplete = true;
+      return bounded.text;
+    }
+    if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+    if (Array.isArray(value)) {
+      if (value.length > 32) incomplete = true;
+      return value.slice(0, 32).map((item) => copy(item, depth + 1));
+    }
+    if (typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      if (entries.length > 64) incomplete = true;
+      const object: Record<string, unknown> = Object.create(null);
+      for (const [key, item] of entries.slice(0, 64)) {
+        const boundedKey = truncateApprovalText(key, 128);
+        if (boundedKey.truncated) incomplete = true;
+        object[boundedKey.text] = copy(item, depth + 1);
+      }
+      return object;
+    }
+    incomplete = true;
+    return "[unsupported value omitted]";
+  };
+  const rendered = JSON.stringify(copy(args, 0));
+  const bounded = truncateApprovalText(rendered, 16_000);
+  return { preview: bounded.text, incomplete: incomplete || bounded.truncated };
+}
+
+/** Stable, non-reversible commitment to the exact prepared argument values. */
+/** Recognize only the old machine-generated approval body, never incidental prose. */
+export function isLegacyToolApprovalBody(body: string | undefined): boolean {
+  return /(?:^|\r?\n\r?\n)tool_id=[^\r\n]+\r?\nargs=(?:\{.*|\[.*)$(?:\r?\n)?/s.test(body ?? "");
+}
+
+function preparedArgsDigest(args: Record<string, unknown>): string {
+  const canonicalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalize(item)]));
+    }
+    return value;
+  };
+  return Array.from(sha256(new TextEncoder().encode(JSON.stringify(canonicalize(args))))).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function approvalGateRequest(
   entry: CatalogEntry,
   actionId: string,
-  args: Record<string, unknown> | undefined,
+  args: Record<string, unknown>,
   summary: string,
   resumeKey: string,
 ): DecisionGateRequest {
+  const boundedSummary = truncateApprovalText(summary, 4_000).text;
+  const review = approvalArgsPreview(args);
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: boundedSummary + "\n\ntool_id=" + actionId + "\nargs=" + review.preview,
     resumeKey,
     dedupeKey: qualifiedId(entry),
     context: {
+      kind: "tool_approval",
       riskLevel: entry.action.riskLevel,
       service: entry.service,
       tool_id: actionId,
-      args,
+      argsPreview: review.preview,
+      preparedArgsDigest: preparedArgsDigest(args),
+      preparedToolId: qualifiedId(entry),
+      ...(review.incomplete ? { reviewIncomplete: true } : {}),
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
-      summary,
+      summary: boundedSummary,
     },
   };
 }
@@ -448,15 +550,39 @@ export async function invokeAction(
   }
   if (!entry) return { kind: "unknown", toolId: actionId };
 
+  // Gate review and execution must use one defaulted, validated object.
+  const prepared = prepareActionArgs(entry.action.parameters, args);
+  if (!prepared.ok) {
+    if (ctx.policyResolver?.onInvocation) {
+      emitInvocation(ctx.policyResolver, {
+        service: entry.service, actionId: qualifiedId(entry), toolId: actionId, riskLevel: entry.action.riskLevel,
+        sessionId: ctx.sessionId, threadId: ctx.threadId, userId: ctx.userId, orgId: ctx.orgId,
+        appliesIn: "session", summary: truncateApprovalText(summary, 4_000).text,
+        resumeKey: opaqueInvocationKey(entry, ctx),
+        queueItemId: ctx.queueItemId, params: args, status: "error", resolvedMode: null,
+        provenance: null, error: `invalid params: ${prepared.error}`,
+      });
+    }
+    return { kind: "invalid-args", error: prepared.error };
+  }
+  const executionArgs = prepared.args;
+  const reviewedArgs = structuredClone(executionArgs);
+  if (ctx.suspendedDecision?.approvalReplay && ctx.suspendedDecision.resolution?.actionId !== "approve") return { kind: "denied-approval" };
+
+  // A restart must not apply changed schema defaults after the approval.
+  if (ctx.suspendedDecision?.approvalReplay && (
+    ctx.suspendedDecision.preparedToolId !== qualifiedId(entry) ||
+    ctx.suspendedDecision.preparedArgsDigest !== preparedArgsDigest(reviewedArgs)
+  )) {
+    return { kind: "error", message: "Approval replay rejected because the approved tool or prepared parameters changed. Ask the user to submit the action again for review." };
+  }
+
+  // One bound applies to the gate body, gate context, plugin context, and audit.
+  const boundedSummary = truncateApprovalText(summary, 4_000).text;
   const resolver = ctx.policyResolver;
-  // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
-  // to ctx.requestDecision when a gate opens for this call. Recorded on every
-  // audit record (even allow/deny, which never open a gate) so a host sink
-  // can correlate all records for one (tool, args) pair. Large args hash into
-  // a bounded suffix: the key is embedded in the engine_decision_gates and
-  // action_invocations primary keys, and Postgres btree index rows cap at
-  // ~2704 bytes.
-  const resumeKey = `${qualifiedId(entry)}:${boundedArgsKey(stableJson(args ?? {}))}`;
+  // A fresh call gets a cryptographically random opaque invocation key.
+  // Restart replay reuses the key persisted with the suspended turn.
+  const resumeKey = opaqueInvocationKey(entry, ctx);
 
   // ── Decision phase ────────────────────────────────────────────
   // Absent resolver: byte-identical to pre-policy behavior — derive the
@@ -468,16 +594,17 @@ export async function invokeAction(
     if (approvalMode === "require_approval") {
       const gateOutcome = await requestApprovalDecision(
         ctx,
-        approvalGateRequest(entry, actionId, args, summary, resumeKey),
+        approvalGateRequest(entry, actionId, reviewedArgs, boundedSummary, resumeKey),
       );
       if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
       const resolution = gateOutcome.resolution;
       // No resolution / an explicit "pending" action means the gate has not
       // yet been decided — distinct from an outright deny.
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
+      if (resolution.actionId === "approve" && approvalArgsPreview(reviewedArgs).incomplete) return { kind: "denied-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
     }
-    return executeAction(entry, actionId, args, summary, ctx);
+    return executeAction(entry, actionId, executionArgs, boundedSummary, ctx);
   }
 
   // Present resolver: consult the host policy port. The policy-facing
@@ -492,7 +619,7 @@ export async function invokeAction(
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
-    params: args,
+    params: structuredClone(reviewedArgs),
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId: ctx.sessionId,
@@ -509,10 +636,10 @@ export async function invokeAction(
     userId: ctx.userId,
     orgId: ctx.orgId,
     appliesIn: "session",
-    summary,
+    summary: boundedSummary,
     resumeKey,
     queueItemId: ctx.queueItemId,
-    params: args,
+    params: structuredClone(reviewedArgs),
   };
 
   let decision: PolicyDecision;
@@ -566,11 +693,11 @@ export async function invokeAction(
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
     const extras: DecisionAction[] = decision.extraGateActions ?? [];
-    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    const baseReq = approvalGateRequest(entry, actionId, reviewedArgs, boundedSummary, resumeKey);
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
       actions: [
-        { id: "approve", label: "Approve", style: "primary" },
+        { id: "approve", label: "Approve", style: "primary", approves: true },
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],
@@ -597,6 +724,12 @@ export async function invokeAction(
     // record.
     if (resolution.actionId === "pending") return { kind: "pending-approval" };
     gateOrdinal = resolution.gateOrdinal;
+    if (approvalArgsPreview(reviewedArgs).incomplete && isApprovedResolution(resolution, decision.extraGateActions)) {
+      emitInvocation(resolver, {
+        ...baseRecord, status: "rejected", resolvedMode: "require_approval", provenance: decision.provenance, gateOrdinal,
+      });
+      return { kind: "denied-approval" };
+    }
     // onResolution is awaited BEFORE the outcome is interpreted; a throw
     // fails the approval closed (treated as not-approved).
     let onResolutionThrew = false;
@@ -624,7 +757,7 @@ export async function invokeAction(
   }
 
   // allow, or an approved require_approval → execute with audit.
-  return executeAction(entry, actionId, args, summary, ctx, {
+  return executeAction(entry, actionId, executionArgs, boundedSummary, ctx, {
     resolver,
     record: {
       ...baseRecord,
@@ -657,6 +790,8 @@ interface Catalog {
   dynamicPlugins: ActionPlugin[];
   /** TTL cache of resolved dynamic actions, keyed by plugin service. */
   resolved: Map<string, ResolvedDynamic>;
+  resolving: Map<string, Promise<ResolvedDynamic>>;
+  dynamicUpdate: Promise<void>;
   now: () => number;
 }
 
@@ -671,6 +806,7 @@ function buildEntries(
     const entry: CatalogEntry = { service, plugin, action };
     entries.push(entry);
     const fqid = action.id.includes(".") ? action.id : `${service}.${action.id}`;
+    if (byId.has(fqid)) throw new Error("duplicate plugin action id: " + fqid);
     byId.set(fqid, entry);
     // Allow a bare id lookup when unambiguous.
     if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);
@@ -686,14 +822,15 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     for (const action of plugin.actions) {
       const entry: CatalogEntry = { service: plugin.service, plugin, action };
       entries.push(entry);
-      const fqid = action.id.includes(".") ? action.id : `${plugin.service}.${action.id}`;
+      const fqid = action.id.includes(".") ? action.id : plugin.service + "." + action.id;
+      if (byId.has(fqid)) throw new Error("duplicate plugin action id: " + fqid);
       byId.set(fqid, entry);
       // Allow a bare id lookup when unambiguous.
       if (action.id !== fqid && !byId.has(action.id)) byId.set(action.id, entry);
     }
     if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId, dynamicPlugins, resolved: new Map(), now };
+  return { entries, byId, dynamicPlugins, resolved: new Map(), resolving: new Map(), dynamicUpdate: Promise.resolve(), now };
 }
 
 /**
@@ -708,20 +845,30 @@ async function resolveDynamic(
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
   const cached = catalog.resolved.get(plugin.service);
-  if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) {
-    return cached;
-  }
-  // resolveActions is guaranteed present on every entry of dynamicPlugins.
-  const resolveActions = plugin.resolveActions;
-  if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
-  const credentialService = plugin.credentialService ?? plugin.service;
-  const actions = await resolveActions({
-    credentials: scopedCredentialProvider(ctx, credentialService),
-  });
-  const built = buildEntries(plugin.service, plugin, actions);
-  const result: ResolvedDynamic = { ...built, fetchedAt: now };
-  catalog.resolved.set(plugin.service, result);
-  return result;
+  if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) return cached;
+  const inFlight = catalog.resolving.get(plugin.service);
+  if (inFlight) return inFlight;
+  const pending = (async (): Promise<ResolvedDynamic> => {
+    const resolveActions = plugin.resolveActions;
+    if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
+    const actions = await resolveActions({ credentials: scopedCredentialProvider(ctx, plugin.credentialService ?? plugin.service) });
+    const built = buildEntries(plugin.service, plugin, actions);
+    let release: (() => void) | undefined;
+    const previous = catalog.dynamicUpdate;
+    catalog.dynamicUpdate = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      for (const entry of built.entries) {
+        const id = qualifiedId(entry);
+        if (catalog.byId.has(id) || [...catalog.resolved.entries()].some(([service, resolved]) => service !== plugin.service && resolved.entries.some((other) => qualifiedId(other) === id))) throw new Error("duplicate plugin action id: " + id);
+      }
+      const result: ResolvedDynamic = { ...built, fetchedAt: now };
+      catalog.resolved.set(plugin.service, result);
+      return result;
+    } finally { release?.(); }
+  })();
+  catalog.resolving.set(plugin.service, pending);
+  try { return await pending; } finally { catalog.resolving.delete(plugin.service); }
 }
 
 // ── list_tools ───────────────────────────────────────────────────
@@ -1210,21 +1357,6 @@ async function executeAction(
   ctx: ToolContext,
   audit?: { resolver: PolicyResolver; record: BaseAuditedRecord },
 ): Promise<InvokeActionResult> {
-  // Validate (and apply schema defaults to) LLM-supplied params before they
-  // reach the plugin action's execute body — closes the gap where unvalidated
-  // params flowed straight into plugin code.
-  const prepared = prepareActionArgs(entry.action.parameters, args);
-  if (!prepared.ok) {
-    if (audit) {
-      emitInvocation(audit.resolver, {
-        ...audit.record,
-        status: "error",
-        error: `invalid params: ${prepared.error}`,
-      });
-    }
-    return { kind: "invalid-args", error: prepared.error };
-  }
-
   // Build the plugin action context. credentialService routing is per-plugin;
   // the action sees the same ToolContext shape plus actionId/service/summary,
   // with credentials defaulting to the plugin's credentialService.
@@ -1245,7 +1377,7 @@ async function executeAction(
   const startedAt = Date.now();
   try {
     const result = await entry.action.execute(
-      prepared.args as Static<typeof entry.action.parameters>,
+      args as Static<typeof entry.action.parameters>,
       actionCtx,
     );
     if (audit) {
@@ -1386,38 +1518,8 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
-function stableJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-// Args JSON at or under this length passes through raw, so small keys stay
-// human-readable and byte-identical to the pre-bound format. The threshold
-// keeps the worst-case UTF-8 gate id well under the ~2704-byte btree cap.
-const RESUME_KEY_ARGS_MAX_CHARS = 256;
-
-/**
- * Returns the args portion of a resumeKey, bounded in length. JSON longer
- * than the threshold is replaced with its UTF-8 byte length plus a 64-bit
- * FNV-1a hash over the UTF-8 bytes — deterministic, so restart replay
- * re-derives the identical key. TextEncoder is a web-standard global (no
- * node:crypto): the engine stays portable.
- */
-function boundedArgsKey(json: string): string {
-  if (json.length <= RESUME_KEY_ARGS_MAX_CHARS) return json;
-  const bytes = new TextEncoder().encode(json);
-  return `fnv1a64:${bytes.length}:${fnv1a64Hex(bytes)}`;
-}
-
-function fnv1a64Hex(bytes: Uint8Array): string {
-  const mask = 0xffffffffffffffffn;
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of bytes) {
-    hash ^= BigInt(byte);
-    hash = (hash * 0x100000001b3n) & mask;
-  }
-  return hash.toString(16).padStart(16, "0");
+function opaqueInvocationKey(entry: CatalogEntry, ctx: ToolContext): string {
+  const replayKey = ctx.suspendedDecision?.resumeKey;
+  if (replayKey !== undefined) return replayKey;
+  return `${qualifiedId(entry)}:${crypto.randomUUID()}`;
 }

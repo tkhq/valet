@@ -16,6 +16,8 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
+  resolutionApproves,
+  toolApprovalGateContext,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -54,7 +56,7 @@ import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
-import { digestGate } from "./gate-digest.js";
+import { digestGate, safeChannelActions } from "./gate-digest.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
@@ -775,7 +777,7 @@ export class ChannelHost {
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,
-      { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: gate.actions },
+      { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: safeChannelActions(gate, digest.reviewIncomplete === true) },
       sessionId,
     );
   }
@@ -1165,6 +1167,13 @@ export class ChannelHost {
           ? "This assistant was deleted. The approval no longer applies."
           : "Valet could not process this approval. Open the session in Valet to resolve it.",
       );
+      return;
+    }
+    const gate = (await session.pendingDecisionGates()).find((candidate) => candidate.id === mapped.gateId);
+    const approval = gate?.type === "approval" ? toolApprovalGateContext(gate.context) : null;
+    const channelReviewIncomplete = gate ? digestGate(gate).reviewIncomplete === true : false;
+    if (gate && channelReviewIncomplete && resolutionApproves(gate, { actionId: gateCallback.actionId, resolvedBy: "", resolvedAt: 0 })) {
+      await transport?.answerCallback?.(gateCallback.callbackId, "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request.");
       return;
     }
     try {

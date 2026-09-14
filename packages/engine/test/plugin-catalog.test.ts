@@ -5,6 +5,7 @@ import type { TObject } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   pluginCatalogTools,
+  toolApprovalGateContext,
   pinnedToolName,
   prepareActionArgs,
   MAX_PINNED_ACTIONS,
@@ -130,7 +131,7 @@ describe("pluginCatalogTools: registration", () => {
     const tools = pluginCatalogTools({
       plugins: [
         { ...a.plugin, service: "github" },
-        { ...b.plugin, service: "gmail" },
+        { ...b.plugin, service: "gmail", actions: b.plugin.actions.map((action) => ({ ...action, id: action.id.replace("github.", "gmail.") })) },
       ],
     });
     expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools"]);
@@ -995,6 +996,107 @@ describe("pluginCatalogTools: call_tool param validation", () => {
   });
 });
 
+describe("pluginCatalogTools: restart approval integrity", () => {
+  it("rejects a replay when a schema default differs from the reviewed value", async () => {
+    let commitment: string | undefined;
+    let approvedToolId: string | undefined;
+    const original: ActionPlugin = {
+      service: "test",
+      actions: [{
+        id: "test.defaulted",
+        name: "Defaulted",
+        description: "requires approval",
+        riskLevel: "high",
+        parameters: Type.Object({ value: Type.Optional(Type.String({ default: "approved" })) }),
+        execute: async () => ({ success: true }),
+      }],
+    };
+    const [, originalCall] = pluginCatalogTools({ plugins: [original] });
+    await originalCall.execute(
+      { tool_id: "test.defaulted", params: {}, summary: "use the approved default" },
+      makeCtx({
+        requestDecision: async (gate) => {
+          commitment = typeof gate.context?.preparedArgsDigest === "string"
+            ? gate.context.preparedArgsDigest
+            : undefined;
+          approvedToolId = typeof gate.context?.preparedToolId === "string"
+            ? gate.context.preparedToolId
+            : undefined;
+          return { actionId: "pending", resolvedBy: "" };
+        },
+      }),
+    );
+    expect(commitment).toMatch(/^[a-f0-9]{64}$/);
+    expect(approvedToolId).toBe("test.defaulted");
+
+    let executed = false;
+    const changed: ActionPlugin = {
+      ...original,
+      actions: [{
+        ...original.actions[0]!,
+        parameters: Type.Object({ value: Type.Optional(Type.String({ default: "changed" })) }),
+        execute: async () => {
+          executed = true;
+          return { success: true };
+        },
+      }],
+    };
+    const [, replayCall] = pluginCatalogTools({ plugins: [changed] });
+    const result = await replayCall.execute(
+      { tool_id: "test.defaulted", params: {}, summary: "use the approved default" },
+      makeCtx({
+        suspendedDecision: {
+          gateId: "gate-1",
+          ordinal: 0,
+          resumeKey: "test.defaulted:opaque",
+          preparedArgsDigest: commitment,
+          preparedToolId: approvedToolId,
+          approvalReplay: true,
+          resolution: { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 },
+        },
+      }),
+    );
+    expect(result.text).toContain("Approval replay rejected");
+    expect(executed).toBe(false);
+  });
+
+  it("rejects a replay when persisted approved tool identity is corrupted", async () => {
+    let executed = false;
+    const plugin: ActionPlugin = {
+      service: "test",
+      actions: [{
+        id: "test.dangerous",
+        name: "Dangerous",
+        description: "requires approval",
+        riskLevel: "high",
+        parameters: Type.Object({ value: Type.String() }),
+        execute: async () => { executed = true; return { success: true }; },
+      }],
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute(
+      { tool_id: "test.dangerous", params: { value: "reviewed" }, summary: "run" },
+      makeCtx({
+        suspendedDecision: {
+          gateId: "gate-1", ordinal: 0, resumeKey: "opaque", preparedToolId: "test.other",
+          preparedArgsDigest: "0".repeat(64), approvalReplay: true,
+          resolution: { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 },
+        },
+      }),
+    );
+    expect(result.text).toContain("Approval replay rejected");
+    expect(executed).toBe(false);
+  });
+  it("fails closed on replay authority restored from a checkpoint without gate context", async () => {
+    let executed = false;
+    const plugin: ActionPlugin = { service: "test", actions: [{ id: "test.checkpoint", name: "Checkpoint", description: "requires approval", riskLevel: "high", parameters: Type.Object({ value: Type.String() }), execute: async () => { executed = true; return { success: true }; } }] };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute({ tool_id: "test.checkpoint", params: { value: "reviewed" }, summary: "run" }, makeCtx({ suspendedDecision: { gateId: "gate-1", ordinal: 0, resumeKey: "opaque", preparedToolId: "test.checkpoint", preparedArgsDigest: "0".repeat(64), approvalReplay: true, resolution: { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 } } }));
+    expect(result.text).toContain("Approval replay rejected");
+    expect(executed).toBe(false);
+  });
+});
+
 describe("pluginCatalogTools: approval gate terminal outcomes", () => {
   function gatedPlugin(): ActionPlugin {
     return {
@@ -1498,7 +1600,7 @@ describe("pinned tool: same execution path as call_tool", () => {
     // one admin rule covers both routes and the audit trail correlates.
     expect(gates[0]?.resumeKey).toContain("workflows.patch_workflow");
     expect(gates[0]?.body).toContain("tool_id=workflows.patch_workflow");
-    expect(gates[0]?.body).toContain("wf-1");
+    expect(gates[0]?.body).toContain("args={\"workflow_id\":\"wf-1\"");
     expect(result?.text).toContain("did not approve");
     expect(calls).toHaveLength(0);
   });
@@ -1557,7 +1659,6 @@ describe("pinned tool: same execution path as call_tool", () => {
       "riskLevel",
       "status",
       "resolvedMode",
-      "resumeKey",
       "appliesIn",
     ] as const) {
       expect(fromPinned?.[field]).toEqual(fromCallTool?.[field]);
@@ -1642,7 +1743,7 @@ describe("pinned tool: the model's summary", () => {
     //
     // What this test actually guards is the summary: it must reach neither
     // the action's arguments nor the audit params.
-    expect(records[0]?.params).toEqual({ workflow_id: "wf-1" });
+    expect(records[0]?.params).toEqual({ workflow_id: "wf-1", name: "untitled" });
   });
 
   it("falls back to the derived summary when the model sends a blank one", async () => {
@@ -1671,5 +1772,79 @@ describe("pinned tool: the model's summary", () => {
       "Add a Slack notify step",
       "Drop the approval gate",
     ]);
+  });
+});
+
+describe("toolApprovalGateContext malformed persistence", () => {
+  it("fails closed without throwing for scalar, null, and array contexts", () => {
+    for (const context of [null, "bad", 1, []]) {
+      expect(toolApprovalGateContext(context)).toEqual({ reviewIncomplete: true });
+    }
+  });
+});
+
+describe("pluginCatalogTools duplicate action identity", () => {
+  it("rejects duplicate qualified action ids instead of selecting by plugin order", () => {
+    const action = makeMockPlugin().plugin.actions[0]!;
+    expect(() => pluginCatalogTools({ plugins: [
+      { service: "one", actions: [{ ...action, id: "shared.run" }] },
+      { service: "two", actions: [{ ...action, id: "shared.run" }] },
+    ] })).toThrow("duplicate plugin action id: shared.run");
+  });
+});
+
+describe("legacy approval body recognition", () => {
+  it("recognizes only the structured tool body, not ordinary prose", async () => {
+    const { isLegacyToolApprovalBody } = await import("../src/plugin-catalog.js");
+    expect(isLegacyToolApprovalBody('Approve it; args=the requested options.')).toBe(false);
+    expect(isLegacyToolApprovalBody('The user said tool_id=not-a-tool.')).toBe(false);
+    expect(isLegacyToolApprovalBody('Approve it\n\ntool_id=github.create_issue\nargs={"title":"x"}')).toBe(true);
+  });
+});
+
+describe("approval review context", () => {
+  it("does not classify generic contextual approvals as tool approvals", async () => {
+    const { toolApprovalGateContext } = await import("../src/plugin-catalog.js");
+    expect(toolApprovalGateContext({ service: "github", riskLevel: "high" })).toBeNull();
+    expect(toolApprovalGateContext({ kind: "tool_approval", tool_id: "github.create_issue", argsPreview: "{bad" })?.reviewIncomplete).toBe(true);
+    expect(toolApprovalGateContext({ kind: "tool_approval", tool_id: "github.create_issue", argsPreview: '{"title":"ok"}' })?.reviewIncomplete).toBeUndefined();
+  });
+});
+
+describe("dynamic discovery collision serialization", () => {
+  it("rejects one concurrent service that discovers an already-qualified action", async () => {
+    const action: PluginAction = { id: "shared.run", name: "Run", description: "run", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) };
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("one", async () => [action]), makeDynamicPlugin("two", async () => [action])] });
+    const ctx = makeCtx();
+    const [one, two] = await Promise.all([list.execute({ service: "one" }, ctx), list.execute({ service: "two" }, ctx)]);
+    const payloads = [decode(one.text), decode(two.text)] as Array<{ tools?: unknown[]; warnings?: unknown[] }>;
+    expect(payloads.filter((payload) => payload.tools?.length === 1 && !payload.warnings?.length)).toHaveLength(1);
+    expect(payloads.filter((payload) => payload.warnings?.length === 1)).toHaveLength(1);
+  });
+});
+
+describe("approval preview own-key fidelity", () => {
+  it("preserves __proto__ in both the review preview and executed args", async () => {
+    let preview = "";
+    let executed: Record<string, unknown> | undefined;
+    const plugin: ActionPlugin = { service: "safe", actions: [{ id: "safe.run", name: "Run", description: "Run", riskLevel: "high", parameters: Type.Object({ ["__proto__"]: Type.String() }), execute: async (args) => { executed = args; return { success: true }; } }] };
+    const [, call] = pluginCatalogTools({ plugins: [plugin] });
+    const params = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(params, "__proto__", { value: "kept", enumerable: true });
+    await call.execute({ tool_id: "safe.run", params, summary: "run" }, makeCtx({ requestDecision: async (gate) => { preview = String(gate.context?.argsPreview); return { actionId: "approve", resolvedBy: "test", resolvedAt: Date.now() }; } }));
+    expect(preview).toContain('"__proto__":"kept"');
+    expect(Object.hasOwn(executed ?? {}, "__proto__")).toBe(true);
+    expect(executed?.["__proto__"]).toBe("kept");
+  });
+});
+
+describe("persisted approval outcomes", () => {
+  it("never executes a persisted denial after policy changes to allow", async () => {
+    let executed = false;
+    const plugin: ActionPlugin = { service: "test", actions: [{ id: "test.denied", name: "Denied", description: "x", riskLevel: "high", parameters: Type.Object({ value: Type.String() }), execute: async () => { executed = true; return { success: true }; } }] };
+    const [, call] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await call.execute({ tool_id: "test.denied", params: { value: "x" }, summary: "x" }, makeCtx({ policyResolver: { resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } }) }, suspendedDecision: { gateId: "g", ordinal: 0, resumeKey: "r", preparedToolId: "test.denied", preparedArgsDigest: "0".repeat(64), approvalReplay: true, resolution: { actionId: "deny", resolvedBy: "u", resolvedAt: 1 } } }));
+    expect(result.text).toContain("did not approve");
+    expect(executed).toBe(false);
   });
 });

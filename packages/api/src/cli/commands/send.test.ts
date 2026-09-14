@@ -139,6 +139,16 @@ describe("render helpers", () => {
     expect(text).toContain("deny");
     expect(text).toContain("valet gates resolve gate_1");
   });
+  it("renders the typed parameter preview and incomplete warning", () => {
+    const text = renderGate({
+      ...GATE,
+      approval: { toolId: "payments.send", argsPreview: "{\"recipient\":\"a@example.test\"}" },
+    });
+    expect(text).toContain("tool: payments.send");
+    expect(text).toContain("parameters: {\"recipient\":\"a@example.test\"}");
+    const unsafe = renderGate({ ...GATE, approval: { argsPreview: "{}", reviewIncomplete: true } });
+    expect(unsafe).toContain("approval actions are unavailable");
+  });
 });
 
 // ── consumeSend ────────────────────────────────────────────────────────────

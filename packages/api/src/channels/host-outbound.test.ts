@@ -773,10 +773,11 @@ describe("ChannelHost outbound delivery", () => {
         { id: "deny", label: "Deny", style: "danger" },
       ],
       context: {
+        kind: "tool_approval",
         riskLevel: "high",
         service: "fake",
         tool_id: "fake.do_thing",
-        args: { target: "prod" },
+        argsPreview: JSON.stringify({ target: "prod" }),
         summary: "do the thing",
       },
       status: "pending",
@@ -801,7 +802,7 @@ describe("ChannelHost outbound delivery", () => {
     expect(sentPrompt?.fields).toEqual([
       { label: "Tool", value: "`fake.do_thing`" },
       { label: "Risk", value: "high" },
-      { label: "target", value: "prod" },
+      { label: "Parameters", value: "`{\"target\":\"prod\"}`" },
     ]);
 
     const ref = fakeTransport.gatePrompts[0]
