@@ -1084,6 +1084,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
 
   return {
     service: "workflows",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     description:
       "Create, inspect, and run Valet DAG workflows (dag/v1 definitions: nodes + edges).",
     actions: [

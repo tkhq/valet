@@ -1,6 +1,6 @@
 import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
-import { validateActionProjectionInventory } from "../authorization/action-projections.js";
+import { quarantineMissingActionProjections } from "../authorization/action-projections.js";
 import { configureCanonicalOrganizationProvisioner } from "../services/org.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
@@ -379,7 +379,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         [workflowsActions, skillsActions, assistantsActions],
       ]);
 
-  validateActionProjectionInventory(actionPluginByService, !opts.plugins);
+  const reportProjectionDiagnostic = (diagnostic: ReturnType<typeof quarantineMissingActionProjections>[number]) => {
+    console.error(`[action-projection:${diagnostic.code}] ${diagnostic.actionId}: ${diagnostic.correctiveAction}`);
+  };
+  for (const diagnostic of quarantineMissingActionProjections(actionPluginByService, reportProjectionDiagnostic)) {
+    reportProjectionDiagnostic(diagnostic);
+  }
   const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
   const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
   configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));

@@ -266,13 +266,14 @@ policiesRouter.post("/preview", async (c) => {
   }
 
   const entry = actionPluginByService.get(body.service);
-  const action = entry?.actionPlugin.actions.find((item) => (item.id.includes(".") ? item.id : `${body.service}.${item.id}`) === body.actionId);
+  if (!entry) return c.json({ error: "Action metadata does not match the static catalog." }, 400);
+  const action = entry.actionPlugin.actions.find((item) => (item.id.includes(".") ? item.id : `${body.service}.${item.id}`) === body.actionId);
   if (!action || action.riskLevel !== body.riskLevel) return c.json({ error: "Action metadata does not match the static catalog." }, 400);
   const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
   // The admin authorizes the dry run outside Rego. Inside the hypothetical
   // request, actor and personal owner are the user whose policy is previewed.
   const previewUserId = body.userId ?? user.id;
-  const commonAction = { service: body.service, actionId: body.actionId, catalogActionId: body.actionId, sourcePluginService: body.service, sourceActionId: body.actionId, sourceToolId: "policy_preview", riskLevel: body.riskLevel, parameters: body.params ?? {}, parameterProjection: actionProjection(body.actionId) };
+  const commonAction = { service: body.service, actionId: body.actionId, catalogActionId: body.actionId, sourcePluginService: body.service, sourceActionId: body.actionId, sourceToolId: "policy_preview", riskLevel: body.riskLevel, parameters: body.params ?? {}, parameterProjection: actionProjection(entry.actionPlugin, action) };
   const adapted = body.appliesIn === "session"
     ? adaptInteractiveAction({ schemaVersion: 1, organizationId: user.orgId, actor: { type: "user", id: previewUserId }, owner: { type: "user", id: previewUserId }, requestId: idempotencyKey, sessionId: body.sessionId!, threadId: `preview:${idempotencyKey}`, queueItemId: idempotencyKey, resumeKey: idempotencyKey, gateOrdinal: 0, action: commonAction, evaluationTimeMs: Date.now(), dynamicFacts: {} })
     : adaptWorkflowAction({ schemaVersion: 1, organizationId: user.orgId, actor: { type: "user", id: previewUserId }, owner: { type: "user", id: previewUserId }, requestId: idempotencyKey, workflowDefinitionId: "policy-preview", workflowVersion: "preview", workflowExecutionId: body.workflowExecutionId!, nodeId: "preview", invocationId: idempotencyKey, action: commonAction, evaluationTimeMs: Date.now(), dynamicFacts: {} });

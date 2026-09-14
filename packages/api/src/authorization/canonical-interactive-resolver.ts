@@ -24,7 +24,7 @@ export function canonicalInteractivePolicyResolver(opts: { db: AppDb; service: C
     const entry = opts.plugins.get(input.service);
     const action = entry?.actionPlugin.actions.find((item) => (item.id.includes(".") ? item.id : `${input.service}.${item.id}`) === input.actionId);
     if (!entry || !action || !input.params) throw new Error("Canonical interactive action is not statically registered.");
-    const common = { plugin: entry.actionPlugin, action, params: input.params, projection: actionProjection(input.actionId), context: { userId: input.userId, orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, owner: input.owner, queueItemId: input.queueItemId }, requestId: input.queueItemId, resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal ?? 0, evaluationTimeMs: now() };
+    const common = { plugin: entry.actionPlugin, action, params: input.params, projection: actionProjection(entry.actionPlugin, action), context: { userId: input.userId, orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, owner: input.owner, queueItemId: input.queueItemId }, requestId: input.queueItemId, resumeKey: input.resumeKey, gateOrdinal: input.gateOrdinal ?? 0, evaluationTimeMs: now() };
     const initial = adaptPluginCatalogAction({ ...common, dynamicFacts: {} });
     const original = (await opts.db.select().from(authorizationDecisions).where(and(eq(authorizationDecisions.orgId, input.orgId), eq(authorizationDecisions.idempotencyKey, initial.request.idempotencyKey))).limit(1))[0];
     const approvalBindingContext = original?.effect === "require_approval" && original.evidence

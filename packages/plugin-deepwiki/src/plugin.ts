@@ -10,6 +10,7 @@ const plugin: ValetPlugin = {
       mcpUrl: 'https://mcp.deepwiki.com/mcp',
       serviceName: 'deepwiki',
       defaultRiskLevel: 'low',
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
       noAuth: true,
     }),
   ],

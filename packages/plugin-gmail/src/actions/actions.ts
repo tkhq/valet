@@ -1035,6 +1035,7 @@ const triageInbox = action(
 
 export const gmailPlugin: ActionPlugin = {
   service: 'gmail',
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description: 'Gmail integration for reading, sending, and triaging email.',
   actions: [
     sendEmail,

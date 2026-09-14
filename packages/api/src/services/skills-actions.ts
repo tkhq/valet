@@ -302,6 +302,7 @@ export function skillsActionPlugin(db: AppDb): ActionPlugin {
 
   return {
     service: "skills",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     description: "Create, edit, and remove the markdown skills a session can read.",
     actions: [listSkillsAction, createSkillAction, updateSkillAction, deleteSkillAction],
   };

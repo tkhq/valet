@@ -10,6 +10,7 @@ const plugin: ValetPlugin = {
       mcpUrl: 'https://mcp.notion.com/mcp',
       serviceName: 'notion',
       defaultRiskLevel: 'medium',
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     }),
   ],
   credentials: [

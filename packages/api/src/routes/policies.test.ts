@@ -33,6 +33,7 @@ function githubPolicyPlugin(defaultApprovalMode?: "allow" | "require_approval" |
     version: "0.0.1",
     actions: [{
       service: "github",
+      safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
       ...(defaultApprovalMode ? { defaultApprovalMode } : {}),
       actions: [{
         id: "github.create_issue",

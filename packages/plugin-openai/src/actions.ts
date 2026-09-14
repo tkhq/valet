@@ -311,6 +311,7 @@ const textToSpeech = action(
 
 export const openaiPlugin: ActionPlugin = {
   service: "openai",
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description: "OpenAI media tools: image generation and editing, audio transcription, text to speech.",
   // Statically-listed actions — without this flag list_tools would advertise
   // the tools even when no OpenAI key resolves. The api's credential resolver

@@ -43,10 +43,12 @@ function testCatalogAction(id: string, riskLevel: RiskLevel): PluginAction {
 function testPolicyPlugin(): ValetPlugin {
   const github: ActionPlugin = {
     service: "github",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     actions: [testCatalogAction("github.create_issue", "medium"), testCatalogAction("github.create_repository", "high")],
   };
   const slack: ActionPlugin = {
     service: "slack",
+    safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
     actions: [testCatalogAction("slack.post_message", "low")],
   };
   return { name: "test-policy-plugin", version: "0.0.1", actions: [github, slack] };

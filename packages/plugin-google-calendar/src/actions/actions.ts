@@ -710,6 +710,7 @@ const queryFreeBusy = action(
 
 export const googleCalendarPlugin: ActionPlugin = {
   service: "google_calendar",
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description: "Google Calendar integration for events and scheduling.",
   actions: [listEvents, createEvent, updateEvent, deleteEvent, quickAdd, queryFreeBusy],
 };

@@ -20,7 +20,7 @@ let pg: TestPgDb | undefined;
 afterEach(async () => { await pg?.cleanup(); pg = undefined; });
 
 function plugins(riskLevel: "low" | "critical") {
-  const actionPlugin: ActionPlugin = { service: "github", actions: [{ id: riskLevel === "critical" ? "github.merge_pull_request" : "github.create_issue", name: "Action", description: "Action", riskLevel, parameters: Type.Object({ value: Type.String() }), execute: async () => ({ success: true }) }] };
+  const actionPlugin: ActionPlugin = { service: "github", safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [{ id: riskLevel === "critical" ? "github.merge_pull_request" : "github.create_issue", name: "Action", description: "Action", riskLevel, parameters: Type.Object({ value: Type.String() }), execute: async () => ({ success: true }) }] };
   const plugin = { name: "github", version: "1", actions: [actionPlugin] } as ValetPlugin;
   return new Map([["github", { plugin, actionPlugin }]]);
 }

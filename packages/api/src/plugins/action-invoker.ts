@@ -253,7 +253,7 @@ async function computeResult(
   const staticAction = findAction(entry.actionPlugin.actions, req.service, req.action);
   let canonicalEnvelope: PolicyDecisionEnvelope | undefined;
   if (opts.canonicalAuthorizationService && staticAction) {
-    const authorization = await enforceCanonicalWorkflowPolicy(opts, req, ctx, staticAction);
+    const authorization = await enforceCanonicalWorkflowPolicy(opts, req, ctx, entry.actionPlugin, staticAction);
     if ("ok" in authorization) return authorization;
     canonicalEnvelope = authorization;
   }
@@ -376,7 +376,7 @@ async function computeResult(
   if (!action) return unknownAction(req);
 
   if (opts.canonicalAuthorizationService && !canonicalEnvelope) {
-    const authorization = await enforceCanonicalWorkflowPolicy(opts, req, ctx, action);
+    const authorization = await enforceCanonicalWorkflowPolicy(opts, req, ctx, entry.actionPlugin, action);
     if ("ok" in authorization) return authorization;
     canonicalEnvelope = authorization;
   }
@@ -513,7 +513,8 @@ function teamRefusalMessage(service: string): string {
  * A no-op when the caller supplied no run/org context.
  */
 async function enforceCanonicalWorkflowPolicy(
-  opts: ActionInvokerOpts, req: WorkflowInvokeActionRequest, ctx: ActionInvocationContext, action: PluginAction,
+  opts: ActionInvokerOpts, req: WorkflowInvokeActionRequest, ctx: ActionInvocationContext,
+  actionPlugin: ActionPlugin, action: PluginAction,
 ): Promise<WorkflowInvokeActionResult | PolicyDecisionEnvelope> {
   const service = opts.canonicalAuthorizationService;
   if (!service) return { ok: false, error: "Canonical authorization service is unavailable." };
@@ -528,7 +529,7 @@ async function enforceCanonicalWorkflowPolicy(
     ...(ctx.owner.type === "team" ? { teamId: ctx.owner.id } : {}), requestId: req.invocationId,
     workflowDefinitionId: workflowDefinitionId, workflowVersion: workflowVersion, workflowExecutionId: workflowExecutionId,
     nodeId: workflowNodeId, invocationId: req.invocationId, evaluationTimeMs: now,
-    action: { service: req.service, actionId, catalogActionId: actionId, sourcePluginService: req.service, sourceActionId: actionId, sourceToolId: workflowNodeId, riskLevel: action.riskLevel, parameters: req.params, parameterProjection: actionProjection(actionId) },
+    action: { service: req.service, actionId, catalogActionId: actionId, sourcePluginService: req.service, sourceActionId: actionId, sourceToolId: workflowNodeId, riskLevel: action.riskLevel, parameters: req.params, parameterProjection: actionProjection(actionPlugin, action) },
   };
   const grantFacts = await loadCanonicalDynamicFacts(opts.db, {
     organizationId: ctx.orgId,

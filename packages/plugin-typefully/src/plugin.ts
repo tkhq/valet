@@ -10,6 +10,7 @@ const plugin: ValetPlugin = {
       mcpUrl: 'https://mcp.typefully.com/mcp',
       serviceName: 'typefully',
       defaultRiskLevel: 'medium',
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
       authQueryParam: 'TYPEFULLY_API_KEY',
     }),
   ],

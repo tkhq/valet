@@ -154,8 +154,8 @@ function makePolicyFixturePlugin(): { plugin: ValetPlugin; calls: (actionId: str
     name: "policy-fixture",
     version: "0.0.1",
     actions: [
-      { service: "github", actions: [ping, nuke, deploy] },
-      { service: "gmail", actions: [wipe] },
+      { service: "github", safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [ping, nuke, deploy] },
+      { service: "gmail", safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [wipe] },
     ],
   };
   return { plugin, calls: (actionId: string) => calls.get(actionId) ?? 0 };

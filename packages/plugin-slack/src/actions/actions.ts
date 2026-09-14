@@ -1165,6 +1165,7 @@ const joinChannel = action(Type.Object({
 
 export const slackPlugin: ActionPlugin = {
   service: 'slack',
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description: 'Slack integration for messages, channels, and users',
   actions: [
     dmOwner,

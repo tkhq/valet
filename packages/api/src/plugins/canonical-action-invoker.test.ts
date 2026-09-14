@@ -13,7 +13,7 @@ afterEach(async () => { await pg?.cleanup(); pg = undefined; });
 const credentials: CredentialStore = { get: async (_owner: CredentialOwner, _service: string) => null, save: async () => {}, delete: async () => {}, list: async () => [] };
 
 function catalog(execute: ActionPlugin["actions"][number]["execute"], service = "github", actionId = "github.create_issue") {
-  const actionPlugin: ActionPlugin = { service, actions: [{ id: actionId, name: "Create", description: "Create", riskLevel: "medium", parameters: Type.Object({ title: Type.String() }), execute }] };
+  const actionPlugin: ActionPlugin = { service, safeParameterProjection: { schemaVersion: 1, mode: "all_safe" }, actions: [{ id: actionId, name: "Create", description: "Create", riskLevel: "medium", parameters: Type.Object({ title: Type.String() }), execute }] };
   const plugin = { name: service, version: "1", actions: [actionPlugin] } as ValetPlugin;
   return new Map([[service, { plugin, actionPlugin }]]);
 }
@@ -63,6 +63,7 @@ describe("canonical workflow action invocation", () => {
     const actionPlugin: ActionPlugin = {
       service: "deepwiki",
       actions: [],
+      safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
       resolveActions: async () => [{ id: "deepwiki.ask_question", name: "Ask", description: "Ask", riskLevel: "medium", parameters: Type.Object({ title: Type.String() }), execute }],
     };
     const plugin = { name: "deepwiki", version: "1", actions: [actionPlugin] } as ValetPlugin;

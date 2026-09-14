@@ -20,6 +20,7 @@ import type {
 } from "./types.js";
 import { isDecisionGateExpired } from "./decision-gate.js";
 import { encodeToolOutput } from "./tool-output.js";
+import type { SafeParameterProjectionV1 } from "./authorization/action-adapters.js";
 
 /**
  * Plugin catalog: indirection layer that exposes plugin actions to the LLM
@@ -67,6 +68,8 @@ export interface PluginAction<TParams extends TSchema = TSchema> {
   description: string;
   riskLevel: RiskLevel;
   parameters: TParams;
+  /** Overrides the service projection for this action. Missing metadata disables canonical authorization. */
+  safeParameterProjection?: SafeParameterProjectionV1;
   execute: (
     args: Static<TParams>,
     ctx: PluginActionContext,
@@ -110,6 +113,8 @@ export interface ActionPlugin {
   service: string;
   description?: string;
   actions: PluginAction[];
+  /** Versioned, secret-safe parameter projection shared by this service's actions. */
+  safeParameterProjection?: SafeParameterProjectionV1;
   /** Override credential service name (defaults to `service`). */
   credentialService?: string;
   /**

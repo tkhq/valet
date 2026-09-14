@@ -1,231 +1,66 @@
-import type { ActionPlugin } from "@valet/engine";
+import type { ActionPlugin, PluginAction } from "@valet/engine";
 import type { SafeParameterProjectionV1 } from "@valet/engine/authorization";
 
-/** Version 1 inventory. all_safe is an explicit assertion that action params contain no credential material. */
-const ALL_SAFE = Object.freeze({ schemaVersion: 1, mode: "all_safe" } as const);
-const DYNAMIC_ALL_SAFE_SERVICES = new Set(["cloudflare", "deepwiki", "figma", "linear", "notion", "sentry", "stripe", "typefully"]);
-const INVENTORY: Readonly<Record<string, SafeParameterProjectionV1>> = Object.freeze({
-  "assistants.archive_assistant": ALL_SAFE,
-  "assistants.create_assistant": ALL_SAFE,
-  "assistants.list_assistants": ALL_SAFE,
-  "assistants.update_assistant": ALL_SAFE,
-  "calendar.create_event": ALL_SAFE,
-  "calendar.delete_event": ALL_SAFE,
-  "calendar.list_events": ALL_SAFE,
-  "calendar.query_free_busy": ALL_SAFE,
-  "calendar.quick_add": ALL_SAFE,
-  "calendar.update_event": ALL_SAFE,
-  "docs.add_comment": ALL_SAFE,
-  "docs.add_tab": ALL_SAFE,
-  "docs.append_markdown": ALL_SAFE,
-  "docs.append_text": ALL_SAFE,
-  "docs.apply_paragraph_style": ALL_SAFE,
-  "docs.apply_text_style": ALL_SAFE,
-  "docs.delete_comment": ALL_SAFE,
-  "docs.delete_range": ALL_SAFE,
-  "docs.find_and_replace": ALL_SAFE,
-  "docs.find_text_index": ALL_SAFE,
-  "docs.get_comment": ALL_SAFE,
-  "docs.insert_image": ALL_SAFE,
-  "docs.insert_page_break": ALL_SAFE,
-  "docs.insert_section_break": ALL_SAFE,
-  "docs.insert_table": ALL_SAFE,
-  "docs.insert_table_with_data": ALL_SAFE,
-  "docs.insert_text": ALL_SAFE,
-  "docs.list_comments": ALL_SAFE,
-  "docs.list_tabs": ALL_SAFE,
-  "docs.modify_text": ALL_SAFE,
-  "docs.read_document": ALL_SAFE,
-  "docs.rename_tab": ALL_SAFE,
-  "docs.replace_document_with_markdown": ALL_SAFE,
-  "docs.reply_to_comment": ALL_SAFE,
-  "docs.resolve_comment": ALL_SAFE,
-  "docs.update_section_style": ALL_SAFE,
-  "drive.copy_file": ALL_SAFE,
-  "drive.create_document": ALL_SAFE,
-  "drive.create_folder": ALL_SAFE,
-  "drive.create_from_template": ALL_SAFE,
-  "drive.delete_file": ALL_SAFE,
-  "drive.download_file": ALL_SAFE,
-  "drive.get_document_info": ALL_SAFE,
-  "drive.get_folder_info": ALL_SAFE,
-  "drive.list_documents": ALL_SAFE,
-  "drive.list_files": ALL_SAFE,
-  "drive.list_folder_contents": ALL_SAFE,
-  "drive.move_file": ALL_SAFE,
-  "drive.rename_file": ALL_SAFE,
-  "drive.search_documents": ALL_SAFE,
-  "drive.search_files": ALL_SAFE,
-  "github.cancel_workflow_run": ALL_SAFE,
-  "github.create_branch": ALL_SAFE,
-  "github.create_comment": ALL_SAFE,
-  "github.create_issue": ALL_SAFE,
-  "github.create_pull_request": ALL_SAFE,
-  "github.create_release": ALL_SAFE,
-  "github.create_repository": ALL_SAFE,
-  "github.create_review": ALL_SAFE,
-  "github.delete_branch": ALL_SAFE,
-  "github.fork_repository": ALL_SAFE,
-  "github.get_issue": ALL_SAFE,
-  "github.get_job_logs": ALL_SAFE,
-  "github.get_pull_request": ALL_SAFE,
-  "github.get_repository": ALL_SAFE,
-  "github.get_workflow_run": ALL_SAFE,
-  "github.inspect_pull_request": ALL_SAFE,
-  "github.list_commits": ALL_SAFE,
-  "github.list_issues": ALL_SAFE,
-  "github.list_pull_requests": ALL_SAFE,
-  "github.list_repo_directory": ALL_SAFE,
-  "github.list_repos": ALL_SAFE,
-  "github.list_workflow_runs": ALL_SAFE,
-  "github.list_workflows": ALL_SAFE,
-  "github.merge_pull_request": ALL_SAFE,
-  "github.read_repo_file": ALL_SAFE,
-  "github.rerun_workflow": ALL_SAFE,
-  "github.search_code": ALL_SAFE,
-  "github.search_issues": ALL_SAFE,
-  "github.trigger_workflow": ALL_SAFE,
-  "github.update_issue": ALL_SAFE,
-  "github.update_pull_request": ALL_SAFE,
-  "gmail.create_draft": ALL_SAFE,
-  "gmail.delete_draft": ALL_SAFE,
-  "gmail.get_draft": ALL_SAFE,
-  "gmail.get_message": ALL_SAFE,
-  "gmail.list_drafts": ALL_SAFE,
-  "gmail.list_labels": ALL_SAFE,
-  "gmail.list_messages": ALL_SAFE,
-  "gmail.modify_labels": ALL_SAFE,
-  "gmail.send_draft": ALL_SAFE,
-  "gmail.send_email": ALL_SAFE,
-  "gmail.trash_message": ALL_SAFE,
-  "gmail.triage_inbox": ALL_SAFE,
-  "gmail.update_draft": ALL_SAFE,
-  "openai.edit_image": ALL_SAFE,
-  "openai.generate_image": ALL_SAFE,
-  "openai.text_to_speech": ALL_SAFE,
-  "openai.transcribe_audio": ALL_SAFE,
-  "sheets.add_conditional_formatting": ALL_SAFE,
-  "sheets.add_sheet": ALL_SAFE,
-  "sheets.append_rows": ALL_SAFE,
-  "sheets.append_table_rows": ALL_SAFE,
-  "sheets.auto_resize_columns": ALL_SAFE,
-  "sheets.auto_resize_rows": ALL_SAFE,
-  "sheets.batch_write": ALL_SAFE,
-  "sheets.clear_range": ALL_SAFE,
-  "sheets.copy_formatting": ALL_SAFE,
-  "sheets.copy_sheet_to": ALL_SAFE,
-  "sheets.create_spreadsheet": ALL_SAFE,
-  "sheets.create_table": ALL_SAFE,
-  "sheets.delete_chart": ALL_SAFE,
-  "sheets.delete_conditional_formatting": ALL_SAFE,
-  "sheets.delete_sheet": ALL_SAFE,
-  "sheets.delete_table": ALL_SAFE,
-  "sheets.duplicate_sheet": ALL_SAFE,
-  "sheets.format_cells": ALL_SAFE,
-  "sheets.freeze_rows_and_columns": ALL_SAFE,
-  "sheets.get_conditional_formatting": ALL_SAFE,
-  "sheets.get_spreadsheet_info": ALL_SAFE,
-  "sheets.get_table": ALL_SAFE,
-  "sheets.group_rows": ALL_SAFE,
-  "sheets.insert_chart": ALL_SAFE,
-  "sheets.list_spreadsheets": ALL_SAFE,
-  "sheets.list_tables": ALL_SAFE,
-  "sheets.protect_range": ALL_SAFE,
-  "sheets.read_cell_format": ALL_SAFE,
-  "sheets.read_spreadsheet": ALL_SAFE,
-  "sheets.rename_sheet": ALL_SAFE,
-  "sheets.set_cell_borders": ALL_SAFE,
-  "sheets.set_column_widths": ALL_SAFE,
-  "sheets.set_dropdown_validation": ALL_SAFE,
-  "sheets.set_row_heights": ALL_SAFE,
-  "sheets.ungroup_all_rows": ALL_SAFE,
-  "sheets.update_table_range": ALL_SAFE,
-  "sheets.write_spreadsheet": ALL_SAFE,
-  "skills.create_skill": ALL_SAFE,
-  "skills.delete_skill": ALL_SAFE,
-  "skills.list_skills": ALL_SAFE,
-  "skills.update_skill": ALL_SAFE,
-  "slack.add_reaction": ALL_SAFE,
-  "slack.delete_message": ALL_SAFE,
-  "slack.dm_owner": ALL_SAFE,
-  "slack.dm_user": ALL_SAFE,
-  "slack.fetch_file": ALL_SAFE,
-  "slack.get_channel_info": ALL_SAFE,
-  "slack.get_pins": ALL_SAFE,
-  "slack.get_reactions": ALL_SAFE,
-  "slack.join_channel": ALL_SAFE,
-  "slack.list_channels": ALL_SAFE,
-  "slack.list_users": ALL_SAFE,
-  "slack.react_to_origin": ALL_SAFE,
-  "slack.read_history": ALL_SAFE,
-  "slack.read_thread": ALL_SAFE,
-  "slack.reply_file_to_origin": ALL_SAFE,
-  "slack.reply_to_origin": ALL_SAFE,
-  "slack.send_message": ALL_SAFE,
-  "slack.update_message": ALL_SAFE,
-  "slack_user.add_bookmark": ALL_SAFE,
-  "slack_user.add_pin": ALL_SAFE,
-  "slack_user.add_reaction": ALL_SAFE,
-  "slack_user.add_reminder": ALL_SAFE,
-  "slack_user.end_dnd": ALL_SAFE,
-  "slack_user.list_channels": ALL_SAFE,
-  "slack_user.post_message": ALL_SAFE,
-  "slack_user.read_history": ALL_SAFE,
-  "slack_user.read_thread": ALL_SAFE,
-  "slack_user.search_messages": ALL_SAFE,
-  "slack_user.send_dm": ALL_SAFE,
-  "slack_user.set_dnd": ALL_SAFE,
-  "slack_user.set_status": ALL_SAFE,
-  "slack_user.upload_file": ALL_SAFE,
-  "telegram.reply_to_origin": ALL_SAFE,
-  "workflows.add_aggregate": ALL_SAFE,
-  "workflows.cancel_run": ALL_SAFE,
-  "workflows.copy_to_team": ALL_SAFE,
-  "workflows.create_schedule": ALL_SAFE,
-  "workflows.create_trigger": ALL_SAFE,
-  "workflows.create_webhook": ALL_SAFE,
-  "workflows.delete_schedule": ALL_SAFE,
-  "workflows.delete_trigger": ALL_SAFE,
-  "workflows.delete_webhook": ALL_SAFE,
-  "workflows.delete_workflow": ALL_SAFE,
-  "workflows.get_node_result": ALL_SAFE,
-  "workflows.get_run": ALL_SAFE,
-  "workflows.get_webhook": ALL_SAFE,
-  "workflows.get_workflow": ALL_SAFE,
-  "workflows.list_event_types": ALL_SAFE,
-  "workflows.list_runs": ALL_SAFE,
-  "workflows.list_schedules": ALL_SAFE,
-  "workflows.list_triggers": ALL_SAFE,
-  "workflows.list_workflows": ALL_SAFE,
-  "workflows.patch_workflow": ALL_SAFE,
-  "workflows.resolve_approval": ALL_SAFE,
-  "workflows.save_workflow": ALL_SAFE,
-  "workflows.start_run": ALL_SAFE,
-  "workflows.update_schedule": ALL_SAFE,
-  "workflows.update_trigger": ALL_SAFE,
-});
-
-export function actionProjection(actionId: string): SafeParameterProjectionV1 {
-  const projection = INVENTORY[actionId];
-  if (projection) return projection;
-  const service = actionId.split(".", 1)[0];
-  if (service && DYNAMIC_ALL_SAFE_SERVICES.has(service)) return ALL_SAFE;
-  throw new Error(`Missing canonical safe-parameter projection for ${actionId}.`);
+export class ActionProjectionError extends TypeError {
+  readonly code = "missing_action_projection";
+  constructor(readonly actionId: string) {
+    super(`Action ${actionId} has no canonical safe-parameter projection. Add safeParameterProjection schemaVersion 1 to the action or service.`);
+    this.name = "ActionProjectionError";
+  }
 }
 
-export function validateActionProjectionInventory(
+export function actionProjection(plugin: ActionPlugin, action: PluginAction): SafeParameterProjectionV1 {
+  const projection = action.safeParameterProjection ?? plugin.safeParameterProjection;
+  if (!projection) throw new ActionProjectionError(qualifiedId(plugin.service, action));
+  return projection;
+}
+
+export interface ActionProjectionDiagnostic {
+  readonly code: "missing_action_projection";
+  readonly service: string;
+  readonly actionId: string;
+  readonly correctiveAction: string;
+}
+
+/**
+ * Disables external actions that do not declare a secret-safe projection.
+ * One bad plugin cannot stop unrelated API services from starting.
+ */
+export function quarantineMissingActionProjections(
   plugins: ReadonlyMap<string, { actionPlugin: ActionPlugin }>,
-  requireExact = true,
-): void {
-  const actual = new Set<string>();
+  onDynamicDiagnostic?: (diagnostic: ActionProjectionDiagnostic) => void,
+): ActionProjectionDiagnostic[] {
+  const diagnostics: ActionProjectionDiagnostic[] = [];
   for (const [service, { actionPlugin }] of plugins) {
-    if (actionPlugin.resolveActions) {
-      if (!DYNAMIC_ALL_SAFE_SERVICES.has(service)) throw new Error(`Dynamic plugin ${service} requires an explicit canonical projection handler.`);
-      continue;
+    actionPlugin.actions = actionPlugin.actions.filter((action) => {
+      if (action.safeParameterProjection ?? actionPlugin.safeParameterProjection) return true;
+      diagnostics.push(diagnostic(service, qualifiedId(service, action)));
+      return false;
+    });
+    const resolveActions = actionPlugin.resolveActions;
+    if (resolveActions && !actionPlugin.safeParameterProjection) {
+      actionPlugin.resolveActions = async (context) => {
+        const resolved = await resolveActions(context);
+        return resolved.filter((action) => {
+          if (action.safeParameterProjection) return true;
+          onDynamicDiagnostic?.(diagnostic(service, qualifiedId(service, action)));
+          return false;
+        });
+      };
     }
-    for (const action of actionPlugin.actions) actual.add(action.id.includes(".") ? action.id : `${service}.${action.id}`);
   }
-  const missing = [...actual].filter((id) => !INVENTORY[id]).sort();
-  const extra = requireExact ? Object.keys(INVENTORY).filter((id) => !actual.has(id)).sort() : [];
-  if (missing.length || extra.length) throw new Error(`Canonical action projection inventory mismatch (missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}).`);
+  return diagnostics;
+}
+
+function diagnostic(service: string, actionId: string): ActionProjectionDiagnostic {
+  return {
+    code: "missing_action_projection",
+    service,
+    actionId,
+    correctiveAction: "Declare safeParameterProjection schemaVersion 1 on the action or service, then restart Valet.",
+  };
+}
+
+function qualifiedId(service: string, action: PluginAction): string {
+  return action.id.includes(".") ? action.id : `${service}.${action.id}`;
 }

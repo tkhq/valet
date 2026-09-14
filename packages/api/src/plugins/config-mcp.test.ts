@@ -26,6 +26,7 @@ describe("configMcpPlugins", () => {
     expect(plugin.name).toBe(`${CONFIG_MCP_PLUGIN_PREFIX}example`);
     expect(plugin.actions?.[0]?.service).toBe("example");
     expect(plugin.actions?.[0]?.resolveActions).toBeDefined();
+    expect(plugin.actions?.[0]?.safeParameterProjection).toEqual({ schemaVersion: 1, mode: "all_safe" });
     // auth: none → no connect flow, tools visible while unconnected.
     expect(plugin.actions?.[0]?.requiresCredential).toBe(false);
     expect(plugin.credentials).toBeUndefined();

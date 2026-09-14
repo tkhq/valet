@@ -49,20 +49,21 @@ export class CanonicalAuthorizationService implements AuthorizationService {
       service: actionPlugin.service,
       actionId: action.id.includes(".") ? action.id : `${actionPlugin.service}.${action.id}`,
       riskLevel: action.riskLevel,
+      parameterProjection: actionProjection(actionPlugin, action),
     })));
     let actions = target.actionId ? catalog.filter((action) => action.actionId === target.actionId)
       : target.service ? catalog.filter((action) => action.service === target.service)
       : catalog.filter((action) => action.riskLevel === target.riskLevel);
     if (target.actionId && actions.length === 0) return { ok: false, error: `cannot set override mode "allow": action "${target.actionId}" is not in the plugin catalog and cannot be verified against org policy` };
-    if (actions.length === 0 && target.service) actions = (["low", "medium", "high", "critical"] as const).map((riskLevel) => ({ service: target.service!, actionId: `${target.service}.override_bounds`, riskLevel }));
+    if (actions.length === 0 && target.service) actions = (["low", "medium", "high", "critical"] as const).map((riskLevel) => ({ service: target.service!, actionId: `${target.service}.override_bounds`, riskLevel, parameterProjection: { schemaVersion: 1, mode: "all_safe" } as const }));
     if (target.riskLevel) {
       const services = [...this.manager.plugins.keys()];
-      actions.push(...services.filter((service) => !actions.some((action) => action.service === service)).map((service) => ({ service, actionId: `${service}.override_bounds`, riskLevel: target.riskLevel! })));
+      actions.push(...services.filter((service) => !actions.some((action) => action.service === service)).map((service) => ({ service, actionId: `${service}.override_bounds`, riskLevel: target.riskLevel!, parameterProjection: { schemaVersion: 1, mode: "all_safe" } as const })));
     }
     const now = this.now();
     for (const action of actions) for (const appliesIn of ["session", "workflow"] as const) {
       const requestId = createHash("sha256").update(canonicalAuthorizationJson({ orgId, userId, target, action, appliesIn, now })).digest("hex");
-      const parameterProjection = action.actionId.endsWith(".override_bounds") ? { schemaVersion: 1, mode: "all_safe" } as const : actionProjection(action.actionId);
+      const parameterProjection = action.actionId.endsWith(".override_bounds") ? { schemaVersion: 1, mode: "all_safe" } as const : action.parameterProjection;
       const common = { ...action, catalogActionId: action.actionId, sourcePluginService: action.service, sourceActionId: action.actionId, sourceToolId: "override_bounds", parameters: {}, parameterProjection };
       const adapted = appliesIn === "session"
         ? adaptInteractiveAction({ schemaVersion: 1, organizationId: orgId, actor: { type: "user", id: userId }, owner: { type: "user", id: userId }, requestId, sessionId: `override:${requestId}`, threadId: requestId, queueItemId: requestId, resumeKey: requestId, gateOrdinal: 0, action: common, evaluationTimeMs: now, dynamicFacts: {} })

@@ -2262,6 +2262,7 @@ const listRepoDirectory = action(Type.Object({
 
 export const githubPlugin: ActionPlugin = {
   service: "github",
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description:
     "GitHub integration: repos, issues, PRs, branches, commits, releases, workflows.",
   // Statically-listed actions, so without this flag list_tools would

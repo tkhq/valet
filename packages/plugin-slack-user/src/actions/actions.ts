@@ -704,6 +704,7 @@ const allActions: PluginAction[] = [
 
 export const slackUserActionPlugin: ActionPlugin = {
   service: "slack-user",
+  safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
   description: "Slack (personal) — acts AS the connected user (xoxp token)",
   requiresCredential: true,
   actions: allActions,
