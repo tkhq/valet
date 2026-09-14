@@ -13,7 +13,7 @@ Replace the 15 current `docs.*` actions in `packages/plugin-google-workspace/` w
 
 | Action ID | Params (summary) | Description | Risk | Guard |
 |-----------|------------------|-------------|------|-------|
-| `docs.read_document` | `documentId`, `format?` (text/json/markdown), `maxLength?`, `tabId?` | Read document content in text, JSON, or markdown format | low | READ_GET |
+| `docs.read_document` | `documentId`, `format?` (text/json/markdown), `maxLength?`, `tabId?`, `suggestionsViewMode?` (`PREVIEW_WITHOUT_SUGGESTIONS`, `PREVIEW_SUGGESTIONS_ACCEPTED`, or `SUGGESTIONS_INLINE`) | Read document content in text, JSON, or markdown format | low | READ_GET |
 | `docs.insert_text` | `documentId`, `text`, `index`, `tabId?` | Insert text at a specific index | medium | WRITE_MODIFY |
 | `docs.append_text` | `documentId`, `text`, `tabId?` | Append text to end of document | medium | WRITE_MODIFY |
 | `docs.modify_text` | `documentId`, `target` (range/find/insertion), `text?`, `style?`, `tabId?` | Combined replace/insert/format in one atomic operation | high | WRITE_MODIFY |

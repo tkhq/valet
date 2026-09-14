@@ -9,6 +9,7 @@ import type {
   SessionEntry,
   ToolContext,
 } from '@valet/engine';
+import { Value } from 'typebox/value';
 import { docsActions } from '../docs-actions.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
@@ -96,6 +97,43 @@ describe('docs actions', () => {
       success: true,
       data: { content: 'Content (11 characters):\n---\nHello world' },
     });
+  });
+
+  it.each([
+    'PREVIEW_WITHOUT_SUGGESTIONS',
+    'PREVIEW_SUGGESTIONS_ACCEPTED',
+    'SUGGESTIONS_INLINE',
+  ] as const)('read_document passes %s to the Docs API', async (suggestionsViewMode) => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        body: {
+          content: [
+            { paragraph: { elements: [{ textRun: { content: 'Hello world' } }] } },
+          ],
+        },
+      }),
+    );
+
+    await action('docs.read_document').execute(
+      { documentId: 'doc1', suggestionsViewMode },
+      pluginCtx(),
+    );
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      DOCS_API +
+        '/documents/doc1?fields=body%28content%28paragraph%28elements%28textRun%28content%29%29%29%29%29&suggestionsViewMode=' +
+        suggestionsViewMode,
+    );
+  });
+
+  it('read_document rejects an unsupported suggestions view mode before execution', () => {
+    expect(
+      Value.Check(action('docs.read_document').parameters, {
+        documentId: 'doc1',
+        suggestionsViewMode: 'ACCEPT_ALL',
+      }),
+    ).toBe(false);
   });
 
   it('read_document maps a 404 to a Docs API error', async () => {
