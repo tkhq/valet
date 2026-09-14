@@ -762,7 +762,13 @@ function fakeGithubPlugin(): { plugin: ValetPlugin; calls: Array<Record<string, 
   const plugin: ValetPlugin = {
     name: "github",
     version: "0.0.1",
-    actions: [{ service: "github", actions: [createIssue] }],
+    actions: [
+      {
+        service: "github",
+        safeParameterProjection: { schemaVersion: 1, mode: "all_safe" },
+        actions: [createIssue],
+      },
+    ],
   };
   return { plugin, calls };
 }
