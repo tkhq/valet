@@ -73,6 +73,11 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # The root project references omit the web app. Check the same build
+      # that Docker Images and Release CLI run before a change can merge.
+      - name: Build web SPA
+        run: pnpm --filter @valet/web build
+
   test:
     runs-on: ubuntu-latest
     strategy:
