@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
 import { canonicalJson } from "../lib/canonical-json.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, teams } from "../schema/index.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, teams } from "../schema/index.js";
 import { buildCurrentPolicySource, standardNewOrganizationPolicySnapshot } from "./bundles/current-policy-source.js";
 import type { CurrentPolicySourceSnapshotV1 } from "./bundles/current-policy-types.js";
 import { SourceBundleHost } from "./bundles/host.js";
@@ -66,6 +66,22 @@ export interface CanonicalReleaseMigrationInput {
   readonly source: "structured" | "authored";
   readonly active: { readonly sourceBundleDigest: string; readonly generation: number };
   readonly bundle: CanonicalSourceBundle;
+}
+
+interface ReleasePointerSnapshot { readonly orgId: string; readonly digest: string; readonly generation: number }
+interface ReleaseAuditSnapshot { readonly orgId: string | null; readonly params: unknown }
+
+export function sameConcurrentReleaseTarget(
+  observed: readonly ReleasePointerSnapshot[],
+  current: readonly ReleasePointerSnapshot[],
+  audits: readonly ReleaseAuditSnapshot[],
+  targetRelease: string,
+): boolean {
+  return current.every((pointer) => observed.some((prior) => prior.orgId === pointer.orgId && prior.digest === pointer.digest && prior.generation === pointer.generation)
+    || audits.some((row) => row.orgId === pointer.orgId && row.params && typeof row.params === "object" && !Array.isArray(row.params)
+      && (row.params as Record<string, unknown>).targetRelease === targetRelease
+      && (row.params as Record<string, unknown>).sourceBundleDigest === pointer.digest
+      && (row.params as Record<string, unknown>).generation === pointer.generation));
 }
 
 export class CanonicalPolicyBundleManager {
@@ -157,8 +173,40 @@ export class CanonicalPolicyBundleManager {
   ): Promise<void> {
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(targetRelease)) throw new Error("Canonical release identifier is invalid.");
     await this.db.transaction(async (tx) => {
+      // Read before waiting for the global lock. If another manager changes
+      // the release set while this caller waits, only the same target can win.
+      const observed = await tx.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
       await tx.execute(sql`select pg_advisory_xact_lock(1447382105)`);
       const pointers = await tx.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId).for("update");
+      if (canonicalJson(observed) !== canonicalJson(pointers)) {
+        const winner = await tx.select({ orgId: actionInvocations.orgId, params: actionInvocations.params })
+          .from(actionInvocations)
+          .where(and(eq(actionInvocations.service, "canonical-policy"), eq(actionInvocations.actionId, "release_set_migration")));
+        if (!sameConcurrentReleaseTarget(observed, pointers, winner, targetRelease)) throw new Error("Canonical release migration lost a concurrent target race. Retry only after you verify the active release set.");
+        return;
+      }
+
+      // Legacy grants lack one or more facts required by the canonical grant
+      // contract. Revoke them in the release transaction so they re-gate.
+      const revoked = await tx.update(runtimeGrants).set({ revokedAt: this.now() }).where(sql`
+        ${runtimeGrants.revokedAt} is null and (
+          ${runtimeGrants.service} is null or ${runtimeGrants.actionId} is null or
+          ${runtimeGrants.riskLevel} is null or ${runtimeGrants.sourceApprovalId} is null or
+          ${runtimeGrants.service} = '' or ${runtimeGrants.actionId} = '' or ${runtimeGrants.sourceApprovalId} = '' or
+          ${runtimeGrants.expiresAt} is null or ${runtimeGrants.policyKey} <> ${runtimeGrants.actionId} or
+          ${runtimeGrants.actionId} not like ${runtimeGrants.service} || '.%' or
+          ${runtimeGrants.expiresAt} <= ${runtimeGrants.createdAt} or
+          ${runtimeGrants.expiresAt} > ${runtimeGrants.createdAt} + ${72 * 60 * 60 * 1000}
+        )
+      `).returning({ id: runtimeGrants.id, orgId: runtimeGrants.orgId });
+      for (const grant of revoked) {
+        await tx.insert(actionInvocations).values({
+          invocationId: `policy:release:${createHash("sha256").update(`${targetRelease}\0legacy-grant\0${grant.id}`).digest("hex")}`,
+          service: "canonical-policy", actionId: "legacy_runtime_grant_revoked", status: "completed",
+          userId: "release-migration", orgId: grant.orgId, params: { targetRelease, grantId: grant.id, treatment: "re_gate" }, createdAt: this.now(),
+        }).onConflictDoNothing();
+      }
+
       const plans: { pointer: typeof pointers[number]; bundle: CanonicalSourceBundle; identity: ValidatedBundleIdentity; authored: boolean }[] = [];
       for (const pointer of pointers) {
         const stored = (await tx.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, pointer.digest)).limit(1))[0];

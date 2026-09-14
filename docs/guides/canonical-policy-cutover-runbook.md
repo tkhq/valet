@@ -48,7 +48,7 @@ The command must exit zero and every organization report must have `"compatible"
 
 5. Stop if any required check or compatibility report fails.
 6. Create a database backup with the approved platform procedure.
-6. Record all active policy pointers.
+7. Record all active policy pointers.
 
 ```bash
 psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --csv \
@@ -56,7 +56,7 @@ psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --csv \
   > canonical-policy-pointers-before.csv
 ```
 
-7. Confirm that every organization has one active pointer and stored bundle.
+8. Confirm that every organization has one active pointer and stored bundle.
 
 ```bash
 psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --tuples-only --no-align <<'SQL'
@@ -70,13 +70,23 @@ SQL
 
 The command must print `0`.
 
-8. When the application, engine, capability profile, interpreter, plugin defaults, or source builder changes, start exactly one isolated candidate with `VALET_POLICY_RELEASE_MIGRATION=<release-id>`. The pre-listen migration takes a global advisory lock, validates every replacement before updating any pointer, and preserves authored policy files byte-for-byte. Remove the variable after it succeeds.
-9. Start one candidate API process against the release database in the approved isolated environment.
-10. Stop if canonical policy readiness prevents startup.
-10. Confirm that the process reports healthy only after readiness completes.
-11. Stop the isolated process.
-12. Compare active pointers with `canonical-policy-pointers-before.csv`.
-13. Investigate every pointer change before release approval.
+9. When the release contract changes, start an isolated candidate with `VALET_POLICY_RELEASE_MIGRATION=<release-id>`.
+
+The pre-listen migration takes a global advisory lock. It validates every replacement before it updates any pointer. It preserves authored policy files byte-for-byte.
+
+The migration revokes each active legacy runtime grant that lacks complete canonical evidence. The next matching action must request approval again. The migration records each revocation as `legacy_runtime_grant_revoked`.
+
+The migration preserves parked workflow approval nodes. When an operator resolves one, the workflow must pass canonical authorization before its action runs.
+
+Concurrent candidates can use the same release identifier. A candidate with a different identifier fails if another candidate changes the release set while it waits.
+
+10. Remove the variable after the migration succeeds.
+11. Start one candidate API process against the release database in the approved isolated environment.
+12. Stop if canonical policy readiness prevents startup.
+13. Confirm that the process reports healthy only after readiness completes.
+14. Stop the isolated process.
+15. Compare active pointers with `canonical-policy-pointers-before.csv`.
+16. Investigate every pointer change before release approval.
 
 Readiness can add a missing initial pointer. It must not replace a stale or invalid pointer.
 

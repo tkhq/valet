@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles } from "../schema/index.js";
-import { CanonicalPolicyBundleManager, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness } from "./canonical-policy-manager.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, workflowRuns } from "../schema/index.js";
+import { CanonicalPolicyBundleManager, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 
 let pg: TestPgDb | undefined;
@@ -176,6 +176,12 @@ describe("canonical policy readiness", () => {
         return input.bundle;
       };
 
+      await db.insert(runtimeGrants).values([
+        { id: "legacy-grant", orgId: "org-a", sessionId: "session-a", policyKey: "gmail.send", grantedBy: "user-a", createdAt: 1 },
+        { id: "canonical-grant", orgId: "org-a", sessionId: "session-a", policyKey: "calendar.create", service: "calendar", actionId: "calendar.create", riskLevel: "high", sourceApprovalId: "approval-a", expiresAt: 1000, grantedBy: "user-a", createdAt: 1 },
+      ]);
+      await db.insert(workflowRuns).values({ id: "pending-approval", workflowId: "workflow-a", definitionVersionId: "version-a", definition: {}, params: {}, status: "parked", waitingOn: [{ kind: "signal", signalType: "approval:review" }], createdAt: 1, updatedAt: 1 });
+
       let calls = 0;
       await expect(manager.migrateReleaseSet("release-bad", async (input) => {
         calls++;
@@ -184,8 +190,18 @@ describe("canonical policy readiness", () => {
       })).rejects.toThrow();
       expect(calls).toBe(2);
       expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(before);
+      expect((await db.select().from(runtimeGrants).where(eq(runtimeGrants.id, "legacy-grant")))[0]?.revokedAt).toBeNull();
 
       await manager.migrateReleaseSet("release-2", rewrite);
+      const grants = await db.select().from(runtimeGrants).orderBy(runtimeGrants.id);
+      expect(grants.find((row) => row.id === "legacy-grant")?.revokedAt).toBe(10);
+      expect(grants.find((row) => row.id === "canonical-grant")?.revokedAt).toBeNull();
+      expect(await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "legacy_runtime_grant_revoked"))).toMatchObject([
+        { orgId: "org-a", params: { targetRelease: "release-2", grantId: "legacy-grant", treatment: "re_gate" } },
+      ]);
+      expect(await db.select().from(workflowRuns).where(eq(workflowRuns.id, "pending-approval"))).toMatchObject([
+        { status: "parked", waitingOn: [{ kind: "signal", signalType: "approval:review" }] },
+      ]);
       const after = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
       expect(after.every((row, index) => row.generation === before[index]!.generation + 1)).toBe(true);
       const migratedAuthored = (await db.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, after[1]!.digest)).limit(1))[0]!.bundle;
@@ -201,6 +217,16 @@ describe("canonical policy readiness", () => {
       expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(rolledBack);
     } finally { await manager.close(); }
   }, 120_000);
+
+  it("accepts only an identical target after a concurrent manager changes the release set", () => {
+    const observed = [{ orgId: "org-a", digest: "old-a", generation: 1 }, { orgId: "org-b", digest: "same-b", generation: 3 }];
+    const current = [{ orgId: "org-a", digest: "new-a", generation: 2 }, { orgId: "org-b", digest: "same-b", generation: 3 }];
+    const audits = [{ orgId: "org-a", params: { targetRelease: "release-2", sourceBundleDigest: "new-a", generation: 2 } }];
+    expect(sameConcurrentReleaseTarget(observed, current, audits, "release-2")).toBe(true);
+    expect(sameConcurrentReleaseTarget(observed, current, audits, "release-3")).toBe(false);
+    expect(sameConcurrentReleaseTarget(observed, [{ ...current[0]!, generation: 3 }, current[1]!], audits, "release-2")).toBe(false);
+    expect(sameConcurrentReleaseTarget(observed, current, [{ ...audits[0]!, params: { ...audits[0]!.params, sourceBundleDigest: "other" } }], "release-2")).toBe(false);
+  });
 
   it("rolls back static writes after a stale pointer CAS", async () => {
     const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
