@@ -397,8 +397,9 @@ async function computeResult(
     const originalInvocationId = req.invocationId;
     const invocationId = req.approval ? authorizationSha256Hex(canonicalAuthorizationJson({ original: originalInvocationId, resolutionId: canonicalApprovalResolutionId(req, req.approval.resolvedBy) })) : originalInvocationId;
     const idempotencyKey = `workflow:${invocationId}`;
-    const reserved = await opts.db.insert(authorizationExecutionAttempts).values({ attemptId: canonicalAttemptId, decisionId: canonicalDecisionId(ctx.orgId, idempotencyKey), outcome: "started", targetIdempotencyKey: req.invocationId, externalOperationIds: [], startedAt: (opts.clock ?? Date.now)(), createdAt: (opts.clock ?? Date.now)() }).onConflictDoNothing().returning({ attemptId: authorizationExecutionAttempts.attemptId });
-    if (!reserved[0]) return { ok: false, error: "Canonical execution attempt is already reserved." };
+    const decisionId = canonicalDecisionId(ctx.orgId, idempotencyKey);
+    const reserved = await opts.db.insert(authorizationExecutionAttempts).values({ attemptId: canonicalAttemptId, decisionId, outcome: "started", targetIdempotencyKey: req.invocationId, externalOperationIds: [], startedAt: (opts.clock ?? Date.now)(), createdAt: (opts.clock ?? Date.now)() }).onConflictDoNothing().returning({ attemptId: authorizationExecutionAttempts.attemptId });
+    if (!reserved[0]) return replayCanonicalAttempt(await loadCanonicalAttempt(opts.db, canonicalAttemptId), decisionId, req.invocationId, opts.db, canonicalAttemptId);
   }
 
   const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);
@@ -413,7 +414,7 @@ async function computeResult(
     result = await action.execute(prepared.args as Static<typeof action.parameters>, actionCtx);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: "failed", redactedError: "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
+    if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: "failed", redactedError: message, finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
     if (canonicalEnvelope) await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, ctx.orgId, { status: "error", error: message, durationMs: (opts.clock ?? Date.now)() - startedAt });
     return { ok: false, error: message };
   }
@@ -424,16 +425,42 @@ async function computeResult(
   // `result` is the full `PluginActionResult` — the same shape the session
   // path's `PolicyInvocationRecord.result` carries.
 
-  if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: result.success ? "completed" : "failed", redactedResult: result.success ? { completed: true } : null, redactedError: result.success ? null : "Action execution failed.", finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
-  if (canonicalEnvelope) await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, ctx.orgId, { status: result.success ? "completed" : "error", result, error: result.success ? undefined : (result.error ?? "failed with no error detail"), durationMs: (opts.clock ?? Date.now)() - startedAt });
+  const executionError = result.success ? undefined : result.error ?? `${req.service}.${req.action} failed with no error detail`;
+  const workflowResult: WorkflowInvokeActionResult = result.success
+    ? { ok: true, result: redactCanonicalResult(result.data, canonicalEnvelope?.decision.redactions.filter((item) => item.target === "user_output") ?? []) }
+    : { ok: false, error: executionError! };
+  if (canonicalAttemptId) await opts.db.update(authorizationExecutionAttempts).set({ outcome: result.success ? "completed" : "failed", redactedResult: result.success ? workflowResult : null, redactedError: executionError ?? null, finishedAt: (opts.clock ?? Date.now)() }).where(eq(authorizationExecutionAttempts.attemptId, canonicalAttemptId));
+  if (canonicalEnvelope) await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, ctx.orgId, { status: result.success ? "completed" : "error", result, error: executionError, durationMs: (opts.clock ?? Date.now)() - startedAt });
 
-  if (!result.success) {
-    return { ok: false, error: result.error ?? `${req.service}.${req.action} failed with no error detail` };
-  }
   // V2-GAP: attachments dropped — workflow results are JSON-only; revisit
   // once workflow runs have a place to store binary artifacts.
-  const redactions = canonicalEnvelope?.decision.redactions.filter((item) => item.target === "user_output") ?? [];
-  return { ok: true, result: redactCanonicalResult(result.data, redactions) };
+  return workflowResult;
+}
+
+async function loadCanonicalAttempt(db: AppDb, attemptId: string) {
+  return (await db.select().from(authorizationExecutionAttempts).where(eq(authorizationExecutionAttempts.attemptId, attemptId)).limit(1))[0];
+}
+
+async function replayCanonicalAttempt(
+  attempt: Awaited<ReturnType<typeof loadCanonicalAttempt>>,
+  decisionId: string,
+  invocationId: string,
+  db: AppDb,
+  attemptId: string,
+): Promise<WorkflowInvokeActionResult> {
+  if (!attempt || attempt.decisionId !== decisionId || attempt.targetIdempotencyKey !== invocationId) {
+    throw new Error("Canonical execution attempt identity is invalid.");
+  }
+  if (attempt.outcome === "completed") {
+    const bytes = new TextEncoder().encode(canonicalAuthorizationJson(attempt.redactedResult)).length;
+    if (bytes > 65_536) throw new Error("Canonical execution outcome exceeds the replay limit.");
+    return parseStoredResult(attempt.redactedResult);
+  }
+  if (attempt.outcome === "failed" && attempt.redactedError) return { ok: false, error: attempt.redactedError };
+  if (attempt.outcome === "started") {
+    await db.update(authorizationExecutionAttempts).set({ outcome: "indeterminate", redactedError: "indeterminate_execution: the action may have run. Do not retry automatically." }).where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.outcome, "started")));
+  }
+  return { ok: false, error: "indeterminate_execution: the action may have run. Do not retry automatically." };
 }
 
 function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionResult {

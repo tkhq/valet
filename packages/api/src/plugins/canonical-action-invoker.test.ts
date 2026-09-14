@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActionPlugin, CredentialOwner, CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
 import { actionInvocations, authorizationDecisions, authorizationExecutionAttempts, actionPolicies, orgs, policySourceBundles } from "../schema/index.js";
@@ -30,6 +31,28 @@ describe("canonical workflow action invocation", () => {
       expect(execute).toHaveBeenCalledOnce(); expect(await pg.appDb.select().from(authorizationDecisions)).toHaveLength(1); expect((await pg.appDb.select().from(authorizationExecutionAttempts))[0]?.outcome).toBe("completed");
       await manager.mutateAndActivate("org-1", { actorId: "admin", operation: "deny", idempotencyKey: "deny" }, (tx) => tx.insert(actionPolicies).values({ id: "deny", orgId: "org-1", principalType: "org", principalId: "org-1", actionId: "github.create_issue", mode: "deny", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 31, updatedAt: 31 }));
       expect((await invoke({ service: "github", action: "create_issue", params: { title: "Two" }, invocationId: "workflow:run-1:node-2" }, { ...context, workflowNodeId: "node-2" })).ok).toBe(false);
+      expect(execute).toHaveBeenCalledOnce();
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("replays completed outcomes and stops indeterminate redelivery", async () => {
+    pg = await freshTestPgDb(); await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    const execute = vi.fn(async () => ({ success: true, data: { value: "original" } })); const plugins = catalog(execute);
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, plugins, () => 10);
+    const request = { service: "github", action: "create_issue", params: { title: "One" }, invocationId: "workflow:run-1:replay" };
+    const context = { userId: "user-1", orgId: "org-1", owner: { type: "user" as const, id: "user-1" }, workflowExecutionId: "run-1", workflowDefinitionId: "workflow-1", workflowVersion: "version-1", workflowNodeId: "replay" };
+    try {
+      await manager.ensureOrganizationReady("org-1"); const service = await CanonicalAuthorizationService.create(manager, () => 20);
+      const invoke = buildActionInvoker({ db: pg.appDb, credentials, actionPluginByService: plugins, canonicalAuthorizationService: service, clock: () => 30 });
+      expect(await invoke(request, context)).toEqual({ ok: true, result: { value: "original" } });
+      await pg.appDb.delete(actionInvocations).where(eq(actionInvocations.invocationId, request.invocationId));
+      expect(await invoke(request, context)).toEqual({ ok: true, result: { value: "original" } });
+      expect(execute).toHaveBeenCalledOnce();
+
+      await pg.appDb.delete(actionInvocations).where(eq(actionInvocations.invocationId, request.invocationId));
+      await pg.appDb.update(authorizationExecutionAttempts).set({ outcome: "started", redactedResult: null, redactedError: null, finishedAt: null });
+      await expect(invoke(request, context)).resolves.toEqual({ ok: false, error: "indeterminate_execution: the action may have run. Do not retry automatically." });
+      expect((await pg.appDb.select().from(authorizationExecutionAttempts))[0]?.outcome).toBe("indeterminate");
       expect(execute).toHaveBeenCalledOnce();
     } finally { await manager.close(); }
   }, 120_000);
