@@ -70,8 +70,9 @@ SQL
 
 The command must print `0`.
 
-8. Start one candidate API process against the release database in the approved isolated environment.
-9. Stop if canonical policy readiness prevents startup.
+8. When the application, engine, capability profile, interpreter, plugin defaults, or source builder changes, start exactly one isolated candidate with `VALET_POLICY_RELEASE_MIGRATION=<release-id>`. The pre-listen migration takes a global advisory lock, validates every replacement before updating any pointer, and preserves authored policy files byte-for-byte. Remove the variable after it succeeds.
+9. Start one candidate API process against the release database in the approved isolated environment.
+10. Stop if canonical policy readiness prevents startup.
 10. Confirm that the process reports healthy only after readiness completes.
 11. Stop the isolated process.
 12. Compare active pointers with `canonical-policy-pointers-before.csv`.

@@ -13,7 +13,7 @@ import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ensureCanonicalPolicyReadiness } from "./authorization/canonical-policy-manager.js";
+import { ensureCanonicalPolicyReadiness, migrateCanonicalPolicyReleaseSet } from "./authorization/canonical-policy-manager.js";
 import { createApp, type AuthWiring } from "./app.js";
 import { selectServerAdapter } from "./server-adapter.js";
 import { buildNodeProviders, shouldSeedLocalIdentity } from "./providers/node.js";
@@ -309,6 +309,19 @@ try {
     process.exit(1);
   }
   throw e;
+}
+
+// Explicit release-set migration is offline: it completes for every tenant
+// under one advisory lock before config writes, readiness, or the listener.
+const policyReleaseMigration = process.env.VALET_POLICY_RELEASE_MIGRATION;
+if (policyReleaseMigration) {
+  try {
+    await migrateCanonicalPolicyReleaseSet(providers.canonicalPolicyManager, policyReleaseMigration);
+  } catch (error) {
+    console.error(`FATAL: canonical policy release migration failed: ${error}`);
+    await providers.canonicalPolicyManager.close();
+    process.exit(1);
+  }
 }
 
 // Effective configuration must settle before canonical policy compilation and before the listener exists.

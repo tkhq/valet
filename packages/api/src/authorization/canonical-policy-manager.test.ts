@@ -148,6 +148,47 @@ describe("canonical policy readiness", () => {
     } finally { await manager.close(); }
   }, 120_000);
 
+  it("migrates a release set atomically, preserves authored source, and is repeatable after rollback", async () => {
+    const db = await setup();
+    await db.insert(orgs).values([{ id: "org-a", name: "A", createdAt: 1 }, { id: "org-b", name: "B", createdAt: 1 }]);
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      await db.insert(actionPolicies).values({ id: "authored", orgId: "org-b", principalType: "org", principalId: "org-b", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+      const authored = await manager.buildCurrent("org-b");
+      await db.delete(actionPolicies).where(eq(actionPolicies.id, "authored"));
+      await manager.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });
+      const before = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
+      const authoredFiles = authored.built.bundle.files;
+      const rewrite = async (input: { bundle: typeof authored.built.bundle }) => {
+        const manifest = JSON.parse(input.bundle.manifestJson) as { source: { revision: string } };
+        if (!manifest.source.revision.endsWith(":release-2")) {
+          const prior = JSON.stringify(manifest.source.revision);
+          manifest.source.revision += ":release-2";
+          return { ...input.bundle, manifestJson: input.bundle.manifestJson.replace(prior, JSON.stringify(manifest.source.revision)) };
+        }
+        return input.bundle;
+      };
+
+      let calls = 0;
+      await expect(manager.migrateReleaseSet("release-bad", async (input) => {
+        calls++;
+        if (input.organizationId === "org-b") return { manifestJson: "{}", files: input.bundle.files };
+        return rewrite(input);
+      })).rejects.toThrow();
+      expect(calls).toBe(2);
+      expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(before);
+
+      await manager.migrateReleaseSet("release-2", rewrite);
+      const after = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
+      expect(after.every((row, index) => row.generation === before[index]!.generation + 1)).toBe(true);
+      const migratedAuthored = (await db.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, after[1]!.digest)).limit(1))[0]!.bundle;
+      expect(migratedAuthored.files).toEqual(authoredFiles);
+      await manager.migrateReleaseSet("release-2", rewrite);
+      expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(after);
+    } finally { await manager.close(); }
+  }, 120_000);
+
   it("rolls back static writes after a stale pointer CAS", async () => {
     const db = await setup(); await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
     const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
