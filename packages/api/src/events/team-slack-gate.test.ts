@@ -14,10 +14,10 @@ import { findFollowedThread } from "./followed-threads.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
 
 const ORG = "org-team-events";
-const channelFilter = { field: "channel", op: "eq", value: "C1" } as const;
+const channelFilter = { field: "channel", op: "eq", value: "C0AK0T8KPPY" } as const;
 const creatorFilter = { field: "user", op: "eq", value: "U_A" } as const;
 const plugins = [slackPlugin];
-function mention(user = "U_B", channel = "C1", threadTs?: string): NormalizedEvent {
+function mention(user = "U_B", channel = "C0AK0T8KPPY", threadTs?: string): NormalizedEvent {
   return {
     key: "slack.app_mention", dedupeKey: randomUUID(), occurredAt: new Date().toISOString(),
     actor: { externalId: user }, refs: { channel }, summary: "Mention",
@@ -82,17 +82,18 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
       orgId: ORG, ownerType: "team", ownerId: "team-1", actorUserId: "member-b", assistantId: "team-assistant",
-      signal: expect.objectContaining({ body: "Help us", origin: { channelType: "slack", threadKey: "slack:C1:100.2", messageTs: "100.2" } }),
+      signal: expect.objectContaining({ body: "Help us", origin: { channelType: "slack", threadKey: "slack:C0AK0T8KPPY:100.2", messageTs: "100.2" } }),
     }));
-    const key = { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "100.2" };
+    const key = { orgId: ORG, channelType: "slack", channelId: "C0AK0T8KPPY", threadTs: "100.2" };
     expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ ownerType: "team", ownerId: "team-1", createdBy: "member-b", assistantId: "team-assistant" });
-    await ingest(mention("U_A", "C1", "100.2"));
+    await ingest(mention("U_A", "C0AK0T8KPPY", "100.2"));
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledTimes(2);
     expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ createdBy: "member-b", ownerId: "team-1" });
   });
 
-  it.each([["U_X", "not_team_member"], ["U_UNLINKED", "unlinked_sender"]])("denies %s before event persistence", async (sender, reason) => {
+  it.each([["U_X", "not_team_member"], ["U_UNLINKED", "unlinked_sender"]])(
+    "does not route %s in #proj-valet before event persistence", async (sender, reason) => {
     await seed();
     expect(await ingest(mention(sender))).toMatchObject({ deliveries: 0, skipped: true });
     expect(await tdb.appDb.select().from(events)).toHaveLength(0);
@@ -130,7 +131,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
 
   it("keeps the channel restriction and rejects a team in another org", async () => {
     await seed();
-    expect((await ingest(mention("U_B", "C2"))).deliveries).toBe(0);
+    expect((await ingest(mention("U_B", "C_OUT_OF_SCOPE"))).deliveries).toBe(0);
     await tdb.appDb.update(teams).set({ orgId: "foreign-org" }).where(eq(teams.id, "team-1"));
     expect((await ingest()).deliveries).toBe(0);
   });

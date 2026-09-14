@@ -106,11 +106,11 @@ function reactionAdded(): Record<string, unknown> {
   };
 }
 
-function appMention(): Record<string, unknown> {
+function appMention(channel = "C500", user = "U100"): Record<string, unknown> {
   return {
     type: "app_mention",
-    user: "U100",
-    channel: "C500",
+    user,
+    channel,
     text: "<@U0BOT> ship it",
     ts: "1720000002.000100",
     event_ts: "1720000002.000100",
@@ -438,7 +438,7 @@ describe("POST /api/channels/slack/webhook", () => {
     await expect.poll(() => deliveryCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
   });
 
-  it("routes another team member through the org bot without a team credential", async () => {
+  it("routes an eligible non-creator mention in #proj-valet through the org bot", async () => {
     const a = await bootTestApi({ plugins: [slackPlugin] });
     api = a;
     await a.providers.eventDispatcher.stop();
@@ -447,14 +447,16 @@ describe("POST /api/channels/slack/webhook", () => {
     await a.providers.db.insert(teams).values({ id: "team-mention", orgId: "local-org", name: "Mentions", createdAt: now });
     await a.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "member-b", role: "member" });
     await a.providers.db.insert(teamMembers).values({ teamId: "team-mention", userId: "member-b", role: "member" });
-    await a.providers.db.insert(userIdentityLinks).values({ id: "member-link", provider: "slack", externalId: "U100", userId: "member-b", createdAt: now });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "member-link", provider: "slack", externalId: "U_ELIGIBLE_NON_CREATOR", userId: "member-b", createdAt: now });
     await a.providers.db.insert(eventSubscriptions).values({
       id: "team-sub", orgId: "local-org", ownerType: "team", ownerId: "team-mention",
       name: "Team mentions", eventKeys: ["slack.app_mention"],
-      filters: [{ field: "channel", op: "eq", value: "C500" }, { field: "user", op: "eq", value: "U_CREATOR" }],
+      // This interim creator filter must not prevent another eligible team
+      // member from mentioning the org bot in the subscribed public channel.
+      filters: [{ field: "channel", op: "eq", value: "C0AK0T8KPPY" }, { field: "user", op: "eq", value: "U_CREATOR" }],
       target: { kind: "orchestrator", follow: true }, createdBy: "member-a", enabled: true, createdAt: now, updatedAt: now,
     });
-    const body = envelope(appMention(), "Ev-team-member");
+    const body = envelope(appMention("C0AK0T8KPPY", "U_ELIGIBLE_NON_CREATOR"), "Ev-team-member");
     expect((await post(a.baseUrl, body, sign(body))).status).toBe(200);
     await expect.poll(() => deliveryCount(a, "Ev-team-member"), { timeout: 5_000 }).toBe(1);
     expect(await a.providers.engineCredentials.get({ type: "team", id: "team-mention" }, "slack")).toBeNull();
