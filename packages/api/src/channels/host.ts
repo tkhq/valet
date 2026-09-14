@@ -945,8 +945,13 @@ export class ChannelHost {
 
     if (event.kind === "gate_callback") {
       const callback = event.gateCallback;
-      const mappedGateId = callback ? this.gateForRef(callback.ref)?.gateId : undefined;
-      const key = mappedGateId ?? callback?.gateId ?? `${callback?.ref.conversationKey ?? event.conversationKey}#${callback?.ref.messageId ?? ""}`;
+      const callbackRef = callback && isRecord(callback.ref) ? callback.ref : undefined;
+      const mappedGateId = callbackRef && typeof callbackRef.conversationKey === "string" && typeof callbackRef.messageId === "string"
+        ? this.gateForRef({ conversationKey: callbackRef.conversationKey, messageId: callbackRef.messageId })?.gateId
+        : undefined;
+      // Never use gateId from the callback payload. It is untrusted input and
+      // must not let a forged button join another gate's serialization chain.
+      const key = mappedGateId ?? `${callbackRef?.conversationKey ?? event.conversationKey}#${callbackRef?.messageId ?? ""}`;
       await this.serializeGateCallback(key, () => this.handleGateCallback(transport, event, orgId, userId, channelType));
       return;
     }
@@ -1107,23 +1112,37 @@ export class ChannelHost {
   }
 
   /** Loads an authorized workflow gate session without materializing guessed ids. */
-  private async workflowGateSession(sessionId: string, orgId: string, userId: string): Promise<{ session: Session; owner: SessionOwnerLike; orgId: string } | null> {
-    if (!this.deps.workflowStore || !this.deps.actionPluginByService || !sessionId.startsWith("wf:")) return null;
+  private async workflowGateSession(
+    sessionId: string,
+    orgId: string,
+    userId: string,
+  ): Promise<
+    | { ok: true; session: Session; owner: SessionOwnerLike; orgId: string }
+    | { ok: false; reason: "workflow_session_malformed" | "workflow_session_missing" | "workflow_session_deleted" | "workflow_session_cross_org" | "unauthorized" }
+  > {
+    if (!this.deps.workflowStore || !this.deps.actionPluginByService || !sessionId.startsWith("wf:")) {
+      return { ok: false, reason: "workflow_session_malformed" };
+    }
     let parts: ReturnType<typeof parseWorkflowSessionId>;
     try {
       parts = parseWorkflowSessionId(sessionId);
     } catch {
-      return null;
+      return { ok: false, reason: "workflow_session_malformed" };
     }
     const run = await this.deps.workflowStore.getRun(parts.runId);
-    if (!run?.owner) return null;
+    if (!run) return { ok: false, reason: "workflow_session_missing" };
+    if (!run.owner) return { ok: false, reason: "workflow_session_deleted" };
     const rows = await this.deps.db
       .select({ orgId: workflowDefinitions.orgId })
       .from(workflowDefinitions)
       .where(eq(workflowDefinitions.id, run.params.workflowId))
       .limit(1);
     const workflowOrgId = rows[0]?.orgId;
-    if (!workflowOrgId || workflowOrgId !== orgId || !(await this.deps.engineStore.getSession(sessionId))) return null;
+    if (!workflowOrgId) return { ok: false, reason: "workflow_session_deleted" };
+    if (workflowOrgId !== orgId) return { ok: false, reason: "workflow_session_cross_org" };
+    if (!(await this.deps.engineStore.getSession(sessionId))) {
+      return { ok: false, reason: "workflow_session_deleted" };
+    }
     const owner: SessionOwnerLike = {
       ownerType: run.owner.ownerType,
       ownerId: run.owner.ownerId,
@@ -1132,7 +1151,7 @@ export class ChannelHost {
     const authorized = owner.ownerType === "org"
       ? await isOrgAdmin(this.deps.db, workflowOrgId, userId)
       : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
-    if (!authorized) return null;
+    if (!authorized) return { ok: false, reason: "unauthorized" };
     const session = await ensureWorkflowSession({
       host: this.deps.engineHost,
       store: this.deps.workflowStore,
@@ -1143,7 +1162,7 @@ export class ChannelHost {
       credentials: this.deps.engineCredentials,
       onePassword: this.deps.onePassword,
     }, sessionId);
-    return { session, owner, orgId: workflowOrgId };
+    return { ok: true, session, owner, orgId: workflowOrgId };
   }
 
   private async handleGateCallback(
@@ -1154,19 +1173,19 @@ export class ChannelHost {
     channelType: string,
   ): Promise<void> {
     const gateCallback = event.gateCallback;
-    if (!gateCallback) {
-      await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "gate_callback missing payload");
+    if (
+      !gateCallback ||
+      !isRecord(gateCallback) ||
+      !isRecord(gateCallback.ref) ||
+      typeof gateCallback.ref.conversationKey !== "string" ||
+      typeof gateCallback.ref.messageId !== "string"
+    ) {
+      const callbackId = isRecord(gateCallback) && typeof gateCallback.callbackId === "string" ? gateCallback.callbackId : undefined;
+      await transport?.answerCallback?.(callbackId ?? "", "This approval has expired — resolve it on the web.");
+      await this.dropLog(orgId, "malformed_callback", event.conversationKey, "gate_callback missing valid ref payload");
       return;
     }
-    let mapped = this.gateForRef(gateCallback.ref);
-    if (!mapped && gateCallback.gateId) {
-      // Fallback: the ref key is rebuilt by the transport from the clicked
-      // message and can drift from the recorded one (thread-ts codecs, LRU
-      // eviction of the send-side key). The gate id embedded in the button
-      // payload recovers the mapping while the gate is still tracked.
-      const firstRef = this.gatePrompts.get(gateCallback.gateId)?.[0];
-      if (firstRef) mapped = this.gateForRef(firstRef);
-    }
+    const mapped = this.gateForRef(gateCallback.ref);
     if (!mapped) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
@@ -1184,7 +1203,7 @@ export class ChannelHost {
       .where(eq(agentSessions.id, mapped.sessionId))
       .limit(1);
     const sessionRow = rows[0];
-    let workflow: Awaited<ReturnType<ChannelHost["workflowGateSession"]>> = null;
+    let workflow: Awaited<ReturnType<ChannelHost["workflowGateSession"]>> | null = null;
     try {
       workflow = sessionRow ? null : await this.workflowGateSession(mapped.sessionId, orgId, userId);
     } catch (err) {
@@ -1195,9 +1214,10 @@ export class ChannelHost {
       );
       return;
     }
-    if (!sessionRow && !workflow) {
+    if (!sessionRow && (!workflow || !workflow.ok)) {
+      const reason = workflow?.reason ?? "workflow_session_missing";
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
-      await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
+      await this.dropLog(orgId, reason, event.conversationKey, reason === "unauthorized" ? "sender may not resolve this session's gates" : reason);
       return;
     }
     if (sessionRow && !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
@@ -1209,7 +1229,7 @@ export class ChannelHost {
     // Same backstop as the web resolve route, via the same shared guard:
     // `always_allow` widens policy for the SESSION's org, so a non-admin's
     // click must fail here with a clear answer, not late inside the engine.
-    const sessionOrgId = sessionRow?.orgId ?? workflow?.orgId;
+    const sessionOrgId = sessionRow?.orgId ?? (workflow?.ok ? workflow.orgId : undefined);
     if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && sessionOrgId && !(await canApplyAlwaysAllow(this.deps.db, sessionOrgId, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
@@ -1234,7 +1254,7 @@ export class ChannelHost {
     // failure must answer too, not escape to handleUpdate's log-only catch.
     let session: Session;
     try {
-      if (workflow) {
+      if (workflow?.ok) {
         session = workflow.session;
       } else {
         if (!sessionRow) throw new Error("missing session row for channel gate callback");
@@ -1323,7 +1343,7 @@ export class ChannelHost {
               const workflow = sessionRow
                 ? null
                 : await this.workflowGateSession(event.sessionId, this.orgId ?? (await this.deps.resolveOrgId()), userId);
-              if ((sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) || workflow) {
+              if ((sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) || workflow?.ok) {
                 await this.sendAndRecordGatePrompt(
                   transport,
                   conversationKey,
