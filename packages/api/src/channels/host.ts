@@ -16,6 +16,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
+  type ActionPlugin,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -35,9 +36,11 @@ import {
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
+import type { WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { agentSessions, users } from "../schema/index.js";
+import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
+import { agentSessions, users, workflowDefinitions } from "../schema/index.js";
 import {
   ArchivedAssistantError,
   assistantSenderIdentity as senderIdentityForAssistant,
@@ -47,7 +50,8 @@ import {
 } from "../assistants/service.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { canResolveSessionGate } from "../services/session-access.js";
+import { canResolveSessionGate, type SessionOwnerLike } from "../services/session-access.js";
+import { isOrgAdmin } from "../services/org.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
@@ -66,6 +70,10 @@ export interface ChannelHostDeps {
   eventStream: EventStream;
   engineCredentials: CredentialStore;
   plugins: ValetPlugin[];
+  /** Workflow store for workflow-owned gate callbacks. */
+  workflowStore?: WorkflowStore;
+  /** Action catalog used when restoring a workflow session for a callback. */
+  actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   /** Public base URL for webhook mode; undefined → long-poll. */
   publicUrl?: string;
   /** Resolves the single org id (single-org assumption, same as auth middleware). */
@@ -243,6 +251,8 @@ export class ChannelHost {
    * one attention DM per recipient. Resolution edits every one of them. */
   private gatePrompts = new Map<string, GatePromptRef[]>();
   private gateActions = new Map<string, DecisionAction[]>();
+  /** Serializes same-gate callbacks so only the first concurrent decision wins. */
+  private gateCallbackChains = new Map<string, Promise<void>>();
   /** Recent gate resolutions, bounded FIFO (cap `DEDUP_CAP`). A prompt can be
    * recorded AFTER its gate settled — `routeAttention` fires deliverers
    * without awaiting them, so a fast resolution legitimately beats an
@@ -934,7 +944,9 @@ export class ChannelHost {
     }
 
     if (event.kind === "gate_callback") {
-      await this.handleGateCallback(transport, event, orgId, userId, channelType);
+      const callback = event.gateCallback;
+      const key = callback?.gateId ?? `${callback?.ref.conversationKey ?? event.conversationKey}#${callback?.ref.messageId ?? ""}`;
+      await this.serializeGateCallback(key, () => this.handleGateCallback(transport, event, orgId, userId, channelType));
       return;
     }
 
@@ -1082,6 +1094,57 @@ export class ChannelHost {
 
   }
 
+  private async serializeGateCallback(key: string, callback: () => Promise<void>): Promise<void> {
+    const previous = this.gateCallbackChains.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(callback);
+    this.gateCallbackChains.set(key, next);
+    try {
+      await next;
+    } finally {
+      if (this.gateCallbackChains.get(key) === next) this.gateCallbackChains.delete(key);
+    }
+  }
+
+  /** Loads an authorized workflow gate session without materializing guessed ids. */
+  private async workflowGateSession(sessionId: string, orgId: string, userId: string): Promise<{ session: Session; owner: SessionOwnerLike; orgId: string } | null> {
+    if (!this.deps.workflowStore || !this.deps.actionPluginByService || !sessionId.startsWith("wf:")) return null;
+    let parts: ReturnType<typeof parseWorkflowSessionId>;
+    try {
+      parts = parseWorkflowSessionId(sessionId);
+    } catch {
+      return null;
+    }
+    const run = await this.deps.workflowStore.getRun(parts.runId);
+    if (!run?.owner) return null;
+    const rows = await this.deps.db
+      .select({ orgId: workflowDefinitions.orgId })
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, run.params.workflowId))
+      .limit(1);
+    const workflowOrgId = rows[0]?.orgId;
+    if (!workflowOrgId || workflowOrgId !== orgId || !(await this.deps.engineStore.getSession(sessionId))) return null;
+    const owner: SessionOwnerLike = {
+      ownerType: run.owner.ownerType,
+      ownerId: run.owner.ownerId,
+      userId: run.owner.ownerType === "user" ? run.owner.ownerId : "",
+    };
+    const authorized = owner.ownerType === "org"
+      ? await isOrgAdmin(this.deps.db, workflowOrgId, userId)
+      : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
+    if (!authorized) return null;
+    const session = await ensureWorkflowSession({
+      host: this.deps.engineHost,
+      store: this.deps.workflowStore,
+      db: this.deps.db,
+      engineStore: this.deps.engineStore,
+      actionPluginByService: this.deps.actionPluginByService,
+      plugins: this.deps.plugins,
+      credentials: this.deps.engineCredentials,
+      onePassword: this.deps.onePassword,
+    }, sessionId);
+    return { session, owner, orgId: workflowOrgId };
+  }
+
   private async handleGateCallback(
     transport: ChannelTransport | undefined,
     event: InboundChannelEvent,
@@ -1120,7 +1183,13 @@ export class ChannelHost {
       .where(eq(agentSessions.id, mapped.sessionId))
       .limit(1);
     const sessionRow = rows[0];
-    if (!sessionRow || !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
+    const workflow = sessionRow ? null : await this.workflowGateSession(mapped.sessionId, orgId, userId);
+    if (!sessionRow && !workflow) {
+      await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
+      await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
+      return;
+    }
+    if (sessionRow && !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
       return;
@@ -1129,7 +1198,8 @@ export class ChannelHost {
     // Same backstop as the web resolve route, via the same shared guard:
     // `always_allow` widens policy for the SESSION's org, so a non-admin's
     // click must fail here with a clear answer, not late inside the engine.
-    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && !(await canApplyAlwaysAllow(this.deps.db, sessionRow.orgId, userId))) {
+    const sessionOrgId = sessionRow?.orgId ?? workflow?.orgId;
+    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && sessionOrgId && !(await canApplyAlwaysAllow(this.deps.db, sessionOrgId, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
       return;
@@ -1153,10 +1223,15 @@ export class ChannelHost {
     // failure must answer too, not escape to handleUpdate's log-only catch.
     let session: Session;
     try {
-      const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
-      session = assistant
-        ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
-        : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+      if (workflow) {
+        session = workflow.session;
+      } else {
+        if (!sessionRow) throw new Error("missing session row for channel gate callback");
+        const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
+        session = assistant
+          ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
+          : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+      }
     } catch (err) {
       console.error("[channels] gate resolve wake failed", err);
       await transport?.answerCallback?.(
@@ -1164,6 +1239,14 @@ export class ChannelHost {
         err instanceof ArchivedAssistantError
           ? "This assistant was deleted. The approval no longer applies."
           : "Valet could not process this approval. Open the session in Valet to resolve it.",
+      );
+      return;
+    }
+    const gate = (await session.pendingDecisionGates()).find((candidate) => candidate.id === mapped.gateId);
+    if (!gate || gate.status !== "pending" || !gate.actions.some((action) => action.id === gateCallback.actionId)) {
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        "This approval was already resolved. Open the session in Valet to see the outcome.",
       );
       return;
     }
@@ -1226,7 +1309,10 @@ export class ChannelHost {
                 .where(eq(agentSessions.id, event.sessionId))
                 .limit(1);
               const sessionRow = rows[0];
-              if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
+              const workflow = sessionRow
+                ? null
+                : await this.workflowGateSession(event.sessionId, this.orgId ?? (await this.deps.resolveOrgId()), userId);
+              if ((sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) || workflow) {
                 await this.sendAndRecordGatePrompt(
                   transport,
                   conversationKey,

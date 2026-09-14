@@ -568,18 +568,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     }
   })();
 
-  const channelHost = new ChannelHost({
-    db,
-    engineHost,
-    engineStore,
-    eventStream,
-    engineCredentials,
-    plugins,
-    publicUrl: publicUrlFromEnv(process.env),
-    resolveOrgId: () => resolveOrgId(db),
-    onePassword,
-  });
-
   // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
   // `WorkflowStore` port `buildWorkflowEngineDeps`'s session executors and
   // the routes both read/write through — one instance per process, backed
@@ -588,6 +576,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // spans nest inside the interpreter's `workflow.drive`/`workflow.node.*`.
   const rawWorkflowStore = new PgWorkflowStore(pgdb);
   const workflowStore = telemetryEnabled ? tracedWorkflowStore(rawWorkflowStore) : rawWorkflowStore;
+
+  const channelHost = new ChannelHost({
+    db,
+    engineHost,
+    engineStore,
+    eventStream,
+    engineCredentials,
+    plugins,
+    workflowStore,
+    actionPluginByService,
+    publicUrl: publicUrlFromEnv(process.env),
+    resolveOrgId: () => resolveOrgId(db),
+    onePassword,
+  });
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,

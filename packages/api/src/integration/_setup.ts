@@ -440,6 +440,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     sweepIntervalMs: 0,
   });
 
+  const workflowStore = new PgWorkflowStore(pgdb);
+
   const channelHost = new ChannelHost({
     db,
     engineHost,
@@ -447,6 +449,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventStream,
     engineCredentials,
     plugins,
+    workflowStore,
+    actionPluginByService,
     publicUrl: opts.channelPublicUrl,
     resolveOrgId: () => resolveOrgId(db),
     onePassword,
@@ -454,8 +458,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   if (opts.startChannelHost) {
     await channelHost.start();
   }
-
-  const workflowStore = new PgWorkflowStore(pgdb);
 
   // Never started on its timer in tests (matches the dispatcher/scheduler
   // convention) — drive `reclaimRun`/`sweep` manually; behavior is tested
