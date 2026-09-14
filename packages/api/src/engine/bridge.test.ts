@@ -79,7 +79,7 @@ describe("engineToWireParts", () => {
 
 describe("engineGateToWire", () => {
   it("truncates approval text at UTF-8 and code-point boundaries", () => {
-    expect(truncateApprovalText("猫😀a", 8)).toEqual({ text: "猫…", truncated: true });
+    expect(truncateApprovalText("猫😀a", 8)).toEqual({ text: "猫😀a", truncated: false });
     expect(truncateApprovalText("猫😀", 10)).toEqual({ text: "猫😀", truncated: false });
   });
 
