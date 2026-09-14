@@ -423,6 +423,7 @@ export function toolApprovalGateContext(
 export function truncateApprovalText(text: string, maxBytes: number): { text: string; truncated: boolean } {
   const encoder = new TextEncoder();
   const suffix = "…";
+  if (encoder.encode(text).length <= maxBytes) return { text, truncated: false };
   const suffixBytes = encoder.encode(suffix).length;
   if (maxBytes <= suffixBytes) return { text: "", truncated: text.length > 0 };
   let bytes = 0;
@@ -501,7 +502,7 @@ function approvalGateRequest(
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${boundedSummary}\n\ntool_id=${actionId}`,
+    body: boundedSummary + "\n\ntool_id=" + actionId + "\nargs=" + review.preview,
     resumeKey,
     dedupeKey: qualifiedId(entry),
     context: {

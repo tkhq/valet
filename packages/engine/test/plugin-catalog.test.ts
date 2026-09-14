@@ -1600,7 +1600,7 @@ describe("pinned tool: same execution path as call_tool", () => {
     // one admin rule covers both routes and the audit trail correlates.
     expect(gates[0]?.resumeKey).toContain("workflows.patch_workflow");
     expect(gates[0]?.body).toContain("tool_id=workflows.patch_workflow");
-    expect(gates[0]?.body).not.toContain("wf-1");
+    expect(gates[0]?.body).toContain("args={\"workflow_id\":\"wf-1\"");
     expect(result?.text).toContain("did not approve");
     expect(calls).toHaveLength(0);
   });
