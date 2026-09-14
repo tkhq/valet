@@ -1003,6 +1003,107 @@ describe("ChildWatcher", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
+  it.each(["failed", "aborted"] as const)(
+    "includes a continuation checkpoint when a compacted child is %s",
+    async (outcome) => {
+      api = await bootTestApi();
+      const deps = childrenDeps(api);
+      const watcher = new ChildWatcher(deps);
+      const { engineHost, engineStore, db } = api.providers;
+
+      const parent = await engineHost.sessionFor("parent-checkpoint", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      const parentThread = parent.thread("web:default");
+      await parent.pause();
+      const child = await engineHost.childSessionFor("child-checkpoint", {
+        parentSessionId: "parent-checkpoint",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "user", id: "local-user" },
+        workspace: "/tmp",
+      });
+      const childThread = child.thread("web:default");
+      const itemId = `qi-checkpoint-${outcome}`;
+      await engineStore.admitSubmission(
+        "child-checkpoint",
+        childThread.id,
+        queuedItem(itemId, childThread.id, "implement"),
+      );
+      await childThread.appendEntry({
+        id: "compaction-checkpoint",
+        sessionId: "child-checkpoint",
+        threadId: childThread.id,
+        parentId: null,
+        type: "compaction",
+        summary: "## Continuation Checkpoint\n- Branch: fix/child\n- Next Action: rerun tests",
+        coveredEntryIds: [],
+        tokenCountBefore: 10,
+        tokenCountAfter: 5,
+        createdAt: Date.now(),
+      });
+      await engineStore.settleUnclaimed("child-checkpoint", childThread.id, itemId, {
+        outcome,
+        error: "continuation transport failed",
+      });
+      await db.insert(agentSessions).values({
+        id: "child-checkpoint",
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+        status: "active",
+        ownerType: "user",
+        ownerId: "local-user",
+        profile: "headless",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      const watch = {
+        childSessionId: "child-checkpoint",
+        queueItemId: itemId,
+        parentSessionId: "parent-checkpoint",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+      };
+      await db.insert(childWatches).values({
+        ...watch,
+        settled: false,
+        createdAt: Date.now(),
+      });
+
+      watcher.arm(watch);
+      await waitFor(async () => {
+        const rows = await db
+          .select()
+          .from(childWatches)
+          .where(eq(childWatches.childSessionId, "child-checkpoint"))
+          .limit(1);
+        return rows[0]?.settled === true;
+      });
+
+      const signals = await engineStore.listUnsettledSubmissions("parent-checkpoint");
+      const content = signals[0]?.content;
+      expect(content).toMatchObject({
+        kind: "signal",
+        signalType: "child.settled",
+        attributes: {
+          continuation_checkpoint_entry_id: "compaction-checkpoint",
+          outcome,
+        },
+      });
+      if (typeof content !== "object" || content === null || !("signalType" in content)) {
+        throw new Error("expected child.settled signal");
+      }
+      expect(content.body).toContain("continuation transport failed");
+      expect(content.body).toContain("Branch: fix/child");
+      expect(content.body).toContain("Next Action: rerun tests");
+    },
+  );
+
   it("child.settled inherits the channel route as manual across a rearm", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
@@ -1517,6 +1618,29 @@ describe("resultBody", () => {
     const huge = "e".repeat(CHILD_RESULT_MAX_CHARS + 10_000);
     const body = resultBody({ queueItemId: "q1", outcome: "failed", error: huge }, childId);
     expect(body.length).toBeLessThanOrEqual(CHILD_RESULT_MAX_CHARS + 400);
+    expect(body).toContain("child_read");
+  });
+
+  it("bounds a large continuation checkpoint and points to child_read", () => {
+    const body = resultBody(
+      { queueItemId: "q1", outcome: "failed", error: "failed" },
+      childId,
+      {
+        id: "checkpoint-large",
+        sessionId: childId,
+        threadId: "thread-child",
+        parentId: null,
+        type: "compaction",
+        summary: "c".repeat(CHILD_RESULT_MAX_CHARS * 10),
+        coveredEntryIds: [],
+        tokenCountBefore: 10,
+        tokenCountAfter: 5,
+        createdAt: Date.now(),
+      },
+    );
+    expect(body.length).toBeLessThanOrEqual(CHILD_RESULT_MAX_CHARS + 400);
+    expect(body).toContain("checkpoint-large");
+    expect(body).toContain("Checkpoint truncated");
     expect(body).toContain("child_read");
   });
 

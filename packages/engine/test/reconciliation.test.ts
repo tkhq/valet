@@ -741,9 +741,8 @@ describe("reconciliation executor (integration)", () => {
     const options = {
       userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spyTool().def],
     };
-    const getEntries = store.getEntries.bind(store);
-    const reads = vi.spyOn(store, "getEntries")
-      .mockImplementationOnce(getEntries)
+    const reads = vi
+      .spyOn(store, "getThreadSnapshot")
       .mockRejectedValueOnce(new Error("history unavailable"));
     try {
       await expect(engine.restoreSession({ sessionId: SESSION, options })).rejects.toThrow("history unavailable");

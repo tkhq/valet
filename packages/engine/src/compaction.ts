@@ -218,6 +218,83 @@ export function tailBudget(usable: number, cfg?: CompactionConfig): number {
   return Math.max(min, capped);
 }
 
+// ── Transcript DAG traversal ───────────────────────────────────────
+
+/**
+ * Return the active transcript path in root-to-leaf order. Entries on other
+ * branches stay durable but do not enter compaction or model context.
+ */
+export function walkTranscriptDag(
+  entries: readonly SessionEntry[],
+  activeLeafEntryId: string | undefined,
+): SessionEntry[] {
+  if (activeLeafEntryId === undefined) return [...entries];
+
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const path: SessionEntry[] = [];
+  const visited = new Set<string>();
+  let entryId: string | null = activeLeafEntryId;
+  while (entryId !== null) {
+    if (visited.has(entryId)) {
+      throw new Error(`Transcript DAG contains a cycle at entry ${entryId}.`);
+    }
+    visited.add(entryId);
+    const entry = byId.get(entryId);
+    if (!entry) {
+      throw new Error(`Transcript DAG is missing entry ${entryId}.`);
+    }
+    path.push(entry);
+    entryId = entry.parentId;
+  }
+  path.reverse();
+
+  // Before TKAI-211, normal entries had null parents but compaction entries
+  // pointed at the covered head. Keep the latest legacy checkpoint and the
+  // chronological null-parent suffix that leads to this path's root. Linked
+  // entries in that range belong to inactive branches and stay excluded.
+  const rootIndex = entries.findIndex((entry) => entry.id === path[0]?.id);
+  const prefix = entries.slice(0, rootIndex);
+  let checkpointIndex = -1;
+  for (let index = prefix.length - 1; index >= 0; index--) {
+    if (prefix[index].type === "compaction") {
+      checkpointIndex = index;
+      break;
+    }
+  }
+  const legacyPrefix = prefix
+    .slice(checkpointIndex < 0 ? 0 : checkpointIndex)
+    .filter((entry, index) =>
+      entry.parentId === null || (checkpointIndex >= 0 && index === 0),
+    );
+  return [...legacyPrefix, ...path];
+}
+
+/** Keep a bounded, user-first suffix for checkpoint evidence. */
+export function selectSummaryCheckpointTail(
+  entries: readonly SessionEntry[],
+  maxTokens: number,
+): SessionEntry[] {
+  let start = entries.length;
+  let tokens = 0;
+  while (start > 0) {
+    const next = estimateEntryTokens(entries[start - 1]);
+    if (start < entries.length && tokens + next > maxTokens) break;
+    start--;
+    tokens += next;
+  }
+  const suffix = entries.slice(start);
+  const firstMessage = suffix.findIndex((entry) => entry.type === "message");
+  const firstEntry = suffix[firstMessage];
+  if (!firstEntry || firstEntry.type !== "message" || firstEntry.role === "user") {
+    return suffix;
+  }
+  const nextUser = suffix.findIndex(
+    (entry, index) =>
+      index > firstMessage && entry.type === "message" && entry.role === "user",
+  );
+  return nextUser < 0 ? [] : suffix.slice(nextUser);
+}
+
 // ── Turn segmentation ──────────────────────────────────────────────
 
 export interface Turn {
@@ -555,6 +632,16 @@ After the analysis, output exactly the Markdown structure shown inside <template
 
 ## Active Tools & Skills
 - [tools, skills, or integrations in active use — name each and what it is being used for, or "(none)"]
+
+## Continuation Checkpoint
+- Branch: [current branch, or "(unknown)"]
+- Commit: [current commit, or "(unknown)"]
+- Changed Files: [changed paths, or "(none)"]
+- Worktree Status: [clean/dirty plus relevant status, or "(unknown)"]
+- Last Command: [exact command, or "(none)"]
+- Failure Output: [exact unresolved failure, or "(none)"]
+- Next Action: [one concrete action]
+- Acceptance Checklist: [remaining acceptance checks, or "(none)"]
 
 ## Next Steps
 - [ordered next actions or "(none)"; for the immediate next step, include a verbatim quote from the most recent messages showing exactly where work left off, so there is no drift in task interpretation]

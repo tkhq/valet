@@ -13,6 +13,7 @@ export default defineConfig({
       'packages/shared',
       'packages/sdk',
       'packages/api',
+      'packages/engine',
       'packages/web',
       // The `make e2e` runner's pure library (step table, scorecard).
       {

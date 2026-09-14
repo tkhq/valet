@@ -118,6 +118,39 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(threads.map((t) => t.key).sort()).toEqual(["task:A", "task:B"]);
     });
 
+    it("getThreadSnapshot keeps its active leaf in the returned entries", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.appendEntries("sess-1", "th-1", [msg("e-base", "user", "base", 1)]);
+
+      for (let index = 0; index < 10; index++) {
+        const entry = msg(`e-race-${index}`, "assistant", "race", index + 2);
+        const [snapshot] = await Promise.all([
+          store.getThreadSnapshot("sess-1", "th-1"),
+          store.appendEntries("sess-1", "th-1", [entry]),
+        ]);
+        expect(snapshot).not.toBeNull();
+        const ids = new Set(snapshot?.entries.map((item) => item.id));
+        expect(ids.has(snapshot?.thread.activeLeafEntryId ?? "")).toBe(true);
+      }
+    });
+
+    it("saveThread cannot rewind the leaf advanced by appendEntries", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.appendEntries("sess-1", "th-1", [msg("e-1", "user", "one", 1)]);
+      const stale = await store.getThread("sess-1", "th-1");
+      if (!stale) throw new Error("thread missing");
+      await store.appendEntries("sess-1", "th-1", [msg("e-2", "assistant", "two", 2)]);
+
+      await store.saveThread("sess-1", { ...stale, status: "paused" });
+
+      expect(await store.getThread("sess-1", "th-1")).toMatchObject({
+        status: "paused",
+        activeLeafEntryId: "e-2",
+      });
+    });
+
     it("appendEntries + getEntries returns entries in insertion order", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

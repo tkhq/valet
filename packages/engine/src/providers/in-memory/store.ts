@@ -65,7 +65,8 @@ export class InMemorySessionStore implements SessionStore {
 
   async saveThread(sessionId: string, thread: ThreadData): Promise<void> {
     const r = this.row(sessionId);
-    r.threads.set(thread.id, thread);
+    const activeLeafEntryId = r.threads.get(thread.id)?.activeLeafEntryId;
+    r.threads.set(thread.id, { ...thread, activeLeafEntryId });
     if (!r.entriesByThread.has(thread.id)) r.entriesByThread.set(thread.id, []);
   }
 
@@ -181,6 +182,19 @@ export class InMemorySessionStore implements SessionStore {
     const all = [...this.rows.values()].map((r) => r.data).filter((s) => s.userId === userId);
     if (opts?.status) return all.filter((s) => s.status === opts.status);
     return all;
+  }
+
+  async getThreadSnapshot(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    const r = this.row(sessionId);
+    const thread = r.threads.get(threadId);
+    if (!thread) return null;
+    return {
+      thread: { ...thread },
+      entries: [...(r.entriesByThread.get(threadId) ?? [])],
+    };
   }
 
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
