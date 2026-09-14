@@ -214,8 +214,10 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     teamIds.add(teamId);
   }
   const rules = [...snapshot.organizationPolicies, ...snapshot.teamPolicies, ...snapshot.personalOverrides];
-  if (rules.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules) {
-    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules} rules.`);
+  const liveRules = rules.filter((row) => !("revokedAtMs" in row) || row.revokedAtMs === null);
+  const liveRuleIds = new Set(liveRules.map((row) => row.id));
+  if (liveRules.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules) {
+    fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRules} active rules.`);
   }
   let matcherCount = 0;
   let regexCount = 0;
@@ -230,13 +232,15 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     validTimestamp(`${row.id}.updatedAtMs`, row.updatedAtMs);
     if (row.updatedAtMs < row.createdAtMs) fail("invalid_timestamp", `Rule ${row.id} was updated before it was created.`);
     const valueComplexity = validateMatchers(row.id, row.paramMatchers);
-    if (row.paramMatchers.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) {
-      fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} matchers.`);
+    if (liveRuleIds.has(row.id)) {
+      if (row.paramMatchers.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) {
+        fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} active matchers.`);
+      }
+      matcherCount += row.paramMatchers.length;
+      regexCount += row.paramMatchers.filter((matcher) => matcher.op === "regex").length;
+      matcherValueBytes += valueComplexity.bytes;
+      matcherValueNodes += valueComplexity.nodes;
     }
-    matcherCount += row.paramMatchers.length;
-    regexCount += row.paramMatchers.filter((matcher) => matcher.op === "regex").length;
-    matcherValueBytes += valueComplexity.bytes;
-    matcherValueNodes += valueComplexity.nodes;
   }
   if (regexCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexMatchers) fail("complexity_limit", `Current policy snapshots support at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxRegexMatchers} regex matchers.`);
   if (matcherCount > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxTotalMatchers) {
@@ -265,7 +269,6 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
       fail("invalid_ownership", `Personal override ${row.id} has invalid ownership or source.`);
     }
   }
-  const liveRules = rules.filter((row) => !("revokedAtMs" in row) || row.revokedAtMs === null);
   for (const [index, row] of liveRules.entries()) {
     for (const other of liveRules.slice(index + 1)) {
       if (rulesCanTie(row, other)) {

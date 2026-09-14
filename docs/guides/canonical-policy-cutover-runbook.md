@@ -38,8 +38,16 @@ pnpm typecheck
 make e2e
 ```
 
-4. Stop if any required check fails.
-5. Create a database backup with the approved platform procedure.
+4. Run the read-only compatibility report against the release database.
+
+```bash
+DATABASE_URL="$DATABASE_URL" pnpm --filter @valet/api policy:compatibility > canonical-policy-compatibility.json
+```
+
+The command must exit zero and every organization report must have `"compatible": true`. The report contains row IDs and corrective actions, but no policy evaluation or matcher values.
+
+5. Stop if any required check or compatibility report fails.
+6. Create a database backup with the approved platform procedure.
 6. Record all active policy pointers.
 
 ```bash
