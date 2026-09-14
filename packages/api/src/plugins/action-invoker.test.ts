@@ -338,6 +338,41 @@ describe("buildActionInvoker", () => {
     expect(seenOwnerId).toBeUndefined();
   });
 
+  it("team workflow posts with the organization bot without a personal Slack identity", async () => {
+    const db = await makeDb();
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]),
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: "C1", is_private: false, is_im: false, is_mpim: false } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, ts: "1.2", channel: "C1" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await invoke(
+        { service: "slack", action: "send_message", params: { channel: "C1", text: "Deploy complete" }, invocationId: "workflow:r1:team-slack-send" },
+        { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+
+      expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "C1" } });
+      expect((fetchMock.mock.calls[1] as [string, RequestInit])[1].headers).toMatchObject({
+        Authorization: "Bearer org-bot",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("workflow slack.send_message posts as the owner's configured assistant", async () => {
     const db = await makeDb();
     const assistant = await createAssistant(db, "org1", { type: "user", id: "u1" }, "Release bot");
@@ -953,6 +988,40 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { token: "org-tok" } });
     expect(seenOwnerId).toBeUndefined();
+  });
+
+  it("keeps slack.dm_owner fail-closed for a team owner with no identity", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-tok" });
+    const db = await makeDb();
+    // A member's identity link must not be stamped onto a team-owned run.
+    await linkIdentity(db, { provider: "slack", externalId: "U123LINKED", userId: "u1" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]),
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await invoke(
+        { service: "slack", action: "dm_owner", params: { text: "Hello" }, invocationId: "workflow:r1:team-dm-owner" },
+        { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error: "Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("prefers the run owner's OWN credential over the org one", async () => {

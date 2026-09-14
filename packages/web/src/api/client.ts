@@ -1249,7 +1249,11 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
-  listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
+  listPlugins: (teamId?: string) =>
+    request<ListPluginsResponse>(
+      "GET",
+      teamId === undefined ? "/plugins" : `/plugins?teamId=${encodeURIComponent(teamId)}`,
+    ),
   listCredentials: (scope?: "user" | "org" | "team", teamId?: string) => {
     const qs = new URLSearchParams();
     if (scope === "org" || scope === "team") qs.set("scope", scope);

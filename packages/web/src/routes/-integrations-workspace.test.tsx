@@ -127,7 +127,8 @@ describe("Integrations workspace isolation", () => {
     expect(screen.getByText("Stored on the team")).toBeTruthy();
     expect(api.listCredentials).toHaveBeenCalledWith("team", "a");
     expect(api.listCredentials).toHaveBeenCalledWith("team", "b");
-    expect(api.listPlugins).toHaveBeenCalledTimes(1);
+    expect(api.listPlugins).toHaveBeenCalledWith("a");
+    expect(api.listPlugins).toHaveBeenCalledWith("b");
 
     view.switchTo();
     expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
@@ -393,7 +394,7 @@ describe("Organization access status", () => {
     vi.mocked(api.listPlugins).mockRejectedValue(new Error("Personal catalog unavailable"));
     await act(async () => {
       void view.client.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      await view.client.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+      await view.client.invalidateQueries({ queryKey: qkIntegrations.plugins("a") });
     });
     await waitFor(() => expect(screen.queryByText("GitHub App · Installed")).toBeNull());
     await waitFor(() => expect(screen.queryByText("Slack · Organization connection")).toBeNull());

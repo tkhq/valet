@@ -699,7 +699,7 @@ export function useSaveSlackCredential() {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
     },
   });
 }
@@ -710,7 +710,7 @@ export function useDeleteSlackApp() {
     mutationFn: () => api.deleteCredential("slack", { scope: "org" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.slackAppAll() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
     },
   });
 }

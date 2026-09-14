@@ -8,7 +8,9 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
+import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { addMember, createTeam } from "../services/teams.js";
 import type { ListPluginsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -290,7 +292,92 @@ describe("GET /api/plugins connect mode", () => {
 
     const after = await fetch(`${api.baseUrl}/api/plugins`);
     const afterBody = (await after.json()) as ListPluginsResponse;
-    expect(afterBody.plugins.find((p) => p.name === "slack")?.services[0]?.connect).toBe("org");
+    const service = afterBody.plugins.find((p) => p.name === "slack")?.services[0];
+    expect(service?.connect).toBe("org");
+    // A personal catalog must not offer to disconnect the organization bot.
+    expect(service?.connected).toBe(false);
+
+    const emptyTeamId = await fetch(`${api.baseUrl}/api/plugins?teamId=`);
+    const emptyTeamIdBody = (await emptyTeamId.json()) as ListPluginsResponse;
+    expect(emptyTeamIdBody.plugins.find((p) => p.name === "slack")?.services[0]).toMatchObject({
+      connect: "org", connected: false,
+    });
+  });
+
+  it("lists an organization Slack bot as connected for its team without a personal identity", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Slack workflows", creatorUserId: "local-user",
+    });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-org-token",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins?teamId=${team.id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListPluginsResponse;
+    expect(body.plugins.find((p) => p.name === "slack")?.services[0]).toMatchObject({
+      service: "slack", connect: "org", connected: true,
+    });
+  });
+
+  it("keeps a broken delegated team credential out of the catalog", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Broken delegation", creatorUserId: "local-user",
+    });
+    await api.providers.engineCredentials.save({ type: "team", id: team.id }, "slack", {
+      type: "bot_token", metadata: { delegatedFrom: "former-member" },
+    });
+    // Match production composition: list sees the team row, while get
+    // resolves the delegation and throws because its source is gone.
+    api.providers.engineCredentials = new TeamCredentialStore(api.providers.engineCredentials, {
+      isMember: async () => true,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins?teamId=${team.id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListPluginsResponse;
+    const service = body.plugins.find((p) => p.name === "slack")?.services[0];
+    expect(service).toMatchObject({ service: "slack", connected: false, connect: "unconfigured" });
+    expect(service?.health).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("former-member");
+  });
+
+  it("does not disclose a team catalog to another team member", async () => {
+    const plugins: ValetPlugin[] = [{
+      name: "slack", version: "0.1.0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }];
+    api = await bootTestApi({ plugins });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Private Slack workflows", creatorUserId: "local-user",
+    });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-org-token",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/plugins?teamId=${team.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(200);
+
+    const other = await createTeam(api.providers.db, {
+      orgId: "local-org", name: "Other workflows", creatorUserId: "local-user",
+    });
+    const denied = await fetch(`${api.baseUrl}/api/plugins?teamId=${other.id}`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(denied.status).toBe(404);
   });
 
   /**
