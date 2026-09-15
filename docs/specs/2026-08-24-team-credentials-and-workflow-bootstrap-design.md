@@ -262,6 +262,8 @@ Recorded 2026-09-06. The design shipped as the stacked series PRs #572 to #591. 
 
    The schema adds a defaulted revision column and a matching boot repair for existing databases. Tests cover unchanged-commit arming and disarming, both concurrent completion orders, stale failures, rollback, tenant isolation, and PostgreSQL row contention. Recorded 2026-09-10.
 
+24. **A broken delegation falls back to the credential behind it.** Decision 3 says a broken reference fails with a typed error, and decision 5 lets an org-provided service reach the org row. The shipped read applied them in the wrong order: the team row was read first, and its error left the function before the org fallback was ever evaluated, so a team whose delegator had departed failed every Slack run while the catalog reported the service connected on the org bot. `resolveTeamCredentialRead` now holds the error and continues. An org-provided org row, or an org-scoped 1Password item under deviation 1, answers the read. When nothing else answers, the held error is raised again, so a team with no fallback still receives the message that names the corrective action, and readiness still reports the row as broken. The catalog reads in the same order: a usable team row reports `manual`, and a broken or absent one lets the org credential report `org`. Recorded 2026-09-14.
+
 ## Team integrations setup (2026-09-10)
 
 The team Integrations page uses the personal catalog's card layout and per-service Connect controls. It shows stored team connections, organization apps, and available services separately. Personal connection status never certifies team access. Slack user identity linking and the reserved 1Password token service are excluded from team setup.
