@@ -46,6 +46,8 @@ describe('Docker publish gate', () => {
       expect(docker.getIn(['jobs', 'build', 'strategy', 'matrix', 'platform', index, 'arch'])).toBe(arch);
     }
     expect(docker.toString()).toContain('type=sha,prefix=sha-');
+    expect(docker.getIn(['jobs', 'merge', 'steps', 4, 'with', 'flavor'])).toBe('latest=false');
+    expect(docker.toString()).not.toContain('type=ref,event=tag');
     expect(docker.toString()).not.toContain('workflow_run');
     expect(docker.toString()).not.toContain('DOCKER_METADATA_PR_HEAD_SHA');
     expect(docker.getIn(['jobs', 'build', 'steps', 0, 'with', 'ref'])).toBe('${{ inputs.release_tag || github.sha }}');

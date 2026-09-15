@@ -177,10 +177,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.img.outputs.name }}
+          flavor: latest=false
           tags: |
             type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
-            type=raw,value=${{ steps.img.outputs.version }},enable=${{ startsWith(env.BUILD_TAG, 'valet/v') }}
-            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ steps.img.outputs.version }},enable=${{ startsWith(env.BUILD_REF, 'refs/tags/v') }}
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')) && !contains(inputs.release_tag || github.ref_name, '-') }}
 
