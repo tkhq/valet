@@ -33,6 +33,13 @@ describe("canonical built-in authorization", () => {
     expect(JSON.stringify(projectBuiltinArguments({ command: canary, timeout: 5 }, builtinAuthorization("bash").projection.pointers))).not.toContain("DISPLAY_CANARY_");
   });
 
+  it("bounds task approval display without copying resources", () => {
+    const display = builtinApprovalDisplay("task", { prompt: "p".repeat(1_000_000), repo: "repo", docker: true, resources: { cpu: 2, memory: "m".repeat(1_000_000), secret: "must not persist" } });
+    expect(display).toMatchObject({ repo: "repo", docker: true, cpu: 2 });
+    expect(JSON.stringify(display)).not.toContain("must not persist");
+    expect(Buffer.byteLength(JSON.stringify(display))).toBeLessThan(2_000);
+  });
+
   it("keeps the built-in registry exhaustive", () => {
     expect(builtinTools.map((tool) => tool.name).sort()).toEqual(["ask_approval", "bash", "child_read", "child_send", "child_status", "edit", "list_threads", "read", "switch_model", "task", "thread_read", "write"]);
     expect(builtinTools.every((tool) => tool.authorization?.actionId === `builtin.${tool.name}`)).toBe(true);

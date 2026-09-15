@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
 import { canonicalJson } from "../lib/canonical-json.js";
-import { ACTION_POLICY_AUTHORIZATION_KIND, actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles, runtimeGrants, teams } from "../schema/index.js";
+import { ACTION_POLICY_AUTHORIZATION_KIND, actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policyAuthoringDocuments, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles, runtimeGrants, teams } from "../schema/index.js";
 import { buildCurrentPolicySource, standardNewOrganizationPolicySnapshot } from "./bundles/current-policy-source.js";
 import type { CurrentPolicySourceSnapshotV1 } from "./bundles/current-policy-types.js";
 import { SourceBundleHost } from "./bundles/host.js";
@@ -11,6 +11,7 @@ import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 import type { CanonicalSourceBundle, ValidatedBundleIdentity } from "./bundles/types.js";
 import { WasmPolicyRuntime } from "./evaluators/wasm-runtime.js";
 import { projectActionDraftToCurrentSnapshot } from "./builder/current-action-projection.js";
+import { normalizePolicyDraft, validatePolicyDraft } from "./builder/model.js";
 import type { NormalizedPolicyDraftV1 } from "./builder/types.js";
 
 export type ActionPluginByService = ReadonlyMap<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
@@ -261,7 +262,7 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
         const stored = (await tx.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, pointer.digest)).limit(1))[0];
         if (!stored) throw new Error(`Canonical policy bundle ${pointer.digest} is missing.`);
         const authored = await isRecordedCandidate(tx, pointer.orgId, pointer.digest);
-        const authoredRevision = authored ? await approvedAuthoredRevision(tx, pointer.orgId, pointer.digest) : undefined;
+        const authoredRevision = authored ? await approvedAuthoredRevision(tx, this.runtime, pointer.orgId, pointer.digest) : undefined;
         const bundle = await replacement({ organizationId: pointer.orgId, source: authored ? "authored" : "structured", active: { sourceBundleDigest: pointer.digest, generation: pointer.generation }, bundle: stored.bundle, ...(authoredRevision ? { authoredRevision } : {}) }, transactionManager);
         const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle });
         await this.runtime.loadBundle(identity.sourceBundleDigest, bundle);
@@ -369,15 +370,32 @@ function revision(value: unknown): string {
   return `current-policy:${createHash("sha256").update(JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item)).digest("hex")}`;
 }
 
-async function approvedAuthoredRevision(db: AppQueryable, organizationId: string, digest: string): Promise<{ documentId: string; revision: number; draft: NormalizedPolicyDraftV1 } | undefined> {
+async function approvedAuthoredRevision(db: AppQueryable, runtime: WasmPolicyRuntime, organizationId: string, digest: string): Promise<{ documentId: string; revision: number; draft: NormalizedPolicyDraftV1 } | undefined> {
   const revisions = await db.select().from(policyAuthoringRevisions).where(and(eq(policyAuthoringRevisions.orgId, organizationId), eq(policyAuthoringRevisions.sourceBundleDigest, digest)));
   const approved: typeof revisions = [];
   for (const revision of revisions) {
-    const review = (await db.select({ id: policyAuthoringReviews.id }).from(policyAuthoringReviews).where(and(eq(policyAuthoringReviews.orgId, organizationId), eq(policyAuthoringReviews.scopeKey, revision.scopeKey), eq(policyAuthoringReviews.documentId, revision.documentId), eq(policyAuthoringReviews.revision, revision.revision), eq(policyAuthoringReviews.sourceBundleDigest, digest), eq(policyAuthoringReviews.verdict, "approve"))).limit(1))[0];
-    if (review) approved.push(revision);
+    const reviews = await db.select().from(policyAuthoringReviews).where(and(eq(policyAuthoringReviews.orgId, organizationId), eq(policyAuthoringReviews.scopeKey, revision.scopeKey), eq(policyAuthoringReviews.documentId, revision.documentId), eq(policyAuthoringReviews.revision, revision.revision), eq(policyAuthoringReviews.sourceBundleDigest, digest), eq(policyAuthoringReviews.verdict, "approve")));
+    if (reviews.length) approved.push(revision);
   }
   if (approved.length !== 1) return undefined;
-  return { documentId: approved[0].documentId, revision: approved[0].revision, draft: approved[0].draft };
+  const revision = approved[0]!;
+  const document = (await db.select().from(policyAuthoringDocuments).where(and(eq(policyAuthoringDocuments.orgId, organizationId), eq(policyAuthoringDocuments.scopeKey, revision.scopeKey), eq(policyAuthoringDocuments.id, revision.documentId))).limit(1))[0];
+  const review = (await db.select().from(policyAuthoringReviews).where(and(eq(policyAuthoringReviews.orgId, organizationId), eq(policyAuthoringReviews.scopeKey, revision.scopeKey), eq(policyAuthoringReviews.documentId, revision.documentId), eq(policyAuthoringReviews.revision, revision.revision), eq(policyAuthoringReviews.sourceBundleDigest, digest), eq(policyAuthoringReviews.verdict, "approve"))).limit(1))[0];
+  const fail = (detail: string): never => { throw new Error(`Approved authored policy for ${organizationId} has invalid ${detail}. Restore the immutable approved revision before release migration.`); };
+  if (!document || document.status !== "approved_for_publication" || document.revision !== revision.revision || document.reviewCycle !== review?.reviewCycle || document.normalizedIdentity !== revision.normalizedIdentity || document.sourceBundleDigest !== digest) fail("document provenance");
+  if (!review || review.normalizedIdentity !== revision.normalizedIdentity || review.policyDigest !== revision.policyDigest || review.engineDigest !== revision.engineDigest) fail("review provenance");
+  if (validatePolicyDraft(revision.draft).length) fail("draft");
+  let normalized: NormalizedPolicyDraftV1;
+  try { normalized = normalizePolicyDraft(revision.draft); } catch { return fail("draft"); }
+  if (normalized.normalizedIdentity !== revision.normalizedIdentity) fail("normalized identity");
+  const rebuilt = buildCurrentPolicySource(projectActionDraftToCurrentSnapshot(normalized, organizationId)).bundle;
+  const rebuiltIdentity = await runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: rebuilt });
+  if (rebuiltIdentity.sourceBundleDigest !== digest || rebuiltIdentity.policyDigest !== revision.policyDigest || rebuiltIdentity.engineDigest !== revision.engineDigest) fail("source bundle digest");
+  const stored = (await db.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, digest)).limit(1))[0];
+  if (!stored) fail("source bundle");
+  const storedIdentity = await runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: stored!.bundle });
+  if (storedIdentity.sourceBundleDigest !== digest || canonicalJson(stored!.bundle) !== canonicalJson(rebuilt) || (revision.bundle && canonicalJson(revision.bundle) !== canonicalJson(stored!.bundle))) fail("immutable source bundle");
+  return { documentId: revision.documentId, revision: revision.revision, draft: normalized };
 }
 
 async function isRecordedCandidate(db: AppQueryable, organizationId: string, digest: string): Promise<boolean> {

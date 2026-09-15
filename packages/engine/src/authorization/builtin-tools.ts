@@ -126,7 +126,19 @@ export function builtinApprovalDisplay(name: string, value: unknown): Record<str
   if (name === "bash") { add("command", row.command); add("cwd", row.cwd); }
   else if (name === "write") { add("path", row.path); add("content preview", row.content); }
   else if (name === "edit") { add("path", row.path); add("operation preview", row.oldString); add("content preview", row.newString); }
-  else if (name === "task") { for (const key of ["repo", "branch", "model", "profile"] as const) add(key, row[key]); add("prompt", row.prompt); if (row.resources && typeof row.resources === "object" && !Array.isArray(row.resources)) out.resources = trustedJsonClone(row.resources) as JsonValue; }
+  else if (name === "task") {
+    // Allowlist display fields. Do not clone resources: it may contain arbitrary
+    // caller data that would otherwise enter suspended-turn persistence.
+    for (const key of ["repo", "branch", "model", "profile"] as const) add(key, row[key]);
+    add("prompt", row.prompt);
+    if (typeof row.docker === "boolean") out.docker = row.docker;
+    const resources = row.resources;
+    if (resources && typeof resources === "object" && !Array.isArray(resources)) {
+      const reviewed = resources as Record<string, unknown>;
+      if (typeof reviewed.cpu === "number" && Number.isFinite(reviewed.cpu)) out.cpu = reviewed.cpu;
+      add("memory", reviewed.memory);
+    }
+  }
   else if (name === "switch_model") add("model", row.model);
   else if (name === "call_tool") { add("tool", row.tool_id); add("summary", row.summary); }
   else if (name === "list_tools") add("service", row.service);

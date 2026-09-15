@@ -341,6 +341,42 @@ export async function persistTerminalGate(
   return terminal;
 }
 
+const HUMAN_CONTEXT_LIMITS = { bytes: 16 * 1024, stringBytes: 1024, depth: 8, nodes: 256, fields: 64 };
+
+/** Copy only plain JSON data before a gate reaches durable storage. */
+export function canonicalHumanContext(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  let nodes = 0;
+  const seen = new Set<object>();
+  const copy = (item: unknown, depth: number): unknown => {
+    if (item === null || typeof item === "boolean") return item;
+    if (typeof item === "string") {
+      if (Buffer.byteLength(item) > HUMAN_CONTEXT_LIMITS.stringBytes) throw new TypeError("Decision gate context text exceeds 1024 bytes. Shorten the display field before requesting approval.");
+      return item;
+    }
+    if (typeof item === "number" && Number.isFinite(item)) return item;
+    if (typeof item !== "object" || depth > HUMAN_CONTEXT_LIMITS.depth || ++nodes > HUMAN_CONTEXT_LIMITS.nodes) throw new TypeError("Decision gate context is not a bounded JSON value. Reduce its depth or fields before requesting approval.");
+    if (seen.has(item)) throw new TypeError("Decision gate context cannot contain cycles.");
+    seen.add(item);
+    try {
+      if (Array.isArray(item)) {
+        if (Object.keys(item).length !== item.length) throw new TypeError("Decision gate context cannot contain sparse arrays.");
+        return item.map((entry) => copy(entry, depth + 1));
+      }
+      if (Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) throw new TypeError("Decision gate context must contain plain objects only.");
+      const descriptors = Object.getOwnPropertyDescriptors(item);
+      const keys = Reflect.ownKeys(descriptors);
+      if (keys.length > HUMAN_CONTEXT_LIMITS.fields || keys.some((key) => typeof key !== "string" || descriptors[key as keyof typeof descriptors]?.get || descriptors[key as keyof typeof descriptors]?.set)) throw new TypeError("Decision gate context must not contain accessors or unsupported fields.");
+      const output: Record<string, unknown> = Object.create(null);
+      for (const key of keys as string[]) output[key] = copy(descriptors[key]!.value, depth + 1);
+      return output;
+    } finally { seen.delete(item); }
+  };
+  const canonical = copy(value, 0) as Record<string, unknown>;
+  if (Buffer.byteLength(JSON.stringify(canonical)) > HUMAN_CONTEXT_LIMITS.bytes) throw new TypeError("Decision gate context exceeds 16 KiB. Shorten the display fields before requesting approval.");
+  return canonical;
+}
+
 export function fromRequest(
   req: DecisionGateRequest,
   gateCtx: GateContext & { ordinal: number },
@@ -372,7 +408,7 @@ export function fromRequest(
         : []),
     expiresAt: req.expiresAt ?? now + GATE_EXPIRY_DEFAULT_MS[req.type],
     status: "pending",
-    context: req.context,
+    context: canonicalHumanContext(req.context),
     origin: req.origin,
     createdAt: now,
     updatedAt: now,
