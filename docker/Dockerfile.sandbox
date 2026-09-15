@@ -75,6 +75,20 @@ RUN curl -fsSL -o /usr/local/bin/cloudflared \
     "https://github.com/cloudflare/cloudflared/releases/download/2026.2.0/cloudflared-linux-amd64" \
     && chmod +x /usr/local/bin/cloudflared
 
+# ─── tk (Turnkey CLI) build stage ───────────────────────────────────────
+# `valet-sign` (git's gpg.ssh.program, installed by sandbox prep) execs
+# `tk ssh git-sign`, which signs commits with a key held in Turnkey
+# (docs/specs/2026-09-12-agent-commit-signing-design.md). tkhq/tk publishes
+# no release binaries yet, so the CLI is built from a pinned commit.
+FROM rust:1-bookworm AS tk-build
+ARG TK_GIT_REV=1b893111f425
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev git \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone https://github.com/tkhq/tk.git /src/tk \
+    && git -C /src/tk checkout "${TK_GIT_REV}" \
+    && cargo build --release --manifest-path /src/tk/Cargo.toml -p tk \
+    && install -m 0755 /src/tk/target/release/tk /out-tk
+
 # ─── Runner Build ──────────────────────────────────────────────────────
 
 FROM base AS runner-build
@@ -89,6 +103,9 @@ RUN bun build src/bin.ts --outdir dist --target bun
 # ─── Final Image ────────────────────────────────────────────────────────
 
 FROM base
+
+# Turnkey CLI for commit signing; see the tk-build stage above.
+COPY --from=tk-build /out-tk /usr/local/bin/tk
 
 WORKDIR /runner
 COPY --from=runner-build /build/runner/dist ./dist

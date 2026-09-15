@@ -47,6 +47,8 @@ import { recordSandboxWorkspaceGrow } from "@valet/engine";
 import type { ExecResult, Sandbox, SessionStartRef } from "@valet/engine";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
+import { valetSignScript } from "./commit-signing-script.js";
+import { SIGN_PROGRAM_PATH } from "@valet/plugin-turnkey/sandbox";
 import type { CredentialCommand } from "./credential-commands.js";
 import { ownerOf } from "../services/session-github-token.js";
 import { PREBUILT_REPO_PATH, type RecipeStep } from "../prebuilds/recipe.js";
@@ -267,10 +269,12 @@ export async function installCredentialHelper(
   const stagedGhWrapper = posixJoin(STAGING_DIR, "valet-gh");
   const stagedSecrets = posixJoin(STAGING_DIR, "valet-secrets");
   const stagedOpShim = posixJoin(STAGING_DIR, "op");
+  const stagedSign = posixJoin(STAGING_DIR, "valet-sign");
   await sandbox.writeFile(stagedHelper, gitCredentialHelperScript(apiUrl));
   await sandbox.writeFile(stagedGhWrapper, ghWrapperScript(apiUrl));
   await sandbox.writeFile(stagedSecrets, secretsCliScript(apiUrl));
   await sandbox.writeFile(stagedOpShim, opShimScript());
+  await sandbox.writeFile(stagedSign, valetSignScript());
   // One wrapper per declared command, staged beside the fixed scripts and
   // installed in the same privileged exec below.
   const staged = credentialCommands.map((cmd) => ({
@@ -294,8 +298,9 @@ export async function installCredentialHelper(
       `cp ${shQuote(stagedGhWrapper)} ${GH_SHIM_PATH}`,
       `cp ${shQuote(stagedSecrets)} ${SECRETS_CLI_PATH}`,
       `cp ${shQuote(stagedOpShim)} ${OP_SHIM_PATH}`,
+      `cp ${shQuote(stagedSign)} ${SIGN_PROGRAM_PATH}`,
       ...staged.map(({ path, installed }) => `cp ${shQuote(path)} ${installed}`),
-      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH} ${OP_SHIM_PATH}${staged
+      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH} ${OP_SHIM_PATH} ${SIGN_PROGRAM_PATH}${staged
         .map(({ installed }) => ` ${installed}`)
         .join("")}`,
     ].join(" && "),
@@ -337,6 +342,18 @@ export async function installCredentialHelper(
   const safeDirectory = await sandbox.exec("git config --global --fixed-value --replace-all safe.directory '*' '*'");
   if (safeDirectory.exitCode !== 0) {
     throw new Error(execFailureMessage("workspace prep: git config safe.directory failed", safeDirectory));
+  }
+
+  // Commit signing (agent commit signing design): git signs in SSH format
+  // through `valet-sign`, which execs `tk ssh git-sign`. Signing stays OFF
+  // here (`commit.gpgsign` is unset); `turnkey.request_signing_key` turns it
+  // on after the user approves a key, so commits before approval stay
+  // unsigned instead of failing.
+  const signProgram = await sandbox.exec(
+    `git config --global gpg.format ssh && git config --global gpg.ssh.program ${shQuote(SIGN_PROGRAM_PATH)}`,
+  );
+  if (signProgram.exitCode !== 0) {
+    throw new Error(execFailureMessage("workspace prep: git config gpg.ssh.program failed", signProgram));
   }
 }
 
