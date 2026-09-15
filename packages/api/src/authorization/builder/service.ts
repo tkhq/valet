@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, count, eq, gt } from "drizzle-orm";
-import type { AuthorizationRequest, JsonValue } from "@valet/engine/authorization";
+import { adaptApiRoute, adaptResourceAccess, type AuthorizationRequest, type JsonValue } from "@valet/engine/authorization";
 import { builtinAuthorization } from "@valet/engine";
 import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
@@ -12,7 +12,8 @@ import { InMemorySourceBundleStorage } from "../bundles/in-memory-storage.js";
 import type { CanonicalSourceBundle, ValidatedBundleIdentity } from "../bundles/types.js";
 import { LocalValetEvaluator } from "../evaluators/local-valet.js";
 import { WasmPolicyRuntime } from "../evaluators/wasm-runtime.js";
-import { projectActionDraftToCurrentSnapshot } from "./current-action-projection.js";
+import { projectDraftToCurrentSnapshot } from "./current-policy-projection.js";
+import { POLICY_CONTEXTS } from "./contexts.js";
 import { normalizePolicyDraft, sanitizeSampleFacts, validatePolicyDraft } from "./model.js";
 import type {
   CreatePolicyDraftRequest,
@@ -52,16 +53,8 @@ export interface PolicyAuthoringCompiler {
 let runtime: WasmPolicyRuntime | undefined;
 export const policyAuthoringCompiler: PolicyAuthoringCompiler = {
   async compile(draft, scope) {
-    if (draft.rules.some((rule) => rule.context !== "tool.action" && rule.context !== "tool.builtin"))
-      return {
-        validation: {
-          valid: true,
-          publishable: false,
-          issues: [issue("unsupported_authorization_context", "rules", "This context can be saved, but it cannot be reviewed or prepared for publication yet.")],
-        },
-      };
     try {
-      const built = buildCurrentPolicySource(projectActionDraftToCurrentSnapshot(draft, scope.organizationId));
+      const built = buildCurrentPolicySource(projectDraftToCurrentSnapshot(draft, scope.organizationId));
       runtime ??= new WasmPolicyRuntime();
       const identity = await runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: built.bundle });
       return { bundle: built.bundle, identity, validation: { valid: true, publishable: true, issues: [] }, source: { rego: built.policySource, data: built.canonicalData } };
@@ -107,6 +100,7 @@ export class PolicyAuthoringService {
     this.now = deps.now ?? Date.now;
     this.auditWrite = deps.auditWrite ?? writeAudit;
   }
+  async contexts(actor: string, scope: PolicyAuthoringScope) { return this.safe(async () => { await this.allowed("view", actor, scope, this.deps.db); return { schemaVersion: 1 as const, contexts: POLICY_CONTEXTS }; }); }
   async list(actor: string, scope: PolicyAuthoringScope, cursor?: string, requestedLimit = DEFAULT_LIMIT) {
     return this.safe(async () => {
       await this.allowed("view", actor, scope, this.deps.db);
@@ -727,6 +721,10 @@ function previewRequest(draft: NormalizedPolicyDraftV1, scope: PolicyAuthoringSc
     target = draft.rules[0]?.target ?? {},
     action = typeof target["action.id"] === "string" ? target["action.id"] : undefined,
     service = typeof target["action.service"] === "string" ? target["action.service"] : (action?.split(".")[0] ?? "preview");
+  const descriptor = POLICY_CONTEXTS[context].targets.find((item) => item.actionId === action);
+  const common = { schemaVersion: 1 as const, organizationId: scope.organizationId, actorUserId: actor, principal: { type: scope.teamId ? "team" as const : "org" as const, id: scope.teamId ?? scope.organizationId }, requestId: randomUUID(), operationId: "policy-authoring-preview", evaluationTimeMs: now };
+  if (context === "api.route" && descriptor?.method && descriptor.template) return adaptApiRoute({ ...common, descriptor: { schemaVersion: 1, service: descriptor.service, actionId: descriptor.actionId, method: descriptor.method, routeTemplate: descriptor.template, riskLevel: descriptor.riskLevel } }).request;
+  if (context === "resource.access" && descriptor?.resourceKind) return adaptResourceAccess({ ...common, descriptor: { schemaVersion: 1, service: descriptor.service, actionId: descriptor.actionId, resourceKind: descriptor.resourceKind, operation: descriptor.operation, riskLevel: descriptor.riskLevel }, resource: {} }).request;
   return {
     schemaVersion: 1,
     requestId: randomUUID(),

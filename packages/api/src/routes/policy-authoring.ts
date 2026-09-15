@@ -61,6 +61,7 @@ function routes(prefix: "/org/policy-drafts" | "/teams/:teamId/policy-drafts") {
     const limit = c.req.query("limit") === undefined ? undefined : Number(c.req.query("limit"));
     return c.json(await s.service.list(s.actor, s.scope, c.req.query("cursor"), limit));
   });
+  policyAuthoringRouter.get(`${prefix}/contexts`, async (c) => { const s = session(c); return c.json(await s.service.contexts(s.actor, s.scope)); });
   policyAuthoringRouter.get(`${prefix}/:documentId`, async (c) => {
     const s = session(c);
     return c.json(await s.service.get(s.actor, s.scope, c.req.param("documentId")));

@@ -129,6 +129,11 @@ describe("current policy source builder", () => {
     expect(resource.decision).toMatchObject({ effect: "allow", reasonCode: "bundle_default" });
   });
 
+  it("rejects unknown route and resource source descriptors", () => {
+    expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "api.route", actionId: "api_sessions.unknown" })] }))).toThrow(expect.objectContaining({ code: "unknown_route_descriptor" }));
+    expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "resource.access", actionId: "resource_session.create" })] }))).toThrow(expect.objectContaining({ code: "unknown_resource_descriptor" }));
+  });
+
   it("canonicalizes a PR 9 version 1 action-only snapshot", async () => {
     const legacy = { ...snapshot(), organizationPolicies: [orgRule({ authorizationKind: undefined })] };
     delete (legacy as { builtinDefaults?: unknown }).builtinDefaults;

@@ -1,9 +1,10 @@
 import type { CurrentOrganizationPolicyV1, CurrentPersonalOverrideV1, CurrentPolicyMatcherV1, CurrentPolicySourceSnapshotV1, CurrentTeamPolicyV1 } from "../bundles/current-policy-types.js";
 import { standardNewOrganizationPolicySnapshot } from "../bundles/current-policy-source.js";
+import { POLICY_CONTEXTS } from "./contexts.js";
 import type { NormalizedPolicyDraftV1, PolicyRuleDraftV1 } from "./types.js";
 
 /** API-side adapter from the normalized browser contract to the PR 6 source snapshot. */
-export function projectActionDraftToCurrentSnapshot(draft: NormalizedPolicyDraftV1, organizationId: string): CurrentPolicySourceSnapshotV1 {
+export function projectDraftToCurrentSnapshot(draft: NormalizedPolicyDraftV1, organizationId: string): CurrentPolicySourceSnapshotV1 {
   const base = standardNewOrganizationPolicySnapshot(organizationId, draft.normalizedIdentity);
   const organizationPolicies: CurrentOrganizationPolicyV1[] = [],
     teamPolicies: CurrentTeamPolicyV1[] = [],
@@ -11,12 +12,12 @@ export function projectActionDraftToCurrentSnapshot(draft: NormalizedPolicyDraft
   const teamIds = new Set<string>();
   for (const rule of draft.rules) {
     if (!["tool.action", "tool.builtin", "api.route", "resource.access"].includes(rule.context)) throw new TypeError("Current source projection does not support this context.");
-    if (rule.context === "tool.builtin" && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Built-in tool rules do not support content matchers.");
+    if (["tool.builtin", "api.route", "resource.access"].includes(rule.context) && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Built-in tool rules do not support content matchers.");
     if (rule.matcherGroups.some((group) => group.mode !== "all")) throw new TypeError("Current source projection supports all matcher groups only.");
-    if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length || rule.approval) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
+    if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length || (rule.approval && !["api.route", "resource.access"].includes(rule.context))) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
     if (rule.subjects.length !== 1 || rule.subjects[0] !== rule.owner.kind) throw new TypeError("Current source projection rejects subject scope loss.");
     if (rule.authority === "personal" && (rule.appliesIn !== "any" || rule.expiresAtMs !== undefined)) throw new TypeError("Personal overrides cannot preserve scope or expiry.");
-    const target = rule.context === "tool.builtin" ? builtinTarget(rule) : actionTarget(rule),
+    const target = ["api.route", "resource.access"].includes(rule.context) ? descriptorTarget(rule) : rule.context === "tool.builtin" ? builtinTarget(rule) : actionTarget(rule),
       paramMatchers = rule.matcherGroups.flatMap((group) =>
         group.matchers.map(
           (matcher) =>
@@ -92,4 +93,10 @@ function builtinTarget(rule: PolicyRuleDraftV1): Pick<CurrentOrganizationPolicyV
   if (target.actionId !== undefined && !target.actionId.startsWith("builtin.")) throw new TypeError("Built-in action targets require a canonical built-in action ID.");
   if (target.service !== undefined && target.service !== "builtin") throw new TypeError("Built-in service targets must use the builtin service.");
   return target;
+}
+
+function descriptorTarget(rule: PolicyRuleDraftV1): Pick<CurrentOrganizationPolicyV1, "actionId"> {
+  const actionId = rule.target["action.id"];
+  if (typeof actionId !== "string" || !POLICY_CONTEXTS[rule.context].targets.some((target) => target.actionId === actionId)) throw new TypeError("Route and resource targets require a registered descriptor.");
+  return { actionId };
 }

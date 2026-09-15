@@ -10,7 +10,7 @@ import { SourceBundleHost } from "./bundles/host.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 import type { CanonicalSourceBundle, ValidatedBundleIdentity } from "./bundles/types.js";
 import { WasmPolicyRuntime } from "./evaluators/wasm-runtime.js";
-import { projectActionDraftToCurrentSnapshot } from "./builder/current-action-projection.js";
+import { projectDraftToCurrentSnapshot } from "./builder/current-policy-projection.js";
 import { normalizePolicyDraft, validatePolicyDraft } from "./builder/model.js";
 import type { NormalizedPolicyDraftV1 } from "./builder/types.js";
 
@@ -327,7 +327,7 @@ export async function migrateCanonicalPolicyReleaseSet(manager: CanonicalPolicyB
   await manager.migrateReleaseSet(targetRelease, async (input, transactionManager) => {
     if (input.source === "structured") return (await transactionManager.buildCurrent(input.organizationId)).built.bundle;
     if (!input.authoredRevision) throw new Error(`Authored policy for ${input.organizationId} cannot be reconstructed. Restore the exact approved document and revision before release migration.`);
-    return buildCurrentPolicySource(projectActionDraftToCurrentSnapshot(input.authoredRevision.draft, input.organizationId)).bundle;
+    return buildCurrentPolicySource(projectDraftToCurrentSnapshot(input.authoredRevision.draft, input.organizationId)).bundle;
   });
 }
 

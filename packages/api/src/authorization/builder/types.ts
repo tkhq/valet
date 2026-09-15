@@ -13,12 +13,26 @@ export interface PolicyFieldDescriptor {
   readonly sensitivity: Sensitivity;
   readonly operators: readonly ComparisonOperator[];
 }
+export interface PolicyTargetOptionV1 {
+  readonly actionId: string;
+  readonly service: string;
+  readonly label: string;
+  readonly riskLevel: "low" | "medium" | "high" | "critical";
+  readonly method?: string;
+  readonly template?: string;
+  readonly resourceKind?: string;
+  readonly operation: string;
+  readonly approvalSupported: boolean;
+}
+export type PolicyContextRegistry = Readonly<Record<AuthorizationKind, PolicyContextDescriptor>>;
+export interface PolicyContextsResponseV1 { readonly schemaVersion: 1; readonly contexts: PolicyContextRegistry; }
 export interface PolicyContextDescriptor {
   readonly schemaVersion: 1;
   readonly kind: AuthorizationKind;
   readonly label: string;
   readonly subjectKinds: readonly ("user" | "team" | "org" | "app")[];
   readonly fields: readonly PolicyFieldDescriptor[];
+  readonly targets: readonly PolicyTargetOptionV1[];
   readonly effects: readonly AuthorizationEffect[];
   readonly humanApproval: boolean;
   readonly fallback: "deny" | "require_approval";

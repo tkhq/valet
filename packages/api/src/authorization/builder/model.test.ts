@@ -154,9 +154,19 @@ describe("policy draft validation", () => {
     const groups = Array.from({ length: 2 }, (_, group) => ({ id: "g" + group, mode: "all" as const, matchers: Array.from({ length: 9 }, (_, row) => ({ id: "m" + group + "-" + row, field: "parameters.x", operator: "eq" as const, value: row })) }));
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: groups }] }).filter(issue => issue.code === "complexity_limit" && issue.path.includes("matcherGroups"))).toHaveLength(1);
     expect(POLICY_CONTEXTS["tool.action"]).toMatchObject({ publishable: true, humanApproval: true, obligations: [] });
-    expect(POLICY_CONTEXTS["api.route"]).toMatchObject({ publishable: false, obligations: [] });
-    expect(POLICY_CONTEXTS["resource.access"]).toMatchObject({ publishable: false, obligations: [] });
-    expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(2);
+    expect(POLICY_CONTEXTS["api.route"]).toMatchObject({ publishable: true, obligations: [] });
+    expect(POLICY_CONTEXTS["resource.access"]).toMatchObject({ publishable: true, obligations: [] });
+    expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(4);
+  });
+
+  it.each(["api.route", "resource.access"] as const)("binds %s drafts to exact descriptors", (context) => {
+    const option = POLICY_CONTEXTS[context].targets.find((target) => target.approvalSupported)!;
+    const value = draft(), rule = { ...value.rules[0], context, target: { "action.id": option.actionId }, matcherGroups: [], appliesIn: undefined, effect: "require_approval" as const, approval: { tier: "human", replay: "once" as const } };
+    expect(validatePolicyDraft({ ...value, rules: [rule] })).toEqual([]);
+    expect(normalizePolicyDraft({ ...value, rules: [rule] }).rules[0].target).toEqual({ "action.id": option.actionId });
+    for (const target of [{ "action.id": "unknown.operation" }, { "route.id": "/api/raw" }, { "action.id": POLICY_CONTEXTS[context === "api.route" ? "resource.access" : "api.route"].targets[0].actionId }]) expect(validatePolicyDraft({ ...value, rules: [{ ...rule, target }] }).map((issue) => issue.code)).toContain("unknown_descriptor");
+    expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: draft().rules[0].matcherGroups }] }).map((issue) => issue.code)).toContain("unsupported_content_matcher");
+    expect(validatePolicyDraft({ ...value, rules: [{ ...rule, obligations: [{ type: "redact" }] }] }).map((issue) => issue.code)).toContain("unsupported_obligation");
   });
 
 });

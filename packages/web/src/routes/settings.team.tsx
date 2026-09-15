@@ -1,4 +1,5 @@
 import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
+import { usePolicyDraftContexts } from "~/api/policy-authoring";
 import { useOrgDirectory } from "~/api/settings";
 import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
@@ -19,6 +20,7 @@ export function TeamSettingsPage() {
 
 function SelectedTeamSettings({ teamId }: { teamId: string }) {
   const directory = useOrgDirectory();
+  const contexts = usePolicyDraftContexts(teamId);
 
   return (
     <div className="space-y-10">
@@ -30,7 +32,7 @@ function SelectedTeamSettings({ teamId }: { teamId: string }) {
         </div>
         {directory.isLoading ? <LoadingRow label="Loading team settings…" /> : directory.error != null ? <ErrorRow>Failed to load the member directory. Reload the page to try again.</ErrorRow> : directory.data ? <TeamsPanel orgMembers={directory.data.users} teamId={teamId} /> : <ErrorRow>Team settings are unavailable. Select another workspace or reload the page.</ErrorRow>}
       </Section>
-      <PolicyBuilder owner={{ kind: "team", id: teamId }} />
+      {contexts.error ? <ErrorRow>Policy contexts are unavailable. Reload the page to try again.</ErrorRow> : contexts.data ? <PolicyBuilder contexts={contexts.data.contexts} owner={{ kind: "team", id: teamId }} /> : <LoadingRow label="Loading policy contexts…" />}
     </div>
   );
 }

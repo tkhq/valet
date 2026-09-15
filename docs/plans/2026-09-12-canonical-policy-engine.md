@@ -435,6 +435,7 @@ make e2e E2E_ARGS="--only cli,typecheck"
 - Keep authentication and tenant-scoped database queries in route and service code.
 - Add a small typed query-obligation vocabulary before list routes use it.
 - Preserve resource concealment behavior through obligations.
+- Publish route and resource rules through the generic builder lifecycle with registry-owned targets.
 
 **Acceptance checks**
 

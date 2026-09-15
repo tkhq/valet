@@ -6,7 +6,7 @@ import { InMemorySourceBundleStorage } from "../bundles/in-memory-storage.js";
 import { LocalValetEvaluator } from "../evaluators/local-valet.js";
 import { WasmPolicyRuntime } from "../evaluators/wasm-runtime.js";
 import { normalizePolicyDraft } from "./model.js";
-import { projectActionDraftToCurrentSnapshot } from "./current-action-projection.js";
+import { projectDraftToCurrentSnapshot } from "./current-policy-projection.js";
 import type { CurrentOrganizationPolicyV1 } from "../bundles/current-policy-types.js";
 import type { JsonValue, PolicyDraftV1, PolicyRuleDraftV1 } from "./types.js";
 
@@ -72,7 +72,7 @@ const request: AuthorizationRequest = {
 describe("browser draft to current source contract", () => {
   it("maps losslessly, validates the bundle, and evaluates through LocalValetEvaluator", async () => {
     const normalized = normalizePolicyDraft(draft);
-    const snapshot = projectActionDraftToCurrentSnapshot(normalized, "org-1");
+    const snapshot = projectDraftToCurrentSnapshot(normalized, "org-1");
     expect(snapshot.organizationPolicies[0]).toEqual({ id: "rule-1", organizationId: "org-1", authorizationKind: "tool.action", actionId: "gmail.send_email", mode: "deny", paramMatchers: [{ path: "to", op: "eq", value: "a@example.com" }], createdAtMs: 1, updatedAtMs: 1, principalType: "org", principalId: "org-1", appliesIn: "any", expiresAtMs: null, revokedAtMs: null, sourceTable: "action_policies", sourcePath: "builder/draft-1/rule-1" });
     const built = buildCurrentPolicySource(snapshot);
     const provenance = JSON.parse(Buffer.from(built.bundle.files.find((file) => file.path.startsWith("provenance/"))!.contentBase64, "base64").toString("utf8"));
@@ -95,28 +95,28 @@ describe("browser draft to current source contract", () => {
   it.each(["workflow.action", "approval", "description", "obligations", "subjects"] as const)("rejects lossy %s projection", field => {
     const patch: Partial<PolicyRuleDraftV1> = field === "workflow.action" ? { context: field } : field === "approval" ? { approval: { tier: "human", replay: "once" } } : field === "description" ? { description: "lost" } : field === "obligations" ? { obligations: [{ type: "redact" }] } : { subjects: ["user"] };
     const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], ...patch }] };
-    expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action|does not support/i);
+    expect(() => projectDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action|does not support/i);
   });
 
   it.each(PROJECTABLE_TARGETS)("projects every browser-valid target %j", target => {
-    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], target }] }, snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], target }] }, snapshot = projectDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
     expect(() => buildCurrentPolicySource(snapshot)).not.toThrow(); expect(snapshot.organizationPolicies).toHaveLength(1);
   });
 
   it.each<Readonly<Record<string, JsonValue>>>([{ "action.id": "builtin.bash" }, { "action.service": "builtin" }, { "action.riskLevel": "high" }] as const)("round-trips built-in kind and target %j", (target) => {
     const rule = { ...draft.rules[0], context: "tool.builtin" as const, target, matcherGroups: [] };
-    const snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft({ ...draft, rules: [rule] }), "org-1");
+    const snapshot = projectDraftToCurrentSnapshot(normalizePolicyDraft({ ...draft, rules: [rule] }), "org-1");
     expect(snapshot.organizationPolicies[0]).toMatchObject({ authorizationKind: "tool.builtin" });
     expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
   });
 
   it("projects a bare approval mode without custom approval fields", () => {
-    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], effect: "require_approval", approval: undefined }] }, snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
+    const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], effect: "require_approval", approval: undefined }] }, snapshot = projectDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
     expect(snapshot.organizationPolicies[0].mode).toBe("require_approval"); expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
   });
 
   it.each(INVALID_SOURCE_TARGETS)("source rejects target grammar %j", (patch, code) => {
-    const current = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(draft), "org-1"), row = { ...current.organizationPolicies[0], actionId: undefined, ...patch };
+    const current = projectDraftToCurrentSnapshot(normalizePolicyDraft(draft), "org-1"), row = { ...current.organizationPolicies[0], actionId: undefined, ...patch };
     expect(() => buildCurrentPolicySource({ ...current, organizationPolicies: [row] })).toThrow(expect.objectContaining({ code }));
   });
 

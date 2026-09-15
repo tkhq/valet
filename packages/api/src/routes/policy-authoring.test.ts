@@ -79,6 +79,32 @@ async function setup() {
 const resourceDeps = { resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: (scope: { organizationId: string }, actorId: string) => testResourceContext(scope.organizationId, actorId) };
 
 describe("canonical policy authoring routes", () => {
+  it("serves exact route and resource authoring descriptors", async () => {
+    const app = await setup(), response = await fetch(`${app.baseUrl}/api/org/policy-drafts/contexts`, { headers });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { contexts: Record<string, { publishable: boolean; targets: { actionId: string; template?: string; resourceKind?: string; operation: string }[] }> };
+    expect(body.contexts["api.route"].publishable).toBe(true);
+    expect(body.contexts["api.route"].targets).toContainEqual(expect.objectContaining({ actionId: "api_sessions.post_sessions", template: "/api/sessions" }));
+    expect(body.contexts["resource.access"].targets).toContainEqual(expect.objectContaining({ actionId: "resource_artifact.publish", resourceKind: "artifact", operation: "publish" }));
+  });
+
+  it.each([["api.route", "api_sessions.post_sessions"], ["resource.access", "resource_artifact.publish"]] as const)("publishes a reviewed %s candidate", async (context, actionId) => {
+    await setup();
+    const key = context.replace(".", "-");
+    const authored: PolicyDraftV1 = { ...draft, draftId: `draft-${key}`, rules: [{ ...draft.rules[0], context, target: { "action.id": actionId }, matcherGroups: [], appliesIn: undefined }] };
+    const preview = await post("/org/policy-drafts/preview", { schemaVersion: 1, draft: authored, sampleFacts: {} });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ evaluation: { decision: { effect: "deny", matchedRuleIds: ["rule-1"] } } });
+    const created = await post("/org/policy-drafts", { ...mutation(`create-${key}`, 0, 0), draft: authored }).then((r) => r.json()) as { documentId: string; revision: number; stateVersion: number; validation: { publishable: boolean } };
+    expect(created.validation.publishable).toBe(true);
+    const submitted = await post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation(`submit-${key}`, created.revision, created.stateVersion)).then((r) => r.json()) as { stateVersion: number };
+    await api!.providers.db.update(orgMembers).set({ role: "admin" }).where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
+    const approved = await post(`/org/policy-drafts/${created.documentId}/reviews`, { ...mutation(`review-${key}`, created.revision, submitted.stateVersion), verdict: "approve", requestId: `review-${key}` }, reviewer).then((r) => r.json()) as { stateVersion: number };
+    const published = await post(`/org/policy-drafts/${created.documentId}/prepare-publication`, { schemaVersion: 1, expectedRevision: created.revision, expectedStateVersion: approved.stateVersion }, reviewer);
+    expect(published.status).toBe(200);
+    expect(await published.json()).toMatchObject({ notice: "This candidate is the active canonical policy bundle.", draft: { rules: [{ context, target: { "action.id": actionId } }] } });
+  });
+
   it("activates a reviewed immutable candidate without changing structured rows", async () => {
     const app = await setup();
     const created = await post("/org/policy-drafts", {

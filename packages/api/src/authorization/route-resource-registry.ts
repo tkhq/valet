@@ -3,6 +3,15 @@ import type { RouterRoute } from "hono/types";
 export type PolicyRisk = "low" | "medium" | "high" | "critical";
 export type ResourceKind = "repository" | "secret" | "policy" | "workflow" | "artifact" | "session" | "assistant" | "team";
 export type ResourceOperation = "create" | "list" | "metadata" | "read" | "update" | "delete" | "execute" | "approve" | "cancel" | "share" | "publish" | "import" | "export" | "attach" | "use" | "link" | "unlink" | "copy";
+export interface ResourceAccessDescriptorV1 { readonly schemaVersion: 1; readonly resourceKind: ResourceKind; readonly operation: ResourceOperation; readonly service: string; readonly actionId: string; readonly riskLevel: PolicyRisk; readonly safeMetadata: readonly ["resourceId", "ownerType", "ownerId", "version"]; }
+export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readonly [PolicyRisk]>> = Object.freeze({
+  "repository.list": ["low"], "repository.metadata": ["low"], "repository.link": ["low"], "repository.unlink": ["low"], "repository.import": ["medium"],
+  "secret.list": ["high"], "secret.metadata": ["high"], "secret.update": ["high"], "secret.delete": ["high"],
+  "policy.list": ["low"], "policy.read": ["low"], "policy.create": ["medium"], "policy.update": ["medium"], "policy.delete": ["high"], "policy.approve": ["high"], "policy.publish": ["high"],
+  "workflow.list": ["low"], "workflow.read": ["low"], "workflow.create": ["medium"], "workflow.update": ["medium"], "workflow.delete": ["high"], "workflow.execute": ["medium"],
+  "artifact.delete": ["high"], "artifact.share": ["medium"], "artifact.publish": ["high"], "artifact.copy": ["low"],
+});
+export const RESOURCE_ACCESS_REGISTRY: readonly ResourceAccessDescriptorV1[] = Object.freeze(Object.entries(RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1).map(([key, [riskLevel]]) => { const split = key.indexOf("."); const resourceKind = key.slice(0, split) as ResourceKind, operation = key.slice(split + 1) as ResourceOperation; return Object.freeze({ schemaVersion: 1 as const, resourceKind, operation, service: `resource_${resourceKind}`, actionId: `resource_${resourceKind}.${operation}`, riskLevel, safeMetadata: ["resourceId", "ownerType", "ownerId", "version"] as const }); }));
 export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: "none"; readonly obligations: readonly []; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
 export interface BoundaryExclusionV1 { readonly schemaVersion: 1; readonly key: string; readonly classification: "public" | "pr12_owned"; readonly rationale: string; }
 type Seed = readonly [service: string, actionId: string, operation: ResourceOperation, risk: PolicyRisk, resourceKind?: ResourceKind];
@@ -87,6 +96,7 @@ export const API_ROUTE_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, Seed>> = Obj
   "GET /api/org/model-tiers": ["api_org", "api_org.get_org_model_tiers", "list", "low"],
   "GET /api/org/plugins": ["api_org", "api_org.get_org_plugins", "list", "low"],
   "GET /api/org/policies": ["api_org", "api_org.get_org_policies", "list", "low", "policy"],
+  "GET /api/org/policy-drafts/contexts": ["api_org", "api_org.get_org_policy_drafts_contexts", "read", "low", "policy"],
   "GET /api/org/policy-drafts": ["api_org", "api_org.get_org_policy_drafts", "list", "low", "policy"],
   "GET /api/org/policy-drafts/:documentId": ["api_org", "api_org.get_org_policy_drafts_item", "read", "low", "policy"],
   "GET /api/org/policy-drafts/:documentId/diff": ["api_org", "api_org.get_org_policy_drafts_item_diff", "read", "low", "policy"],
@@ -135,6 +145,7 @@ export const API_ROUTE_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, Seed>> = Obj
   "GET /api/teams/:id/grants": ["api_teams", "api_teams.get_teams_item_grants", "read", "low", "policy"],
   "GET /api/teams/:id/members": ["api_teams", "api_teams.get_teams_item_members", "read", "low", "team"],
   "GET /api/teams/:id/policies": ["api_teams", "api_teams.get_teams_item_policies", "read", "low", "policy"],
+  "GET /api/teams/:teamId/policy-drafts/contexts": ["api_teams", "api_teams.get_teams_item_policy_drafts_contexts", "read", "low", "policy"],
   "GET /api/teams/:teamId/policy-drafts": ["api_teams", "api_teams.get_teams_item_policy_drafts", "read", "low", "policy"],
   "GET /api/teams/:teamId/policy-drafts/:documentId": ["api_teams", "api_teams.get_teams_item_policy_drafts_item", "read", "low", "policy"],
   "GET /api/teams/:teamId/policy-drafts/:documentId/diff": ["api_teams", "api_teams.get_teams_item_policy_drafts_item_diff", "read", "low", "policy"],

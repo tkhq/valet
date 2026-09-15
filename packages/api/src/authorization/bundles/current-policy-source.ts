@@ -3,6 +3,7 @@ import { BUILTIN_TOOL_NAMES, builtinAuthorization } from "@valet/engine";
 import { validateCurrentPolicyDynamicFactsV2, type CurrentPolicyDynamicFactsV2, type JsonValue } from "@valet/engine/authorization";
 import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, isCurrentPolicyActionV1, isCurrentPolicyRiskV1, isCurrentPolicyServiceV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
 export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
+import { API_ROUTE_DESCRIPTOR_SEEDS_V1, RESOURCE_ACCESS_REGISTRY } from "../route-resource-registry.js";
 import { grantPolicyKey } from "../../policies/service.js";
 import type { CanonicalSourceBundle } from "./types.js";
 import type {
@@ -18,6 +19,7 @@ const MODES = new Set(["allow", "require_approval", "deny"]);
 const APPLIES_IN = new Set(["any", "session", "workflow"]);
 const MATCHER_OPS = new Set(["eq", "neq", "regex", "in", "not_in", "gt", "gte", "lt", "lte", "exists", "not_exists"]);
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
+const ROUTE_ACTIONS = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[1])), ROUTE_SERVICES = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[0])), RESOURCE_ACTIONS = new Set(RESOURCE_ACCESS_REGISTRY.map((entry) => entry.actionId));
 const POLICY_PATH = "policies/current-action-policy.rego";
 const DATA_PATH = "data/current-action-policy.json";
 const PROVENANCE_PATH = "provenance/current-action-policy.json";
@@ -253,6 +255,8 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   for (const row of liveRules) {
     if (row.authorizationKind !== undefined && row.authorizationKind !== "tool.action" && row.authorizationKind !== "tool.builtin" && row.authorizationKind !== "api.route" && row.authorizationKind !== "resource.access") fail("unknown_authorization_kind", `Rule ${row.id} has an unknown authorization kind.`);
     validateTarget(row.id, row);
+    if (row.authorizationKind === "api.route" && (row.paramMatchers.length || row.riskLevel !== undefined || (row.actionId !== undefined ? !ROUTE_ACTIONS.has(row.actionId) : row.service === undefined || !ROUTE_SERVICES.has(row.service)))) fail("unknown_route_descriptor", `Rule ${row.id} does not target a registered route action or service.`);
+    if (row.authorizationKind === "resource.access" && (row.paramMatchers.length || row.actionId === undefined || !RESOURCE_ACTIONS.has(row.actionId))) fail("unknown_resource_descriptor", `Rule ${row.id} does not target a registered resource operation.`);
     validateMode(row.id, row.mode);
     if ("appliesIn" in row) validatePolicySemantics(row);
     const valueComplexity = validateMatchers(row.id, row.paramMatchers);
