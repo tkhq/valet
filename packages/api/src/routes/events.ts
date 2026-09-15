@@ -679,11 +679,9 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     // ownership/membership/assistant checks above can still insert after
     // the team (or its target workflow/assistant) is gone, landing as a
     // permanent orphan — the race #709 closed for schedules.
-    // `principalTeamId: null` forces the same live-membership recheck the
-    // checks above already made, now inside the lock.
     const rows = await withAuthorizedTeamOwnership(
       db,
-      { teamId: ownerId, orgId: user.orgId, userId: user.id, principalTeamId: null, requireMembership: false },
+      { teamId: ownerId, orgId: user.orgId, userId: user.id, principalTeamId: null, requireMembership: true },
       async (tx) => {
         if (body.target.kind === "workflow") {
           const [targetWorkflow] = await tx
