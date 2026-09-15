@@ -58,7 +58,7 @@ describe("team token management", () => {
     expect((await put(id, "fake", { ...headers, "x-valet-test-user-id": "test-admin" })).status).toBe(200);
   });
 
-  it("removes the old routes without deleting legacy tokens or enforcing their metadata", async () => {
+  it("rejects removed routes without deleting legacy tokens or enforcing metadata", async () => {
     const id = await setup();
     const owner = { type: "team", id } as const;
     await api.providers.engineCredentials.save(owner, "onepassword", {
@@ -66,7 +66,7 @@ describe("team token management", () => {
     });
     for (const method of ["GET", "PUT", "DELETE"]) {
       const result = await fetch(`${api.baseUrl}/api/teams/${id}/onepassword-refs`, { method, headers });
-      expect(result.status).toBe(404);
+      expect(result.status).toBe(403);
     }
     expect(await api.providers.engineCredentials.get(owner, "onepassword")).toMatchObject({ apiKey: "fake-existing" });
     expect((await put(id, "fake-replacement")).status).toBe(200);

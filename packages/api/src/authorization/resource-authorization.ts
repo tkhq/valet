@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
 import {
   adaptResourceAccess,
   buildRouteResourceObligationPlan,
@@ -7,9 +6,7 @@ import {
   type RouteResourceObligationPlanV1,
 } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
-import { authorizationExecutionAttempts } from "../schema/index.js";
 import type { CanonicalAuthorizationService } from "./canonical-authorization-service.js";
-import { canonicalDecisionId } from "./canonical-authorization-service.js";
 import { RESOURCE_ACCESS_REGISTRY, type ResourceKind, type ResourceOperation } from "./route-resource-policy.js";
 
 export interface ResourceAuthorizationContext {
@@ -47,12 +44,10 @@ export class ResourceAuthorizationError extends Error {
   }
 }
 
-const READ_OPERATIONS = new Set<ResourceOperation>(["list", "metadata", "read", "export"]);
-
 export class CanonicalResourceAuthorizationService implements ResourceAuthorizationPort {
   constructor(
     private readonly service: CanonicalAuthorizationService,
-    private readonly db: AppDb,
+    _db: AppDb,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -76,23 +71,11 @@ export class CanonicalResourceAuthorizationService implements ResourceAuthorizat
       });
       const envelope = await this.service.authorize(adapted.request);
       if (envelope.decision.effect !== "allow") throw new ResourceAuthorizationError(envelope.decision.effect);
-      const plan = buildRouteResourceObligationPlan(envelope.decision);
-      if (!READ_OPERATIONS.has(input.operation)) await this.reserveMutation(canonicalDecisionId(input.organizationId, adapted.request.idempotencyKey), adapted.request.idempotencyKey);
-      return plan;
+      return buildRouteResourceObligationPlan(envelope.decision);
     } catch (error) {
       if (error instanceof ResourceAuthorizationError) throw error;
       throw new ResourceAuthorizationError("indeterminate");
     }
-  }
-
-  private async reserveMutation(decisionId: string, targetIdempotencyKey: string): Promise<void> {
-    const attemptId = `attempt:${decisionId.slice("decision:".length)}`;
-    const now = this.now();
-    const inserted = await this.db.insert(authorizationExecutionAttempts).values({ attemptId, decisionId, outcome: "started", targetIdempotencyKey, externalOperationIds: [], startedAt: now, createdAt: now }).onConflictDoNothing().returning({ attemptId: authorizationExecutionAttempts.attemptId });
-    if (inserted[0]) return;
-    const prior = (await this.db.select().from(authorizationExecutionAttempts).where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.decisionId, decisionId))).limit(1))[0];
-    if (!prior || prior.targetIdempotencyKey !== targetIdempotencyKey) throw new Error("Canonical resource execution identity is invalid.");
-    throw new ResourceAuthorizationError("indeterminate");
   }
 }
 

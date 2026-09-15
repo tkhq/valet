@@ -475,7 +475,7 @@ export const artifactsRouter = new Hono<AppEnv>();
 function artifactAuthorization(c: Context<AppEnv>, orgId: string, scope: ArtifactScope) {
   return {
     port: c.var.providers.resourceAuthorizationPort,
-    context: { organizationId: orgId, actorUserId: scope.actorUserId, principal: isValidInternalToken(c.req.header("x-valet-internal")) ? { type: "app" as const, id: "artifact-tool" } : (requirePrincipal(c) ?? { type: "app" as const, id: "artifact-tool" }), deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) },
+    context: { organizationId: orgId, actorUserId: scope.actorUserId, principal: isValidInternalToken(c.req.header("x-valet-internal")) ? scope.owner : (requirePrincipal(c) ?? { type: "app" as const, id: "artifact-tool" }), deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) },
   };
 }
 
