@@ -1,4 +1,9 @@
 /**
+ * What the api does when a workflow run settles. Two observers live here,
+ * both driven by `LocalRunHost`'s `onRunSettled` hook: the failed-run
+ * notification below, and the per-run thread archive at the end of the
+ * file.
+ *
  * Failed-run attention (batch-fanout design decision 4). A workflow run
  * that settles `failed` reaches its owner through the attention router an
  * approval park already uses, so `routeAttention` stays the only writer of
@@ -16,10 +21,12 @@
  *     hide a failed batch from the people who run it.
  */
 import { eq } from "drizzle-orm";
+import type { SessionStore } from "@valet/engine";
 import type { NodeCheckpoint, OnRunSettled, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { workflowRunThreadKey } from "./engine-deps.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
   return `/workflows?tab=action-required&run=${encodeURIComponent(runId)}&gate=${encodeURIComponent(nodeId)}`;
@@ -102,4 +109,88 @@ export function failedNodeSummary(checkpoints: NodeCheckpoint[]): string {
 
 function truncate(text: string): string {
   return text.length <= ERROR_CHARS ? text : `${text.slice(0, ERROR_CHARS)}…`;
+}
+
+export interface RunThreadArchiveDeps {
+  db: AppDb;
+  store: Pick<WorkflowStore, "getCheckpoints">;
+  /** The engine's own session store, for the thread's key and creation time. */
+  engineStore: Pick<SessionStore, "getThread">;
+}
+
+/**
+ * Archives the assistant thread an unattended run reported on, at the
+ * moment the run settles.
+ *
+ * Each run gets its own thread (`engine-deps.ts#workflowRunThreadKey`), so
+ * a workflow that runs every hour would add one live thread to the
+ * assistant sidebar every hour. This hook is the single owner of that
+ * cleanup: a settled run's thread leaves the default thread list and stays
+ * readable under "Show archived". Nothing is deleted, and there is no
+ * sweep or timer — a run that never settles keeps its thread, which is the
+ * state the person needs to see.
+ *
+ * Two kinds of thread are deliberately left alone. The thread an attended
+ * run was started from belongs to the person, not to the run. A `session`
+ * node's thread belongs to a workflow session, which has no sidebar. The
+ * thread key is what tells them apart.
+ *
+ * Contained by contract, like the notification above: the run is already
+ * settled when this fires, so a throw would abandon a drive lease nothing
+ * reclaims. Idempotent: a run reclaimed while `terminalizing` reports
+ * twice, and the second archive write is the same write.
+ */
+export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled {
+  return async (info) => {
+    try {
+      const key = workflowRunThreadKey(info.runId);
+      const done = new Set<string>();
+      for (const checkpoint of await deps.store.getCheckpoints(info.runId)) {
+        const dispatch = submissionDispatch(checkpoint.effects);
+        if (!dispatch) continue;
+        const seen = `${dispatch.sessionId}\n${dispatch.threadId}`;
+        if (done.has(seen)) continue;
+        done.add(seen);
+        const thread = await deps.engineStore.getThread(dispatch.sessionId, dispatch.threadId);
+        if (!thread) {
+          // A thread a node dispatched onto should still be there. Report
+          // it rather than archive nothing in silence; a key that does not
+          // match is ordinary (an origin thread, or a session node's own).
+          console.debug(
+            `workflow run thread archive: run ${info.runId} recorded thread ${dispatch.threadId} ` +
+              `on session ${dispatch.sessionId}, which the engine store no longer holds.`,
+          );
+          continue;
+        }
+        if (thread.key !== key) continue;
+        await deps.db
+          .insert(sessionThreads)
+          .values({
+            id: thread.id,
+            sessionId: dispatch.sessionId,
+            createdAt: thread.createdAt,
+            archivedAt: info.settledAt,
+          })
+          .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: info.settledAt } });
+      }
+    } catch (err) {
+      console.error(`workflow run thread archive failed for ${info.runId}:`, err);
+    }
+  };
+}
+
+/**
+ * The session and thread a submission node recorded when it dispatched
+ * (`@valet/workflow`'s `submission-node.ts` writes them into the node's
+ * checkpoint effects). Returns null for every other node.
+ */
+function submissionDispatch(
+  effects: Record<string, unknown> | undefined,
+): { sessionId: string; threadId: string } | null {
+  const sessionId = effects?.sessionId;
+  const receipt = effects?.receipt;
+  if (typeof sessionId !== "string") return null;
+  if (typeof receipt !== "object" || receipt === null || !("threadId" in receipt)) return null;
+  const threadId = receipt.threadId;
+  return typeof threadId === "string" ? { sessionId, threadId } : null;
 }

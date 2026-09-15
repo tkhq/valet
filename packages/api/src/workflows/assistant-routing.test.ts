@@ -102,7 +102,10 @@ describe("workflow explicit assistant routing", () => {
     const listed = await list.execute({}, { ...machine, actionId: "workflows.list_workflows" });
     expect(listed.success).toBe(true);
     expect(listed.data).toMatchObject({ workflows: [{ name: "Unattended" }] });
-    const workflowId = (saved.data as { workflowId: string }).workflowId;
+    if (typeof saved.data !== "object" || saved.data === null || !("workflowId" in saved.data)) {
+      throw new Error(`Save did not return a workflow id: ${JSON.stringify(saved)}`);
+    }
+    const workflowId = String(saved.data.workflowId);
 
     // A person who left the team keeps no reach through the same assistant.
     const departed = { ...machine, userId: "departed-user" } as PluginActionContext;

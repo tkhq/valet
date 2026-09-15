@@ -61,6 +61,7 @@ import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
 import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
@@ -515,6 +516,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalGrant,
+    // The settle observers `providers/node.ts` wires, so an integration
+    // test sees what a real settle does: the failed-run notification and
+    // the archive of the run's own assistant thread. The sandbox reclaim
+    // stays manual here, for the reason given above it.
+    onRunSettled: async (info) => {
+      await buildRunSettledAttention({ db, store: workflowStore })(info);
+      await buildRunThreadArchive({ db, store: workflowStore, engineStore })(info);
+    },
   });
   const workflowRunHost = opts.workflowRunHost ?? realWorkflowRunHost;
   // Only start the host loop when it's the real one under test control — a

@@ -165,8 +165,17 @@ export function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdPart
   return { runId, nodeId, iteration };
 }
 
+/**
+ * The key of the assistant thread one unattended run reports on. One
+ * thread per run: the engine runs a thread's queue in series and aborts it
+ * as a whole, so runs of one workflow must not share one. Read back by
+ * `run-attention.ts`, which archives the thread at settlement.
+ */
+export function workflowRunThreadKey(runId: string): string {
+  return `signal:workflow:${runId}`;
+}
+
 interface RunContext {
-  workflowId: string;
   orgId: string;
   actorUserId: string;
   owner: Principal;
@@ -196,7 +205,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { workflowId: run.params.workflowId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
+  return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
     assistantId: workflowAssistantId(run.definition), origin: run.params.origin };
 }
 
@@ -453,9 +462,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
      * `thread.submitPrompt` calls already have for the `session` node), so
      * it submits directly rather than waiting on that extension.
      *
-     * Explicit assistant origins reuse their exact durable session and thread.
-     * Other runs reuse one thread per workflow definition. Old per-run receipts
-     * remain valid. A missing origin thread must not create a replacement.
+     * An explicit assistant origin reuses its exact durable session and
+     * thread. Every other run reports on its own thread. A missing origin
+     * thread must not create a replacement.
      */
     async promptOrchestrator(
       promptText: string,
@@ -501,10 +510,16 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
         { sessionId: assistant.sessionId },
       );
+      // One thread per run. A thread is the engine's unit of serial
+      // execution and of abort: a shared thread makes one run's approval
+      // gate hold every other run of the same workflow, and makes the
+      // thread's Stop button cancel all of them. `run-attention.ts`
+      // archives the thread when the run settles, so the sidebar does not
+      // fill up. An attended run reports into the thread it was started
+      // from instead.
       const thread = ctx.origin
         ? session.threadById(ctx.origin.threadId)
-        : await session.threadByKey(`signal:workflow:${runId}`)
-          ?? session.thread(`signal:workflow:definition:${ctx.workflowId}`);
+        : session.thread(workflowRunThreadKey(runId));
       if (!thread) {
         throw new Error(
           `Workflow origin thread ${ctx.origin?.threadId} is missing from session ${session.id}. ` +

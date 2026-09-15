@@ -1,9 +1,17 @@
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { NodeCheckpoint, RunSettledInfo } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable, type AppDb } from "../lib/drizzle.js";
-import { notifications, workflowDefinitions } from "../schema/index.js";
-import { buildRunSettledAttention, failedNodeSummary, workflowApprovalHref } from "./run-attention.js";
+import { notifications, sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import { buildWorkflowEngineDeps } from "./engine-deps.js";
+import {
+  buildRunSettledAttention,
+  buildRunThreadArchive,
+  failedNodeSummary,
+  workflowApprovalHref,
+} from "./run-attention.js";
 
 function checkpoint(overrides: Partial<NodeCheckpoint> & { nodeId: string }): NodeCheckpoint {
   return {
@@ -154,6 +162,113 @@ describe("buildRunSettledAttention", () => {
 
     await expect(buildRunSettledAttention({ db, store: brokenStore })(settled())).resolves.toBeUndefined();
     expect(await db.select().from(notifications)).toHaveLength(0);
+  });
+});
+
+describe("buildRunThreadArchive", () => {
+  let api: TestApi | undefined;
+  afterEach(async () => { await api?.cleanup(); api = undefined; });
+
+  /** Seeds one definition and one run of it, both owned by the local user. */
+  async function seedRun(a: TestApi, runId: string, workflowId: string, origin?: { assistantSessionId: string; threadId: string }) {
+    const now = Date.now();
+    await a.providers.db.insert(workflowDefinitions).values({
+      id: workflowId, orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id,
+      name: "thread-archive-test", definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now, updatedAt: now,
+    }).onConflictDoNothing();
+    await a.providers.workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}) },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "user", ownerId: LOCAL_USER.id },
+    );
+  }
+
+  /** Records the receipt the orchestrator node persists after it dispatches. */
+  async function recordDispatch(a: TestApi, runId: string, receipt: { sessionId: string; threadId: string; queueItemId: string }) {
+    await a.providers.workflowStore.putIntent({
+      runId, nodeId: "node1", iteration: 0, status: "intent", attempt: 1, createdAt: Date.now(),
+      effects: {
+        sessionId: receipt.sessionId,
+        receipt: { threadId: receipt.threadId, queueItemId: receipt.queueItemId },
+        repairAttempted: false,
+      },
+    });
+  }
+
+  function settledRun(runId: string, workflowId: string): RunSettledInfo {
+    return {
+      runId, workflowId, outcome: "completed",
+      owner: { ownerType: "user", ownerId: LOCAL_USER.id }, settledAt: 5_000,
+    };
+  }
+
+  it("archives the settled run's own thread and leaves a live run's thread alone", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    await seedRun(api, "run_done", "wf_archive");
+    await seedRun(api, "run_live", "wf_archive");
+    const dispatch = (runId: string) => deps.promptOrchestrator("report", {
+      dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    const done = await dispatch("run_done");
+    const live = await dispatch("run_live");
+    await recordDispatch(api, "run_done", done);
+    await recordDispatch(api, "run_live", live);
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_done", "wf_archive"));
+
+    const rows = await db.select().from(sessionThreads);
+    expect(rows).toEqual([
+      expect.objectContaining({ id: done.threadId, sessionId: done.sessionId, archivedAt: 5_000 }),
+    ]);
+    expect(rows.find((r) => r.id === live.threadId)).toBeUndefined();
+  });
+
+  it("leaves the origin thread of an attended run in the sidebar", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { resolveDefaultAssistant } = await import("../assistants/service.js");
+    const assistant = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
+    const session = await engineHost.assistantSessionFor(
+      assistant.id, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id }, { sessionId: assistant.sessionId },
+    );
+    const originThread = await session.createThread("web:origin");
+    await seedRun(api, "run_attended", "wf_attended", {
+      assistantSessionId: assistant.sessionId, threadId: originThread.id,
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    const receipt = await deps.promptOrchestrator("report", {
+      dispatchId: "workflow:run_attended:node1", queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    expect(receipt.threadId).toBe(originThread.id);
+    await recordDispatch(api, "run_attended", receipt);
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_attended", "wf_attended"));
+
+    expect(await db.select().from(sessionThreads)).toEqual([]);
+  });
+
+  it("swallows a store fault, because a throw here would abandon the drive", async () => {
+    api = await bootTestApi();
+    const { db, engineStore } = api.providers;
+    const brokenStore = {
+      getCheckpoints: async (): Promise<NodeCheckpoint[]> => { throw new Error("store unreachable"); },
+    };
+
+    await expect(
+      buildRunThreadArchive({ db, store: brokenStore, engineStore })(settledRun("run_broken", "wf_broken")),
+    ).resolves.toBeUndefined();
+    expect(await db.select().from(sessionThreads)).toEqual([]);
   });
 });
 

@@ -6,7 +6,7 @@ Base: `dev-v2` after #706 (`b2f74fdd2`). These findings cover #707, #705, #640, 
 
 | PR | Finding | Repair and regression coverage |
 | --- | --- | --- |
-| #707 | The origin-thread change conflicts with #706. Its unattended path would retain one thread per run. | Direct assistant calls reuse their exact origin. Unattended calls retain the bounded definition thread and old receipt recovery. Routing tests cover both paths. |
+| #707 | The origin-thread change conflicts with #706. Both paths must stay usable. | Direct assistant calls reuse their exact origin. Unattended calls get one thread per run, which the settle hook archives. Routing tests cover both paths. |
 | #707 | A team run can retain a personal origin after its actor leaves the team. Later output could disclose team work. | Check current membership before each personal-origin dispatch. A regression removes membership between dispatches. |
 | #705 | A forged callback gate ID could recover another recorded prompt. | Require the callback's recorded prompt reference. A forged reference with a valid gate ID leaves the gate pending. |
 | #705 | Cross-org and org-admin checks could be skipped once a workflow session had an app row. | Apply workflow ownership checks with or without a backfilled row. Cover cross-org, non-admin, nonmember, malformed reference, and forged action cases. |
