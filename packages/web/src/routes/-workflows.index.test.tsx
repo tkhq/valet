@@ -9,7 +9,7 @@
  * does, since this suite only cares that navigation was requested, not
  * that the router actually resolved it.
  *
- * The team row's `OwnerBadge` carries a tooltip, which Radix refuses to
+ * The team row's `AssistantBadge` carries a tooltip, which Radix refuses to
  * render outside a provider, so the page renders inside one here — the same
  * wrapper `session-header.test.tsx` uses.
  */
@@ -31,7 +31,9 @@ const workflowsData: { workflows: WorkflowDefinitionSummary[] } = {
     {
       id: "wf_1",
       name: "Deploy pipeline",
-      definition: {},
+      // Pins an assistant, which is what the row badges. `wf_2` pins none,
+      // so the two rows cover both halves of the resolution rule.
+      definition: { version: "dag/v1", assistantId: "asst_scribe", nodes: [], edges: [] },
       createdAt: 1,
       updatedAt: 1,
       ownerType: "user",
@@ -159,8 +161,20 @@ const createMutateAsync = vi.fn().mockResolvedValue({
 });
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
-    <a {...rest}>{children}</a>
+  // `params` is serialized onto the stub so a case can read the row a link
+  // navigates to, not only its route pattern.
+  Link: ({
+    children,
+    params,
+    ...rest
+  }: {
+    children: ReactNode;
+    params?: unknown;
+    [key: string]: unknown;
+  }) => (
+    <a data-params={JSON.stringify(params)} {...rest}>
+      {children}
+    </a>
   ),
   useNavigate: () => navigate,
   // One `useSearch` serves both readers: the hub reads `?tab=`, and the
@@ -206,6 +220,14 @@ vi.mock("~/api/assistants", async (importOriginal) => {
             owner: { type: "team" as const, id: "team_1" },
             sessionId: "assistant:asst_team_1",
             isDefault: true,
+            createdAt: 1,
+          },
+          {
+            id: "asst_scribe",
+            owner: { type: "user" as const, id: "u1" },
+            sessionId: "assistant:asst_scribe",
+            name: "Scribe",
+            isDefault: false,
             createdAt: 1,
           },
         ],
@@ -535,10 +557,43 @@ describe("WorkflowsIndexPage", () => {
 });
 
 describe("WorkflowsIndexPage — team ownership", () => {
-  it("badges a team-owned workflow with its team name, linked to that team's assistant", () => {
+  // The badge opens the assistant that runs the workflow, not a chat with
+  // the team. A team row running on the team's unnamed default still reads
+  // as the team, which is the name this list showed before.
+  it("badges a team-owned workflow with its assistant, linked to the assistant editor", () => {
     renderPage();
-    const badge = screen.getByText("Platform");
-    expect(badge.closest("a")?.getAttribute("to")).toBe("/chat");
+    const link = screen.getByText("Platform").closest("a");
+    expect(link?.getAttribute("to")).toBe("/assistants/$assistantId");
+    expect(JSON.parse(link?.getAttribute("data-params") ?? "null")).toEqual({
+      assistantId: "asst_team_1",
+    });
+  });
+
+  // The definition, not the owner, decides which assistant runs a workflow.
+  it("badges a workflow with the assistant its definition pins", () => {
+    renderPage();
+    const link = screen.getByText("Scribe").closest("a");
+    expect(link?.getAttribute("to")).toBe("/assistants/$assistantId");
+    expect(JSON.parse(link?.getAttribute("data-params") ?? "null")).toEqual({
+      assistantId: "asst_scribe",
+    });
+  });
+
+  // The approvals list carries runs, not definitions, so it resolves each
+  // row's assistant through the workflows list.
+  it("badges each approval with its workflow's assistant", () => {
+    searchState = { tab: "action-required" };
+    renderPage();
+
+    const pinned = screen.getByText("Scribe").closest("a");
+    expect(JSON.parse(pinned?.getAttribute("data-params") ?? "null")).toEqual({
+      assistantId: "asst_scribe",
+    });
+    const team = screen.getByText("Platform").closest("a");
+    expect(team?.getAttribute("to")).toBe("/assistants/$assistantId");
+    expect(JSON.parse(team?.getAttribute("data-params") ?? "null")).toEqual({
+      assistantId: "asst_team_1",
+    });
   });
 
   it("creates the workflow in the workspace being read, with no second question", async () => {

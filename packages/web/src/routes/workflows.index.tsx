@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Clock, ShieldAlert, Trash2, Zap } from "lucide-react";
 import type {
@@ -17,7 +17,7 @@ import {
   useWorkflowTriggers,
   useWorkflows,
 } from "~/api/workflows";
-import { OwnerBadge } from "~/components/owner-badge";
+import { AssistantBadge } from "~/components/assistant-badge";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { runCountLabel } from "~/lib/run-count";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
@@ -33,6 +33,7 @@ import { Pager } from "~/components/pager";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
+import { workflowAssistantId } from "~/lib/workflow-assistant";
 
 /**
  * `/workflows` — tabbed hub (Workflows | Runs | Triggers | Templates). The
@@ -176,6 +177,19 @@ function ActionRequiredTab({
   focusRun?: string;
   focusGate?: string;
 }) {
+  // A second, deliberately UNSCOPED workflows read: the approvals list spans
+  // every workspace the reader belongs to, while the Workflows tab asks for
+  // one owner, so the two cannot share a cache key. One read serves every
+  // row, and it only carries the assistant each row badges.
+  const workflowsQ = useWorkflows();
+  const assistantByWorkflow = useMemo(
+    () =>
+      new Map(
+        (workflowsQ.data?.workflows ?? []).map((w) => [w.id, workflowAssistantId(w.definition)]),
+      ),
+    [workflowsQ.data],
+  );
+
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted">
@@ -199,6 +213,7 @@ function ActionRequiredTab({
           <ActionRequiredRow
             key={item.id}
             item={item}
+            assistantId={assistantByWorkflow.get(item.workflowId)}
             focused={item.runId === focusRun && (!focusGate || item.gate.nodeId === focusGate)}
           />
         ))}
@@ -207,7 +222,19 @@ function ActionRequiredTab({
   );
 }
 
-function ActionRequiredRow({ item, focused }: { item: WorkflowActionRequiredItem; focused: boolean }) {
+function ActionRequiredRow({
+  item,
+  assistantId,
+  focused,
+}: {
+  item: WorkflowActionRequiredItem;
+  /** The assistant this run's definition pins. Absent covers two cases the
+   * badge treats alike: the definition pins none, and the workflows read has
+   * not answered (or never lists that workflow). Both fall back to the
+   * owner's default assistant, which is what an unpinned run uses. */
+  assistantId: string | undefined;
+  focused: boolean;
+}) {
   const { gate } = item;
   const policy = gate.kind === "policy_gate";
   const action = policy && gate.service && gate.action ? `${gate.service}.${gate.action}` : gate.nodeId;
@@ -229,7 +256,11 @@ function ActionRequiredRow({ item, focused }: { item: WorkflowActionRequiredItem
               <ShieldAlert className="h-3 w-3" aria-hidden />
               {policy ? "Tool permission" : "Workflow approval"}
             </span>
-            <OwnerBadge ownerType={item.owner.type} ownerId={item.owner.id} />
+            <AssistantBadge
+              ownerType={item.owner.type}
+              ownerId={item.owner.id}
+              assistantId={assistantId}
+            />
           </div>
           <Link
             to="/workflows/$workflowId"
@@ -415,7 +446,7 @@ function DefinitionRow({
     // row opens the workflow, because a row that looks like one target should
     // be one: clicking the empty space beside the name did nothing before.
     <li className="group relative flex flex-wrap items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
-      {/* The owner badge is a link of its own, so it sits beside the name
+      {/* The assistant badge is a link of its own, so it sits beside the name
           link, not inside it. Anything interactive here must sit ABOVE the
           stretched area — nesting it inside the anchor would be invalid and
           would swallow its own click. */}
@@ -428,7 +459,11 @@ function DefinitionRow({
           {workflow.name}
         </Link>
         <span className="relative z-10">
-          <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
+          <AssistantBadge
+            ownerType={workflow.ownerType}
+            ownerId={workflow.ownerId}
+            assistantId={workflowAssistantId(workflow.definition)}
+          />
         </span>
         {workflow.origin === "repo" && workflow.upstream && (
           <span
