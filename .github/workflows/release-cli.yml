@@ -91,7 +91,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Generate changelog artifact
-        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/valet/v') || github.ref == 'refs/heads/dev-v2'
         run: |
           set -euo pipefail
           build_sha=$(git rev-parse HEAD)
@@ -100,10 +99,11 @@ jobs:
             --artifact-sha "$build_sha"
             --metadata packages/api/src/changelog/release.json
           )
-          if [[ "$BUILD_REF" == refs/tags/valet/v* ]]; then
+          if [[ "$BUILD_REF" == refs/tags/v* ]]; then
+            version="${BUILD_TAG#valet/}"
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \
-              --artifact-version "${BUILD_TAG#valet/v}"
+              --artifact-version "${version#v}"
           else
             node packages/api/scripts/generate-changelog.mjs \
               "${common[@]}" \

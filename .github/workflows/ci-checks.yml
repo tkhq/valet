@@ -168,4 +168,3 @@ jobs:
             && test "${{ needs.test.result }}" = "success" \
             && test "${{ needs.cgroup_test.result }}" = "success" \
             && test "${{ needs.docs-lint.result }}" = "success"
-

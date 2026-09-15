@@ -29,7 +29,8 @@ Chart changes can run the shared checks twice: once in CI and once in the chart 
 Reusable workflows retain the caller SHA and ref. Docker and CLI builds verify that checkout matches `github.sha` before uploading artifacts.
 A mismatched release-tag input fails before publishing.
 Docker retains `type=sha,prefix=sha-`, with the default seven-character short SHA. Branch publishes retain `dev-v2`.
-Version tags retain their release version. Only stable Docker releases receive `latest`; automatic latest tagging is disabled.
+Version tags retain their release version. Only exact `vX.Y.Z` or `valet/vX.Y.Z` Docker releases receive `latest`. Prereleases and non-version tags cannot move it. Automatic latest tagging is disabled.
+Both supported tag formats generate embedded release metadata with the release version and tested commit SHA for Docker and CLI builds.
 
 Docker publishing receives `contents: read` and `packages: write`. CLI publishing receives `contents: write`; its build jobs use `contents: read`.
 Chart publishing and application release creation retain their existing permissions. GHCR login uses `GITHUB_TOKEN`. No OIDC permission is required.
@@ -61,7 +62,7 @@ All three manual entry points require the shared checks. The separate Docker and
 ## Validation
 
 `scripts/e2e/artifact-publish.test.ts` checks caller dependencies, trigger boundaries, source verification, permissions, and build joins.
-The existing application-release tests check release retries. Actionlint checks workflow syntax and reusable-workflow inputs.
+Application-release tests check release retries, execute the Docker tag shell step across a ref table, and run the metadata generator for both tag formats. Actionlint checks workflow syntax and reusable-workflow inputs.
 These local checks do not publish artifacts.
 
 After merging, verify these cases with fresh commits in GitHub Actions and the artifact stores:
