@@ -121,6 +121,10 @@ export class CanonicalAuthorizationService implements AuthorizationService {
     return this.replay(stored, subjectDigest);
   }
 
+  verifyPersistedDecision(row: AuthorizationDecisionRow): PolicyDecisionEnvelope {
+    return this.replay(row, row.requestSubjectDigest);
+  }
+
   private replay(row: AuthorizationDecisionRow, subjectDigest: string): PolicyDecisionEnvelope {
     if (row.requestSubjectDigest !== subjectDigest || !row.evidence) throw new Error("Canonical authorization idempotency conflict.");
     if (row.evaluatorKind !== this.evaluator.identity.kind || row.evaluatorEngineDigest !== this.evaluator.identity.engineDigest || row.evidence.schemaVersion !== 1 || row.evidence.profileDigest !== this.evidence.profileDigest || row.evidence.interpreterDigest !== this.evidence.interpreterDigest || row.evidence.contractDigest !== this.evidence.contractDigest) throw new Error("Canonical authorization replay evidence is invalid.");

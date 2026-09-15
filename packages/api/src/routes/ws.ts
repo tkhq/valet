@@ -119,12 +119,21 @@ export function registerWsRoutes(
           // process, killing every other live session. We instead emit an
           // error frame and close the socket gracefully.
           try {
-            const wsAuthorization = await authorizeWsOperation("session.stream.subscribe");
-            if (wsAuthorization.envelope.decision.effect !== "allow") {
-              const approval = wsAuthorization.envelope.decision.effect === "require_approval";
-              send(ws, { type: "authorization_refusal", code: approval ? "authorization_approval_required" : "authorization_denied", message: approval ? "This stream requires approval. Resolve the decision over REST, then reconnect." : "Policy denied this session stream.", decisionId: wsAuthorization.decisionId });
-              ws.close(approval ? 4409 : 4403, "authorization refused");
-              return;
+            for (const operation of ["session.stream.connect", "session.stream.subscribe"] as const) {
+              let wsAuthorization: Awaited<ReturnType<typeof authorizeWsOperation>>;
+              try {
+                wsAuthorization = await authorizeWsOperation(operation);
+              } catch {
+                send(ws, { type: "authorization_refusal", code: "authorization_indeterminate", message: "Authorization failed. Reconnect before you retry." });
+                ws.close(4411, "authorization indeterminate");
+                return;
+              }
+              if (wsAuthorization.envelope.decision.effect !== "allow") {
+                const approval = wsAuthorization.envelope.decision.effect === "require_approval";
+                send(ws, { type: "authorization_refusal", code: approval ? "authorization_approval_required" : "authorization_denied", message: approval ? "This stream requires approval. Resolve the decision over REST, then reconnect." : "Policy denied this session stream.", decisionId: wsAuthorization.decisionId });
+                ws.close(approval ? 4409 : 4403, "authorization refused");
+                return;
+              }
             }
             // Verify view access before subscribing — direct ownership, or
             // team membership for a team's orchestrator session, or the

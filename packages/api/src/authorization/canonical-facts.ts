@@ -28,7 +28,9 @@ export async function loadCanonicalDynamicFacts(db: AppQueryable, query: Canonic
 
   const approvalScope = query.appliesIn === "workflow"
     ? eq(canonicalApprovalResolutions.workflowExecutionId, query.scopeId)
-    : eq(canonicalApprovalResolutions.sessionId, query.scopeId);
+    : query.appliesIn === "session"
+      ? eq(canonicalApprovalResolutions.sessionId, query.scopeId)
+      : and(eq(canonicalApprovalResolutions.scopeKind, query.appliesIn), eq(canonicalApprovalResolutions.scopeId, query.scopeId));
   const approvals = query.requestSubjectDigest && query.originalDecisionDigest
     ? await db.select().from(canonicalApprovalResolutions).where(and(
         eq(canonicalApprovalResolutions.orgId, query.organizationId),

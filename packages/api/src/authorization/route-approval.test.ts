@@ -43,10 +43,10 @@ describe("durable route approval replay", () => {
       await pg.appDb.insert(canonicalApprovalResolutions).values({
         resolutionId, approvalId: row.decisionId, gateId: row.decisionId, orgId: row.orgId,
         requestSubjectDigest: row.requestSubjectDigest, originalDecisionDigest: row.evidence!.decisionDigest,
-        approverId: "admin-1", verdict: "approved", appliesIn: "route", sessionId: first.request.subject.invocation.id,
+        approverId: "admin-1", verdict: "approved", appliesIn: "route", scopeKind: "route", scopeId: first.request.subject.invocation.id,
         resolvedAt: 150, expiresAt: 500, resolutionVersion: 1,
       });
-      const replay = await loadApprovedRouteReplay(pg.appDb, first.request, resolutionId, 200);
+      const replay = await loadApprovedRouteReplay(pg.appDb, first.request, resolutionId, 200, (stored) => service.verifyPersistedDecision(stored));
       expect(replay?.verdict).toBe("approved");
       const post = adaptApiRoute({
         schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" },
@@ -58,6 +58,12 @@ describe("durable route approval replay", () => {
       expect(canonicalDecisionId("org-1", first.request.idempotencyKey)).toBe(row.decisionId);
       const changed = initial({ ...descriptor, actionId: "api_sessions.get_sessions_other" });
       await expect(loadApprovedRouteReplay(pg.appDb, changed.request, resolutionId, 200)).rejects.toThrow(/does not match/i);
+      await pg.appDb.update(canonicalApprovalResolutions).set({ revokedAt: 201 });
+      await expect(loadApprovedRouteReplay(pg.appDb, first.request, resolutionId, 202)).rejects.toThrow(/does not match/i);
+      await pg.appDb.update(canonicalApprovalResolutions).set({ revokedAt: null });
+      await expect(loadApprovedRouteReplay(pg.appDb, first.request, resolutionId, 500)).rejects.toThrow(/does not match/i);
+      await pg.appDb.update(authorizationDecisions).set({ evaluatorEngineDigest: "0".repeat(64) });
+      await expect(loadApprovedRouteReplay(pg.appDb, first.request, resolutionId, 200, (stored) => service.verifyPersistedDecision(stored))).rejects.toThrow(/evidence is invalid/i);
     } finally { await manager.close(); }
   }, 120_000);
 });

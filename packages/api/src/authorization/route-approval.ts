@@ -42,6 +42,8 @@ routeApprovalRouter.post("/decisions/:decisionId/resolve", async (c) => {
     eq(authorizationDecisions.decisionId, decisionId), eq(authorizationDecisions.orgId, user.orgId),
   )).limit(1))[0];
   if (!isRouteApproval(original)) return c.json({ error: "Authorization decision not found." }, 404);
+  try { c.var.providers.canonicalAuthorizationService.verifyPersistedDecision(original); }
+  catch { return c.json({ error: "Authorization decision evidence is invalid. Request a new decision." }, 409); }
   if (!(await mayResolve(db, user.id, user.orgId, original.approvalRequirement))) {
     return c.json({ error: "This approval requires a different approver. Ask an authorized administrator." }, 403);
   }
@@ -51,7 +53,7 @@ routeApprovalRouter.post("/decisions/:decisionId/resolve", async (c) => {
   await db.insert(canonicalApprovalResolutions).values({
     resolutionId, approvalId: original.decisionId, gateId: original.decisionId, orgId: original.orgId,
     requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence!.decisionDigest,
-    approverId: user.id, verdict: body.verdict, appliesIn: "route", sessionId: routeOperationId(original),
+    approverId: user.id, verdict: body.verdict, appliesIn: "route", scopeKind: "route", scopeId: routeOperationId(original),
     resolvedAt: now, expiresAt: original.approvalRequirement.expiresAtMs ?? now + 72 * 60 * 60 * 1000,
     resolutionVersion: 1,
   }).onConflictDoNothing();

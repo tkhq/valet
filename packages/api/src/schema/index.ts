@@ -1802,6 +1802,8 @@ export const canonicalApprovalResolutions = pgTable(
     appliesIn: text("applies_in", { enum: ["session", "workflow", "route", "resource"] }).notNull(),
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
+    scopeKind: text("scope_kind", { enum: ["route", "resource"] }),
+    scopeId: text("scope_id"),
     resolvedAt: bigint("resolved_at", { mode: "number" }).notNull(),
     expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
     resolutionVersion: integer("resolution_version").notNull(),
@@ -1810,7 +1812,7 @@ export const canonicalApprovalResolutions = pgTable(
   (t) => [
     uniqueIndex("canonical_approval_gate_version").on(t.orgId, t.gateId, t.resolutionVersion),
     index("canonical_approval_subject").on(t.orgId, t.requestSubjectDigest, t.expiresAt),
-    check("canonical_approval_scope", sql`(${t.sessionId} IS NOT NULL)::int + (${t.workflowExecutionId} IS NOT NULL)::int = 1`),
+    check("canonical_approval_scope", sql`(${t.sessionId} IS NOT NULL)::int + (${t.workflowExecutionId} IS NOT NULL)::int + (${t.scopeId} IS NOT NULL)::int = 1 AND ((${t.scopeId} IS NULL AND ${t.scopeKind} IS NULL) OR (${t.scopeId} IS NOT NULL AND ${t.scopeKind} IS NOT NULL AND ${t.appliesIn} = ${t.scopeKind}))`),
     check("canonical_approval_version", sql`${t.resolutionVersion} = 1`),
     check("canonical_approval_expiry", sql`${t.expiresAt} > ${t.resolvedAt}`),
   ],
