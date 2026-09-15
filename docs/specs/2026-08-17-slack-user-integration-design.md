@@ -149,8 +149,8 @@ tsconfig referencing workspace deps, root tsconfig reference,
 Contents:
 
 - **Actions**: port `slack_user.*` from `main` (search messages, list
-  channels, read history, read thread, set status, snooze/end DND, send
-  DM, post message, add reaction, upload file, pin, bookmark, reminder).
+  channels, read history, read thread, get status, set status, snooze/end DND,
+  send DM, post message, add reaction, upload file, pin, bookmark, reminder).
   They are already an `ActionPlugin` over an injected credential. Apply
   the current type-safety rules during the port (no `any`, no double
   casts).

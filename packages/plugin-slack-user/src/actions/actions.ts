@@ -255,6 +255,33 @@ const listChannels = action(
   },
 });
 
+const getStatus = action(Type.Object({}))({
+  id: "slack_user.get_status",
+  name: "Get Status (as user)",
+  description: "Read the connected user's Slack custom status text, emoji, and expiration.",
+  riskLevel: "low",
+  execute: async (_p, ctx) => {
+    const token = await getUserToken(ctx);
+    if (!token) return { success: false, error: notConnectedError() };
+    const res = await slackGet("users.profile.get", token);
+    if (!res.ok) return readSlackError(res);
+    const data = (await res.json()) as {
+      ok: boolean;
+      error?: string;
+      profile?: { status_text?: string; status_emoji?: string; status_expiration?: number };
+    };
+    if (!data.ok) return slackDataError(data.error);
+    return {
+      success: true,
+      data: {
+        status_text: data.profile?.status_text ?? "",
+        status_emoji: data.profile?.status_emoji ?? "",
+        status_expiration: data.profile?.status_expiration ?? 0,
+      },
+    };
+  },
+});
+
 const readHistory = action(
   Type.Object({
     channel: Type.String({ description: "Channel ID (C…/G…/D…)." }),
@@ -687,6 +714,7 @@ const allActions: PluginAction[] = [
   // read / search
   searchMessages,
   listChannels,
+  getStatus,
   readHistory,
   readThread,
   // write / act-as
