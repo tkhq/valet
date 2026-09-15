@@ -18,6 +18,7 @@ This also covers transports whose callbacks carry only the message reference.
 Malformed, stale, cross-org, and unauthorized callbacks receive the same expired response.
 This prevents a callback from probing whether a gate or workflow session exists.
 Drop logs retain the internal failure category for diagnosis: malformed, missing, deleted, or cross-org workflow sessions.
+A workflow category applies only to a `wf:` session id. A click on any other id whose session row is absent is logged as unauthorized.
 
 These callbacks resolve engine decision gates inside workflow sessions.
 Authored workflow approval nodes continue to use workflow approval signals and the workflow run page.

@@ -164,6 +164,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Runtime shape check for a gate-prompt reference. The field is typed, but it
+ * arrives from a transport's parser, so both readers of an inbound callback
+ * check it before they key a map with it.
+ */
+function isGatePromptRef(value: unknown): value is GatePromptRef {
+  return isRecord(value) && typeof value.conversationKey === "string" && typeof value.messageId === "string";
+}
+
 type OriginReplyState = "none" | "pending" | "succeeded" | "failed";
 
 /** Classify explicit origin delivery across every assistant entry in a submission. */
@@ -984,10 +993,8 @@ export class ChannelHost {
 
     if (event.kind === "gate_callback") {
       const callback = event.gateCallback;
-      const callbackRef = callback && isRecord(callback.ref) ? callback.ref : undefined;
-      const mappedGateId = callbackRef && typeof callbackRef.conversationKey === "string" && typeof callbackRef.messageId === "string"
-        ? this.gateForRef({ conversationKey: callbackRef.conversationKey, messageId: callbackRef.messageId })?.gateId
-        : undefined;
+      const callbackRef = callback && isGatePromptRef(callback.ref) ? callback.ref : undefined;
+      const mappedGateId = callbackRef ? this.gateForRef(callbackRef)?.gateId : undefined;
       // Never use gateId from the callback payload. It is untrusted input and
       // must not let a forged button join another gate's serialization chain.
       const key = mappedGateId ?? `${callbackRef?.conversationKey ?? event.conversationKey}#${callbackRef?.messageId ?? ""}`;
@@ -1231,13 +1238,7 @@ export class ChannelHost {
     channelType: string,
   ): Promise<void> {
     const gateCallback = event.gateCallback;
-    if (
-      !gateCallback ||
-      !isRecord(gateCallback) ||
-      !isRecord(gateCallback.ref) ||
-      typeof gateCallback.ref.conversationKey !== "string" ||
-      typeof gateCallback.ref.messageId !== "string"
-    ) {
+    if (!gateCallback || !isRecord(gateCallback) || !isGatePromptRef(gateCallback.ref)) {
       const callbackId = isRecord(gateCallback) && typeof gateCallback.callbackId === "string" ? gateCallback.callbackId : undefined;
       await transport?.answerCallback?.(callbackId ?? "", "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "malformed_callback", event.conversationKey, "gate_callback missing valid ref payload");
@@ -1263,7 +1264,7 @@ export class ChannelHost {
     const sessionRow = rows[0];
     let workflow: Awaited<ReturnType<ChannelHost["authorizeWorkflowGate"]>> | null = null;
     try {
-      workflow = mapped.sessionId.startsWith("wf:") || !sessionRow
+      workflow = mapped.sessionId.startsWith("wf:")
         ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId)
         : null;
     } catch (err) {
@@ -1275,7 +1276,9 @@ export class ChannelHost {
       return;
     }
     if ((workflow && !workflow.ok) || (!sessionRow && !workflow)) {
-      const reason = workflow?.reason ?? "workflow_session_missing";
+      // No app row and no workflow run behind the id: nothing authorizes this
+      // click. It is an unknown or deleted ordinary session, not a workflow.
+      const reason = workflow?.reason ?? "unauthorized";
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, reason, event.conversationKey, reason === "unauthorized" ? "sender may not resolve this session's gates" : reason);
       return;

@@ -922,9 +922,9 @@ export class SlackTransport implements ChannelTransport {
         action_id: action.id,
         // Slack allows 2,000-char values, so the real gate id rides along
         // instead of being looked up by message reference (Telegram's
-        // 64-byte callback_data cannot carry it). The host uses it as a
-        // fallback when its in-memory ref map misses, but the map's
-        // sessionId is still required to resolve — an api restart still
+        // 64-byte callback_data cannot carry it). The id is advisory: the
+        // host resolves a click through its own recorded prompt reference
+        // and never trusts an id from the payload, so an api restart still
         // loses a pending gate.
         value: `g|${gate.gateId}|${action.id}`,
         ...(action.style !== undefined ? { style: action.style } : {}),

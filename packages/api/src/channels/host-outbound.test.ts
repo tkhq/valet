@@ -28,7 +28,7 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -1513,6 +1513,32 @@ describe("ChannelHost outbound delivery", () => {
 
     const answer = fakeTransport.answered.find((a) => a.callbackId === "cb3");
     expect(answer?.text).toContain("expired");
+  });
+
+  it("a click on a session with no row drop-logs unauthorized, not a workflow reason", async () => {
+    // An ordinary session id whose row is gone (deleted, or never written).
+    // Nothing about it is a workflow, so the drop reason must not say so.
+    const ref = { conversationKey: "fake:dm:77", messageId: "m-ghost" };
+    host.recordGatePrompt("gate-ghost", ref, "sess-ghost");
+
+    await host.handleUpdate(
+      "fake",
+      inbound({
+        dispatchId: `fake:${randomUUID()}`,
+        kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId: "cb-ghost", ref },
+      }),
+    );
+
+    const drops = await testDb.appDb.select().from(eventDropLog);
+    const reasons = drops.map((row) => row.reason);
+    expect(reasons).toContain("unauthorized");
+    expect(reasons).not.toContain("workflow_session_malformed");
+    expect(drops.find((row) => row.reason === "unauthorized")?.detail).toBe(
+      "sender may not resolve this session's gates",
+    );
+    // The clicker still gets the uniform answer, so a probe learns nothing.
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "cb-ghost")?.text).toContain("expired");
   });
 
   it("gate_callback with always_allow from a non-org-admin answers with the admin requirement", async () => {
