@@ -566,8 +566,12 @@ export function setNodePosition(
   };
 }
 
+/** Writes the camera and keeps every other editor field, `defaultModel`
+ * included. The editor calls this on each pan and zoom, and again when it
+ * adopts a refetch, so a rebuilt `ui` here loses a field the server wrote
+ * and the next save persists the loss. */
 export function setViewport(definition: WorkflowDefinition, viewport: FlowViewport): WorkflowDefinition {
-  return { ...definition, ui: { nodes: definition.ui?.nodes ?? {}, viewport } };
+  return { ...definition, ui: { ...definition.ui, nodes: definition.ui?.nodes ?? {}, viewport } };
 }
 
 // ─── auto-layout (BFS depth layering, no dagre/elk) ──────────────────────────

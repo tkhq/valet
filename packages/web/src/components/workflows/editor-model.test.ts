@@ -435,6 +435,22 @@ describe('position and viewport persistence', () => {
     expect(next.ui?.viewport).toEqual({ x: 5, y: 6, zoom: 2 });
     expect(next.ui?.nodes).toEqual(definition.ui?.nodes);
   });
+
+  // A pan or a zoom writes the camera through this helper on every gesture,
+  // and the editor re-applies the stored camera when it adopts a refetch. A
+  // rebuilt `ui` would drop the editor default the server just wrote, and
+  // the next save would persist the loss.
+  it('keeps the rest of definition.ui when it writes the viewport', () => {
+    const definition = baseDefinition();
+    const withDefault: WorkflowDefinition = {
+      ...definition,
+      ui: { ...definition.ui, nodes: definition.ui?.nodes ?? {}, defaultModel: 'm' },
+    };
+    const next = setViewport(withDefault, { x: 5, y: 6, zoom: 2 });
+    expect(next.ui?.defaultModel).toBe('m');
+    expect(next.ui?.viewport).toEqual({ x: 5, y: 6, zoom: 2 });
+    expect(next.ui?.nodes).toEqual(definition.ui?.nodes);
+  });
 });
 
 describe('autoLayout (BFS depth layering)', () => {
