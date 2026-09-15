@@ -152,12 +152,23 @@ describe("workflow explicit assistant routing", () => {
       origin: { assistantSessionId: "assistant:chosen", threadId: thread.id },
     });
 
+    // A session that is no assistant's carries no origin. The action does
+    // not decide that: it hands its session and thread to the service,
+    // which is the only validator.
     expect((await action.execute({ workflow_id: created.id }, { ...ctx, sessionId: "child-session" })).success).toBe(true);
     expect(start.mock.calls[1]?.[1]).not.toHaveProperty("origin");
+
+    // The service's thread checks reach the action path too.
+    const archived = await session.createThread("web:archived-origin");
+    await p.db.insert(sessionThreads).values({
+      id: archived.id, sessionId: "assistant:chosen", createdAt: Date.now(), archivedAt: Date.now(),
+    });
+    expect((await action.execute({ workflow_id: created.id }, { ...ctx, threadId: archived.id })).success).toBe(true);
+    expect(start.mock.calls[2]?.[1]).not.toHaveProperty("origin");
     expect(await startWorkflowRun(deps, owner, created.id, undefined, {
       assistantSessionId: "assistant:other", threadId: thread.id,
     })).toBeTruthy();
-    expect(start.mock.calls[2]?.[1]).not.toHaveProperty("origin");
+    expect(start.mock.calls[3]?.[1]).not.toHaveProperty("origin");
   });
 
   it("starts a team workflow from a personal assistant on the originating thread", async () => {

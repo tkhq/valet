@@ -182,26 +182,6 @@ const NO_OWNER: PluginActionResult = {
   error: "no authenticated principal in tool context",
 };
 
-/** Return an origin only for a direct call from the effective owner's active assistant. */
-async function workflowOriginFromContext(
-  deps: WorkflowServiceDeps,
-  owner: WorkflowOwner,
-  ctx: PluginActionContext,
-) {
-  if (!ctx.sessionId || !ctx.threadId) return undefined;
-  const [assistant] = await deps.db.select().from(assistants)
-    .where(and(eq(assistants.sessionId, ctx.sessionId), eq(assistants.orgId, owner.orgId)))
-    .limit(1);
-  const effectiveOwner = owner.principal?.type === "team"
-    ? owner.principal
-    : { type: "user" as const, id: owner.userId };
-  if (!assistant || assistant.archivedAt !== null ||
-      assistant.ownerType !== effectiveOwner.type || assistant.ownerId !== effectiveOwner.id) {
-    return undefined;
-  }
-  return { assistantSessionId: assistant.sessionId, threadId: ctx.threadId };
-}
-
 /**
  * Curried action builder (same shape as plugin-github's): the first call
  * binds T from the parameters schema; the second types `execute`'s args via
@@ -388,7 +368,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
-      const origin = await workflowOriginFromContext(deps, owner, ctx);
+      // The calling conversation, as-is. `startWorkflowRun` is the one
+      // validator: it drops a session that is no assistant's, an assistant
+      // that belongs to neither the caller nor the run, and a thread that
+      // is archived or gone.
+      const origin = ctx.sessionId && ctx.threadId
+        ? { assistantSessionId: ctx.sessionId, threadId: ctx.threadId }
+        : undefined;
       const started = await startWorkflowRun(deps, owner, workflow_id, input, origin);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
