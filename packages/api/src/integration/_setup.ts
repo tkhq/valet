@@ -67,6 +67,7 @@ import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
 import { createApp, type AuthWiring } from "../app.js";
+import type { McpAuditStore } from "../auth/mcp.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { Providers } from "../providers/types.js";
@@ -143,6 +144,8 @@ export interface BootTestApiOpts {
    * other caller: no callback means always ready, matching a harness with
    * no background boot chain. */
   isReady?: () => boolean;
+  /** Replaces the required MCP audit store for fail-closed tests. */
+  mcpAuditStore?: McpAuditStore;
   /** Public base URL forwarded to the constructed `ChannelHost` (Task 8) —
    * unset by default (long-poll/inert mode). Webhook-mode route tests set
    * this so the host registers webhook transports instead. */
@@ -618,7 +621,11 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   }
 
   // Node-only test boot: `createApp` defaults to the Node server adapter.
-  const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir, isReady: opts.isReady });
+  const { startServer } = createApp(providers, authWiring, {
+    webDistDir: opts.webDistDir,
+    isReady: opts.isReady,
+    mcpAuditStore: opts.mcpAuditStore,
+  });
   const server = await new Promise<ReturnType<typeof startServer>>((resolve) => {
     const handle = startServer({ port, onListen: () => resolve(handle) });
   });

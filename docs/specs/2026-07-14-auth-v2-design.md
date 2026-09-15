@@ -197,3 +197,13 @@ Two credentials, one file, both independent of better-auth:
 - The in-sandbox auth gateway itself (v1's :9000 proxy) and any in-sandbox services consuming the service JWTs — this pass ships the tested token/JWT contract only.
 - Multi-org.
 - Per-service integration OAuth connect flows (Linear, Notion, Google APIs, etc. beyond the login-doubles-as-connect hook above) — specified in `2026-07-20-integration-oauth-design.md`.
+
+## Memory tools on the MCP mount (TKAI-252)
+
+The authenticated `/mcp` mount exposes `mem_capture`, `mem_search`, and `mem_read` from the memory plugin. It exposes no other memory mutations. The API builds a personal `MemoryScope` only from the verified OAuth token. Reads include current team memberships and check live membership before resolving a team path.
+
+`mem_capture` creates `90-inbox/YYYY-MM-DD-<slug>.md` with a title hash and race-safe numeric suffix. The caller cannot set the path or owner. The memory service removes embedded frontmatter and sets `origin` to `mcp:external`.
+
+Each authenticated `tools/call` attempt starts a strict, organization-scoped `action_invocations` row before dispatch. Name and schema rejections finish as errors. Successful tools finish after execution. Per-request-ID and per-tool FIFO queues keep duplicate IDs distinct. A later start failure finalizes earlier rows before dispatch. Required audit failures fail closed. Ambiguous organization membership also fails closed. OAuth 401s occur before this audit boundary.
+
+Capture content and all unvalidated arguments are redacted. With `VALET_TRUST_PROXY=1`, one trusted ingress must append its observed client as the final `x-forwarded-for` hop. Valet ignores earlier hops. Otherwise, keep the setting off and use the socket peer. The mount keeps the Better Auth challenge and stateless JSON transport.

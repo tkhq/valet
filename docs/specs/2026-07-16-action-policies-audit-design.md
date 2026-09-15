@@ -223,3 +223,9 @@ Policy edits apply on the next action; no session restart is required.
 
 If a team policy read fails, chat and workflow actions remain blocked until
 a successful check. A prior approval cannot bypass an unread team deny.
+
+**Strict MCP audit (TKAI-252).** `source_ip` stays nullable for internal calls.
+An authenticated MCP tool attempt inserts an organization-scoped pending row
+before dispatch and strictly updates its outcome. Unknown tools and invalid
+arguments are error rows. Audit failures fail MCP calls closed; internal writes
+stay best-effort. Filters redact memory content and all unvalidated arguments.
