@@ -99,8 +99,13 @@ This suppression requires the installation's `botUserId` metadata; legacy creden
 
 The reply step offers the active team's assistant and its assistant picker.
 A team workspace seeds the team target; create and review keep that target.
-Team copy says that linked team members can invoke the assistant. Unlinked senders and nonmembers cannot.
+A team target adds a "Who can mention it" choice: "Anyone in the organization" (the default) or "Only members of {team}".
+The step says that the assistant answers explicit mentions in the selected channels under either choice, and that everyone in those channels sees the replies.
+It also says that a followed thread reaches the assistant with later messages from anyone in that thread, because thread following is on by default.
+It also says what a wider audience does and does not permit: a sender outside the team cannot see or change the assistant's sessions, settings, or credentials, what they ask for in the channel runs with the team's access and tools, and the assistant does not run or change the team's workflows for them.
+Team copy says that a sender with no linked Slack account is always denied.
 Personal copy keeps the creator-only explanation. Channel scope and follow choices remain explicit.
+The review line names the audience it will save. The subscriptions list marks a team mention rule "org members" or "team only".
 
 ## Validation
 
@@ -151,9 +156,14 @@ Membership in a different organization does not restore replay access. No broade
 
 The team homepage has a prominent **Set up Slack replies** button. It opens a
 modal that reuses the automation wizard's reply and review steps. The team is
-fixed to the selected workspace. The reader selects channels and an explicit
-team orchestrator; personal targets and the all-channels option stay in Events.
+fixed to the selected workspace. The reader selects channels, an explicit team
+orchestrator, and the invocation audience, which opens on "Anyone in the
+organization"; personal targets and the all-channels option stay in Events.
 The existing subscription API, membership checks, and collision detection apply.
+A nonmember of the team can invoke the assistant only while the rule carries
+the organization audience, and only by an explicit mention in a selected
+channel, or in a thread that mention opened while thread following is on.
+Under the team audience a nonmember still cannot invoke it.
 
 A missing organization bot links to Organization Settings → Slack. Existing
 team reply rules are shown before the reader can add another rule. The shortcut

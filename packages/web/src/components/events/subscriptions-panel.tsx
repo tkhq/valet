@@ -74,6 +74,19 @@ export function mentionChannelScope(sub: EventSubscriptionWire): string | null {
   return `${names.length} channels`;
 }
 
+/**
+ * Who may invoke a team assistant by mention, for a team mention rule; null
+ * for every other row. The rule reads the same either way from the outside,
+ * so the row has to say which audience it carries. An absent audience is the
+ * team, which is what every rule written before the choice existed means.
+ */
+export function mentionAudienceLabel(sub: EventSubscriptionWire): string | null {
+  const teamAssistant =
+    sub.ownerType === "team" && sub.target.kind === "orchestrator" && sub.target.orchestrator === "team";
+  if (!teamAssistant || !selectsSlackMention(sub.eventKeys)) return null;
+  return sub.audience === "organization" ? "org members" : "team only";
+}
+
 function describeTarget(
   target: EventSubscriptionTargetWire,
   workflowNames: Map<string, string>,
@@ -279,6 +292,7 @@ function SubscriptionRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
   const channelScope = mentionChannelScope(sub);
+  const audienceScope = mentionAudienceLabel(sub);
 
   return (
     <div className="flex flex-wrap items-center gap-3 py-3 sm:flex-nowrap">
@@ -321,6 +335,7 @@ function SubscriptionRow({
             → {describeTarget(sub.target, workflowNames, teamNames)}
           </span>
           {channelScope && <span className="text-xs text-muted">· {channelScope}</span>}
+          {audienceScope && <span className="text-xs text-muted">· {audienceScope}</span>}
           {sub.filters.length > 0 && (
             <span className="text-xs text-muted">
               · {sub.filters.length} filter{sub.filters.length === 1 ? "" : "s"}

@@ -169,6 +169,56 @@ describe("AutomationWizard", () => {
     });
   });
 
+  it("homepage setup opens on the organization audience and posts it", () => {
+    assistantsData = { assistants: [
+      { id: "a-team", name: "Reviewer", isDefault: true, owner: { type: "team", id: "t_platform" } },
+    ] };
+    render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
+    const anyone = screen.getByLabelText(/Anyone in the organization/) as HTMLInputElement;
+    expect(anyone.checked).toBe(true);
+    expect((screen.getByLabelText(/Only members of Platform/) as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByText(/answers explicit mentions in the selected channels/)).toBeTruthy();
+    // Thread following is on by default, so the copy must not read as
+    // "explicit mentions only".
+    expect(screen.getByText(/from anyone in that thread/)).toBeTruthy();
+    expect(screen.getByText(/whoever sends them/)).toBeTruthy();
+    expect(screen.getByText(/runs with the team's access and tools/)).toBeTruthy();
+    expect(screen.getByText(/does not run or change the team's workflows/)).toBeTruthy();
+    addReplyChannel("C123");
+    fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-team" } });
+    clickNext();
+    expect(screen.getByText(/any member of the organization/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(createSubscription.mock.calls[0][0].audience).toBe("organization");
+  });
+
+  it("the team-only audience posts audience team", () => {
+    assistantsData = { assistants: [
+      { id: "a-team", name: "Reviewer", isDefault: true, owner: { type: "team", id: "t_platform" } },
+    ] };
+    render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
+    fireEvent.click(screen.getByLabelText(/Only members of Platform/));
+    addReplyChannel("C123");
+    fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-team" } });
+    clickNext();
+    expect(screen.getByText(/any linked member of Platform/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(createSubscription.mock.calls[0][0].audience).toBe("team");
+  });
+
+  it("a personal reply rule carries no audience", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    clickNext();
+    expect(screen.queryByLabelText(/Anyone in the organization/)).toBeNull();
+    addReplyChannel("C123");
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Mine" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(createSubscription.mock.calls[0][0].audience).toBeUndefined();
+  });
+
   it("reply outcome posts slack.app_mention with the picked channel and follow ON", () => {
     // The team workspace seeds the team assistant.
     scopeTeamId = "t_platform";
@@ -179,7 +229,7 @@ describe("AutomationWizard", () => {
 
     // Step 2 — Reply: channels are required now, so add one, and leave
     // follow ON (default). The team radio is available.
-    expect(screen.getByText(/any linked team member/)).toBeTruthy();
+    expect(screen.getByText(/The team owns and administers the assistant/)).toBeTruthy();
     addReplyChannel("C123");
     const teamRadio = screen.getByLabelText(/Platform's assistant/) as HTMLInputElement;
     expect(teamRadio.disabled).toBe(false);
@@ -210,9 +260,9 @@ describe("AutomationWizard", () => {
     expect(screen.getByText(/An assistant answers Slack @-mentions/)).toBeTruthy();
     clickNext();
     expect(screen.getByText(/This rule uses the organization/)).toBeTruthy();
-    expect(screen.getByText(/any linked team member/)).toBeTruthy();
+    expect(screen.getByText(/Choose below who may invoke it by mention/)).toBeTruthy();
     expect((screen.getByLabelText(/Platform's assistant/) as HTMLInputElement).disabled).toBe(false);
-    expect(screen.getByText(/Unlinked senders and nonmembers/)).toBeTruthy();
+    expect(screen.getByText(/no linked Slack account is always denied/)).toBeTruthy();
     // The review describes the selected team's member scope.
     addReplyChannel("C123");
     clickNext();

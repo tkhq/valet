@@ -41,6 +41,7 @@ import {
   LoadingRow,
 } from "~/components/primitives";
 import type {
+  EventSubscriptionAudienceWire,
   EventSubscriptionCollisionsWire,
   EventSubscriptionFilterWire,
 } from "@valet/api/wire";
@@ -215,6 +216,11 @@ export function AutomationWizard({
   // where the same flag rides a raw `slack.app_mention` selection.
   const [replyChannels, setReplyChannels] = useState<SelectedChannel[]>([]);
   const [anyChannel, setAnyChannel] = useState(false);
+  // Who may invoke a team assistant by mention. A bot invited into a channel
+  // answers everyone in that channel by default; team-only stays one click
+  // away. Read only for a team reply target, so a personal or org rule posts
+  // no audience at all.
+  const [audience, setAudience] = useState<EventSubscriptionAudienceWire>("organization");
   const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // The collision report of the last create attempt (TKAI-294).
@@ -371,12 +377,16 @@ export function AutomationWizard({
                 labels: replyChannels.map((ch) => ch.label),
               },
             ];
+      const mentionTarget = mentionTargetFrom(target);
       createSubscription.mutate(
         {
           name: name.trim(),
           eventKeys: [SLACK_APP_MENTION],
           filters: channelFilters,
-          target: { ...mentionTargetFrom(target), follow },
+          target: { ...mentionTarget, follow },
+          // Only a team assistant has an audience; the server refuses one
+          // on any other target.
+          ...(mentionTarget.orchestrator === "team" ? { audience } : {}),
           ...(anyChannel ? { anyChannel: true } : {}),
           ...(allowCollision ? { allowCollision: true } : {}),
         },
@@ -487,6 +497,8 @@ export function AutomationWizard({
               target={mentionTargetFrom(target)}
               onTargetChange={chooseTarget}
               scopedTeam={scopedTeam}
+              audience={audience}
+              onAudienceChange={setAudience}
               follow={follow}
               onFollowChange={setFollow}
             />
@@ -544,6 +556,7 @@ export function AutomationWizard({
                 cron,
                 timezone,
                 target: outcome === "reply" ? mentionTargetFrom(target) : target,
+                audience,
                 follow,
                 workflows,
                 teams,
@@ -681,6 +694,8 @@ function ReplyStep({
   target,
   onTargetChange,
   scopedTeam,
+  audience,
+  onAudienceChange,
   follow,
   onFollowChange,
 }: {
@@ -692,6 +707,8 @@ function ReplyStep({
   target: OrchestratorChoice;
   onTargetChange: (t: TargetChoice) => void;
   scopedTeam: { id: string; name: string } | undefined;
+  audience: EventSubscriptionAudienceWire;
+  onAudienceChange: (v: EventSubscriptionAudienceWire) => void;
   follow: boolean;
   onFollowChange: (v: boolean) => void;
 }) {
@@ -701,11 +718,12 @@ function ReplyStep({
   const slackLink = linksQ.data?.links.find((l) => l.provider === "slack");
   const slackUnlinked = slackLink !== undefined && !slackLink.linked;
   const reach = target.orchestrator === "org" ? "the org assistant" : "your assistant";
+  const teamName = scopedTeam?.name ?? "the team";
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted">
         {target.orchestrator === "team"
-          ? "This rule uses the organization’s Slack bot. It fires when any linked team member @-mentions the app. Unlinked senders and nonmembers cannot invoke the team assistant."
+          ? "This rule uses the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A sender with no linked Slack account is always denied."
           : <>This rule fires only when <span className="text-ink">you</span> @-mention the app.
             Mentions by other people do not reach {reach}.</>}
       </p>
@@ -787,6 +805,41 @@ function ReplyStep({
         </div>
       </div>
 
+      {target.orchestrator === "team" && (
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-muted">Who can mention it</p>
+          <div className="space-y-1.5">
+            <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+              <input
+                type="radio"
+                name="automation-reply-audience"
+                checked={audience === "organization"}
+                onChange={() => onAudienceChange("organization")}
+              />
+              Anyone in the organization
+            </label>
+            <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+              <input
+                type="radio"
+                name="automation-reply-audience"
+                checked={audience === "team"}
+                onChange={() => onAudienceChange("team")}
+              />
+              Only members of {teamName}
+            </label>
+          </div>
+          <p className="mt-1.5 text-xs text-muted">
+            Either way, the assistant answers explicit mentions in the selected channels, and
+            everyone in those channels sees the replies. While it keeps following a thread, it
+            also reads later messages in a thread it has answered, from anyone in that thread.
+            A sender outside the team cannot see or change the assistant's sessions, settings,
+            or credentials, but whatever they ask it to do runs with the team's access and
+            tools. It answers questions and runs its tools. It does not run or change the
+            team's workflows for senders outside the team.
+          </p>
+        </div>
+      )}
+
       <label className="flex min-h-11 items-start gap-2 text-sm text-ink sm:min-h-0">
         <input
           type="checkbox"
@@ -798,7 +851,7 @@ function ReplyStep({
           Keep following the thread
           <span className="block text-xs text-muted">
             After the first reply, later messages in that thread reach the assistant without a
-            new mention.
+            new mention, whoever sends them.
           </span>
         </span>
       </label>
@@ -1359,6 +1412,8 @@ export function summarize(args: {
   cron: string;
   timezone: string;
   target: TargetChoice;
+  /** Read only for a team reply target. */
+  audience: EventSubscriptionAudienceWire;
   follow: boolean;
   workflows: { id: string; name: string }[];
   teams: { id: string; name: string }[];
@@ -1375,7 +1430,13 @@ export function summarize(args: {
         : "";
     const trailing = args.follow ? " Later thread messages reach the assistant too." : "";
     if (args.target.kind === "orchestrator" && args.target.orchestrator === "team") {
-      return `When any linked team member @-mentions the app${where}, ${then}. Unlinked senders and nonmembers do not fire it.${trailing}`;
+      const teamId = args.target.teamId;
+      const teamName = args.teams.find((t) => t.id === teamId)?.name ?? args.scopedTeam?.name ?? "the team";
+      const who =
+        args.audience === "organization"
+          ? "any member of the organization"
+          : `any linked member of ${teamName}`;
+      return `When ${who} @-mentions the app${where}, ${then}. A sender with no linked Slack account does not fire it.${trailing}`;
     }
     return `When you @-mention the app${where}, ${then}. Mentions by other people do not fire it.${trailing}`;
   }
