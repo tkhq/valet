@@ -1046,6 +1046,7 @@ export async function copyWorkflowDefinition(
     }
     const name = destination.name.trim();
     if (!name) throw new ValidationError("Choose a name for the team workflow copy.");
+    await authorizeWorkflowResource(deps, owner, "create");
     return deps.db.transaction(async (tx) => {
       await lockTeamForOwnership(tx, destination.teamId);
       if (!(await getTeamInOrg(tx, owner.orgId, destination.teamId)) ||
@@ -1058,7 +1059,11 @@ export async function copyWorkflowDefinition(
       )).limit(1);
       if (existing) throw new ValidationError("A workflow with that name already exists in the team. Choose another name.");
       const definition = await copiedDefinitionForOwner(tx, owner.orgId, row.definition, { type: "team", id: destination.teamId });
-      return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition, teamId: destination.teamId });
+      const now = Date.now();
+      const copyId = newWorkflowId("wf");
+      await tx.insert(workflowDefinitions).values({ id: copyId, orgId: owner.orgId, ownerType: "team", ownerId: destination.teamId, name, definition, origin: "local", createdAt: now, updatedAt: now });
+      await snapshotVersion({ ...deps, db: tx }, copyId, 1, name, definition, now);
+      return { id: copyId, name, definition, createdAt: now, updatedAt: now, ownerType: "team" as const, ownerId: destination.teamId };
     });
   }
 
