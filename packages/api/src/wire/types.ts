@@ -2519,6 +2519,16 @@ export interface WorkflowActionRequiredItem {
   workflowName: string;
   runCreatedAt: number;
   owner: { type: "user" | "team" | "org"; id: string };
+  /**
+   * The assistant this run executes as, read from the RUN's definition
+   * snapshot, not from the definition as it stands now. A run keeps the
+   * snapshot it started with, so re-pinning the workflow while a run waits
+   * for approval must not change the assistant the approval screen names.
+   *
+   * Absent when the snapshot pins none (the owner's default assistant runs
+   * it) or names one this API cannot read.
+   */
+  assistantId?: string;
   trigger: {
     type: "manual" | "schedule" | "webhook" | "event" | "workflow" | "unknown";
     triggerId?: string;

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Clock, ShieldAlert, Trash2, Zap } from "lucide-react";
 import type {
@@ -177,19 +177,6 @@ function ActionRequiredTab({
   focusRun?: string;
   focusGate?: string;
 }) {
-  // A second, deliberately UNSCOPED workflows read: the approvals list spans
-  // every workspace the reader belongs to, while the Workflows tab asks for
-  // one owner, so the two cannot share a cache key. One read serves every
-  // row, and it only carries the assistant each row badges.
-  const workflowsQ = useWorkflows();
-  const assistantByWorkflow = useMemo(
-    () =>
-      new Map(
-        (workflowsQ.data?.workflows ?? []).map((w) => [w.id, workflowAssistantId(w.definition)]),
-      ),
-    [workflowsQ.data],
-  );
-
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted">
@@ -213,7 +200,6 @@ function ActionRequiredTab({
           <ActionRequiredRow
             key={item.id}
             item={item}
-            assistantId={assistantByWorkflow.get(item.workflowId)}
             focused={item.runId === focusRun && (!focusGate || item.gate.nodeId === focusGate)}
           />
         ))}
@@ -224,15 +210,9 @@ function ActionRequiredTab({
 
 function ActionRequiredRow({
   item,
-  assistantId,
   focused,
 }: {
   item: WorkflowActionRequiredItem;
-  /** The assistant this run's definition pins. Absent covers two cases the
-   * badge treats alike: the definition pins none, and the workflows read has
-   * not answered (or never lists that workflow). Both fall back to the
-   * owner's default assistant, which is what an unpinned run uses. */
-  assistantId: string | undefined;
   focused: boolean;
 }) {
   const { gate } = item;
@@ -256,10 +236,14 @@ function ActionRequiredRow({
               <ShieldAlert className="h-3 w-3" aria-hidden />
               {policy ? "Tool permission" : "Workflow approval"}
             </span>
+            {/* The run's OWN snapshot names this assistant, so re-pinning
+                the workflow while the run waits does not move the badge
+                beside a permission decision. Absent means the snapshot pins
+                none, and the owner's default assistant runs it. */}
             <AssistantBadge
               ownerType={item.owner.type}
               ownerId={item.owner.id}
-              assistantId={assistantId}
+              assistantId={item.assistantId}
             />
           </div>
           <Link

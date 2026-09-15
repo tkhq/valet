@@ -243,7 +243,7 @@ Decision 2 put a badge where ownership varies inside one view, and `OwnerBadge` 
 
 Workflow rows and event subscription rows badge the assistant that owns the work. The badge links to `/assistants/$assistantId`, the editor for the assistant's model, persona, and tools. A named assistant, a persona or a renamed default, reads by its own name. An unnamed default reads by its owner, the team name or "Org", because "Default Orchestrator" on every row of a cross-workspace list names nothing. The tooltip names the assistant, and adds the team name for a team row.
 
-The client resolves the assistant from lists these pages already load. A workflow row uses the assistant its definition pins, or the owner's default. A subscription row uses the assistant its target pins, or the target owner's default. If the assistants list holds no match, a team row keeps the unlinked team-name badge, so a failed lookup does not remove the ownership signal.
+The client resolves the assistant from lists these pages already load. A workflow row uses the assistant its definition pins, or the owner's default. A subscription row uses the assistant its target pins, or the target owner's default. An approvals row is the exception: the API reports the assistant from the run's own definition snapshot, because that row sits beside a permission decision. If the assistants list holds no match, a team row keeps the unlinked team-name badge, so a failed lookup does not remove the ownership signal.
 
 A personal row stays quiet while the reader's own default assistant owns it. It gets a badge when a persona owns it instead.
 

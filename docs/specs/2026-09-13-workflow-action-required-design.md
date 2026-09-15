@@ -55,6 +55,14 @@ Each item includes these fields:
 - Policy risk, provenance, parameters, and deny behavior when present.
 - Safe trigger type and trigger id.
 - Gate creation time for the waiting duration.
+- The assistant the run executes as, when its definition snapshot names one.
+
+The assistant comes from the RUN's definition snapshot, not from the
+definition as it stands now. A run keeps the definition it started with, so a
+re-pin while the run waits must not change the assistant this list reports.
+The item omits the field when the snapshot pins none, and when the snapshot
+names an unusable id. The row still lists in both cases: its approval is the
+only way that run settles.
 
 The API excludes trigger data and trigger metadata.
 Those values can contain message bodies, credentials, or external payloads.
@@ -112,6 +120,7 @@ Buttons keep the existing mobile touch target.
 | AR-6 | A policy gate is visible                         | Inspect actions            | The UI shows tool permission scopes and policy-specific consequences.           |
 | AR-7 | A resolution succeeds or races                   | Observe query cache        | The action-required query invalidates and refreshes.                            |
 | AR-8 | The viewport is narrow                           | Render the tab             | Cards stack, identifiers wrap, and controls retain touch targets.               |
+| AR-9 | A run is parked, then its workflow is re-pinned to another assistant | List action-required items | The item reports the assistant from the run's snapshot. A snapshot with an unusable id reports none and still lists. |
 
 ## Scope
 

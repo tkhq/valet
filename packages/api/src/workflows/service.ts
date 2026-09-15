@@ -1484,6 +1484,7 @@ export async function listWorkflowActionRequired(
     const detail = await getWorkflowRunDetail(deps, owner, summary.runId);
     if (detail === null) continue;
     const trigger = workflowActionTrigger(detail.run.params);
+    const assistantId = parkedRunAssistantId(detail.run.definition);
     for (const gate of detail.pendingGates) {
       const iteration = gate.iteration ?? 0;
       items.push({
@@ -1493,6 +1494,7 @@ export async function listWorkflowActionRequired(
         workflowName: summary.workflowName,
         runCreatedAt: summary.createdAt,
         owner: detail.owner,
+        ...(assistantId === undefined ? {} : { assistantId }),
         trigger,
         gate,
       });
@@ -1500,6 +1502,20 @@ export async function listWorkflowActionRequired(
   }
   items.sort((a, b) => (a.gate.waitingSince ?? a.runCreatedAt) - (b.gate.waitingSince ?? b.runCreatedAt));
   return { items, count: items.length };
+}
+
+/**
+ * The assistant a parked run executes as. `workflowAssistantId` throws on a
+ * malformed id because it guards writes and dispatch; this list only
+ * reports, and a run with a broken snapshot still needs its approval to be
+ * reachable. Such a run reports no assistant instead of failing the list.
+ */
+function parkedRunAssistantId(definition: unknown): string | undefined {
+  try {
+    return workflowAssistantId(definition);
+  } catch {
+    return undefined;
+  }
 }
 
 function workflowActionTrigger(params: unknown): ListWorkflowActionRequiredResponse["items"][number]["trigger"] {

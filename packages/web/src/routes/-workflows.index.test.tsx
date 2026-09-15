@@ -115,6 +115,9 @@ const actionRequiredData: ListWorkflowActionRequiredResponse = {
       workflowName: "Deploy pipeline",
       runCreatedAt: Date.now() - 20_000,
       owner: { type: "user", id: "u-1" },
+      // The run's snapshot, which is NOT what `wf_1` pins today. The row
+      // must badge the assistant the parked run actually executes as.
+      assistantId: "asst_archivist",
       trigger: { type: "manual" },
       gate: {
         nodeId: "review",
@@ -227,6 +230,14 @@ vi.mock("~/api/assistants", async (importOriginal) => {
             owner: { type: "user" as const, id: "u1" },
             sessionId: "assistant:asst_scribe",
             name: "Scribe",
+            isDefault: false,
+            createdAt: 1,
+          },
+          {
+            id: "asst_archivist",
+            owner: { type: "user" as const, id: "u-1" },
+            sessionId: "assistant:asst_archivist",
+            name: "Archivist",
             isDefault: false,
             createdAt: 1,
           },
@@ -579,18 +590,22 @@ describe("WorkflowsIndexPage — team ownership", () => {
     });
   });
 
-  // The approvals list carries runs, not definitions, so it resolves each
-  // row's assistant through the workflows list.
-  it("badges each approval with its workflow's assistant", () => {
+  // The approvals row badges the assistant the API reports from the RUN's
+  // definition snapshot. `wf_1` pins "asst_scribe" today, the parked run
+  // snapshotted "asst_archivist", and the row must read the run.
+  it("badges each approval from the run's own assistant, not the current definition", () => {
     searchState = { tab: "action-required" };
     renderPage();
 
-    const pinned = screen.getByText("Scribe").closest("a");
+    const pinned = screen.getByText("Archivist").closest("a");
+    expect(pinned?.getAttribute("to")).toBe("/assistants/$assistantId");
     expect(JSON.parse(pinned?.getAttribute("data-params") ?? "null")).toEqual({
-      assistantId: "asst_scribe",
+      assistantId: "asst_archivist",
     });
+    expect(screen.queryByText("Scribe")).toBeNull();
+    // The team run's snapshot pins none, so its owner's default runs it and
+    // the row reads as the team.
     const team = screen.getByText("Platform").closest("a");
-    expect(team?.getAttribute("to")).toBe("/assistants/$assistantId");
     expect(JSON.parse(team?.getAttribute("data-params") ?? "null")).toEqual({
       assistantId: "asst_team_1",
     });
