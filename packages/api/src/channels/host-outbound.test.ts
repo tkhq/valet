@@ -984,6 +984,111 @@ describe("ChannelHost outbound delivery", () => {
     expect(ref ? host.gateForRef(ref) : null).toBeNull();
   });
 
+  /**
+   * Opens one approval gate on a channel-bound thread and waits for its card.
+   * Returns the gate, the thread it lives on, and the card's prompt ref.
+   */
+  async function openChannelGate(): Promise<{ sessionId: string; threadId: string; gateId: string; ref: GatePromptRef }> {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const gateId = `gate-${randomUUID()}`;
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: {
+          type: "decision_gate",
+          threadId,
+          gate: {
+            id: gateId,
+            sessionId: session.id,
+            threadId,
+            queueItemId: `qi-${gateId}`,
+            resumeKey: `rk-${gateId}`,
+            ordinal: 1,
+            type: "approval",
+            title: "Approve the thing?",
+            actions: [
+              { id: "approve", label: "Approve", style: "primary" },
+              { id: "deny", label: "Deny", style: "danger" },
+            ],
+            status: "pending",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+      },
+      `gate-open-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+    });
+    const prompt = fakeTransport.gatePrompts[0];
+    return {
+      sessionId: session.id,
+      threadId,
+      gateId,
+      ref: { conversationKey: prompt?.conversationKey ?? "", messageId: prompt?.messageId ?? "" },
+    };
+  }
+
+  /** The three gate maps are private, and a leak is only visible in them.
+   * Element access reads them with their real types, so the assertion needs
+   * no cast and still breaks if a map's shape changes. */
+  function gateMapSizes(target: ChannelHost): { refs: number; prompts: number; actions: number } {
+    return {
+      refs: target["gateRefs"].size,
+      prompts: target["gatePrompts"].size,
+      actions: target["gateActions"].size,
+    };
+  }
+
+  it("a withdrawn gate clears its card instead of leaving live buttons", async () => {
+    const { sessionId, threadId, gateId, ref } = await openChannelGate();
+    expect(host.gateForRef(ref)).toMatchObject({ gateId });
+
+    await eventStream.append(
+      {
+        sessionId,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "decision_gate_withdrawn", threadId, gateId, reason: "abort" },
+      },
+      `gate-withdraw-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("Withdrawn");
+    expect(fakeTransport.gateEdits[0]?.ref).toEqual(ref);
+    // Nothing may still map the card to the gate, and no map may keep a row.
+    expect(host.gateForRef(ref)).toBeNull();
+    expect(gateMapSizes(host)).toEqual({ refs: 0, prompts: 0, actions: 0 });
+  });
+
+  it("an expired gate clears its card instead of leaving live buttons", async () => {
+    const { sessionId, threadId, gateId, ref } = await openChannelGate();
+
+    await eventStream.append(
+      {
+        sessionId,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "decision_gate_expired", threadId, gateId },
+      },
+      `gate-expire-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("Expired");
+    expect(host.gateForRef(ref)).toBeNull();
+    expect(gateMapSizes(host)).toEqual({ refs: 0, prompts: 0, actions: 0 });
+  });
+
   it("gate_callback round trip resolves the real gate", async () => {
 
     faux.setResponses([

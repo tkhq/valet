@@ -26,3 +26,10 @@ If the click carries no `response_url`, or the URL no longer accepts the post, t
 The transport posts only to a Slack host, so a payload that arrives without Slack's signature cannot aim the answer at another address.
 A callback answered without text sends nothing, because the acknowledgement already stands.
 Every failure to answer is logged and the callback continues, because the gate outcome is already decided.
+
+## Withdrawn and expired gates
+
+A gate can end without a decision. The engine withdraws a gate when the run is steered, aborted, or cancelled, and expires a gate that no one answers in time.
+The host subscribes to both endings and settles the gate the same way a decision does.
+It writes the outcome line onto every prompt message for the gate, and clears the gate from its prompt, reference, and action maps.
+The buttons therefore stop accepting clicks when the run ends, and a long-lived process holds no state for a gate that is over.

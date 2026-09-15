@@ -117,6 +117,10 @@ function gateResolutionLabel(
   return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}${by}`;
 }
 
+/** Outcome lines for the two endings that carry no decision. */
+const GATE_EXPIRED_LABEL = "⏳ Expired — no one answered in time";
+const GATE_WITHDRAWN_LABEL = "🚫 Withdrawn — this approval is no longer needed";
+
 const LOCALDEV_SUFFIX = ".localdev";
 
 /**
@@ -538,7 +542,20 @@ export class ChannelHost {
   startOutbound(): void {
     if (this.outboundUnsub) return;
     this.outboundUnsub = this.deps.eventStream.subscribe(
-      { eventTypes: ["message_end", "tool_end", "decision_gate", "decision_gate_resolved", "command_result"] },
+      {
+        eventTypes: [
+          "message_end",
+          "tool_end",
+          "decision_gate",
+          "decision_gate_resolved",
+          // An ending without a decision still has to clear the card:
+          // otherwise a cancelled or timed-out run leaves live buttons in the
+          // channel for the life of the process.
+          "decision_gate_expired",
+          "decision_gate_withdrawn",
+          "command_result",
+        ],
+      },
       (event) => {
         // Serialize per (session, thread): each handler awaits transport
         // sends, and two concurrent handlers can land out of order — the
@@ -588,6 +605,10 @@ export class ChannelHost {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
         await this.deliverGateResolution(e.gateId, e.resolution);
+      } else if (e.type === "decision_gate_expired") {
+        await this.settleGatePrompts(e.gateId, GATE_EXPIRED_LABEL, { resolvedAtMs: event.timestamp });
+      } else if (e.type === "decision_gate_withdrawn") {
+        await this.settleGatePrompts(e.gateId, GATE_WITHDRAWN_LABEL, { resolvedAtMs: event.timestamp });
       } else if (e.type === "command_result") {
         await this.deliverCommandResult(event.sessionId, e.threadId, e.entry);
       }
@@ -842,17 +863,35 @@ export class ChannelHost {
     if (!refs || refs.length === 0) return;
     const actions = this.gateActions.get(gateId) ?? [];
     const label = gateResolutionLabel(actions, resolution, await this.userName(resolution.resolvedBy));
+    await this.settleGatePrompts(gateId, label, {
+      ...(resolution.actionId !== undefined ? { actionId: resolution.actionId } : {}),
+      resolvedAtMs: resolution.resolvedAt,
+    });
+  }
 
-    for (const ref of refs) {
+  /**
+   * Writes the outcome line onto every prompt message for a gate, then drops
+   * the gate from all three gate maps. The single place a gate's channel
+   * state ends: a decision, an expiry, and a withdrawal all arrive here.
+   *
+   * One window stays open. A prompt whose send is still in flight has no ref
+   * yet, so this settles nothing for it, and `sendAndRecordGatePrompt`
+   * re-seeds the maps when that send lands. Only a decision is replayed onto
+   * such a prompt (`settledGates` holds a resolution), so an expiry or a
+   * withdrawal in that window leaves that one message with live buttons
+   * until someone clicks and reads the answer.
+   */
+  private async settleGatePrompts(
+    gateId: string,
+    label: string,
+    outcome: { actionId?: string; resolvedAtMs?: number } = {},
+  ): Promise<void> {
+    for (const ref of this.gatePrompts.get(gateId) ?? []) {
       const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
       const transport = this.transports.get(channelType);
       if (transport) {
         try {
-          await transport.updateGatePrompt(ref, {
-            actionId: resolution.actionId,
-            label,
-            resolvedAtMs: resolution.resolvedAt,
-          });
+          await transport.updateGatePrompt(ref, { ...outcome, label });
         } catch (err) {
           // One stale message (deleted DM, revoked scope) must not keep the
           // other copies of the same prompt un-updated.
