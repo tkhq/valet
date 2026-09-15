@@ -191,6 +191,39 @@ describe("teamServiceReadiness", () => {
     expect(result.blocked).toEqual([{ service: "gmail", reason: BROKEN_REASON }]);
   });
 
+  // The run no longer stops at a broken team row when the organization
+  // provides the service: `resolveTeamCredentialRead` falls through to the
+  // org row. Readiness has to give the run's answer, or the team's
+  // workflows stay disarmed while every run of them succeeds.
+  it("stays ready on a broken delegation the organization credential covers", async () => {
+    await credentials.save({ type: "org", id: ORG }, "slack", {
+      type: "bot_token",
+      accessToken: "org-slack",
+    });
+    await credentials.save({ type: "team", id: TEAM }, "slack", {
+      type: "bot_token",
+      metadata: { delegatedFrom: "u-1" },
+    });
+
+    const result = await teamServiceReadiness(deps(), {
+      orgId: ORG,
+      teamId: TEAM,
+      definition: toolDefinition("slack"),
+    });
+
+    expect(result.ready).toEqual(["slack"]);
+    expect(result.blocked).toEqual([]);
+    expect(teamArmRefusals(result)).toEqual([]);
+    expect(result.warnings).toEqual([
+      {
+        service: "slack",
+        reason:
+          "slack was shared by a member who is no longer on the team, or whose connection is gone. " +
+          "Runs use the organization credential instead. Remove the team credential, or share it again.",
+      },
+    ]);
+  });
+
   it("blocks a delegated reference whose source credential is gone", async () => {
     await delegateGmail({ member: true, source: false });
 
