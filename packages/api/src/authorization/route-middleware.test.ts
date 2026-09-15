@@ -38,18 +38,18 @@ describe("route authorization middleware", () => {
     expect(await api.providers.db.select().from(agentSessions)).toHaveLength(0);
   });
 
-  it("protects the resolution endpoint without recursively requiring approval", async () => {
+  it("denies recursive approval on the resolution endpoint", async () => {
     api = await bootTestApi();
     const seen: string[] = [];
-    const original = api.providers.canonicalAuthorizationService.authorize.bind(api.providers.canonicalAuthorizationService);
     vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request) => {
       seen.push(request.action.id);
-      return original(request);
+      return envelope(request, "require_approval");
     });
     const response = await fetch(`${api.baseUrl}/api/authorization/decisions/missing/resolve`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ schemaVersion: 1, verdict: "approved" }),
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ schemaVersion: 1, verdict: "approved" }),
     });
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ code: "authorization_recursive_approval" });
     expect(seen).toEqual(["api_authorization.post_authorization_decisions_item_resolve"]);
   });
 

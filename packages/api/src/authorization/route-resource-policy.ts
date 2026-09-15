@@ -31,11 +31,8 @@ export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readon
   "repository.import": ["medium"],
   "secret.list": ["high"],
   "secret.metadata": ["high"],
-  "secret.create": ["high"],
   "secret.update": ["high"],
   "secret.delete": ["high"],
-  "secret.attach": ["high"],
-  "secret.use": ["high"],
   "policy.list": ["low"],
   "policy.read": ["low"],
   "policy.create": ["medium"],
@@ -49,40 +46,10 @@ export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readon
   "workflow.update": ["medium"],
   "workflow.delete": ["high"],
   "workflow.execute": ["medium"],
-  "workflow.approve": ["high"],
-  "workflow.cancel": ["low"],
-  "workflow.copy": ["low"],
-  "workflow.import": ["medium"],
-  "workflow.export": ["medium"],
-  "artifact.list": ["low"],
-  "artifact.metadata": ["low"],
-  "artifact.read": ["low"],
-  "artifact.create": ["medium"],
-  "artifact.update": ["medium"],
   "artifact.delete": ["high"],
   "artifact.share": ["medium"],
   "artifact.publish": ["high"],
   "artifact.copy": ["low"],
-  "session.list": ["low"],
-  "session.read": ["low"],
-  "session.create": ["medium"],
-  "session.update": ["medium"],
-  "session.delete": ["high"],
-  "session.execute": ["medium"],
-  "session.approve": ["high"],
-  "session.cancel": ["low"],
-  "assistant.list": ["low"],
-  "assistant.read": ["low"],
-  "assistant.create": ["medium"],
-  "assistant.update": ["medium"],
-  "assistant.delete": ["high"],
-  "assistant.execute": ["medium"],
-  "team.list": ["low"],
-  "team.read": ["low"],
-  "team.create": ["medium"],
-  "team.update": ["medium"],
-  "team.delete": ["high"],
-  "team.approve": ["high"],
 });
 
 export const RESOURCE_ACCESS_REGISTRY: readonly ResourceAccessDescriptorV1[] = Object.freeze(
@@ -114,6 +81,9 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
       const routeRequest = replay === undefined ? initial.request : adaptApiRoute({ schemaVersion: 1, organizationId: user.orgId, actorUserId: user.id, principal, requestId: `${delivery}:approved`, operationId: replay.operationId, evaluationTimeMs, descriptor, dynamicFacts: { currentPolicy: replay.facts }, approvalBindingContext: replay.binding, approvalScopeId: initial.request.subject.invocation.id }).request;
       const routeDecision = await c.var.providers.canonicalAuthorizationService.authorize(routeRequest);
       obligationPlan = buildRouteResourceObligationPlan(routeDecision.decision);
+      if (routeDecision.decision.effect === "require_approval" && matched.descriptor.actionId === "api_authorization.post_authorization_decisions_item_resolve") {
+        return c.json({ error: "Approval resolution cannot require another approval. Ask an organization administrator to change the route policy.", code: "authorization_recursive_approval" }, 403);
+      }
       if (routeDecision.decision.effect === "require_approval" && c.req.header("Idempotency-Key") === undefined) return c.json({ error: "Send an Idempotency-Key before requesting approval.", code: "authorization_idempotency_required" }, 428);
       const routeRefusal = refusal(routeDecision, canonicalDecisionId(user.orgId, routeRequest.idempotencyKey));
       if (routeRefusal) return c.json(routeRefusal.body, routeRefusal.status);
@@ -140,12 +110,17 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
 }
 
 export function resolveRouteDescriptor(registry: readonly ApiRouteDescriptorV1[], method: string, path: string): { descriptor: ApiRouteDescriptorV1; resourceId?: string } | undefined {
-  for (const descriptor of registry) {
-    if (descriptor.method !== method.toUpperCase() && descriptor.method !== "ALL") continue;
-    const matched = matchTemplate(descriptor.template, path);
-    if (matched) return { descriptor, ...(matched.resourceId === undefined ? {} : { resourceId: matched.resourceId }) };
-  }
-  return undefined;
+  const candidates = registry
+    .filter((descriptor) => descriptor.method === method.toUpperCase() || descriptor.method === "ALL")
+    .map((descriptor) => ({ descriptor, matched: matchTemplate(descriptor.template, path) }))
+    .filter((candidate): candidate is { descriptor: ApiRouteDescriptorV1; matched: { resourceId?: string } } => candidate.matched !== undefined)
+    .sort((left, right) => templateSpecificity(right.descriptor.template) - templateSpecificity(left.descriptor.template));
+  const selected = candidates[0];
+  return selected === undefined ? undefined : { descriptor: selected.descriptor, ...(selected.matched.resourceId === undefined ? {} : { resourceId: selected.matched.resourceId }) };
+}
+
+function templateSpecificity(template: string): number {
+  return template.split("/").filter(Boolean).reduce((score, segment) => score + (segment === "*" ? 0 : segment.startsWith(":") ? 1 : 2), 0);
 }
 
 function refusal(envelope: PolicyDecisionEnvelope, decisionId: string): { status: 403 | 409; body: { error: string; code: string; decisionId?: string } } | undefined {
@@ -167,11 +142,6 @@ export async function loadApprovedRouteReplay(db: AppDb, initial: AuthorizationR
   const binding = { requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest };
   const facts = await loadCanonicalDynamicFacts(db, { organizationId: original.orgId, service: initial.action.service!, actionId: initial.action.id, riskLevel: initial.action.riskLevel as "low" | "medium" | "high" | "critical", appliesIn: "route", scopeId, evaluationTimeMs, ...binding });
   return { verdict: resolution.verdict, operationId: `approved:${createHash("sha256").update(`${scopeId}\0${resolutionId}`).digest("hex")}`, facts, binding };
-}
-function descriptorFor(kind: ResourceKind, operation: ResourceOperation): ResourceAccessDescriptorV1 {
-  const descriptor = RESOURCE_ACCESS_REGISTRY.find((entry) => entry.resourceKind === kind && entry.operation === operation);
-  if (!descriptor) throw new Error(`Resource operation ${kind}.${operation} has no descriptor.`);
-  return descriptor;
 }
 
 function deliveryIdentity(value: string | undefined): string {

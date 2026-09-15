@@ -7,11 +7,12 @@ import {
   WS_OPERATION_DESCRIPTOR_SEEDS_V1,
   buildApiRouteRegistry,
   mergeApiRouteDescriptorMapsV1,
+  resolveRouteDescriptor,
 } from "./route-resource-policy.js";
 
 function assemblyProviders(withAuthorization = true): never {
   const service = withAuthorization ? { authorize: async () => { throw new Error("not called during assembly"); } } : undefined;
-  return new Proxy({ canonicalAuthorizationService: service }, {
+  return new Proxy({ canonicalAuthorizationService: service, resourceAuthorizationPort: service }, {
     get: (target, key) => key in target ? target[key as keyof typeof target]
       : key === "plugins" ? [] : key === "actionPluginByService" ? new Map() : {},
   }) as never;
@@ -41,12 +42,23 @@ describe("route and resource policy registries", () => {
     expect(() => createApp(assemblyProviders(false))).toThrow(/canonical authorization service is required/i);
   });
 
-  it("registers explicit WebSocket and resource operations", () => {
+  it("selects the most specific mounted route descriptor", () => {
+    const base = { schemaVersion: 1, method: "GET", service: "api_admin", operation: "list", riskLevel: "low", approvalSupported: false, safeProjection: "none", obligations: [], audit: { group: "admin" } } as const;
+    const registry = [
+      { ...base, template: "/api/admin/*", actionId: "api_admin.get_admin_item" },
+      { ...base, template: "/api/admin/submissions", actionId: "api_admin.get_admin_submissions" },
+    ];
+    expect(resolveRouteDescriptor(registry, "GET", "/api/admin/submissions")?.descriptor.actionId).toBe("api_admin.get_admin_submissions");
+    expect(resolveRouteDescriptor(registry, "GET", "/api/admin/other")?.descriptor.actionId).toBe("api_admin.get_admin_item");
+  });
+
+  it("registers explicit WebSocket and enforced resource operations", () => {
     expect(Object.keys(WS_OPERATION_DESCRIPTOR_SEEDS_V1).sort()).toEqual([
       "session.stream.connect", "session.stream.pong", "session.stream.subscribe",
     ]);
     const pairs = new Set(RESOURCE_ACCESS_REGISTRY.map((entry) => `${entry.resourceKind}.${entry.operation}`));
-    for (const pair of ["repository.import", "secret.use", "policy.publish", "workflow.approve", "artifact.share", "session.execute", "assistant.update", "team.approve"]) expect(pairs.has(pair)).toBe(true);
+    for (const pair of ["repository.import", "secret.update", "policy.publish", "workflow.execute", "artifact.share"]) expect(pairs.has(pair)).toBe(true);
+    for (const unsupported of ["secret.use", "workflow.approve", "session.execute", "assistant.update", "team.approve"]) expect(pairs.has(unsupported)).toBe(false);
     expect(pairs.size).toBe(RESOURCE_ACCESS_REGISTRY.length);
   });
 });

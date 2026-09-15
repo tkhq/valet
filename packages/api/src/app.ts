@@ -305,8 +305,11 @@ export function createApp(
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
-  if (typeof providers.canonicalAuthorizationService?.authorize !== "function" || typeof providers.resourceAuthorizationPort?.authorize !== "function") {
-    throw new Error("Canonical route and resource authorization services are required for protected API routes.");
+  if (typeof providers.canonicalAuthorizationService?.authorize !== "function") {
+    throw new Error("Canonical authorization service is required for protected API routes.");
+  }
+  if (typeof providers.resourceAuthorizationPort?.authorize !== "function") {
+    throw new Error("Resource authorization service is required for protected API routes.");
   }
   let routePolicyRegistry: readonly ApiRouteDescriptorV1[] = [];
   app.use("/api/*", routeResourcePolicyMiddleware(() => routePolicyRegistry));

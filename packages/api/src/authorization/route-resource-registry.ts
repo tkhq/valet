@@ -3,7 +3,7 @@ import type { RouterRoute } from "hono/types";
 export type PolicyRisk = "low" | "medium" | "high" | "critical";
 export type ResourceKind = "repository" | "secret" | "policy" | "workflow" | "artifact" | "session" | "assistant" | "team";
 export type ResourceOperation = "create" | "list" | "metadata" | "read" | "update" | "delete" | "execute" | "approve" | "cancel" | "share" | "publish" | "import" | "export" | "attach" | "use" | "link" | "unlink" | "copy";
-export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: "none"; readonly obligations: readonly ["field_mask", "result_limit"]; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
+export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: "none"; readonly obligations: readonly []; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
 export interface BoundaryExclusionV1 { readonly schemaVersion: 1; readonly key: string; readonly classification: "public" | "pr12_owned"; readonly rationale: string; }
 type Seed = readonly [service: string, actionId: string, operation: ResourceOperation, risk: PolicyRisk, resourceKind?: ResourceKind];
 export function mergeApiRouteDescriptorMapsV1(...maps: readonly Readonly<Record<string, Seed>>[]): Readonly<Record<string, Seed>> {
@@ -387,7 +387,7 @@ export function buildApiRouteRegistry(routes: readonly Pick<RouterRoute, "method
     return Object.freeze({
       schemaVersion: 1 as const, method, template, service, actionId, operation, riskLevel,
       approvalSupported: !["list", "read", "metadata"].includes(operation), safeProjection: "none" as const,
-      obligations: ["field_mask", "result_limit"] as const, audit: { group },
+      obligations: [] as const, audit: { group },
       ...(resourceKind === undefined ? {} : { resourceKind }),
     });
   }).sort((a, b) => `${a.method} ${a.template}`.localeCompare(`${b.method} ${b.template}`)));
