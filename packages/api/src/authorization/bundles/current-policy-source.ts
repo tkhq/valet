@@ -355,6 +355,7 @@ function validateApproval(fact: CurrentApprovalResolutionSourceV1, organizationI
 function validateScope(id: string, appliesIn: string, sessionId: string | undefined, workflowId: string | undefined): void {
   if (appliesIn === "session" && nonBlank(sessionId) && workflowId === undefined) return;
   if (appliesIn === "workflow" && nonBlank(workflowId) && sessionId === undefined) return;
+  if ((appliesIn === "route" || appliesIn === "resource") && nonBlank(sessionId) && workflowId === undefined) return;
   fail("invalid_scope", `Fact ${id} has a scope that does not match appliesIn.`);
 }
 
@@ -665,6 +666,8 @@ scope_matches(fact) if { applies_in == "session"; fact[5] == "session"; fact[6] 
 scope_matches(fact) if { applies_in == "workflow"; fact[5] == "workflow"; fact[6] == input.subject.workflowExecutionId }
 approval_scope_matches if { applies_in == "session"; input.facts.currentPolicy.approvalBinding[2] == "session"; input.facts.currentPolicy.approvalBinding[3] == input.subject.sessionId }
 approval_scope_matches if { applies_in == "workflow"; input.facts.currentPolicy.approvalBinding[2] == "workflow"; input.facts.currentPolicy.approvalBinding[3] == input.subject.workflowExecutionId }
+approval_scope_matches if { applies_in == "route"; input.facts.currentPolicy.approvalBinding[2] == "route"; input.facts.currentPolicy.approvalBinding[3] == input.context.approvalScopeId }
+approval_scope_matches if { applies_in == "resource"; input.facts.currentPolicy.approvalBinding[2] == "resource"; input.facts.currentPolicy.approvalBinding[3] == input.context.approvalScopeId }
 `;
 
 const CURRENT_ACTION_POLICY_SUFFIX = `

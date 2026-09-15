@@ -164,6 +164,8 @@ The resource registry covers repositories, secrets, policies, workflows, artifac
 
 Authenticated route and resource checks use an allow baseline. Organization and team rules can narrow that baseline by exact action, service, or risk. Route and resource kinds remain separate from tool and workflow action kinds. PR 10 releases ignore route and resource rows during rollback. A PR 11 release migration rebuilds structured or authored bundles through immutable lineage before activation.
 
+Route approvals use the persisted canonical decision ID. The approver resolves that decision through the bounded authorization endpoint. The client then retries with the same `Idempotency-Key` and the persisted resolution ID. The middleware reconstructs the original route request, verifies every stored digest, loads the exact approval fact, and re-evaluates policy. A changed route cannot consume the approval. WebSocket authorization refusals use a typed event with the same durable decision ID.
+
 Route and resource decisions support result limits, field masks, read-only constraints, and response redactions. The host composes route and resource obligations by the strictest compatible value. It denies incompatible masks and unknown obligations before dispatch. The host applies output obligations before it returns JSON. A redaction failure returns no unredacted response.
 
 ## Rego v1 compatibility and capability profile

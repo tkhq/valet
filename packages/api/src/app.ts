@@ -86,6 +86,7 @@ import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
 import { buildApiRouteRegistry, routeResourcePolicyMiddleware, type ApiRouteDescriptorV1 } from "./authorization/route-resource-policy.js";
+import { routeApprovalRouter } from "./authorization/route-approval.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
@@ -311,6 +312,7 @@ export function createApp(
   app.use("/api/*", routeResourcePolicyMiddleware(() => routePolicyRegistry));
   const protectedRouteStart = app.routes.length;
 
+  app.route("/api/authorization", routeApprovalRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);

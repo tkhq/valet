@@ -131,9 +131,11 @@ export interface CurrentApprovalResolutionSourceV1 {
   readonly originalDecisionDigest: string;
   readonly approverId: string;
   readonly verdict: "approved" | "rejected";
-  readonly appliesIn: "session" | "workflow";
+  readonly appliesIn: "session" | "workflow" | "route" | "resource";
   readonly sessionId?: string;
   readonly workflowExecutionId?: string;
+  readonly routeOperationId?: string;
+  readonly resourceOperationId?: string;
   readonly resolvedAtMs: number;
   readonly expiresAtMs: number;
   readonly resolutionVersion: 1;

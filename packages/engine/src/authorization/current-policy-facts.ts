@@ -7,7 +7,7 @@ const SERVICE = /^[a-z][a-z0-9_-]*$/;
 const HEX = /^[0-9a-f]{64}$/;
 const RISKS = ["low", "medium", "high", "critical"] as const;
 export type CurrentPolicyRisk = typeof RISKS[number];
-export type CurrentPolicyScope = "session" | "workflow";
+export type CurrentPolicyScope = "session" | "workflow" | "route" | "resource";
 export type CurrentPolicyGrantTuple = readonly [string, string, string, string, CurrentPolicyRisk, CurrentPolicyScope, string, number, number, number | null];
 export type CurrentPolicyApprovalBindingTuple = readonly [string, string, CurrentPolicyScope, string];
 export type CurrentPolicyApprovalTuple = readonly [string, "approved" | "rejected", number, number, 1];
@@ -67,7 +67,7 @@ function id(value: unknown): value is string { return typeof value === "string" 
 function serviceId(value: unknown): value is string { return typeof value === "string" && SERVICE.test(value); }
 function action(value: unknown): value is string { return typeof value === "string" && ACTION.test(value); }
 function riskId(value: unknown): value is CurrentPolicyRisk { return typeof value === "string" && RISKS.includes(value as CurrentPolicyRisk); }
-function scopeType(value: unknown): value is CurrentPolicyScope { return value === "session" || value === "workflow"; }
+function scopeType(value: unknown): value is CurrentPolicyScope { return value === "session" || value === "workflow" || value === "route" || value === "resource"; }
 function hex(value: unknown): value is string { return typeof value === "string" && HEX.test(value); }
 function time(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0; }
 function bad(): never { throw new TypeError("Current policy dynamic facts are malformed."); }

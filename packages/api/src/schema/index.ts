@@ -1799,7 +1799,7 @@ export const canonicalApprovalResolutions = pgTable(
     originalDecisionDigest: text("original_decision_digest").notNull(),
     approverId: text("approver_id").notNull(),
     verdict: text("verdict", { enum: ["approved", "rejected"] }).notNull(),
-    appliesIn: text("applies_in", { enum: ["session", "workflow"] }).notNull(),
+    appliesIn: text("applies_in", { enum: ["session", "workflow", "route", "resource"] }).notNull(),
     sessionId: text("session_id"),
     workflowExecutionId: text("workflow_execution_id"),
     resolvedAt: bigint("resolved_at", { mode: "number" }).notNull(),

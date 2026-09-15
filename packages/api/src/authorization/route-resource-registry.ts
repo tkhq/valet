@@ -17,6 +17,7 @@ export function mergeApiRouteDescriptorMapsV1(...maps: readonly Readonly<Record<
 }
 
 export const API_ROUTE_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, Seed>> = Object.freeze({
+  "POST /api/authorization/decisions/:decisionId/resolve": ["api_authorization", "api_authorization.post_authorization_decisions_item_resolve", "approve", "high", "policy"],
   "DELETE /api/admin/*": ["api_admin", "api_admin.delete_admin_item", "delete", "high"],
   "DELETE /api/artifacts/:id": ["api_artifacts", "api_artifacts.delete_artifacts_item", "delete", "high", "artifact"],
   "DELETE /api/assistants/:id": ["api_assistants", "api_assistants.delete_assistants_item", "delete", "high", "assistant"],

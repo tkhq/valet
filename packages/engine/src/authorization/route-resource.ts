@@ -1,5 +1,6 @@
 import { authorizationIdentity, canonicalAuthorizationJson, resourceAuthorizationSubject, routeAuthorizationSubject } from "./identity.js";
 import { trustedJsonClone } from "./trusted-json.js";
+import { validateCurrentPolicyDynamicFactsV2, type CurrentPolicyDynamicFactsV2 } from "./current-policy-facts.js";
 import type { AuthorizationPrincipal, AuthorizationRequest, JsonObject, PolicyDecisionV1, RedactionDirective } from "./types.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/;
@@ -24,6 +25,9 @@ interface CommonInput {
   readonly operationId: string;
   readonly evaluationTimeMs: number;
   readonly safeMetadata?: JsonObject;
+  readonly dynamicFacts?: { readonly currentPolicy?: CurrentPolicyDynamicFactsV2 };
+  readonly approvalBindingContext?: { readonly requestSubjectDigest: string; readonly originalDecisionDigest: string };
+  readonly approvalScopeId?: string;
 }
 
 export interface ApiRouteAdapterInputV1 extends CommonInput {
@@ -114,6 +118,7 @@ function metadata(value: JsonObject | undefined): JsonObject {
 }
 
 function output(input: CommonInput & { descriptor: { service: string; actionId: string; riskLevel: string } }, kind: "api.route" | "resource.access", subject: AuthorizationRequest["subject"], parameters: JsonObject, resource?: AuthorizationRequest["resource"]): RouteResourceAdapterOutputV1 {
+  const facts: JsonObject = input.dynamicFacts?.currentPolicy === undefined ? {} : { currentPolicy: validateCurrentPolicyDynamicFactsV2(input.dynamicFacts.currentPolicy, { organizationId: input.organizationId, service: input.descriptor.service, actionId: input.descriptor.actionId, riskLevel: input.descriptor.riskLevel as "low" | "medium" | "high" | "critical", appliesIn: kind === "api.route" ? "route" : "resource", scopeId: input.approvalScopeId ?? input.operationId, evaluationTimeMs: input.evaluationTimeMs, ...input.approvalBindingContext }) };
   const partial = {
     schemaVersion: 1 as const,
     requestId: input.requestId,
@@ -121,8 +126,8 @@ function output(input: CommonInput & { descriptor: { service: string; actionId: 
     subject,
     action: { id: input.descriptor.actionId, service: input.descriptor.service, riskLevel: input.descriptor.riskLevel, parameters },
     ...(resource === undefined ? {} : { resource }),
-    context: { schemaVersion: 1, evaluationTimeMs: input.evaluationTimeMs },
-    facts: {},
+    context: { schemaVersion: 1, evaluationTimeMs: input.evaluationTimeMs, ...(input.approvalBindingContext ?? {}), ...(input.approvalScopeId === undefined ? {} : { approvalScopeId: input.approvalScopeId }) },
+    facts,
   };
   const identity = authorizationIdentity(partial);
   const request = deepFreeze({ ...partial, idempotencyKey: identity.idempotencyKey });
