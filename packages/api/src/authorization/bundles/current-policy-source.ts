@@ -251,7 +251,7 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   let matcherValueBytes = 0;
   let matcherValueNodes = 0;
   for (const row of liveRules) {
-    if (row.authorizationKind !== undefined && row.authorizationKind !== "tool.action" && row.authorizationKind !== "tool.builtin") fail("unknown_authorization_kind", `Rule ${row.id} has an unknown authorization kind.`);
+    if (row.authorizationKind !== undefined && row.authorizationKind !== "tool.action" && row.authorizationKind !== "tool.builtin" && row.authorizationKind !== "api.route" && row.authorizationKind !== "resource.access") fail("unknown_authorization_kind", `Rule ${row.id} has an unknown authorization kind.`);
     validateTarget(row.id, row);
     validateMode(row.id, row.mode);
     if ("appliesIn" in row) validatePolicySemantics(row);
@@ -519,7 +519,7 @@ function ruleConditions(row: NormalizedRule, rowIndex: number): string[] {
 
 function ruleApplicabilityConditions(row: NormalizedRule): string[] {
   return [
-    row.authorizationKind === "tool.action" ? `input.kind in {"tool.action","workflow.action"}` : `input.kind == "tool.builtin"`,
+    row.authorizationKind === "tool.action" ? `input.kind in {"tool.action","workflow.action"}` : `input.kind == ${canonicalJson(row.authorizationKind)}`,
     row.ownerType === "team" ? `input.subject.principal.type == "team"` : row.ownerType === "personal" ? `input.subject.principal.type == "user"` : undefined,
     row.ownerType === "organization" ? undefined : `input.subject.principal.id == ${canonicalJson(row.ownerId)}`,
     row.target.kind === "action" ? `input.action.id == ${canonicalJson(row.target.value)}` : row.target.kind === "service" ? `input.action.service == ${canonicalJson(row.target.value)}` : `input.action.riskLevel == ${canonicalJson(row.target.value)}`,
@@ -635,11 +635,15 @@ policy := data.valet.authz
 supported_kind if { input.kind == "tool.action" }
 supported_kind if { input.kind == "workflow.action" }
 supported_kind if { input.kind == "tool.builtin" }
+supported_kind if { input.kind == "api.route" }
+supported_kind if { input.kind == "resource.access" }
 action_context if { supported_kind }
 
 applies_in := "session" if { input.kind == "tool.action" }
 applies_in := "workflow" if { input.kind == "workflow.action" }
 applies_in := "session" if { input.kind == "tool.builtin" }
+applies_in := "route" if { input.kind == "api.route" }
+applies_in := "resource" if { input.kind == "resource.access" }
 
 input_valid if {
   input.schemaVersion == 1
@@ -687,7 +691,16 @@ static_layers := layers if {
   layers := {"org":org,"team":team,"override":override,"base":base}
 }
 static_layers := layers if {
-  input.kind != "tool.builtin"
+  input.kind in {"api.route","resource.access"}
+  org := org_winner
+  team := team_winner
+  override := override_winner
+  strict := strict_winner(org, team)
+  base := strict_winner(strict, {"id":"standard.authenticated_access","mode":"allow","modeRank":1,"source":"bundle"})
+  layers := {"org":org,"team":team,"override":override,"base":base}
+}
+static_layers := layers if {
+  input.kind in {"tool.action","workflow.action"}
   org := org_winner
   team := team_winner
   override := override_winner

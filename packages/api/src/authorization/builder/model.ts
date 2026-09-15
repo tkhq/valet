@@ -74,7 +74,7 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     false,
   );
   const nestedIds = new Set<string>();
-  if (!Array.isArray(value.matcherGroups) || (value.matcherGroups.length === 0 && value.context !== "tool.builtin")) issues.push(issue("empty_conditions", `${path}.matcherGroups`, "Add at least one condition group."));
+  if (!Array.isArray(value.matcherGroups) || (value.matcherGroups.length === 0 && !(["tool.builtin", "api.route", "resource.access"] as string[]).includes(String(value.context)))) issues.push(issue("empty_conditions", `${path}.matcherGroups`, "Add at least one condition group."));
   else
     value.matcherGroups.forEach((group, groupIndex) => {
       if (!record(group) || !validId(group.id) || nestedIds.has(String(group.id)) || !["all", "any", "not"].includes(String(group.mode)) || !Array.isArray(group.matchers) || !dense(group.matchers) || group.matchers.length === 0 || (group.mode === "not" && group.matchers.length !== 1)) {

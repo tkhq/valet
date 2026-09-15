@@ -17,7 +17,7 @@ describe("canonical policy builder", () => {
       target: { value: "safe@example.com" },
     });
     fireEvent.change(screen.getByLabelText("Authorization context"), {
-      target: { value: "route.access" },
+      target: { value: "api.route" },
     });
     expect(screen.queryByDisplayValue("gmail.send_email")).toBeNull();
     expect(screen.getByText(/Preview fails closed/).textContent).toContain("fails closed");

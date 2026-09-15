@@ -5,7 +5,7 @@ import { AUTHORIZATION_CONTEXT_KINDS, POLICY_CONTEXTS } from "./contexts.js";
 import { createPreviewRequest, normalizePolicyDraft, sanitizeSampleFacts, validatePolicyDraft } from "./model.js";
 import type { JsonValue, PolicyDraftV1 } from "./types.js";
 
-const ALL: AuthorizationKind[] = ["tool.action", "workflow.action", "tool.builtin", "plugin.entitlement", "route.access", "resource.access", "delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate", "egress.connect"];
+const ALL: AuthorizationKind[] = ["tool.action", "workflow.action", "tool.builtin", "plugin.entitlement", "api.route", "resource.access", "delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate", "egress.connect"];
 function draft(): PolicyDraftV1 {
   return {
     schemaVersion: 1,
@@ -60,7 +60,7 @@ describe("policy context registry", () => {
     expect(authorizationSha256Hex("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     expect(normalizePolicyDraft(draft()).normalizedIdentity).toBe("policy-draft-v1:77f0183085ee631b3bbf4cf920dbbb9bc37aa8a2feb41778d4a22e5a9f0aed44");
     const locale = vi.spyOn(String.prototype, "locale" + "Compare" as "locale\u0043ompare").mockImplementation(() => { throw new Error("locale-dependent"); }); expect(normalizePolicyDraft(draft()).normalizedIdentity).toContain("policy-draft-v1:"); locale.mockRestore();
-    const base = draft(), mixed: PolicyDraftV1 = { ...base, rules: [...base.rules, { ...base.rules[0], ruleId: "rule-2", context: "route.access" }] };
+    const base = draft(), mixed: PolicyDraftV1 = { ...base, rules: [...base.rules, { ...base.rules[0], ruleId: "rule-2", context: "api.route" }] };
     expect(validatePolicyDraft(mixed).map(value => value.code)).toContain("mixed_context");
     let reads = 0; const hostile = Object.defineProperty({}, "rules", { enumerable: true, get() { reads++; throw new Error("no"); } });
     expect(() => validatePolicyDraft(hostile)).not.toThrow(); expect(reads).toBe(0);
@@ -153,7 +153,7 @@ describe("policy draft validation", () => {
     expect(validatePolicyDraft(tool)).toEqual([]); expect(validatePolicyDraft(credential)).toEqual([]); expect(validatePolicyDraft({ ...credential, rules: [{ ...credential.rules[0], effect: "allow" }] }).map(issue => issue.code)).toContain("unexpected_approval");
     const groups = Array.from({ length: 2 }, (_, group) => ({ id: "g" + group, mode: "all" as const, matchers: Array.from({ length: 9 }, (_, row) => ({ id: "m" + group + "-" + row, field: "parameters.x", operator: "eq" as const, value: row })) }));
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: groups }] }).filter(issue => issue.code === "complexity_limit" && issue.path.includes("matcherGroups"))).toHaveLength(1);
-    expect(POLICY_CONTEXTS["tool.action"]).toMatchObject({ publishable: true, humanApproval: true, obligations: [] }); expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(2);
+    expect(POLICY_CONTEXTS["tool.action"]).toMatchObject({ publishable: true, humanApproval: true, obligations: [] }); expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(4);
   });
 
 });

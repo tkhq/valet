@@ -10,7 +10,7 @@ export function projectActionDraftToCurrentSnapshot(draft: NormalizedPolicyDraft
     personalOverrides: CurrentPersonalOverrideV1[] = [];
   const teamIds = new Set<string>();
   for (const rule of draft.rules) {
-    if (rule.context !== "tool.action" && rule.context !== "tool.builtin") throw new TypeError("Current source projection supports action and built-in tool contexts only.");
+    if (!["tool.action", "tool.builtin", "api.route", "resource.access"].includes(rule.context)) throw new TypeError("Current source projection does not support this context.");
     if (rule.context === "tool.builtin" && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Built-in tool rules do not support content matchers.");
     if (rule.matcherGroups.some((group) => group.mode !== "all")) throw new TypeError("Current source projection supports all matcher groups only.");
     if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length || rule.approval) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
@@ -30,7 +30,7 @@ export function projectActionDraftToCurrentSnapshot(draft: NormalizedPolicyDraft
     const common = {
       id: rule.ruleId,
       organizationId,
-      authorizationKind: rule.context as "tool.action" | "tool.builtin",
+      authorizationKind: rule.context as "tool.action" | "tool.builtin" | "api.route" | "resource.access",
       ...target,
       mode: rule.effect,
       paramMatchers,

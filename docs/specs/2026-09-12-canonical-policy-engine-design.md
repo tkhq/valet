@@ -156,6 +156,16 @@ TKMS and TVC have different roles:
 - Internal UMP is not the stable Valet API for this work.
 - A future TKMS integration can co-sign a decision, hold a policy-admin key, hold an execution key, or provide consensus approval. The evaluator contract does not depend on UMP or on a TKMS activity shape.
 
+### Route and resource enforcement
+
+The API builds a versioned descriptor registry from every authenticated Hono route before it serves traffic. Each descriptor uses the mounted route template. Raw URLs, query strings, headers, bodies, and content do not enter policy input. The middleware runs after authentication and before route handlers. It persists the `api.route` decision first. For registered resource surfaces, it then persists an independent `resource.access` decision. Both decisions must allow the operation.
+
+The resource registry covers repositories, secrets, policies, workflows, artifacts, sessions, and assistants. It assigns stable action IDs to each supported operation. Unknown route templates, methods, resource kinds, operations, evaluator results, and obligations fail closed. Health, readiness, authentication, verified webhooks, static assets, and PR 12 sandbox or credential callbacks have explicit non-policy classifications.
+
+Authenticated route and resource checks use an allow baseline. Organization and team rules can narrow that baseline by exact action, service, or risk. Route and resource kinds remain separate from tool and workflow action kinds. PR 10 releases ignore route and resource rows during rollback. A PR 11 release migration rebuilds structured or authored bundles through immutable lineage before activation.
+
+Route and resource decisions support result limits, field masks, read-only constraints, and response redactions. The host composes route and resource obligations by the strictest compatible value. It denies incompatible masks and unknown obligations before dispatch. The host applies output obligations before it returns JSON. A redaction failure returns no unredacted response.
+
 ## Rego v1 compatibility and capability profile
 
 Rego v1 remains the canonical authoring language. Valet targets full Rego v1 syntax, language semantics, and pure built-in coverage. The first engine profile does not claim full compatibility until it passes the required corpus and built-in gates.
@@ -274,7 +284,7 @@ type AuthorizationKind =
   | "workflow.action"
   | "tool.builtin"
   | "plugin.entitlement"
-  | "route.access"
+  | "api.route"
   | "resource.access"
   | "delegation.create"
   | "agent.signal"
@@ -458,7 +468,7 @@ The registry covers these contexts:
 |---|---|---|
 | Tool and action | `tool.action`, `tool.builtin` | Service, fully qualified action, risk, parameter schema, plugin default, and tool class. The tool class distinguishes built-ins. |
 | Workflow | `workflow.action` | Definition, node, `workflowExecutionId`, owner, trigger, `appliesIn`, and workflow grant scope. |
-| Route and API | `route.access` | HTTP method, route ID, authenticated principal type, operation, and concealment requirement. |
+| Route and API | `api.route` | HTTP method, route ID, authenticated principal type, operation, and concealment requirement. |
 | Resource | `resource.access` | Resource type, stable ID, owner, tenant, visibility, requested operation, and query obligation. |
 | Entitlement | `plugin.entitlement` | Plugin, instance availability, organization mode, team set, and feature operation. |
 | Delegation and child session | `delegation.create`, `agent.signal` | Parent, child, edge type, target owner, repository, model tier, hop count, and inherited authority. The edge type distinguishes agent signals. |

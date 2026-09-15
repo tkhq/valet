@@ -286,7 +286,7 @@ PR 7a adds the reviewed in-memory builder and fixture preview provider. It adds 
 **Acceptance checks**
 
 - Each `AuthorizationKind` maps to one descriptor: `tool.action` and `tool.builtin` use Tool and action, with tool class distinguishing built-ins.
-- `workflow.action` uses Workflow. `route.access` uses Route and API. `resource.access` uses Resource. `plugin.entitlement` uses Entitlement.
+- `workflow.action` uses Workflow. `api.route` uses Route and API. `resource.access` uses Resource. `plugin.entitlement` uses Entitlement.
 - `delegation.create` and `agent.signal` use Delegation and child session, with edge type distinguishing signals.
 - `sandbox.capability` uses Sandbox capability. `credential.use` and `credential.delegate` use Credential. `egress.connect` uses Egress.
 - Common fields stay generic while context-specific fields and operators come from capability schemas.

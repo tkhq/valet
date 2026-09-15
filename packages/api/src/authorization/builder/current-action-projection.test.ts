@@ -95,7 +95,7 @@ describe("browser draft to current source contract", () => {
   it.each(["workflow.action", "approval", "description", "obligations", "subjects"] as const)("rejects lossy %s projection", field => {
     const patch: Partial<PolicyRuleDraftV1> = field === "workflow.action" ? { context: field } : field === "approval" ? { approval: { tier: "human", replay: "once" } } : field === "description" ? { description: "lost" } : field === "obligations" ? { obligations: [{ type: "redact" }] } : { subjects: ["user"] };
     const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], ...patch }] };
-    expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action|action and built-in/i);
+    expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action|does not support/i);
   });
 
   it.each(PROJECTABLE_TARGETS)("projects every browser-valid target %j", target => {

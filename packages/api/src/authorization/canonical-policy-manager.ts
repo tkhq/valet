@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
 import { canonicalJson } from "../lib/canonical-json.js";
@@ -18,8 +18,8 @@ export type ActionPluginByService = ReadonlyMap<string, { plugin: ValetPlugin; a
 
 export async function currentPolicySnapshot(db: AppQueryable, organizationId: string, plugins: ActionPluginByService): Promise<CurrentPolicySourceSnapshotV1> {
   const [policyRows, overrideRows, teamRows] = await Promise.all([
-    db.select().from(actionPolicies).where(and(eq(actionPolicies.orgId, organizationId), eq(actionPolicies.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND))),
-    db.select().from(actionPolicyOverrides).where(and(eq(actionPolicyOverrides.orgId, organizationId), eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND))),
+    db.select().from(actionPolicies).where(and(eq(actionPolicies.orgId, organizationId), inArray(actionPolicies.authorizationKind, [ACTION_POLICY_AUTHORIZATION_KIND, "api.route", "resource.access"]))),
+    db.select().from(actionPolicyOverrides).where(and(eq(actionPolicyOverrides.orgId, organizationId), inArray(actionPolicyOverrides.authorizationKind, [ACTION_POLICY_AUTHORIZATION_KIND, "api.route", "resource.access"]))),
     db.select({ id: teams.id }).from(teams).where(eq(teams.orgId, organizationId)),
   ]);
   const existingTeamIds = new Set(teamRows.map((row) => row.id));

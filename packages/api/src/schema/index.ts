@@ -1441,7 +1441,7 @@ export const actionPolicies = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    authorizationKind: text("authorization_kind", { enum: ["tool.action", "tool.builtin"] }).notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
+    authorizationKind: text("authorization_kind", { enum: ["tool.action", "tool.builtin", "api.route", "resource.access"] }).notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
     principalType: text("principal_type", { enum: ["org", "user", "team"] }).notNull(),
     principalId: text("principal_id").notNull(),
     service: text("service"),
@@ -1513,7 +1513,7 @@ export const actionPolicyOverrides = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    authorizationKind: text("authorization_kind", { enum: ["tool.action", "tool.builtin"] }).notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
+    authorizationKind: text("authorization_kind", { enum: ["tool.action", "tool.builtin", "api.route", "resource.access"] }).notNull().default(ACTION_POLICY_AUTHORIZATION_KIND),
     userId: text("user_id").notNull(),
     service: text("service"),
     actionId: text("action_id"),

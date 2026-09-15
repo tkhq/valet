@@ -13,7 +13,7 @@ export interface CurrentPolicyMatcherV1 {
 
 export interface CurrentPolicyTargetV1 {
   /** Version 1 snapshots omit this field and canonicalize to tool.action. */
-  readonly authorizationKind?: "tool.action" | "tool.builtin";
+  readonly authorizationKind?: "tool.action" | "tool.builtin" | "api.route" | "resource.access";
   readonly service?: string;
   readonly actionId?: string;
   readonly riskLevel?: RiskLevel;
