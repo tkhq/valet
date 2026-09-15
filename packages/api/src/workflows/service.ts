@@ -30,7 +30,7 @@ import type { CanonicalPolicyBundleManager } from "../authorization/canonical-po
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import type { ResourceAuthorizationContext, ResourceAuthorizationPort } from "../authorization/resource-authorization.js";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
-import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
 import {
   actionInvocations,
   contentSources,
@@ -515,7 +515,7 @@ export function canAccessTriggerRowInScope(
  * an id that arrives in a query string is a request, not a permission.
  */
 
-async function authorizeWorkflowResource(
+export async function authorizeWorkflowResource(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   operation: "list" | "read" | "create" | "update" | "delete" | "execute",
@@ -1116,30 +1116,47 @@ export async function deleteWorkflowDefinition(
   const metadata = await workflowResourceMetadata(deps, owner, id);
   if (!metadata) return "not_found";
   await authorizeWorkflowResource(deps, owner, "delete", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
-  return deps.db.transaction(async (tx) => {
-    const [candidate] = await tx.select().from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
-    if (!candidate) return "not_found";
-    const row = candidate.ownerType === "team" ? candidate : await ownedDefinitionRow(tx, owner, id);
-    if (!row) return "not_found";
-    if (row.ownerType === "team") {
-      // A machine principal must not learn another team's resource or request IDs.
-      if (owner.principal?.type === "team" && owner.principal.id !== row.ownerId) return "not_found";
-      if (owner.principal?.type === "team" || !(await lockTeamDeletionAccess(tx, owner, row.ownerId))) {
-        throw new TeamAdminRequiredError(row.ownerId, "workflow", id);
-      }
+  return deps.db.transaction((tx) => deleteWorkflowDefinitionInTransaction({ ...deps, db: tx }, owner, id, true));
+}
+
+/** Delete from a transaction that has already authorized this exact resource. */
+export async function deleteWorkflowDefinitionInTransaction(
+  deps: Omit<WorkflowServiceDeps, "db"> & { db: AppTx },
+  owner: WorkflowOwner,
+  id: string,
+  resourceAuthorized = false,
+): Promise<DeleteWorkflowResult> {
+  // A deletion-request approval already holds the team and resource locks.
+  // Its manager can be an org admin outside the team roster, so that trusted
+  // transaction must not reapply the member-only lookup before the service
+  // checks its own team-admin boundary below.
+  const [metadata] = await deps.db.select({ id: workflowDefinitions.id, ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, updatedAt: workflowDefinitions.updatedAt }).from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
+  if (!metadata) return "not_found";
+  if (!resourceAuthorized) {
+    await authorizeWorkflowResource(deps, owner, "delete", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
+  }
+  const [candidate] = await deps.db.select().from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
+  if (!candidate) return "not_found";
+  const row = candidate.ownerType === "team" ? candidate : await ownedDefinitionRow(deps.db, owner, id);
+  if (!row) return "not_found";
+  if (row.ownerType === "team") {
+    // A machine principal must not learn another team's resource or request IDs.
+    if (owner.principal?.type === "team" && owner.principal.id !== row.ownerId) return "not_found";
+    if (owner.principal?.type === "team" || !(await lockTeamDeletionAccess(deps.db, owner, row.ownerId))) {
+      throw new TeamAdminRequiredError(row.ownerId, "workflow", id);
     }
-    // Deleting the file is the delete, exactly as editing the file is the
-    // edit. A delete here would come back on the next sync anyway.
-    await refuseRepoOwned(tx, row);
+  }
+  // Deleting the file is the delete, exactly as editing the file is the
+  // edit. A delete here would come back on the next sync anyway.
+  await refuseRepoOwned(deps.db, row);
 
-    const active = await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
-      eq(workflowRuns.workflowId, id), inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
-    )).limit(1);
-    if (active.length > 0) return "has_active_runs";
+  const active = await deps.db.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+    eq(workflowRuns.workflowId, id), inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
+  )).limit(1);
+  if (active.length > 0) return "has_active_runs";
 
-    await purgeWorkflowRows(tx, owner.orgId, id);
-    return "deleted";
-  });
+  await purgeWorkflowRows(deps.db, owner.orgId, id);
+  return "deleted";
 }
 
 /**
