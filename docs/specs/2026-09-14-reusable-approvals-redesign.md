@@ -91,6 +91,8 @@ The durable action MUST show a confirmation. The confirmation MUST name the prin
 
 Slack, Telegram, and agent approval callbacks MUST reject or omit a durable scope. They continue to submit approve-once or deny only.
 
+Existing `once`, `run`, and `always` behavior and policy semantics remain unchanged. These scopes MAY use the narrow arbitration boundary for their signals. Only the new durable grant intent participates in grant-plus-signal atomicity. This specification does not redesign `run` or `always` persistence, and it does not remove either scope.
+
 A durable grant is node-scoped. It does not cover a whole workflow definition. Several exact argument variants MAY coexist for one node. Creating one variant MUST NOT supersede another variant on the same node.
 
 ### Principals
@@ -242,7 +244,7 @@ Revoked rows release their slots. Retained rows are never overwritten. A revoked
 
 An expired row still owns its live slot until a reapproval supersedes it. Reapproval after expiry MUST write `superseded_at` and `superseded_by` on the expired row, then insert a new row. Both changes occur in the resolution transaction.
 
-An exact retry MUST replay before any slot mutation. A second already-parked gate that matches an existing unexpired live grant MUST select that grant and signal success without extending `expires_at`.
+An exact retry MUST replay before any slot mutation. If another gate created a matching live grant after this gate parked, the human still submits a resolution. The atomic port MUST select or reuse that grant and signal success. No background sweep resolves the gate, and reuse MUST NOT extend `expires_at`.
 
 The fixed expiry is `created_at + 90 days`. No caller can choose another duration.
 
@@ -275,11 +277,14 @@ A retry comparison MUST normalize and compare the complete payload:
 - Note.
 - Channel.
 - Scope.
-- Selected or reused grant ID.
 
-The port MAY also store internal binding evidence needed to audit the choice. That evidence must match for replay.
+The selected or reused grant ID is stored replay output. It is not caller-payload comparison input.
 
-The same signal ID and exact normalized payload returns the stored success. The same signal ID with any differing field returns conflict. Omitted optional values and explicit null values use one documented normalization.
+If the deterministic signal exists, an exact caller-payload replay MUST return stored success before live reauthorization. Final wake and execution revalidation remain authoritative.
+
+Any internal binding evidence used for replay MUST be read from and compared with the stored resolution record. It MUST NOT be recomputed from changed live state.
+
+The same signal ID with any differing comparison input returns conflict. Omitted optional values and explicit null values use one documented normalization.
 
 The port MUST check exact retry before it revokes, supersedes, inserts, or claims a live slot. An injected failure at any point rolls back both grant and signal facts.
 
@@ -303,7 +308,8 @@ A workflow tool invocation uses this order:
 6. If policy is allow, invoke without a durable grant.
 7. If policy is `require_approval`, resolve only credential binding metadata.
 8. Look up one exact durable variant.
-9. If no valid variant exists, park an approve-once gate with durable eligibility metadata.
+9. If an exact valid variant passes all final checks, invoke without parking.
+10. If no valid variant exists, park an approve-once gate with durable eligibility metadata.
 
 Dynamic discovery that needs a credential cannot pass step 2 in V1. The run parks as approve-once with a finite durable-ineligibility reason when policy requires approval.
 
@@ -313,7 +319,7 @@ At durable approval time, the server MUST re-read and authorize every binding. I
 
 A live deny refuses the resolution and writes neither grant nor signal. A live allow resolves without creating a durable grant because no approval is needed. A `require_approval` decision can create or select the exact grant.
 
-Team creation checks an actual locked `team_members` admin row and captures its epoch. The transaction must prevent concurrent role change or removal from invalidating the authorization before commit.
+Team creation checks an actual locked `team_members` admin row and captures its epoch. The transaction MUST prevent concurrent role change or removal from invalidating the authorization before commit.
 
 ### Wake and reuse
 
@@ -394,6 +400,8 @@ A gate parked before deployment has no complete binding. It remains approve-once
 ## Schema readiness and retention
 
 Implementation edits `packages/api/migrations/pg/0000_app.sql` in place and adds matching `SCHEMA_REPAIRS` entries in `packages/api/src/lib/drizzle.ts`. This follows Valet's pre-1.0 convention.
+
+The credential incarnation column MUST use `DEFAULT gen_random_uuid()`. Its repair MUST backfill existing credential rows with `gen_random_uuid()`. Credential, policy, and override revision columns MUST use `DEFAULT 1`, and their repairs MUST backfill existing rows with `1`. Each matching `SCHEMA_REPAIRS` entry MUST be additive, idempotent, and rollback-safe. The team membership epoch uses the equivalent database-default and backfill rule defined above.
 
 Startup migrations and schema repairs are the only readiness owner. If a repair fails, the API remains unready or startup fails. A request MUST NOT query catalogs for feature readiness. The gate state MUST NOT contain `schema repair missing`.
 
@@ -490,8 +498,8 @@ Each row is a required test. Store-level concurrency tests use a real PostgreSQL
 | NODE-5 | One node renders several exact argument variants | Variants coexist; no node-wide supersession occurs. |
 | KEY-1 | HMAC organization, domain, algorithm, or format differs | Digest does not match. |
 | KEY-2 | Key rotates or format is unknown | Reuse fails closed; no internal digest is returned. |
-| TX-1 | Same signal and exact normalized payload retry | Port returns replay and performs no slot mutation. |
-| TX-2 | Same signal with different decision, actor, note, channel, scope, or grant | Port returns conflict and performs no losing mutation. |
+| TX-1 | Same signal and exact normalized caller-payload retry | Port returns stored success before live reauthorization and performs no slot mutation. |
+| TX-2 | Same signal with different decision, actor, note, channel, or scope | Port returns conflict and performs no losing mutation. |
 | TX-3 | Concurrent approve and deny | Exactly one commits; the other conflicts. |
 | TX-4 | Failure is injected after grant selection or insertion and before signal insertion | Transaction rolls back every grant and signal mutation. |
 | TX-5 | Failure is injected after signal insertion and before commit | Transaction rolls back every grant and signal mutation. |
