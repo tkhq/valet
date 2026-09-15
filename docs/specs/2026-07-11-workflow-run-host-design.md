@@ -274,3 +274,16 @@ claim of a healthy long-lived run too. `WorkflowFenceError` never counts
 clears the count, so transient failures keep the original posture. The
 counter is process-local by design; a run that keeps failing across
 restarts re-earns its strikes in minutes.
+
+**Run origin resolution (2026-09-14).** A run can record the assistant
+conversation that started it: `params.origin` holds the assistant session
+id and the thread id. `promptOrchestrator` resolved that session id with a
+prefix parse, which accepts `assistant:*` only. Assistants migrated from
+`orchestrator_identities` keep an `orchestrator:*` session id, so every
+orchestrator node of a run started from such a thread threw before it
+dispatched. The throw poisoned the drive, and the run failed after the
+strike cap with no node diagnostic; a retry and every child run inherited
+the same origin and failed the same way. The origin now resolves through
+the assistants table (`loadAssistantBySessionId`), which is the authority
+on which session ids belong to an assistant. The org, owner, and archived
+checks are unchanged.

@@ -16,7 +16,7 @@ import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { assistants, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -402,6 +402,45 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
     });
     expect(receipt).toMatchObject({ sessionId: assistant.sessionId, threadId: originThread.id });
+  });
+
+  it("reuses a legacy orchestrator-prefixed origin session", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    // Rows migrated from `orchestrator_identities` keep their legacy
+    // session id. The assistants table is the authority on which session
+    // ids are assistant sessions, so an origin must resolve through it.
+    const legacySessionId = `orchestrator:user:${LOCAL_USER.id}`;
+    await db.insert(assistants).values({
+      id: "legacy-assistant",
+      orgId: LOCAL_ORG.id,
+      ownerType: "user",
+      ownerId: LOCAL_USER.id,
+      sessionId: legacySessionId,
+      isDefault: false,
+      createdAt: Date.now(),
+    });
+    const session = await engineHost.assistantSessionFor(
+      "legacy-assistant",
+      { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id },
+      { sessionId: legacySessionId },
+    );
+    const originThread = await session.createThread("web:legacy-origin");
+    const runId = "wfrun_orch_legacy_origin";
+    await seedRun(api, runId, "wf_orch_legacy_origin", {
+      assistantSessionId: legacySessionId,
+      threadId: originThread.id,
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+
+    const receipt = await deps.promptOrchestrator("continue here", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    expect(receipt).toMatchObject({ sessionId: legacySessionId, threadId: originThread.id });
   });
 
   it("rejects a missing durable origin thread without creating a replacement", async () => {

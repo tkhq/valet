@@ -72,6 +72,7 @@ import { workflowDefinitions } from "../schema/index.js";
 import {
   ArchivedAssistantError,
   loadAssistant,
+  loadAssistantBySessionId,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
@@ -471,22 +472,23 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
 
       // An explicit conversation origin takes precedence over definition
       // routing. Older and unattended runs keep the snapshot/default route.
-      const originAssistantId = ctx.origin
-        ? parseAssistantSessionId(ctx.origin.assistantSessionId)
-        : null;
-      if (ctx.origin && !originAssistantId) {
-        throw new Error(`workflow engine-deps: invalid origin assistant session: ${ctx.origin.assistantSessionId}`);
-      }
-      const assistant = originAssistantId
-        ? await loadAssistant(opts.db, originAssistantId)
+      //
+      // The origin resolves through the assistants table, never through an
+      // id prefix: rows migrated from `orchestrator_identities` keep legacy
+      // `orchestrator:*` session ids that no prefix parse recognizes
+      // (`assistants/service.ts#loadAssistantBySessionId`). A prefix parse
+      // here failed every orchestrator node of every run such a thread
+      // started. The lookup is by session id, so the loaded row always
+      // carries the origin's own session id.
+      const assistant = ctx.origin
+        ? await loadAssistantBySessionId(opts.db, ctx.origin.assistantSessionId)
         : ctx.assistantId
           ? await loadAssistant(opts.db, ctx.assistantId)
           : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
       const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
       const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
       if (!assistant || assistant.orgId !== ctx.orgId ||
-          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor)) ||
-          (ctx.origin && assistant.sessionId !== ctx.origin.assistantSessionId)) {
+          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor))) {
         throw new Error("Workflow orchestrator is unavailable. Select an orchestrator owned by this workflow's workspace.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
