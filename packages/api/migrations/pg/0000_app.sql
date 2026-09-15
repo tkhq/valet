@@ -1579,6 +1579,17 @@ CREATE TABLE IF NOT EXISTS "policy_authoring_revisions" (
   FOREIGN KEY ("org_id","scope_key","document_id") REFERENCES "policy_authoring_documents"("org_id","scope_key","id")
 );
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION reject_policy_authoring_revision_update() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'policy_authoring_revisions rows are immutable; insert a new revision instead';
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS policy_authoring_revisions_immutable ON policy_authoring_revisions;
+--> statement-breakpoint
+CREATE TRIGGER policy_authoring_revisions_immutable BEFORE UPDATE ON policy_authoring_revisions
+FOR EACH ROW EXECUTE FUNCTION reject_policy_authoring_revision_update();
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "policy_authoring_reviews" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "scope_key" text NOT NULL, "document_id" text NOT NULL,
   "revision" integer NOT NULL, "review_cycle" integer NOT NULL, "normalized_identity" text NOT NULL,

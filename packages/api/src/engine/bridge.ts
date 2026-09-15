@@ -46,7 +46,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
 }
 
 function gateHumanContext(context: Record<string, unknown> | undefined): Record<string, string> | undefined {
-  if (context?.service !== "builtin" || !context.args || typeof context.args !== "object" || Array.isArray(context.args)) return undefined;
+  if (typeof context?.service !== "string" || !context.args || typeof context.args !== "object" || Array.isArray(context.args)) return undefined;
   const values = Object.entries(context.args as Record<string, unknown>).slice(0, 8).map(([key, value]) => [key.slice(0, 60), typeof value === "string" ? value.slice(0, 480) : JSON.stringify(value).slice(0, 480)]);
   return values.length ? Object.fromEntries(values) : undefined;
 }

@@ -20,7 +20,7 @@ import type {
   ToolDef,
   ToolResult,
 } from "./types.js";
-import { isDecisionGateExpired } from "./decision-gate.js";
+import { canonicalHumanContext, isDecisionGateExpired } from "./decision-gate.js";
 import { encodeToolOutput } from "./tool-output.js";
 import type { SafeParameterProjectionV1 } from "./authorization/action-adapters.js";
 
@@ -409,21 +409,18 @@ function approvalGateRequest(
   summary: string,
   resumeKey: string,
 ): DecisionGateRequest {
+  const bounded = canonicalHumanContext({ service: entry.service, tool_id: actionId, summary, riskLevel: entry.action.riskLevel, args: args ?? {} })!;
+  const preview = bounded.args && typeof bounded.args === "object" && !Array.isArray(bounded.args) ? bounded.args as Record<string, unknown> : {};
+  const boundedSummary = typeof bounded.summary === "string" ? bounded.summary : "Approval requested";
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: `${boundedSummary}\n\ntool_id=${actionId}\nargs=${stableJson(preview)}`,
     resumeKey,
     dedupeKey: qualifiedId(entry),
-    context: {
-      riskLevel: entry.action.riskLevel,
-      service: entry.service,
-      tool_id: actionId,
-      args,
-      // The one-line human summary, separate from the machine-readable body
-      // above. Channel deliverers render it instead of the tool_id/args dump.
-      summary,
-    },
+    // Persist only the bounded structured human preview. Policy evaluation,
+    // proof, execution, and audit continue to use the validated raw args.
+    context: bounded,
   };
 }
 

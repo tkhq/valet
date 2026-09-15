@@ -4,9 +4,12 @@ import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { pgDbFromPool } from "@valet/store-postgres";
 import { buildAppDb, applyAppMigrations } from "../lib/drizzle.js";
-import { actionPolicies, orgs, policyActiveBundles, policySourceBundles } from "../schema/index.js";
+import { orgs, policyActiveBundles, policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles } from "../schema/index.js";
 import type { CanonicalSourceBundle } from "./bundles/types.js";
 import { CanonicalPolicyBundleManager, ensureCanonicalPolicyReadiness } from "./canonical-policy-manager.js";
+import { buildCurrentPolicySource } from "./bundles/current-policy-source.js";
+import { projectActionDraftToCurrentSnapshot } from "./builder/current-action-projection.js";
+import { normalizePolicyDraft } from "./builder/model.js";
 
 function barrier() {
   let release = () => {};
@@ -62,11 +65,17 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("canonical release migration tra
       }
       await ensureCanonicalPolicyReadiness(first);
       expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(beforeFutureRows);
-      await db.insert(actionPolicies).values({ id: "authored", orgId: "org-b", principalType: "org", principalId: "org-b", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
-      const authored = await first.buildCurrent("org-b");
-      await db.delete(actionPolicies).where(eq(actionPolicies.id, "authored"));
+      const normalized = normalizePolicyDraft({ schemaVersion: 1, draftId: "published", rules: [{ ruleId: "authored", context: "tool.action", authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": "gmail.send" }, matcherGroups: [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }], effect: "deny", appliesIn: "any", obligations: [], description: "", metadata: {} }] });
+      const oldSnapshot = projectActionDraftToCurrentSnapshot(normalized, "org-b");
+      const authoredBuilt = buildCurrentPolicySource({ ...oldSnapshot, builtinDefaults: [] });
+      const authored = { built: authoredBuilt, identity: await first.runtime.run<import("./bundles/types.js").ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: authoredBuilt.bundle }) };
       await first.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });
+      const validation = { valid: true, publishable: true, issues: [] };
+      await db.insert(policyAuthoringDocuments).values({ id: "published", orgId: "org-b", scopeKey: "org", status: "approved_for_publication", revision: 1, stateVersion: 3, reviewCycle: 1, normalizedIdentity: normalized.normalizedIdentity, sourceBundleDigest: authored.identity.sourceBundleDigest, policyDigest: authored.identity.policyDigest, engineDigest: authored.identity.engineDigest, validationSummary: validation, createdBy: "author", createdAt: 2, updatedAt: 3 });
+      await db.insert(policyAuthoringRevisions).values({ orgId: "org-b", scopeKey: "org", documentId: "published", revision: 1, draft: normalized, normalizedIdentity: normalized.normalizedIdentity, bundle: authored.built.bundle, sourceBundleDigest: authored.identity.sourceBundleDigest, policyDigest: authored.identity.policyDigest, engineDigest: authored.identity.engineDigest, validationSummary: validation, createdBy: "author", createdAt: 2 });
+      await db.insert(policyAuthoringReviews).values({ id: "review", orgId: "org-b", scopeKey: "org", documentId: "published", revision: 1, reviewCycle: 1, normalizedIdentity: normalized.normalizedIdentity, sourceBundleDigest: authored.identity.sourceBundleDigest, policyDigest: authored.identity.policyDigest, engineDigest: authored.identity.engineDigest, reviewerId: "reviewer", verdict: "approve", requestId: "request", createdAt: 3 });
 
+      await db.insert(policyAuthoringAudit).values({ id: "audit", orgId: "org-b", scopeKey: "org", teamId: null, documentId: "published", revision: 1, stateVersion: 1, reviewCycle: null, actorId: "author", operation: "create", idempotencyKey: "audit", priorState: null, newState: "draft", sourceBundleDigest: authored.identity.sourceBundleDigest, policyDigest: authored.identity.policyDigest, engineDigest: authored.identity.engineDigest, createdAt: 2 });
       const before = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
       const originals = new Map<string, CanonicalSourceBundle>();
       for (const pointer of before) {

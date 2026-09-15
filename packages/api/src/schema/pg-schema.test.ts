@@ -1081,6 +1081,8 @@ describe("pg app schema + migrations", () => {
       await expect(db.query(`INSERT INTO policy_authoring_documents (id,org_id,scope_key,team_id,status,revision,state_version,normalized_identity,validation_summary,created_by,created_at,updated_at) VALUES ('bad','o','org','t','live',1,1,'i','{}','u',1,1)`)).rejects.toThrow();
       await db.query(`INSERT INTO policy_authoring_documents (id,org_id,scope_key,status,revision,state_version,normalized_identity,validation_summary,created_by,created_at,updated_at) VALUES ('doc','o','org','draft',1,1,'i','{}','u',1,1)`);
       await expect(db.query(`INSERT INTO policy_authoring_revisions (org_id,scope_key,document_id,revision,draft,normalized_identity,validation_summary,created_by,created_at) VALUES ('other','org','doc',1,'{}','i','{}','u',1)`)).rejects.toThrow();
+      await db.query(`INSERT INTO policy_authoring_revisions (org_id,scope_key,document_id,revision,draft,normalized_identity,validation_summary,created_by,created_at) VALUES ('o','org','doc',1,'{}','i','{}','u',1)`);
+      await expect(db.query(`UPDATE policy_authoring_revisions SET created_by='other' WHERE document_id='doc'`)).rejects.toThrow(/immutable/);
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 

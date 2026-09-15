@@ -142,7 +142,9 @@ interface SchemaRepair {
   probe:
     | { kind: "column"; table: string; column: string }
     | { kind: "table"; table: string }
-    | { kind: "index"; index: string };
+    | { kind: "index"; index: string }
+    | { kind: "trigger"; trigger: string }
+    | { kind: "function"; function: string };
   sql: string;
   /**
    * A one-shot data statement run in the same transaction, right after
@@ -287,7 +289,9 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
 
   { describe: "policy authoring documents table", probe: { kind: "table", table: "policy_authoring_documents" }, sql: "CREATE TABLE IF NOT EXISTS \"policy_authoring_documents\" (\n  \"id\" text NOT NULL, \"org_id\" text NOT NULL, \"scope_key\" text NOT NULL, \"team_id\" text,\n  \"status\" text NOT NULL DEFAULT 'draft', \"revision\" integer NOT NULL, \"state_version\" integer NOT NULL, \"review_cycle\" integer,\n  \"normalized_identity\" text NOT NULL, \"source_bundle_digest\" text, \"policy_digest\" text, \"engine_digest\" text,\n  \"validation_summary\" jsonb NOT NULL, \"created_by\" text NOT NULL, \"created_at\" bigint NOT NULL, \"updated_at\" bigint NOT NULL,\n  PRIMARY KEY (\"id\"), CONSTRAINT \"policy_authoring_documents_tenant_id\" UNIQUE (\"org_id\",\"scope_key\",\"id\"),\n  CONSTRAINT \"policy_authoring_documents_scope\" CHECK ((\"team_id\" IS NULL AND \"scope_key\"='org') OR \"scope_key\"='team:'||\"team_id\"),\n  CONSTRAINT \"policy_authoring_documents_status\" CHECK (\"status\" IN ('draft','in_review','approved_for_publication')),\n  CONSTRAINT \"policy_authoring_documents_revision\" CHECK (\"revision\">0 AND \"state_version\">0)\n);" },
   { describe: "policy authoring revisions table", probe: { kind: "table", table: "policy_authoring_revisions" }, sql: "CREATE TABLE IF NOT EXISTS \"policy_authoring_revisions\" (\n  \"org_id\" text NOT NULL, \"scope_key\" text NOT NULL, \"document_id\" text NOT NULL, \"revision\" integer NOT NULL,\n  \"draft\" jsonb NOT NULL, \"normalized_identity\" text NOT NULL, \"bundle\" jsonb, \"source_bundle_digest\" text,\n  \"policy_digest\" text, \"engine_digest\" text, \"validation_summary\" jsonb NOT NULL, \"created_by\" text NOT NULL, \"created_at\" bigint NOT NULL,\n  PRIMARY KEY(\"org_id\",\"scope_key\",\"document_id\",\"revision\"),\n  FOREIGN KEY (\"org_id\",\"scope_key\",\"document_id\") REFERENCES \"policy_authoring_documents\"(\"org_id\",\"scope_key\",\"id\")\n);" },
-  { describe: "policy authoring reviews table", probe: { kind: "table", table: "policy_authoring_reviews" }, sql: "CREATE TABLE IF NOT EXISTS \"policy_authoring_reviews\" (\n  \"id\" text PRIMARY KEY NOT NULL, \"org_id\" text NOT NULL, \"scope_key\" text NOT NULL, \"document_id\" text NOT NULL,\n  \"revision\" integer NOT NULL, \"review_cycle\" integer NOT NULL, \"normalized_identity\" text NOT NULL,\n  \"source_bundle_digest\" text NOT NULL, \"policy_digest\" text NOT NULL, \"engine_digest\" text NOT NULL,\n  \"reviewer_id\" text NOT NULL, \"verdict\" text NOT NULL, \"request_id\" text NOT NULL, \"created_at\" bigint NOT NULL,\n  CONSTRAINT \"policy_authoring_reviews_verdict\" CHECK (\"verdict\" IN ('approve','reject')),\n  FOREIGN KEY (\"org_id\",\"scope_key\",\"document_id\",\"revision\") REFERENCES \"policy_authoring_revisions\"(\"org_id\",\"scope_key\",\"document_id\",\"revision\")\n);" },
+
+  { describe: "policy authoring revision immutability function", probe: { kind: "function", function: "reject_policy_authoring_revision_update" }, sql: "CREATE FUNCTION reject_policy_authoring_revision_update() RETURNS trigger AS $ BEGIN RAISE EXCEPTION 'policy_authoring_revisions rows are immutable; insert a new revision instead'; END; $ LANGUAGE plpgsql" },
+  { describe: "policy authoring revisions immutability trigger", probe: { kind: "trigger", trigger: "policy_authoring_revisions_immutable" }, sql: "CREATE TRIGGER policy_authoring_revisions_immutable BEFORE UPDATE ON policy_authoring_revisions FOR EACH ROW EXECUTE FUNCTION reject_policy_authoring_revision_update()" },  { describe: "policy authoring reviews table", probe: { kind: "table", table: "policy_authoring_reviews" }, sql: "CREATE TABLE IF NOT EXISTS \"policy_authoring_reviews\" (\n  \"id\" text PRIMARY KEY NOT NULL, \"org_id\" text NOT NULL, \"scope_key\" text NOT NULL, \"document_id\" text NOT NULL,\n  \"revision\" integer NOT NULL, \"review_cycle\" integer NOT NULL, \"normalized_identity\" text NOT NULL,\n  \"source_bundle_digest\" text NOT NULL, \"policy_digest\" text NOT NULL, \"engine_digest\" text NOT NULL,\n  \"reviewer_id\" text NOT NULL, \"verdict\" text NOT NULL, \"request_id\" text NOT NULL, \"created_at\" bigint NOT NULL,\n  CONSTRAINT \"policy_authoring_reviews_verdict\" CHECK (\"verdict\" IN ('approve','reject')),\n  FOREIGN KEY (\"org_id\",\"scope_key\",\"document_id\",\"revision\") REFERENCES \"policy_authoring_revisions\"(\"org_id\",\"scope_key\",\"document_id\",\"revision\")\n);" },
   { describe: "policy authoring operations table", probe: { kind: "table", table: "policy_authoring_operations" }, sql: "CREATE TABLE IF NOT EXISTS \"policy_authoring_operations\" (\n  \"org_id\" text NOT NULL, \"scope_key\" text NOT NULL, \"actor_id\" text NOT NULL, \"operation\" text NOT NULL,\n  \"document_key\" text NOT NULL, \"document_id\" text, \"idempotency_key\" text NOT NULL, \"payload_digest\" text NOT NULL, \"response\" jsonb,\n  \"created_at\" bigint NOT NULL, PRIMARY KEY(\"org_id\",\"scope_key\",\"actor_id\",\"operation\",\"document_key\",\"idempotency_key\"),\n  CONSTRAINT \"policy_authoring_operations_document\" CHECK ((\"operation\"='create' AND \"document_key\"='create' AND \"document_id\" IS NULL) OR (\"operation\"<>'create' AND \"document_key\"=\"document_id\")),\n  FOREIGN KEY (\"org_id\",\"scope_key\",\"document_id\") REFERENCES \"policy_authoring_documents\"(\"org_id\",\"scope_key\",\"id\")\n);" },
   { describe: "policy authoring audit table", probe: { kind: "table", table: "policy_authoring_audit" }, sql: "CREATE TABLE IF NOT EXISTS \"policy_authoring_audit\" (\n  \"id\" text PRIMARY KEY NOT NULL, \"org_id\" text NOT NULL, \"scope_key\" text NOT NULL, \"team_id\" text, \"document_id\" text NOT NULL,\n  \"revision\" integer NOT NULL, \"state_version\" integer NOT NULL, \"review_cycle\" integer, \"actor_id\" text NOT NULL,\n  \"operation\" text NOT NULL, \"idempotency_key\" text NOT NULL, \"prior_state\" text, \"new_state\" text NOT NULL,\n  \"source_bundle_digest\" text, \"policy_digest\" text, \"engine_digest\" text, \"created_at\" bigint NOT NULL,\n  FOREIGN KEY (\"org_id\",\"scope_key\",\"document_id\",\"revision\") REFERENCES \"policy_authoring_revisions\"(\"org_id\",\"scope_key\",\"document_id\",\"revision\")\n);" },
   { describe: "policy authoring documents list index", probe: { kind: "index", index: "policy_authoring_documents_list" }, sql: 'CREATE INDEX IF NOT EXISTS "policy_authoring_documents_list" ON "policy_authoring_documents" ("org_id","scope_key","id")' },
@@ -1419,10 +1423,14 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   const columnTables = new Set<string>();
   const tableNames: string[] = [];
   const indexNames: string[] = [];
+  const triggerNames: string[] = [];
+  const functionNames: string[] = [];
   for (const { probe } of SCHEMA_REPAIRS) {
     if (probe.kind === "column") columnTables.add(probe.table);
     else if (probe.kind === "table") tableNames.push(probe.table);
-    else indexNames.push(probe.index);
+    else if (probe.kind === "index") indexNames.push(probe.index);
+    else if (probe.kind === "trigger") triggerNames.push(probe.trigger);
+    else functionNames.push(probe.function);
   }
 
   const present = new Set<string>();
@@ -1452,9 +1460,22 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
     indexNames,
     (row) => `index:${String(row["indexname"])}`,
   );
+  await collect(
+    `SELECT tgname FROM pg_trigger
+     WHERE NOT tgisinternal
+       AND tgname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    triggerNames,
+    (row) => `trigger:${String(row["tgname"])}`,
+  );
+  await collect(
+    `SELECT proname FROM pg_proc
+     WHERE proname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    functionNames,
+    (row) => `function:${String(row["proname"])}`,
+  );
 
   const pending = SCHEMA_REPAIRS.filter(({ probe: p }) => {
-    const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
+    const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : p.kind === "index" ? `index:${p.index}` : p.kind === "trigger" ? `trigger:${p.trigger}` : `function:${p.function}`;
     return !present.has(key);
   });
   return tablesBeforeTheirColumns(pending);

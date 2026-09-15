@@ -106,7 +106,7 @@ async function executeAuthorizedBuiltin<TParams extends import("typebox").TSchem
     const display = builtinApprovalDisplay(def.name, params);
     let resolution: import("./types.js").DecisionResolution;
     try {
-      resolution = await ctx.requestDecision({ type: "approval", title: `Approve ${def.name}?`, body: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.`, resumeKey, dedupeKey, context: { tool_id: def.authorization.actionId, service: "builtin", riskLevel: def.authorization.riskLevel, args: display, summary: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.` } });
+      resolution = await ctx.requestDecision({ type: "approval", title: `Approve ${def.name}?`, body: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.`, resumeKey, dedupeKey, context: { service: "builtin", tool_id: def.authorization.actionId, summary: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.`, riskLevel: def.authorization.riskLevel, args: display } });
     } catch (error) {
       if (!isDecisionGateExpired(error)) throw error;
       input = { ...input, gateOrdinal: error.ordinal ?? input.gateOrdinal };

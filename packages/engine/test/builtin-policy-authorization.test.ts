@@ -26,10 +26,11 @@ describe("canonical built-in authorization", () => {
     expect(builtinDeliveryKey({ ...base, toolCallId: "call-a" })).not.toContain("CANARY_");
   });
   it("keeps omitted content only in bounded human display", () => {
-    const canary = "DISPLAY_CANARY_" + "x".repeat(1_000);
+    const canary = "DISPLAY_CANARY_" + "😀漢".repeat(200_000);
     const display = builtinApprovalDisplay("bash", { command: canary, timeout: 5 });
     expect(JSON.stringify(display)).toContain("DISPLAY_CANARY_");
-    expect(JSON.stringify(display).length).toBeLessThan(600);
+    expect(new TextEncoder().encode(JSON.stringify(display)).byteLength).toBeLessThan(600);
+    expect(JSON.stringify(display)).toContain("[truncated]");
     expect(JSON.stringify(projectBuiltinArguments({ command: canary, timeout: 5 }, builtinAuthorization("bash").projection.pointers))).not.toContain("DISPLAY_CANARY_");
   });
 

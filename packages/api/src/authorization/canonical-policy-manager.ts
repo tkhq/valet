@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
 import { canonicalJson } from "../lib/canonical-json.js";
-import { ACTION_POLICY_AUTHORIZATION_KIND, actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policyAuthoringDocuments, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles, runtimeGrants, teams } from "../schema/index.js";
+import { ACTION_POLICY_AUTHORIZATION_KIND, actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles, runtimeGrants, teams } from "../schema/index.js";
 import { buildCurrentPolicySource, standardNewOrganizationPolicySnapshot } from "./bundles/current-policy-source.js";
 import type { CurrentPolicySourceSnapshotV1 } from "./bundles/current-policy-types.js";
 import { SourceBundleHost } from "./bundles/host.js";
@@ -113,7 +113,10 @@ export function sameConcurrentReleaseTarget(
 /** Read-only policy builder bound to one database scope. Release migration
  * uses a transaction instance so every snapshot observes the locked state. */
 export class CanonicalPolicyBuildManager {
-  constructor(readonly db: AppQueryable, readonly plugins: ActionPluginByService, readonly runtime: WasmPolicyRuntime) {}
+  readonly host: SourceBundleHost;
+  constructor(readonly db: AppQueryable, readonly plugins: ActionPluginByService, readonly runtime: WasmPolicyRuntime) {
+    this.host = new SourceBundleHost(new PostgresSourceBundleStorage(db), runtime);
+  }
   async buildCurrent(organizationId: string) {
     const snapshot = await currentPolicySnapshot(this.db, organizationId, this.plugins);
     const built = buildCurrentPolicySource(snapshot);
@@ -262,9 +265,11 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
         const stored = (await tx.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, pointer.digest)).limit(1))[0];
         if (!stored) throw new Error(`Canonical policy bundle ${pointer.digest} is missing.`);
         const authored = await isRecordedCandidate(tx, pointer.orgId, pointer.digest);
-        const authoredRevision = authored ? await approvedAuthoredRevision(tx, this.runtime, pointer.orgId, pointer.digest) : undefined;
+        const authoredRevision = authored ? await approvedAuthoredRevision(tx, transactionManager.host, pointer.orgId, pointer.digest) : undefined;
+        if (authored && !authoredRevision) throw new Error(`Authored policy for ${pointer.orgId} cannot be reconstructed. Restore the exact approved document and revision before release migration.`);
         const bundle = await replacement({ organizationId: pointer.orgId, source: authored ? "authored" : "structured", active: { sourceBundleDigest: pointer.digest, generation: pointer.generation }, bundle: stored.bundle, ...(authoredRevision ? { authoredRevision } : {}) }, transactionManager);
         const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle });
+        if (canonicalJson(bundle) !== canonicalJson(stored.bundle) && identity.sourceBundleDigest === pointer.digest) throw new Error(`Canonical release migration changed source bytes for ${pointer.orgId} without changing its digest.`);
         await this.runtime.loadBundle(identity.sourceBundleDigest, bundle);
         plans.push({ pointer, bundle, identity, authored });
       }
@@ -370,31 +375,41 @@ function revision(value: unknown): string {
   return `current-policy:${createHash("sha256").update(JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item)).digest("hex")}`;
 }
 
-async function approvedAuthoredRevision(db: AppQueryable, runtime: WasmPolicyRuntime, organizationId: string, digest: string): Promise<{ documentId: string; revision: number; draft: NormalizedPolicyDraftV1 } | undefined> {
-  const revisions = await db.select().from(policyAuthoringRevisions).where(and(eq(policyAuthoringRevisions.orgId, organizationId), eq(policyAuthoringRevisions.sourceBundleDigest, digest)));
-  const approved: typeof revisions = [];
-  for (const revision of revisions) {
-    const reviews = await db.select().from(policyAuthoringReviews).where(and(eq(policyAuthoringReviews.orgId, organizationId), eq(policyAuthoringReviews.scopeKey, revision.scopeKey), eq(policyAuthoringReviews.documentId, revision.documentId), eq(policyAuthoringReviews.revision, revision.revision), eq(policyAuthoringReviews.sourceBundleDigest, digest), eq(policyAuthoringReviews.verdict, "approve")));
-    if (reviews.length) approved.push(revision);
+async function approvedAuthoredRevision(db: AppQueryable, host: SourceBundleHost, organizationId: string, digest: string): Promise<{ documentId: string; revision: number; draft: NormalizedPolicyDraftV1 } | undefined> {
+  const digestRevisions = await db.select().from(policyAuthoringRevisions).where(and(eq(policyAuthoringRevisions.orgId, organizationId), eq(policyAuthoringRevisions.sourceBundleDigest, digest)));
+  const digestDocuments = await db.select().from(policyAuthoringDocuments).where(and(eq(policyAuthoringDocuments.orgId, organizationId), eq(policyAuthoringDocuments.sourceBundleDigest, digest)));
+  const anchors = new Map<string, typeof digestRevisions[number]>();
+  for (const revision of digestRevisions) anchors.set(`${revision.scopeKey}\0${revision.documentId}\0${revision.revision}`, revision);
+  for (const document of digestDocuments) {
+    const row = (await db.select().from(policyAuthoringRevisions).where(and(eq(policyAuthoringRevisions.orgId, organizationId), eq(policyAuthoringRevisions.scopeKey, document.scopeKey), eq(policyAuthoringRevisions.documentId, document.id), eq(policyAuthoringRevisions.revision, document.revision))).limit(1))[0];
+    if (row) anchors.set(`${row.scopeKey}\0${row.documentId}\0${row.revision}`, row);
+  }
+  const approved: typeof digestRevisions = [];
+  for (const revision of anchors.values()) {
+    const reviews = await db.select().from(policyAuthoringReviews).where(and(eq(policyAuthoringReviews.orgId, organizationId), eq(policyAuthoringReviews.scopeKey, revision.scopeKey), eq(policyAuthoringReviews.documentId, revision.documentId), eq(policyAuthoringReviews.revision, revision.revision), eq(policyAuthoringReviews.verdict, "approve")));
+    if (reviews.some((review) => review.sourceBundleDigest === digest || revision.sourceBundleDigest === digest)) approved.push(revision);
   }
   if (approved.length !== 1) return undefined;
   const revision = approved[0]!;
+  const fail = (detail: string): never => { throw new Error(`Approved authored policy for ${organizationId} document ${revision.documentId} revision ${revision.revision} has invalid ${detail}. Restore that exact immutable document revision before release migration.`); };
   const document = (await db.select().from(policyAuthoringDocuments).where(and(eq(policyAuthoringDocuments.orgId, organizationId), eq(policyAuthoringDocuments.scopeKey, revision.scopeKey), eq(policyAuthoringDocuments.id, revision.documentId))).limit(1))[0];
-  const review = (await db.select().from(policyAuthoringReviews).where(and(eq(policyAuthoringReviews.orgId, organizationId), eq(policyAuthoringReviews.scopeKey, revision.scopeKey), eq(policyAuthoringReviews.documentId, revision.documentId), eq(policyAuthoringReviews.revision, revision.revision), eq(policyAuthoringReviews.sourceBundleDigest, digest), eq(policyAuthoringReviews.verdict, "approve"))).limit(1))[0];
-  const fail = (detail: string): never => { throw new Error(`Approved authored policy for ${organizationId} has invalid ${detail}. Restore the immutable approved revision before release migration.`); };
-  if (!document || document.status !== "approved_for_publication" || document.revision !== revision.revision || document.reviewCycle !== review?.reviewCycle || document.normalizedIdentity !== revision.normalizedIdentity || document.sourceBundleDigest !== digest) fail("document provenance");
-  if (!review || review.normalizedIdentity !== revision.normalizedIdentity || review.policyDigest !== revision.policyDigest || review.engineDigest !== revision.engineDigest) fail("review provenance");
+  const reviews = await db.select().from(policyAuthoringReviews).where(and(eq(policyAuthoringReviews.orgId, organizationId), eq(policyAuthoringReviews.scopeKey, revision.scopeKey), eq(policyAuthoringReviews.documentId, revision.documentId), eq(policyAuthoringReviews.revision, revision.revision), eq(policyAuthoringReviews.sourceBundleDigest, digest), eq(policyAuthoringReviews.verdict, "approve")));
+  if (reviews.length !== 1) fail("review provenance");
+  const review = reviews[0]!;
+  if (!document || document.status !== "approved_for_publication" || document.revision !== revision.revision || document.reviewCycle !== review.reviewCycle || document.normalizedIdentity !== revision.normalizedIdentity || document.sourceBundleDigest !== digest || document.policyDigest !== revision.policyDigest || document.engineDigest !== revision.engineDigest) fail("document provenance");
+  if (review.normalizedIdentity !== revision.normalizedIdentity || review.policyDigest !== revision.policyDigest || review.engineDigest !== revision.engineDigest || review.reviewCycle !== document.reviewCycle) fail("review provenance");
+  const authorAudit = (await db.select().from(policyAuthoringAudit).where(and(eq(policyAuthoringAudit.orgId, organizationId), eq(policyAuthoringAudit.scopeKey, revision.scopeKey), eq(policyAuthoringAudit.documentId, revision.documentId), eq(policyAuthoringAudit.revision, revision.revision), eq(policyAuthoringAudit.actorId, revision.createdBy), eq(policyAuthoringAudit.createdAt, revision.createdAt)))).find((row) => row.sourceBundleDigest === revision.sourceBundleDigest && row.policyDigest === revision.policyDigest && row.engineDigest === revision.engineDigest);
+  if (!authorAudit || !revision.createdBy || !Number.isSafeInteger(revision.createdAt) || revision.createdAt > review.createdAt || review.createdAt > document.updatedAt || canonicalJson(revision.validationSummary) !== canonicalJson(document.validationSummary)) fail("revision provenance");
+  if (!revision.sourceBundleDigest || !revision.policyDigest || !revision.engineDigest || revision.sourceBundleDigest !== digest) fail("source identity");
   if (validatePolicyDraft(revision.draft).length) fail("draft");
   let normalized: NormalizedPolicyDraftV1;
   try { normalized = normalizePolicyDraft(revision.draft); } catch { return fail("draft"); }
   if (normalized.normalizedIdentity !== revision.normalizedIdentity) fail("normalized identity");
-  const rebuilt = buildCurrentPolicySource(projectActionDraftToCurrentSnapshot(normalized, organizationId)).bundle;
-  const rebuiltIdentity = await runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: rebuilt });
-  if (rebuiltIdentity.sourceBundleDigest !== digest || rebuiltIdentity.policyDigest !== revision.policyDigest || rebuiltIdentity.engineDigest !== revision.engineDigest) fail("source bundle digest");
-  const stored = (await db.select({ bundle: policySourceBundles.bundle }).from(policySourceBundles).where(eq(policySourceBundles.digest, digest)).limit(1))[0];
-  if (!stored) fail("source bundle");
-  const storedIdentity = await runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: stored!.bundle });
-  if (storedIdentity.sourceBundleDigest !== digest || canonicalJson(stored!.bundle) !== canonicalJson(rebuilt) || (revision.bundle && canonicalJson(revision.bundle) !== canonicalJson(stored!.bundle))) fail("immutable source bundle");
+  if (!revision.bundle) fail("revision bundle");
+  let loaded: Awaited<ReturnType<SourceBundleHost["load"]>>;
+  try { loaded = await host.load(digest); } catch { return fail("immutable source bundle"); }
+  if (loaded.identity.sourceBundleDigest !== digest || loaded.identity.policyDigest !== revision.policyDigest || loaded.identity.engineDigest !== revision.engineDigest) fail("source bundle identity");
+  if (canonicalJson(revision.bundle) !== canonicalJson(loaded.bundle)) fail("revision bundle bytes");
   return { documentId: revision.documentId, revision: revision.revision, draft: normalized };
 }
 

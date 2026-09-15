@@ -1568,6 +1568,22 @@ describe("pinned tool: same execution path as call_tool", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("persists a bounded structured preview for large plugin arguments", async () => {
+    const { plugin } = makePinnablePlugin();
+    const requests: DecisionGateRequest[] = [];
+    const resolver: PolicyResolver = { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "org_policy" } }) };
+    const [, , pinned] = pluginCatalogTools({ plugins: [plugin], pins: [PATCH_PIN] });
+    await pinned?.execute(
+      { workflow_id: "DISPLAY_CANARY_" + "😀漢".repeat(200_000) },
+      makeCtx({ policyResolver: resolver, requestDecision: async (req) => { requests.push(req); return { actionId: "deny" }; } }),
+    );
+    const request = requests[0]!;
+    expect(new TextEncoder().encode(JSON.stringify(request.context)).byteLength).toBeLessThanOrEqual(16 * 1024);
+    expect(new TextEncoder().encode(request.body ?? "").byteLength).toBeLessThan(2 * 1024);
+    expect(JSON.stringify(request.context)).toContain("DISPLAY_CANARY_");
+    expect(JSON.stringify(request.context)).toContain("[truncated]");
+  });
+
   it("rejects schema-violating args before execute, same text as call_tool", async () => {
     const { plugin, calls } = makePinnablePlugin();
     const { viaCallTool, viaPinned } = await bothRoutes(plugin, { workflow_id: 7 });

@@ -110,11 +110,19 @@ export function builtinDeliveryKey(input: { readonly descriptor: BuiltinAuthoriz
   return `${dedupeKey}:${suffix}`;
 }
 
-const DISPLAY_VALUE_CAP = 480;
+const DISPLAY_VALUE_BYTES = 480;
+const displayEncoder = new TextEncoder();
 function displayText(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
-  const points = [...value.replace(/[\r\n\t]+/g, " ")];
-  return points.length > DISPLAY_VALUE_CAP ? points.slice(0, DISPLAY_VALUE_CAP - 1).join("") + "…" : points.join("");
+  const text = value.replace(/[\r\n\t]+/g, " ");
+  if (displayEncoder.encode(text).byteLength <= DISPLAY_VALUE_BYTES) return text;
+  const marker = "… [truncated]";
+  let output = "";
+  for (const point of text) {
+    if (displayEncoder.encode(output + point + marker).byteLength > DISPLAY_VALUE_BYTES) break;
+    output += point;
+  }
+  return output + marker;
 }
 
 /** Human-only bounded context. Callers may store this only on a decision gate. */
