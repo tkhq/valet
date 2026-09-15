@@ -461,7 +461,9 @@ The thread list stays bounded at the other end. When a run settles, the run host
 
 A run can settle before the turn it started finishes. An orchestrator node with `wait: { mode: "none" }` completes its checkpoint at dispatch, so the run reaches `stop` with the prompt still queued, and the strike-cap settle aborts no submission. The archive therefore reads the submission the node dispatched and skips a thread whose submission is not settled. One unsettled submission holds the whole thread, because several nodes can report on one thread. The thread then stays in the list, which is again the state the person needs to see.
 
-Cancellation passes the submission ID to the engine. It aborts only that submission, including its pending gates. Other queued or running submissions remain active. This applies to explicit cancellation, stop nodes, and failed foreach siblings, whose sibling runs share the parent's thread. Legacy callers without a submission ID retain thread-wide abort behavior.
+Cancellation passes the submission ID to the engine. It aborts only that submission, including its pending gates. Other queued or running submissions remain active. This applies to explicit cancellation, stop nodes, and failed foreach siblings. Legacy callers without a submission ID retain thread-wide abort behavior.
+
+Sibling runs share the parent's thread only under an attended parent. A child run copies the parent's origin, and an unattended parent has none, so each child of an unattended parent reports on its own thread. A wide fan-out therefore adds one thread per child while it runs, and each thread leaves the list when its child settles.
 
 The keyless HTTP integration test starts the same workflow twice through the real API, LocalRunHost, engine, and PGlite store. It substitutes only the model transport. Both runs must complete with separate persisted results on their own threads, and each thread must be archived when its run settles.
 
