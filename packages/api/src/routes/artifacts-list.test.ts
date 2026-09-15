@@ -1,3 +1,4 @@
+import { allowArtifactAuthorization } from "../test-helpers/resource-authorization.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -29,7 +30,7 @@ async function setup() {
   const publish = async (owner: { type: "user" | "team"; id: string }, key: string, actor = "local-user") => {
     const row = await publishArtifact(db, { owner, actorUserId: actor }, {
       orgId: "local-org", key, content: `# ${key}`, format: "markdown",
-    });
+    }, allowArtifactAuthorization());
     // Equal timestamps exercise the id tie-breaker across page boundaries.
     await db.update(artifacts).set({ updatedAt: 1234 }).where(eq(artifacts.id, row.id));
     return row;

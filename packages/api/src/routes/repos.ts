@@ -25,7 +25,8 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { githubInstallations } from "../schema/index.js";
 import { resolveUserApiToken } from "../services/github-tokens.js";
 import { githubHost } from "../repos/github-host.js";
-import type { RepoHostContext } from "../repos/host.js";
+import { listAuthorizedRepos, type RepoHostContext } from "../repos/host.js";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
 import type { GetReposResponse } from "../wire/types.js";
 
 export const reposRouter = new Hono<AppEnv>();
@@ -40,8 +41,8 @@ reposRouter.get("/", async (c) => {
     deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) },
   };
 
-  const [repos, userToken, installationRows] = await Promise.all([
-    githubHost.listRepos(ctx),
+  const repos = await listAuthorizedRepos(githubHost, ctx, { port: c.var.providers.resourceAuthorizationPort, context: { organizationId: user.orgId, actorUserId: user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) } });
+  const [userToken, installationRows] = await Promise.all([
     resolveUserApiToken(ctx.deps, user.orgId, user.id),
     db
       .select({ id: githubInstallations.id })

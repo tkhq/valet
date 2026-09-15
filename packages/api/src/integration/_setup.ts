@@ -1,5 +1,6 @@
 import { CanonicalPolicyBundleManager, ensureCanonicalPolicyReadiness } from "../authorization/canonical-policy-manager.js";
 import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import { CanonicalResourceAuthorizationService } from "../authorization/resource-authorization.js";
 /**
  * Shared boot harness for API integration tests.
  *
@@ -322,6 +323,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));
   await ensureCanonicalPolicyReadiness(canonicalPolicyManager);
   const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
+  const resourceAuthorizationPort = new CanonicalResourceAuthorizationService(canonicalAuthorizationService, db);
 
   // Same circular-construction indirection as providers/node.ts — see its
   // comment. Test callers that want to unit-test the spawner/watcher/reader
@@ -574,6 +576,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     canonicalPolicyManager,
     canonicalAuthorizationService,
+    resourceAuthorizationPort,
     blobs,
     encryptionKey: "test-key",
     engineStore,

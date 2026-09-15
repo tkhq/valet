@@ -68,6 +68,8 @@ import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../s
 import { deleteDelegationsFrom, listDelegationsFrom } from "../services/credential-delegations.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
+import { CredentialMetadataAuthorization, type CredentialMetadataOperation } from "../services/credential-metadata-authorization.js";
 import { serviceDisplayName } from "../lib/service-display-name.js";
 import type {
   CredentialSummary,
@@ -275,15 +277,25 @@ async function toSummary(
   };
 }
 
+function credentialMetadata(c: Context<AppEnv>): CredentialMetadataAuthorization {
+  return new CredentialMetadataAuthorization(c.var.providers.db, c.var.providers.engineCredentials, c.var.providers.resourceAuthorizationPort, { organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) });
+}
+
+async function authorizeCredentialMetadata(c: Context<AppEnv>, owner: CredentialOwner, operation: CredentialMetadataOperation, service?: string): Promise<void> {
+  await credentialMetadata(c).authorize(owner, operation, service);
+}
+
 credentialsRouter.get("/", async (c) => {
   const { engineCredentials, db } = c.var.providers;
   const scope = parseCredentialScope(c.req.query("scope"));
   const ownerOrErr = await resolveCredentialOwner(c, scope, c.req.query("teamId"), "read");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
+  const metadata = credentialMetadata(c);
 
   const listed: CredentialSummary[] = [];
   if (owner.type === "team") {
+    await metadata.authorize(owner, "list");
     // Read the team rows directly. `engineCredentials.get` follows a
     // delegated reference and throws when it is broken — a list must not.
     const rows = await db
@@ -325,9 +337,9 @@ credentialsRouter.get("/", async (c) => {
     return c.json({ credentials: listed } satisfies ListCredentialsResponse);
   }
 
-  const items = await engineCredentials.list(owner);
+  const items = await metadata.list(owner);
   for (const item of items) {
-    const stored = await engineCredentials.get(owner, item.service);
+    const stored = await metadata.get(owner, item.service);
     if (!stored) continue;
     const summary = await toSummary(item.service, stored, item.connectedAt);
     if (summary) listed.push(summary);
@@ -359,6 +371,7 @@ credentialsRouter.put("/:service", async (c) => {
   if (body.createOnly && (scope !== "team" || body.onepassword)) {
     return c.json({ error: "createOnly supports direct team tokens. Select team scope and enter a token." }, 400);
   }
+  const operation = body.createOnly ? "create" : "update";
 
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
@@ -547,6 +560,7 @@ credentialsRouter.put("/:service", async (c) => {
       const rejected = await verifySlackCredential(c, scope, credential, resolved);
       if (rejected) return rejected;
     }
+    await authorizeCredentialMetadata(c, owner, operation, service);
     await engineCredentials.save(owner, service, credential);
     await refreshCredentialReadiness(c.var.providers, owner, service);
     const resp: PutCredentialResponse = { ok: true };
@@ -558,6 +572,7 @@ credentialsRouter.put("/:service", async (c) => {
         body.accessToken !== undefined || body.refreshToken !== undefined || body.metadata !== undefined) {
       return c.json({ error: "Send a service_account with apiKey only. Configure vault permissions in 1Password." }, 400);
     }
+    await authorizeCredentialMetadata(c, owner, operation, service);
     const ok = await mutateTeamOnePassword(db, c.var.providers.encryptionKey,
       { orgId: user.orgId, userId: user.id, teamId: owner.id }, { kind: "token", token: body.apiKey.trim() });
     if (!ok) return c.json({ error: "Team not found." }, 404);
@@ -602,6 +617,7 @@ credentialsRouter.put("/:service", async (c) => {
     if (rejected) return rejected;
   }
 
+  await authorizeCredentialMetadata(c, owner, operation, service);
   if (owner.type === "team") {
     const outcome = await db.transaction(async (tx) => {
       if (!(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id }))) {
@@ -683,7 +699,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   // The caller's own credential is checked before the team slot. A caller
   // with nothing to share is told to connect first; the slot answer only
   // matters once there is a credential to share.
-  const source = await engineCredentials.get({ type: "user", id: user.id }, service);
+  const source = await credentialMetadata(c).get({ type: "user", id: user.id }, service, "attach");
   if (!source || (!rowHasSecret(source) && !onePasswordMeta(source))) {
     return c.json(
       { error: `Connect ${label} in Integrations first, then share it with the team.` },
@@ -780,6 +796,7 @@ credentialsRouter.delete("/:service/delegations/:teamId", async (c) => {
   const teamId = c.req.param("teamId");
   const team = await getTeamInOrg(db, user.orgId, teamId);
   if (!team) return c.json({ error: "Team not found." }, 404);
+  await authorizeCredentialMetadata(c, { type: "team", id: teamId }, "delete", service);
   const rows = await db
     .select()
     .from(credentials)
@@ -809,6 +826,7 @@ credentialsRouter.delete("/:service", async (c) => {
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
   const service = c.req.param("service");
+  await authorizeCredentialMetadata(c, owner, "delete", service);
   if (service === ONEPASSWORD_SERVICE && owner.type === "team") {
     const ok = await mutateTeamOnePassword(db, c.var.providers.encryptionKey,
       { orgId: user.orgId, userId: user.id, teamId: owner.id }, { kind: "token", token: null });

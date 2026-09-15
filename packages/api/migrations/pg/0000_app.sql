@@ -946,9 +946,9 @@ CREATE INDEX "authorization_decisions_subject" ON "authorization_decisions" ("re
 CREATE TABLE "canonical_approval_resolutions" (
 	"resolution_id" text PRIMARY KEY NOT NULL, "approval_id" text NOT NULL, "gate_id" text NOT NULL, "org_id" text NOT NULL,
 	"request_subject_digest" text NOT NULL, "original_decision_digest" text NOT NULL, "approver_id" text NOT NULL, "verdict" text NOT NULL,
-	"applies_in" text NOT NULL, "session_id" text, "workflow_execution_id" text, "resolved_at" bigint NOT NULL, "expires_at" bigint NOT NULL,
+	"applies_in" text NOT NULL, "session_id" text, "workflow_execution_id" text, "scope_kind" text, "scope_id" text, "resolved_at" bigint NOT NULL, "expires_at" bigint NOT NULL,
 	"resolution_version" integer NOT NULL, "revoked_at" bigint,
-	CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int = 1),
+	CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int + ("scope_id" IS NOT NULL)::int = 1 AND (("scope_id" IS NULL AND "scope_kind" IS NULL) OR ("scope_id" IS NOT NULL AND "scope_kind" IS NOT NULL AND "applies_in" = "scope_kind"))),
 	CONSTRAINT "canonical_approval_version" CHECK ("resolution_version" = 1), CONSTRAINT "canonical_approval_expiry" CHECK ("expires_at" > "resolved_at")
 );
 --> statement-breakpoint

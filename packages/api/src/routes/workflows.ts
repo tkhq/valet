@@ -13,7 +13,7 @@ import { NotFoundError } from "@valet/shared";
 import type { CredentialStore } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
-import { resolveCreateOwner, type RequestPrincipal } from "../lib/request-principal.js";
+import { resolveCreateOwner, userPrincipal, type RequestPrincipal } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
 import {
   WorkflowCursorError,
@@ -143,14 +143,14 @@ function parseRunLimit(raw: string | undefined): { limit?: number } | { error: s
 
 function serviceCtx(c: {
   var: {
-    providers: Omit<WorkflowServiceDeps, "credentials"> & { engineCredentials: CredentialStore };
+    providers: Omit<WorkflowServiceDeps, "credentials" | "resourceAuthorizationContext"> & { engineCredentials: CredentialStore };
     user: { id: string; orgId: string };
     principal?: RequestPrincipal;
   };
 }): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
-  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials, canonicalAuthorizationService, canonicalPolicyManager } = c.var.providers;
+  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials, canonicalAuthorizationService, canonicalPolicyManager, resourceAuthorizationPort } = c.var.providers;
   return {
-    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials, canonicalAuthorizationService, canonicalPolicyManager },
+    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials, canonicalAuthorizationService, canonicalPolicyManager, resourceAuthorizationPort, resourceAuthorizationContext: () => ({ organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: c.var.principal ?? userPrincipal(c.var.user.id), deliveryId: crypto.randomUUID() }) },
     owner: { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
     env: buildValidateEnvironment(actionPluginByService),
   };

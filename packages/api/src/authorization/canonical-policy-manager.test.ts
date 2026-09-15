@@ -7,17 +7,22 @@ import { deleteOverrideByTarget, listMyOverrides, listPolicies, revokePolicy, up
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 import { currentPolicyCompatibilityReports } from "./policy-compatibility.js";
 import { normalizePolicyDraft } from "./builder/model.js";
-import { projectActionDraftToCurrentSnapshot } from "./builder/current-action-projection.js";
+import { projectDraftToCurrentSnapshot } from "./builder/current-policy-projection.js";
 import { buildCurrentPolicySource } from "./bundles/current-policy-source.js";
+import { POLICY_CONTEXTS } from "./builder/contexts.js";
+import type { PolicyDraftV1 } from "./builder/types.js";
 
 let pg: TestPgDb | undefined;
 afterEach(async () => { await pg?.cleanup(); pg = undefined; });
 async function setup() { pg = await freshTestPgDb(); return pg.appDb; }
 const bundle = (value: string) => ({ manifestJson: value, files: [] });
 
-async function seedApprovedCandidate(db: Awaited<ReturnType<typeof setup>>, manager: CanonicalPolicyBundleManager, documentId = "integrity-doc") {
-  const normalized = normalizePolicyDraft({ schemaVersion: 1, draftId: documentId, rules: [{ ruleId: "authored", context: "tool.action", authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": "gmail.send" }, matcherGroups: [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }], effect: "deny", appliesIn: "any", obligations: [], description: "", metadata: {} }] });
-  const snapshot = projectActionDraftToCurrentSnapshot(normalized, "org-b");
+async function seedApprovedCandidate(db: Awaited<ReturnType<typeof setup>>, manager: CanonicalPolicyBundleManager, documentId = "integrity-doc", context: "tool.action" | "api.route" | "resource.access" = "tool.action") {
+  const descriptorTarget = context === "tool.action" ? undefined : POLICY_CONTEXTS[context].targets[0]?.actionId;
+  if (context !== "tool.action" && !descriptorTarget) throw new Error(`Missing ${context} test descriptor.`);
+  const draft: PolicyDraftV1 = { schemaVersion: 1, draftId: documentId, rules: [{ ruleId: "authored", context, authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": descriptorTarget ?? "gmail.send" }, matcherGroups: context === "tool.action" ? [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }] : [], effect: "deny", appliesIn: context === "tool.action" ? "any" : undefined, obligations: [], description: "", metadata: {} }] };
+  const normalized = normalizePolicyDraft(draft);
+  const snapshot = projectDraftToCurrentSnapshot(normalized, "org-b");
   const built = buildCurrentPolicySource({ ...snapshot, builtinDefaults: [] });
   const identity = await manager.runtime.run<import("./bundles/types.js").ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: built.bundle });
   await manager.activateCandidate("org-b", identity, built.bundle, { actorId: "publisher", operation: "policy_authoring_publish", idempotencyKey: documentId });
@@ -257,7 +262,7 @@ describe("canonical policy readiness", () => {
       await ensureCanonicalPolicyReadiness(manager);
       await db.insert(actionPolicies).values({ id: "authored", orgId: "org-b", principalType: "org", principalId: "org-b", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
       const normalized = normalizePolicyDraft({ schemaVersion: 1, draftId: "published", rules: [{ ruleId: "authored", context: "tool.action", authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": "gmail.send" }, matcherGroups: [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }], effect: "deny", appliesIn: "any", obligations: [], description: "", metadata: {} }] });
-      const oldSnapshot = projectActionDraftToCurrentSnapshot(normalized, "org-b");
+      const oldSnapshot = projectDraftToCurrentSnapshot(normalized, "org-b");
       const authoredBuilt = buildCurrentPolicySource({ ...oldSnapshot, builtinDefaults: [] });
       const authored = { built: authoredBuilt, identity: await manager.runtime.run<import("./bundles/types.js").ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: authoredBuilt.bundle }) };
       await db.delete(actionPolicies).where(eq(actionPolicies.id, "authored"));
@@ -284,7 +289,7 @@ describe("canonical policy readiness", () => {
     try {
       await ensureCanonicalPolicyReadiness(manager);
       const normalized = normalizePolicyDraft({ schemaVersion: 1, draftId: "published", rules: [{ ruleId: "authored", context: "tool.action", authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": "gmail.send" }, matcherGroups: [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }], effect: "deny", appliesIn: "any", obligations: [], description: "", metadata: {} }] });
-      const oldSnapshot = projectActionDraftToCurrentSnapshot(normalized, "org-b");
+      const oldSnapshot = projectDraftToCurrentSnapshot(normalized, "org-b");
       const authoredBuilt = buildCurrentPolicySource({ ...oldSnapshot, builtinDefaults: [] });
       const authored = { built: authoredBuilt, identity: await manager.runtime.run<import("./bundles/types.js").ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: authoredBuilt.bundle }) };
       await manager.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });
@@ -350,6 +355,37 @@ describe("canonical policy readiness", () => {
       expect(rolledBack.every((row, index) => row.generation === before[index]!.generation + 2)).toBe(true);
       await manager.migrateReleaseSet("release-1-rollback", async (input) => originalBundles.get(input.organizationId)!);
       expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(rolledBack);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+
+  it.each(["api.route", "resource.access"] as const)("migrates a %s candidate A to B to C, rolls back, and reapplies", async (context) => {
+    const db = await setup();
+    await db.insert(orgs).values({ id: "org-b", name: "B", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      const candidate = await seedApprovedCandidate(db, manager, `migration-${context.replace(".", "-")}`, context);
+      const initial = (await manager.host.activePointer("org-b"))!;
+      const rewrite = (target: string) => async (input: { bundle: typeof candidate.built.bundle }) => {
+        const manifest = JSON.parse(input.bundle.manifestJson) as { source: { revision: string } };
+        manifest.source.revision = manifest.source.revision.replace(/:release-[bc]$/, "") + `:release-${target}`;
+        return { ...input.bundle, manifestJson: JSON.stringify(manifest) };
+      };
+      await manager.migrateReleaseSet("release-b", rewrite("b"));
+      const releaseB = (await manager.host.activePointer("org-b"))!;
+      await manager.migrateReleaseSet("release-c", rewrite("c"));
+      const releaseC = (await manager.host.activePointer("org-b"))!;
+      expect(new Set([initial.sourceBundleDigest, releaseB.sourceBundleDigest, releaseC.sourceBundleDigest]).size).toBe(3);
+      await manager.migrateReleaseSet("release-a-rollback", async () => candidate.built.bundle);
+      expect((await manager.host.activePointer("org-b"))?.sourceBundleDigest).toBe(initial.sourceBundleDigest);
+      await manager.migrateReleaseSet("release-c-reapply", rewrite("c"));
+      const reapplied = (await manager.host.activePointer("org-b"))!;
+      expect(reapplied.sourceBundleDigest).toBe(releaseC.sourceBundleDigest);
+      expect(reapplied.generation).toBe(initial.generation + 4);
+      const active = await manager.host.loadActive("org-b");
+      const rego = active.bundle.files.find((file) => file.path.endsWith("policy.rego"));
+      expect(rego && Buffer.from(rego.contentBase64, "base64").toString("utf8")).toContain(`input.kind == "${context}"`);
     } finally { await manager.close(); }
   }, 120_000);
 

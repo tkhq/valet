@@ -12,6 +12,9 @@
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
+import type { Context } from "hono";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
+import { PolicyResourceAuthorization } from "../services/policy-resource-authorization.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import {
   ACTION_LOG_DEFAULT_LIMIT,
@@ -49,6 +52,10 @@ export const policiesRouter = new Hono<AppEnv>();
 export const actionLogRouter = new Hono<AppEnv>();
 
 const POLICY_NOT_FOUND = { error: "policy not found" } as const;
+
+function policyResource(c: Context<AppEnv>): PolicyResourceAuthorization {
+  return new PolicyResourceAuthorization(c.var.providers.resourceAuthorizationPort, { organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) });
+}
 
 /** Keeps canonical reason codes compatible with the existing preview wire. */
 export function previewProvenanceSource(reasonCode: string): string {
@@ -109,6 +116,7 @@ policiesRouter.get("/", async (c) => {
 
   const { db, canonicalPolicyManager } = c.var.providers;
   const user = c.var.user;
+  await policyResource(c).authorize("list", { ownerType: "org", ownerId: user.orgId });
   const rows = await listOrgPolicies(db, user.orgId);
   const resp: ListOrgPoliciesResponse = { policies: rows.map(toPolicyWire) };
   return c.json(resp);
@@ -158,6 +166,7 @@ policiesRouter.post("/", async (c) => {
     return c.json({ error: (err as Error).message }, 400);
   }
 
+  await policyResource(c).authorize("create", { ownerType: "org", ownerId: user.orgId });
   const now = Date.now();
   const row = await canonicalPolicyManager.mutateAndActivate(user.orgId, policyWriteAudit(c, user.id, "create"), (tx) => createPolicy(tx, { orgId: user.orgId, type: "org", id: user.orgId }, {
     service: body.service,
@@ -210,6 +219,7 @@ policiesRouter.patch("/:id", async (c) => {
     }
   }
 
+  await policyResource(c).authorize("update", { id, ownerType: "org", ownerId: user.orgId });
   const updated = await canonicalPolicyManager.mutateAndActivate(user.orgId, policyWriteAudit(c, user.id, "update"), (tx) => updatePolicy(tx, { orgId: user.orgId, type: "org", id: user.orgId }, id, {
     mode: body.mode,
     paramMatchers,
@@ -232,6 +242,7 @@ policiesRouter.delete("/:id", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
+  await policyResource(c).authorize("delete", { id, ownerType: "org", ownerId: user.orgId });
   const revoked = await canonicalPolicyManager.mutateAndActivate(user.orgId, policyWriteAudit(c, user.id, "revoke"), (tx) => revokePolicy(tx, { orgId: user.orgId, type: "org", id: user.orgId }, id, Date.now()));
   if (!revoked) return c.json(POLICY_NOT_FOUND, 404);
   const resp: DeleteOrgPolicyResponse = toPolicyWire(revoked);
@@ -273,6 +284,7 @@ policiesRouter.post("/preview", async (c) => {
     return c.json({ error: "workflowExecutionId is required when appliesIn is workflow" }, 400);
   }
 
+  await policyResource(c).authorize("read", { ownerType: "org", ownerId: user.orgId });
   const entry = actionPluginByService.get(body.service);
   if (!entry) return c.json({ error: "Action metadata does not match the static catalog." }, 400);
   const action = entry.actionPlugin.actions.find((item) => (item.id.includes(".") ? item.id : `${body.service}.${item.id}`) === body.actionId);

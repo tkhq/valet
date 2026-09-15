@@ -1,4 +1,4 @@
-import type { CreatePolicyDraftRequest, EditPolicyDraftRequest, PolicyAuthoringDocument, PolicyMutationBase, NormalizedPolicyDraftV1, PolicyPreviewServerRequest, PolicyRevisionDiffV1, ReviewPolicyDraftRequest } from "@valet/api/policy-builder";
+import type { CreatePolicyDraftRequest, EditPolicyDraftRequest, PolicyAuthoringDocument, PolicyMutationBase, NormalizedPolicyDraftV1, PolicyPreviewServerRequest, PolicyContextsResponseV1, PolicyRevisionDiffV1, ReviewPolicyDraftRequest } from "@valet/api/policy-builder";
 import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
@@ -1421,6 +1421,7 @@ export const api = {
     request<{ ok: true }>("DELETE", `/me/identity-links/${encodeURIComponent(provider)}`),
 
   // Canonical authoring candidates are inert until PR 9.
+  getPolicyDraftContexts: (teamId?: string) => request<PolicyContextsResponseV1>("GET", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/contexts` : "/org/policy-drafts/contexts"),
   listPolicyDrafts: (teamId?: string, cursor?: string, limit?: number) => request<{ documents: PolicyAuthoringDocument[]; nextCursor?: string }>("GET", `${teamId ? `/teams/${encodeURIComponent(teamId)}` : "/org"}/policy-drafts?${new URLSearchParams({ ...(cursor ? { cursor } : {}), ...(limit ? { limit: String(limit) } : {}) })}`),
   createPolicyDraft: (body: CreatePolicyDraftRequest, teamId?: string) => request<PolicyAuthoringDocument>("POST", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts` : "/org/policy-drafts", body),
   editPolicyDraft: (id: string, body: EditPolicyDraftRequest, teamId?: string) => request<PolicyAuthoringDocument>("PATCH", teamId ? `/teams/${encodeURIComponent(teamId)}/policy-drafts/${encodeURIComponent(id)}` : `/org/policy-drafts/${encodeURIComponent(id)}`, body),

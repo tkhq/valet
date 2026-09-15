@@ -7,6 +7,7 @@ import { canViewTeam, getTeamInOrg } from "../services/teams.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
 import { PolicyAuthoringError, PolicyAuthoringService, type PolicyAuthoringAuthorizer } from "../authorization/builder/service.js";
 import type { PolicyAuthoringScope } from "../authorization/builder/types.js";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
 import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError } from "../authorization/canonical-policy-manager.js";
 
 export const policyAuthoringRouter = new Hono<AppEnv>();
@@ -33,7 +34,7 @@ function session(c: RouteContext) {
       organizationId: user.orgId,
       ...(teamId ? { teamId } : {}),
     } satisfies PolicyAuthoringScope,
-    service: new PolicyAuthoringService({ db: c.var.providers.db, authorizer, canonicalPolicyManager: c.var.providers.canonicalPolicyManager }),
+    service: new PolicyAuthoringService({ db: c.var.providers.db, authorizer, canonicalPolicyManager: c.var.providers.canonicalPolicyManager, resourceAuthorizationPort: c.var.providers.resourceAuthorizationPort, resourceAuthorizationContext: (scope, actorId) => ({ organizationId: scope.organizationId, actorUserId: actorId, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }) }),
   };
 }
 async function body(c: RouteContext): Promise<unknown> {
@@ -60,6 +61,7 @@ function routes(prefix: "/org/policy-drafts" | "/teams/:teamId/policy-drafts") {
     const limit = c.req.query("limit") === undefined ? undefined : Number(c.req.query("limit"));
     return c.json(await s.service.list(s.actor, s.scope, c.req.query("cursor"), limit));
   });
+  policyAuthoringRouter.get(`${prefix}/contexts`, async (c) => { const s = session(c); return c.json(await s.service.contexts(s.actor, s.scope)); });
   policyAuthoringRouter.get(`${prefix}/:documentId`, async (c) => {
     const s = session(c);
     return c.json(await s.service.get(s.actor, s.scope, c.req.param("documentId")));

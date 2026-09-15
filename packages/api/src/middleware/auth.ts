@@ -1,7 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { eq } from "drizzle-orm";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
-import { teams, users } from "../schema/index.js";
+import { agentSessions, teams, users } from "../schema/index.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
@@ -292,16 +292,28 @@ export async function resolveOptionalIdentity(
  * Internal-token bypass (decision 15): a request carrying a valid
  * `x-valet-internal` token (constant-time compared — see
  * `lib/internal-auth.ts`) skips every rung below it and falls straight
- * through to the route without `c.var.user`/`c.var.sandbox` set — only the
- * memory routes accept this header this phase, and they derive their owner
- * tuple from `x-valet-owner`/`x-valet-actor` headers instead.
+ * through to the route. If the request names an acting session, the middleware
+ * loads its user and organization for canonical route authorization. Memory
+ * routes derive their owner tuple from `x-valet-owner` and `x-valet-actor`.
  */
 export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHandler<AppEnv> {
   const { auth, db } = opts;
 
   return async (c, next) => {
-    // 1. Internal token — unconditional bypass.
+    // 1. A valid internal token bypasses the remaining credential checks.
+    // An acting session supplies canonical route identity when present.
     if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+      const actingSessionId = c.req.header("x-valet-session-id");
+      const actingSession = actingSessionId ? await db.select({ userId: agentSessions.userId, orgId: agentSessions.orgId }).from(agentSessions).where(eq(agentSessions.id, actingSessionId)).limit(1).then((rows) => rows[0]) : undefined;
+      if (actingSession) {
+        const actor = await db.select().from(users).where(eq(users.id, actingSession.userId)).limit(1).then((rows) => rows[0]);
+        const orgId = actingSession.orgId;
+        if (actor && orgId) {
+          c.set("user", { id: actor.id, email: actor.email, name: actor.name ?? undefined, role: normalizeRole(actor.role), orgId });
+          c.set("principal", userPrincipal(actingSession.userId));
+          c.set("authVia", "apiKey");
+        }
+      }
       await next();
       return;
     }

@@ -1,6 +1,7 @@
 import type { DecisionGateRequest, PolicyDecision, PolicyResolver, PolicyResolveInput } from "../types.js";
 import { authorizationSha256Hex, canonicalAuthorizationJson, requestSubjectDigest } from "./identity.js";
 import { trustedJsonClone } from "./trusted-json.js";
+import { buildRouteResourceObligationPlan } from "./route-resource.js";
 import type { ApprovalRequirement, AuthorizationRequest, Obligation, PolicyDecisionEnvelope, PolicyDecisionV1, RedactionDirective } from "./types.js";
 
 const HEX = /^[0-9a-f]{64}$/;
@@ -111,7 +112,8 @@ export function assertEnvelope(untrustedRequest: AuthorizationRequest, untrusted
   if (envelope.schemaVersion !== 1 || typeof envelope.requestId !== "string" || envelope.requestId !== request.requestId || !hex(envelope.requestSubjectDigest) || envelope.requestSubjectDigest !== requestSubjectDigest(request) || !hex(envelope.inputDigest) || envelope.inputDigest !== inputDigestOf(request) || !hex(envelope.policyDigest) || !hex(envelope.sourceBundleDigest) || !timestamp(envelope.evaluatedAtMs)) fail("invalid_decision");
   if (!record(envelope.evaluator)) fail("invalid_decision"); exact(envelope.evaluator, ["kind", "engineDigest"]);
   if ((envelope.evaluator.kind !== "local_valet" && envelope.evaluator.kind !== "tvc_attested") || !hex(envelope.evaluator.engineDigest)) fail("invalid_decision");
-  buildActionObligationPlan(envelope.decision);
+  if (request.kind === "api.route" || request.kind === "resource.access") buildRouteResourceObligationPlan(envelope.decision);
+  else buildActionObligationPlan(envelope.decision);
   if ((envelope.evaluator.kind === "tvc_attested") !== (envelope.proof !== undefined)) fail("invalid_decision");
   if (envelope.proof !== undefined) {
     exact(envelope.proof, ["formatVersion", "keyId", "claimsDigest", "signature", "attestationDocument"]);
@@ -124,14 +126,21 @@ export function assertEnvelope(untrustedRequest: AuthorizationRequest, untrusted
 
 function validateActionRequest(request: AuthorizationRequest): void {
   exact(request, ["schemaVersion", "requestId", "idempotencyKey", "kind", "subject", "action", "context", "facts", "resource", "approval"]);
-  if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || !ID.test(request.requestId) || (request.kind !== "tool.action" && request.kind !== "workflow.action" && request.kind !== "tool.builtin") || !record(request.context) || !record(request.facts)) fail("invalid_decision");
+  if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || !ID.test(request.requestId) || !(["tool.action", "workflow.action", "tool.builtin", "api.route", "resource.access"] as string[]).includes(request.kind) || !record(request.context) || !record(request.facts)) fail("invalid_decision");
   if (!record(request.subject)) fail("invalid_decision"); exact(request.subject, ["orgId", "principal", "invocation", "actorUserId", "sessionId", "threadId", "workflowExecutionId", "workflowNodeId", "parentSessionId"]);
   if (typeof request.subject.orgId !== "string" || !ID.test(request.subject.orgId) || !record(request.subject.principal) || !record(request.subject.invocation)) fail("invalid_decision");
   exact(request.subject.principal, ["type", "id"]); exact(request.subject.invocation, ["type", "id"]);
-  if ((request.subject.principal.type !== "user" && request.subject.principal.type !== "team" && request.subject.principal.type !== "org") || typeof request.subject.principal.id !== "string" || !ID.test(request.subject.principal.id) || (request.subject.invocation.type !== "interactive" && request.subject.invocation.type !== "workflow") || typeof request.subject.invocation.id !== "string" || !ID.test(request.subject.invocation.id) || request.idempotencyKey !== `${request.subject.invocation.type}:${request.subject.invocation.id}`) fail("invalid_decision");
+  if ((request.subject.principal.type !== "user" && request.subject.principal.type !== "team" && request.subject.principal.type !== "org" && request.subject.principal.type !== "app") || typeof request.subject.principal.id !== "string" || !ID.test(request.subject.principal.id) || (request.subject.invocation.type !== "interactive" && request.subject.invocation.type !== "workflow" && request.subject.invocation.type !== "route" && request.subject.invocation.type !== "resource") || typeof request.subject.invocation.id !== "string" || !ID.test(request.subject.invocation.id) || request.idempotencyKey !== `${request.subject.invocation.type}:${request.subject.invocation.id}`) fail("invalid_decision");
   for (const value of [request.subject.actorUserId, request.subject.sessionId, request.subject.threadId, request.subject.workflowExecutionId, request.subject.workflowNodeId, request.subject.parentSessionId]) if (value !== undefined && (typeof value !== "string" || !ID.test(value))) fail("invalid_decision");
   if (!record(request.action)) fail("invalid_decision"); exact(request.action, ["id", "service", "riskLevel", "parameters"]);
   if (typeof request.action.id !== "string" || !ID.test(request.action.id) || typeof request.action.service !== "string" || !ID.test(request.action.service) || typeof request.action.riskLevel !== "string" || !["low", "medium", "high", "critical"].includes(request.action.riskLevel) || !record(request.action.parameters)) fail("invalid_decision");
+  if ((request.kind === "resource.access") !== (request.resource !== undefined)) fail("invalid_decision");
+  if (request.resource !== undefined) {
+    if (!record(request.resource)) fail("invalid_decision"); exact(request.resource, ["type", "id", "ownerType", "ownerId"]);
+    if (typeof request.resource.type !== "string" || !ID.test(request.resource.type)) fail("invalid_decision");
+    for (const value of [request.resource.id, request.resource.ownerType, request.resource.ownerId]) if (value !== undefined && (typeof value !== "string" || !ID.test(value))) fail("invalid_decision");
+    if ((request.resource.ownerType === undefined) !== (request.resource.ownerId === undefined)) fail("invalid_decision");
+  }
 }
 
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

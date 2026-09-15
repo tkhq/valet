@@ -8,7 +8,7 @@ import { orgs, policyActiveBundles, policyAuthoringAudit, policyAuthoringDocumen
 import type { CanonicalSourceBundle } from "./bundles/types.js";
 import { CanonicalPolicyBundleManager, ensureCanonicalPolicyReadiness } from "./canonical-policy-manager.js";
 import { buildCurrentPolicySource } from "./bundles/current-policy-source.js";
-import { projectActionDraftToCurrentSnapshot } from "./builder/current-action-projection.js";
+import { projectDraftToCurrentSnapshot } from "./builder/current-policy-projection.js";
 import { normalizePolicyDraft } from "./builder/model.js";
 
 function barrier() {
@@ -66,7 +66,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("canonical release migration tra
       await ensureCanonicalPolicyReadiness(first);
       expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(beforeFutureRows);
       const normalized = normalizePolicyDraft({ schemaVersion: 1, draftId: "published", rules: [{ ruleId: "authored", context: "tool.action", authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": "gmail.send" }, matcherGroups: [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }], effect: "deny", appliesIn: "any", obligations: [], description: "", metadata: {} }] });
-      const oldSnapshot = projectActionDraftToCurrentSnapshot(normalized, "org-b");
+      const oldSnapshot = projectDraftToCurrentSnapshot(normalized, "org-b");
       const authoredBuilt = buildCurrentPolicySource({ ...oldSnapshot, builtinDefaults: [] });
       const authored = { built: authoredBuilt, identity: await first.runtime.run<import("./bundles/types.js").ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: authoredBuilt.bundle }) };
       await first.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });

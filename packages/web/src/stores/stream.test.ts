@@ -1231,6 +1231,22 @@ describe("turn error visibility", () => {
     });
   });
 
+  it("stores a WebSocket authorization refusal without payload context", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      type: "authorization_refusal",
+      code: "authorization_approval_required",
+      message: "This stream requires approval.",
+      decisionId: "decision-1",
+    });
+    expect(useStreamStore.getState().bySession[SESSION].sessionError).toEqual({
+      code: "authorization_approval_required",
+      message: "This stream requires approval.",
+    });
+  });
+
   it("stores an error with no threadId as a session-level error", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, {

@@ -105,3 +105,15 @@ describe("api client: notification preferences", () => {
     expect(JSON.parse(opts.body as string)).toEqual({ kind: "approval", web: false });
   });
 });
+
+describe("api client: policy authoring contexts", () => {
+  it("fetches organization and team descriptors from the server", async () => {
+    const fetchMock = stubFetchOk({ schemaVersion: 1, contexts: {} });
+    await api.getPolicyDraftContexts();
+    await api.getPolicyDraftContexts("team:one");
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/org/policy-drafts/contexts",
+      "/api/teams/team%3Aone/policy-drafts/contexts",
+    ]);
+  });
+});

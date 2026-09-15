@@ -28,8 +28,9 @@ import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
 import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import type { ResourceAuthorizationContext, ResourceAuthorizationPort } from "../authorization/resource-authorization.js";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
-import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import type { AppDb, AppQueryable, AppTx } from "../lib/drizzle.js";
 import {
   actionInvocations,
   contentSources,
@@ -86,6 +87,8 @@ export interface WorkflowServiceDeps {
    * (`plugin.triggers`) for event-key validation and discovery. */
   plugins?: ValetPlugin[];
   canonicalAuthorizationService?: CanonicalAuthorizationService;
+  resourceAuthorizationPort: ResourceAuthorizationPort;
+  resourceAuthorizationContext(owner: WorkflowOwner): ResourceAuthorizationContext;
   canonicalPolicyManager?: CanonicalPolicyBundleManager;
 }
 
@@ -511,11 +514,30 @@ export function canAccessTriggerRowInScope(
  * checked the user may reach that owner (`isAuthorizedForOwner`), because
  * an id that arrives in a query string is a request, not a permission.
  */
+
+export async function authorizeWorkflowResource(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  operation: "list" | "read" | "create" | "update" | "delete" | "execute",
+  resource?: { id: string; ownerType: "user" | "team" | "org"; ownerId: string; version: number },
+): Promise<void> {
+  const context = deps.resourceAuthorizationContext(owner);
+  if (context.organizationId !== owner.orgId || (context.principal.type !== "app" && context.actorUserId !== owner.userId)) throw new Error("Workflow resource authorization context does not match the caller.");
+  const plan = await deps.resourceAuthorizationPort.authorize({ ...context, resourceKind: "workflow", operation, ...(resource ? { resource } : {}) });
+  if (plan.resultLimit !== undefined || plan.fieldMask !== undefined || plan.redactions.length > 0 || (plan.readOnly && !["list", "read"].includes(operation))) throw new Error("Workflow service cannot enforce the required resource obligation.");
+}
+
+async function workflowResourceMetadata(deps: WorkflowServiceDeps, owner: WorkflowOwner, id: string) {
+  const rows = await deps.db.select({ id: workflowDefinitions.id, ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, updatedAt: workflowDefinitions.updatedAt }).from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId), await ownedDefinitionFilter(deps.db, owner))).limit(1);
+  return rows[0];
+}
+
 export async function listWorkflowDefinitions(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   scope?: WorkflowOwnerRef,
 ): Promise<WorkflowDefinitionSummary[]> {
+  await authorizeWorkflowResource(deps, owner, "list");
   // A scoped list reads one owner, so it never needs the team roster.
   const where = scope
     ? and(eq(workflowDefinitions.ownerType, scope.ownerType), eq(workflowDefinitions.ownerId, scope.ownerId))
@@ -534,6 +556,9 @@ export async function getWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<WorkflowDefinitionSummary | null> {
+  const metadata = await workflowResourceMetadata(deps, owner, id);
+  if (!metadata) return null;
+  await authorizeWorkflowResource(deps, owner, "read", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
   const names = await repoNamesFor(deps.db, [row]);
@@ -560,6 +585,7 @@ export async function createWorkflowDefinition(
   // 404 with a confusing "team null not found".
   if (typeof input.teamId === "string") {
     const teamId = input.teamId;
+    await authorizeWorkflowResource(deps, owner, "create", { id, ownerType: "team", ownerId: teamId, version: now });
     // The membership check and the insert happen inside one transaction
     // holding `lockTeamForOwnership`'s advisory lock, so this
     // can't race `deleteTeam` (`services/teams.ts`) — without it, a
@@ -585,6 +611,7 @@ export async function createWorkflowDefinition(
     ownerType = "team";
     ownerId = teamId;
   } else {
+    await authorizeWorkflowResource(deps, owner, "create", { id, ownerType: "user", ownerId: owner.userId, version: now });
     await validateWorkflowAssistant(deps.db, owner.orgId, { type: "user", id: owner.userId }, input.definition);
     await deps.db.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
   }
@@ -707,6 +734,9 @@ export async function updateWorkflowDefinition(
   id: string,
   input: { name?: string; definition?: unknown },
 ): Promise<WorkflowDefinitionSummary | null> {
+  const metadata = await workflowResourceMetadata(deps, owner, id);
+  if (!metadata) return null;
+  await authorizeWorkflowResource(deps, owner, "update", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
   await refuseRepoOwned(deps.db, row);
@@ -1016,6 +1046,9 @@ export async function copyWorkflowDefinition(
     }
     const name = destination.name.trim();
     if (!name) throw new ValidationError("Choose a name for the team workflow copy.");
+    const now = Date.now();
+    const copyId = newWorkflowId("wf");
+    await authorizeWorkflowResource(deps, owner, "create", { id: copyId, ownerType: "team", ownerId: destination.teamId, version: now });
     return deps.db.transaction(async (tx) => {
       await lockTeamForOwnership(tx, destination.teamId);
       if (!(await getTeamInOrg(tx, owner.orgId, destination.teamId)) ||
@@ -1028,7 +1061,9 @@ export async function copyWorkflowDefinition(
       )).limit(1);
       if (existing) throw new ValidationError("A workflow with that name already exists in the team. Choose another name.");
       const definition = await copiedDefinitionForOwner(tx, owner.orgId, row.definition, { type: "team", id: destination.teamId });
-      return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition, teamId: destination.teamId });
+      await tx.insert(workflowDefinitions).values({ id: copyId, orgId: owner.orgId, ownerType: "team", ownerId: destination.teamId, name, definition, origin: "local", createdAt: now, updatedAt: now });
+      await snapshotVersion({ ...deps, db: tx }, copyId, 1, name, definition, now);
+      return { id: copyId, name, definition, createdAt: now, updatedAt: now, ownerType: "team" as const, ownerId: destination.teamId };
     });
   }
 
@@ -1036,6 +1071,7 @@ export async function copyWorkflowDefinition(
   const copyId = newWorkflowId("wf");
   const name = `${row.name} (copy)`;
   const definition = await copiedDefinitionForOwner(deps.db, owner.orgId, row.definition, { type: "user", id: owner.userId });
+  await authorizeWorkflowResource(deps, owner, "create", { id: copyId, ownerType: "user", ownerId: owner.userId, version: now });
   // Personal, whatever the original's owner was. A team-owned mirror copied
   // into the team would be a second team workflow every member sees; the
   // person who wants to change the graph gets it in their own workspace,
@@ -1077,30 +1113,50 @@ export async function deleteWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<DeleteWorkflowResult> {
-  return deps.db.transaction(async (tx) => {
-    const [candidate] = await tx.select().from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
-    if (!candidate) return "not_found";
-    const row = candidate.ownerType === "team" ? candidate : await ownedDefinitionRow(tx, owner, id);
-    if (!row) return "not_found";
-    if (row.ownerType === "team") {
-      // A machine principal must not learn another team's resource or request IDs.
-      if (owner.principal?.type === "team" && owner.principal.id !== row.ownerId) return "not_found";
-      if (owner.principal?.type === "team" || !(await lockTeamDeletionAccess(tx, owner, row.ownerId))) {
-        throw new TeamAdminRequiredError(row.ownerId, "workflow", id);
-      }
+  const metadata = await workflowResourceMetadata(deps, owner, id);
+  if (!metadata) return "not_found";
+  await authorizeWorkflowResource(deps, owner, "delete", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
+  return deps.db.transaction((tx) => deleteWorkflowDefinitionInTransaction({ ...deps, db: tx }, owner, id, true));
+}
+
+/** Delete from a transaction that has already authorized this exact resource. */
+export async function deleteWorkflowDefinitionInTransaction(
+  deps: Omit<WorkflowServiceDeps, "db"> & { db: AppTx },
+  owner: WorkflowOwner,
+  id: string,
+  resourceAuthorized = false,
+): Promise<DeleteWorkflowResult> {
+  // A deletion-request approval already holds the team and resource locks.
+  // Its manager can be an org admin outside the team roster, so that trusted
+  // transaction must not reapply the member-only lookup before the service
+  // checks its own team-admin boundary below.
+  const [metadata] = await deps.db.select({ id: workflowDefinitions.id, ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, updatedAt: workflowDefinitions.updatedAt }).from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
+  if (!metadata) return "not_found";
+  if (!resourceAuthorized) {
+    await authorizeWorkflowResource(deps, owner, "delete", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
+  }
+  const [candidate] = await deps.db.select().from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
+  if (!candidate) return "not_found";
+  const row = candidate.ownerType === "team" ? candidate : await ownedDefinitionRow(deps.db, owner, id);
+  if (!row) return "not_found";
+  if (row.ownerType === "team") {
+    // A machine principal must not learn another team's resource or request IDs.
+    if (owner.principal?.type === "team" && owner.principal.id !== row.ownerId) return "not_found";
+    if (owner.principal?.type === "team" || !(await lockTeamDeletionAccess(deps.db, owner, row.ownerId))) {
+      throw new TeamAdminRequiredError(row.ownerId, "workflow", id);
     }
-    // Deleting the file is the delete, exactly as editing the file is the
-    // edit. A delete here would come back on the next sync anyway.
-    await refuseRepoOwned(tx, row);
+  }
+  // Deleting the file is the delete, exactly as editing the file is the
+  // edit. A delete here would come back on the next sync anyway.
+  await refuseRepoOwned(deps.db, row);
 
-    const active = await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
-      eq(workflowRuns.workflowId, id), inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
-    )).limit(1);
-    if (active.length > 0) return "has_active_runs";
+  const active = await deps.db.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+    eq(workflowRuns.workflowId, id), inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
+  )).limit(1);
+  if (active.length > 0) return "has_active_runs";
 
-    await purgeWorkflowRows(tx, owner.orgId, id);
-    return "deleted";
-  });
+  await purgeWorkflowRows(deps.db, owner.orgId, id);
+  return "deleted";
 }
 
 /**
@@ -1206,6 +1262,9 @@ export async function startWorkflowRun(
   workflowId: string,
   input?: Record<string, unknown>,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
+  const metadata = await workflowResourceMetadata(deps, owner, workflowId);
+  if (!metadata) return null;
+  await authorizeWorkflowResource(deps, owner, "execute", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 

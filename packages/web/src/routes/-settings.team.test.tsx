@@ -30,6 +30,9 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: { callerRole: "member", features: { organizations: true } } }),
   useOrgDirectory: () => { directoryRead(); return directory; },
 }));
+vi.mock("~/api/policy-authoring", () => ({
+  usePolicyDraftContexts: () => ({ data: undefined, error: null }),
+}));
 // The real panel's permission and mutation targets have their own tests.
 // This draft verifies that the route replaces its child on a scope change.
 vi.mock("~/components/settings/teams-panel", () => ({

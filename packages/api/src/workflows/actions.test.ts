@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testWorkflowResourceContext } from "../test-helpers/resource-authorization.js";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type WorkflowDefinition } from "@valet/workflow";
@@ -214,6 +215,7 @@ describe("DB-backed actions", () => {
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: new StubRunHost(),
       credentials: new InMemoryCredentialStore(),
+      resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext,
     };
   });
 
@@ -855,6 +857,7 @@ describe("update actions", () => {
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: new StubRunHost(),
       credentials: new InMemoryCredentialStore(),
+      resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext,
       plugins: [githubPlugin],
     };
 

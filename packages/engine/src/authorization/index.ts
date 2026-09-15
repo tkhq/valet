@@ -5,5 +5,6 @@ export * from "./action-plans.js";
 export * from "./current-policy-facts.js";
 export * from "./trusted-json.js";
 export * from "./builtin-tools.js";
+export * from "./route-resource.js";
 
 export { redactCanonicalValue } from "./redaction.js";

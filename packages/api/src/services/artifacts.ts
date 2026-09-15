@@ -31,8 +31,8 @@ import {
   resolveArtifactTitle,
   type ArtifactFormat,
 } from "@valet/shared";
-import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
+import type { ResourceAuthorizationContext, ResourceAuthorizationPort } from "../authorization/resource-authorization.js";
 import { normalizePath } from "../lib/okf.js";
 import { artifactComments, artifactVersions, artifacts, orgMembers, orgs, teamMembers, teams } from "../schema/index.js";
 import { getTeamInOrg, lockTeamForOwnership } from "./teams.js";
@@ -43,9 +43,15 @@ export type ArtifactVersionRow = typeof artifactVersions.$inferSelect;
 export type ArtifactCommentRow = typeof artifactComments.$inferSelect;
 export type ArtifactVisibility = "org" | "public";
 
-export interface ArtifactScope extends MemoryScope {
-  /** Verified caller. Internal tools use their authenticated owner principal. */
-  principal?: Principal;
+export type ArtifactScope = MemoryScope;
+export interface ArtifactAuthorization {
+  port: ResourceAuthorizationPort;
+  context: ResourceAuthorizationContext;
+}
+
+async function authorizeArtifactResource(auth: ArtifactAuthorization, scope: ArtifactScope, operation: "share" | "publish" | "delete" | "copy"): Promise<void> {
+  const plan = await auth.port.authorize({ ...auth.context, resourceKind: "artifact", operation, resource: { ownerType: scope.owner.type, ownerId: scope.owner.id } });
+  if (plan.resultLimit !== undefined || plan.fieldMask !== undefined || plan.redactions.length > 0 || plan.readOnly) throw new Error("Artifact service cannot enforce the required resource obligation.");
 }
 
 /** Both rows authorize a human. Mutation callers hold SHARE locks until commit,
@@ -60,11 +66,10 @@ function artifactMemberships(db: AppDb, orgId: string, teamId: string, userId: s
     ));
 }
 
-async function requireTeamArtifactScope(db: AppDb, scope: ArtifactScope, orgId: string, lockMemberships = false): Promise<void> {
-  const caller = scope.principal ?? { type: "user", id: scope.actorUserId };
-  if (caller.type === "team" && (scope.owner.type !== "team" || scope.owner.id !== caller.id)) {
-    throw new NotFoundError("owner", scope.owner.id);
-  }
+async function requireTeamArtifactScope(db: AppDb, scope: ArtifactScope, orgId: string, auth: ArtifactAuthorization, lockMemberships = false): Promise<void> {
+  const caller = auth.context.principal;
+  if (caller.type !== "user" && caller.type !== "team" && caller.type !== "app") throw new NotFoundError("owner", scope.owner.id);
+  if (caller.type === "team" && (scope.owner.type !== "team" || scope.owner.id !== caller.id)) throw new NotFoundError("owner", scope.owner.id);
   if (scope.owner.type !== "team") return;
   if (caller.type === "team") {
     if (!await getTeamInOrg(db, orgId, scope.owner.id)) throw new NotFoundError("owner", scope.owner.id);
@@ -135,8 +140,9 @@ interface PublishInput {
  * `visibility: "org"` on create; a refresh keeps the stored visibility —
  * widening is a separate, human-only action (`setArtifactVisibility`).
  */
-export async function shareArtifact(db: AppDb, scope: ArtifactScope, opts: ShareArtifactOpts): Promise<ArtifactRow> {
-  await requireTeamArtifactScope(db, scope, opts.orgId);
+export async function shareArtifact(db: AppDb, scope: ArtifactScope, opts: ShareArtifactOpts, auth: ArtifactAuthorization): Promise<ArtifactRow> {
+  await requireTeamArtifactScope(db, scope, opts.orgId, auth);
+  await authorizeArtifactResource(auth, scope, "share");
   if (opts.path.startsWith("team:")) {
     throw new ValidationError(
       "Team-prefixed virtual paths cannot be shared. Share from the team scope itself, or copy the file into your own memory first.",
@@ -155,7 +161,7 @@ export async function shareArtifact(db: AppDb, scope: ArtifactScope, opts: Share
     icon: "",
     orgId: opts.orgId,
     sourceSessionId: opts.sourceSessionId,
-  });
+  }, auth);
 }
 
 /**
@@ -165,7 +171,9 @@ export async function shareArtifact(db: AppDb, scope: ArtifactScope, opts: Share
  * publish-key namespace with memory shares, which is the point — one key, one
  * artifact, one URL.
  */
-export async function publishArtifact(db: AppDb, scope: ArtifactScope, opts: PublishArtifactOpts): Promise<ArtifactRow> {
+export async function publishArtifact(db: AppDb, scope: ArtifactScope, opts: PublishArtifactOpts, auth: ArtifactAuthorization): Promise<ArtifactRow> {
+  await requireTeamArtifactScope(db, scope, opts.orgId, auth);
+  await authorizeArtifactResource(auth, scope, "publish");
   if (!isArtifactFormat(opts.format)) {
     throw new ValidationError("format must be 'markdown' or 'html'.");
   }
@@ -190,17 +198,19 @@ export async function publishArtifact(db: AppDb, scope: ArtifactScope, opts: Pub
     icon: normalizeArtifactIcon(opts.icon),
     orgId: opts.orgId,
     sourceSessionId: opts.sourceSessionId,
-  });
+  }, auth);
 }
 
 /** Copy the current personal snapshot. Audience grants and history do not transfer. */
 export async function copyArtifactToTeam(
-  db: AppDb, scope: MemoryScope, orgId: string,
+  db: AppDb, scope: ArtifactScope, orgId: string,
   input: { artifactId: string; teamId: string; key: string },
+  auth: ArtifactAuthorization,
 ): Promise<ArtifactRow> {
   if (scope.owner.type !== "user" || scope.owner.id !== scope.actorUserId) {
     throw new ValidationError("Copy personal artifacts from your personal assistant or workspace.");
   }
+  await authorizeArtifactResource(auth, scope, "copy");
   const source = await getArtifactById(db, input.artifactId);
   if (!source || source.orgId !== orgId || source.ownerType !== "user" || source.ownerId !== scope.owner.id || source.revokedAt !== null) {
     throw new NotFoundError("artifact", input.artifactId);
@@ -211,7 +221,7 @@ export async function copyArtifactToTeam(
     await lockTeamForOwnership(tx, input.teamId);
     await requireTeamArtifactScope(tx, {
       owner: { type: "team", id: input.teamId }, actorUserId: scope.actorUserId,
-    }, orgId, true);
+    }, orgId, auth, true);
     const now = Date.now();
     const [copy] = await tx.insert(artifacts).values({
       id: randomUUID(), token: mintToken(), ownerType: "team", ownerId: input.teamId,
@@ -236,10 +246,10 @@ export async function copyArtifactToTeam(
  * Reactivation also clears `shared_version`: the pin was part of the revoked
  * audience decision.
  */
-async function upsertArtifact(db: AppDb, scope: ArtifactScope, input: PublishInput): Promise<ArtifactRow> {
+async function upsertArtifact(db: AppDb, scope: ArtifactScope, input: PublishInput, auth: ArtifactAuthorization): Promise<ArtifactRow> {
   return db.transaction(async (tx) => {
     if (scope.owner.type === "team") await lockTeamForOwnership(tx, scope.owner.id);
-    await requireTeamArtifactScope(tx, scope, input.orgId, true);
+    await requireTeamArtifactScope(tx, scope, input.orgId, auth, true);
     return writeArtifact(tx, scope, input);
   });
 }
@@ -336,11 +346,13 @@ async function appendVersion(db: AppDb, row: ArtifactRow, actorUserId: string, n
 
 /** Revoke the active artifact for `path` in this scope. 404 when nothing
  * is shared at that path. */
-export async function revokeArtifactByPath(db: AppDb, scope: ArtifactScope, path: string, orgId: string): Promise<void> {
+export async function revokeArtifactByPath(db: AppDb, scope: ArtifactScope, path: string, orgId: string, auth: ArtifactAuthorization): Promise<void> {
+  await requireTeamArtifactScope(db, scope, orgId, auth);
+  await authorizeArtifactResource(auth, scope, "delete");
   const normalized = normalizePath(path);
   await db.transaction(async (tx) => {
     if (scope.owner.type === "team") await lockTeamForOwnership(tx, scope.owner.id);
-    await requireTeamArtifactScope(tx, scope, orgId, true);
+    await requireTeamArtifactScope(tx, scope, orgId, auth, true);
     const rows = await tx.update(artifacts).set({ revokedAt: Date.now() }).where(and(
       eq(artifacts.orgId, orgId),
       eq(artifacts.ownerType, scope.owner.type),

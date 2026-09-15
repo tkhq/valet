@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testResourceContext } from "../test-helpers/resource-authorization.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -75,7 +76,35 @@ async function setup() {
   return api;
 }
 
+const resourceDeps = { resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: (scope: { organizationId: string }, actorId: string) => testResourceContext(scope.organizationId, actorId) };
+
 describe("canonical policy authoring routes", () => {
+  it("serves exact route and resource authoring descriptors", async () => {
+    const app = await setup(), response = await fetch(`${app.baseUrl}/api/org/policy-drafts/contexts`, { headers });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { contexts: Record<string, { publishable: boolean; targets: { actionId: string; template?: string; resourceKind?: string; operation: string }[] }> };
+    expect(body.contexts["api.route"].publishable).toBe(true);
+    expect(body.contexts["api.route"].targets).toContainEqual(expect.objectContaining({ actionId: "api_sessions.post_sessions", template: "/api/sessions" }));
+    expect(body.contexts["resource.access"].targets).toContainEqual(expect.objectContaining({ actionId: "resource_artifact.publish", resourceKind: "artifact", operation: "publish" }));
+  });
+
+  it.each([["api.route", "api_sessions.post_sessions"], ["resource.access", "resource_artifact.publish"]] as const)("publishes a reviewed %s candidate", async (context, actionId) => {
+    await setup();
+    const key = context.replace(".", "-");
+    const authored: PolicyDraftV1 = { ...draft, draftId: `draft-${key}`, rules: [{ ...draft.rules[0], context, target: { "action.id": actionId }, matcherGroups: [], appliesIn: undefined }] };
+    const preview = await post("/org/policy-drafts/preview", { schemaVersion: 1, draft: authored, sampleFacts: {} });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ evaluation: { decision: { effect: "deny", matchedRuleIds: ["rule-1"] } } });
+    const created = await post("/org/policy-drafts", { ...mutation(`create-${key}`, 0, 0), draft: authored }).then((r) => r.json()) as { documentId: string; revision: number; stateVersion: number; validation: { publishable: boolean } };
+    expect(created.validation.publishable).toBe(true);
+    const submitted = await post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation(`submit-${key}`, created.revision, created.stateVersion)).then((r) => r.json()) as { stateVersion: number };
+    await api!.providers.db.update(orgMembers).set({ role: "admin" }).where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
+    const approved = await post(`/org/policy-drafts/${created.documentId}/reviews`, { ...mutation(`review-${key}`, created.revision, submitted.stateVersion), verdict: "approve", requestId: `review-${key}` }, reviewer).then((r) => r.json()) as { stateVersion: number };
+    const published = await post(`/org/policy-drafts/${created.documentId}/prepare-publication`, { schemaVersion: 1, expectedRevision: created.revision, expectedStateVersion: approved.stateVersion }, reviewer);
+    expect(published.status).toBe(200);
+    expect(await published.json()).toMatchObject({ notice: "This candidate is the active canonical policy bundle.", draft: { rules: [{ context, target: { "action.id": actionId } }] } });
+  });
+
   it("activates a reviewed immutable candidate without changing structured rows", async () => {
     const app = await setup();
     const created = await post("/org/policy-drafts", {
@@ -425,7 +454,7 @@ describe("canonical policy authoring routes", () => {
         }),
       ];
     for (const [index, compile] of compilers.entries()) {
-      const service = new PolicyAuthoringService({
+      const service = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
         compiler: { compile, evaluate: async () => ({}) },
@@ -438,7 +467,7 @@ describe("canonical policy authoring routes", () => {
       ).rejects.toMatchObject({ code: "unsupported", statusCode: 422 });
     }
     const hash = "a".repeat(64),
-      service = new PolicyAuthoringService({
+      service = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
         compiler: {
@@ -471,11 +500,11 @@ describe("canonical policy authoring routes", () => {
     const app = await setup(),
       scope = { organizationId: "local-org" },
       authorizer = { authorize: async () => true as const };
-    const normal = new PolicyAuthoringService({
+    const normal = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
       }),
-      failing = new PolicyAuthoringService({
+      failing = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
         auditWrite: async () => {
@@ -650,7 +679,7 @@ describe("canonical policy authoring routes", () => {
   it("authorizes before compilation and binds preparation to the engine", async () => {
     const app = await setup(),
       scope = { organizationId: "local-org" },
-      real = new PolicyAuthoringService({ db: app.providers.db, authorizer: { authorize: async () => true } });
+      real = new PolicyAuthoringService({ ...resourceDeps, db: app.providers.db, authorizer: { authorize: async () => true } });
     const created = await real.create("author", scope, { ...mutation("engine-create-key", 0, 0), draft });
     let calls = 0,
       allowed = false,
@@ -663,7 +692,7 @@ describe("canonical policy authoring routes", () => {
       },
       evaluate: async () => ({}),
     };
-    const guarded = new PolicyAuthoringService({ db: app.providers.db, authorizer: { authorize: async () => allowed }, compiler });
+    const guarded = new PolicyAuthoringService({ ...resourceDeps, db: app.providers.db, authorizer: { authorize: async () => allowed }, compiler });
     await expect(guarded.create("denied", scope, { ...mutation("denied-create-key", 0, 0), draft })).rejects.toMatchObject({ statusCode: 403 });
     await expect(guarded.edit("denied", scope, created.documentId, { ...mutation("denied-edit-key", 1, 1), draft })).rejects.toMatchObject({ statusCode: 403 });
     expect(calls).toBe(0);

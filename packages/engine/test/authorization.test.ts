@@ -56,9 +56,9 @@ describe("authorization identities", () => {
 
   it("uses portable SHA-256 output", () => {
     const subject = routeAuthorizationSubject({ orgId: "org-1", principal, operationId: "operation-1" });
-    const identity = authorizationIdentity({ kind: "route.access", subject, action: { id: "route.read" } });
+    const identity = authorizationIdentity({ kind: "api.route", subject, action: { id: "route.read" } });
 
-    expect(identity.requestSubjectDigest).toBe("6528037cfb8df579d960eb15e8245d861769a5f3fc2cbb171cb77f0aed5a9950");
+    expect(identity.requestSubjectDigest).toBe("c611d0182734fae47bfc5ac73290879921daab8894d6ac551bb0dfdb3b1444b5");
   });
 
   it("omits optional undefined object properties recursively", () => {
@@ -69,13 +69,13 @@ describe("authorization identities", () => {
       principal: { ...subject.principal, optional: undefined },
     };
     const omitted = authorizationIdentity({
-      kind: "route.access",
+      kind: "api.route",
       subject,
       action: { id: "route.read" },
       resource: { type: "repository", id: "repo-1" },
     });
     const explicit = authorizationIdentity({
-      kind: "route.access",
+      kind: "api.route",
       subject: withUndefined,
       action: { id: "route.read", service: undefined },
       resource: { type: "repository", id: "repo-1", ownerId: undefined },
@@ -98,7 +98,7 @@ describe("authorization identities", () => {
     expect(authorizationIdentity({ kind: "workflow.action", subject: workflow, action }).idempotencyKey).toBe(
       "workflow:invocation-1",
     );
-    expect(authorizationIdentity({ kind: "route.access", subject: route, action: { id: "route.read" } }).idempotencyKey).toBe(
+    expect(authorizationIdentity({ kind: "api.route", subject: route, action: { id: "route.read" } }).idempotencyKey).toBe(
       "route:operation-1",
     );
     expect(

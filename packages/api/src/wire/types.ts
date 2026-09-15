@@ -1598,6 +1598,7 @@ export type WireEvent =
       /** The completed command as a wire `Message` (role "system", content = output). */
       message: Message;
     }
+  | { seq: number; ts: number; offset?: string; type: "authorization_refusal"; code: "authorization_denied" | "authorization_approval_required" | "authorization_indeterminate"; message: string; decisionId?: string }
   | { seq: number; ts: number; offset?: string; type: "ping" };
 
 export type WireEventType = WireEvent["type"];

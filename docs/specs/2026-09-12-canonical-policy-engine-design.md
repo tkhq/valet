@@ -156,6 +156,18 @@ TKMS and TVC have different roles:
 - Internal UMP is not the stable Valet API for this work.
 - A future TKMS integration can co-sign a decision, hold a policy-admin key, hold an execution key, or provide consensus approval. The evaluator contract does not depend on UMP or on a TKMS activity shape.
 
+### Route and resource enforcement
+
+The API builds a versioned descriptor registry from every authenticated Hono route before it serves traffic. Each descriptor uses the mounted route template. Raw URLs, query strings, headers, bodies, and content do not enter policy input. The middleware runs after authentication and before route handlers. It persists the `api.route` decision first. Resource services use a portable authorization port before metadata reads or side effects. Route and resource decisions are independent. Both decisions must allow the operation.
+
+The resource registry covers repositories, secrets, policies, workflows, artifacts, sessions, and assistants. It assigns stable action IDs to each supported operation. Unknown route templates, methods, resource kinds, operations, evaluator results, and obligations fail closed. Health, readiness, authentication, verified webhooks, static assets, and PR 12 sandbox or credential callbacks have explicit non-policy classifications.
+
+Authenticated route and resource checks use an allow baseline. Organization and team rules can narrow that baseline by exact action, service, or risk. Route and resource kinds remain separate from tool and workflow action kinds. PR 10 releases ignore route and resource rows during rollback. A PR 11 release migration rebuilds structured or authored bundles through immutable lineage before activation.
+
+Route approvals use the persisted canonical decision ID. The approver resolves that decision through the bounded authorization endpoint. Route and resource resolutions use `scope_kind` and `scope_id`. They do not overload legacy session or workflow columns. The client then retries with the same `Idempotency-Key` and the persisted resolution ID. The middleware reconstructs the original route request, verifies every stored digest, loads the exact approval fact, and re-evaluates policy. A changed route cannot consume the approval. Mutating routes with an idempotency key reserve execution before dispatch. Replays return a bounded completed or indeterminate result without a second dispatch. Reads create distinct delivery decisions and no execution attempt. WebSocket connect, subscribe, and pong operations each authorize before their side effect. WebSocket authorization refusals use a typed event with the same durable decision ID.
+
+Route and resource decisions support result limits, field masks, read-only constraints, and response redactions. The host composes route and resource obligations by the strictest compatible value. It denies incompatible masks and unknown obligations before dispatch. The host applies output obligations before it returns JSON. A redaction failure returns no unredacted response.
+
 ## Rego v1 compatibility and capability profile
 
 Rego v1 remains the canonical authoring language. Valet targets full Rego v1 syntax, language semantics, and pure built-in coverage. The first engine profile does not claim full compatibility until it passes the required corpus and built-in gates.
@@ -274,7 +286,7 @@ type AuthorizationKind =
   | "workflow.action"
   | "tool.builtin"
   | "plugin.entitlement"
-  | "route.access"
+  | "api.route"
   | "resource.access"
   | "delegation.create"
   | "agent.signal"
@@ -458,7 +470,7 @@ The registry covers these contexts:
 |---|---|---|
 | Tool and action | `tool.action`, `tool.builtin` | Service, fully qualified action, risk, parameter schema, plugin default, and tool class. The tool class distinguishes built-ins. |
 | Workflow | `workflow.action` | Definition, node, `workflowExecutionId`, owner, trigger, `appliesIn`, and workflow grant scope. |
-| Route and API | `route.access` | HTTP method, route ID, authenticated principal type, operation, and concealment requirement. |
+| Route and API | `api.route` | HTTP method, route ID, authenticated principal type, operation, and concealment requirement. |
 | Resource | `resource.access` | Resource type, stable ID, owner, tenant, visibility, requested operation, and query obligation. |
 | Entitlement | `plugin.entitlement` | Plugin, instance availability, organization mode, team set, and feature operation. |
 | Delegation and child session | `delegation.create`, `agent.signal` | Parent, child, edge type, target owner, repository, model tier, hop count, and inherited authority. The edge type distinguishes agent signals. |
@@ -897,7 +909,7 @@ An interactive `call_tool` request and a workflow tool node use the same service
 
 ### Approval replay
 
-A critical action returns `require_approval`. Valet persists the decision and gate. A user approves once. Valet re-evaluates with a fact bound to the original subject. The process restarts before execution. The repeated request returns the stored post-approval decision. A request with one changed parameter has a different subject and does not reuse the approval. Before resolution persistence, the resolver reconstructs the request from the owning queue item. It rebinds only after the request ID, idempotency key, subject digest, and input digest match the original decision. The approval binding includes the input, policy, engine, profile, interpreter, contract, and source bundle digests. Decision evidence does not store the raw request or projected parameters. Rolled-back releases read and mutate only `tool.action` policy rows. They ignore later `tool.builtin` rows.
+A critical action returns `require_approval`. Valet persists the decision and gate. A user approves once. Valet re-evaluates with a fact bound to the original subject. The process restarts before execution. The repeated request returns the stored post-approval decision. A request with one changed parameter has a different subject and does not reuse the approval. Before resolution persistence, the resolver reconstructs the request from the owning queue item. It rebinds only after the request ID, idempotency key, subject digest, and input digest match the original decision. The approval binding includes the input, policy, engine, profile, interpreter, contract, and source bundle digests. Decision evidence does not store the raw request or projected parameters. Rolled-back releases read and mutate only `tool.action` policy rows. They ignore later `tool.builtin`, `api.route`, and `resource.access` rows. Their approval fact loader also ignores route and resource scopes because legacy session and workflow scope columns remain null.
 
 ### Resource and delegation access
 
@@ -1031,3 +1043,11 @@ Release migration validates an approved authored revision against its document, 
 `policy_authoring_revisions` is append-only. PostgreSQL and PGlite reject every `UPDATE` through the baseline trigger and schema repair. The authoring service inserts a new row for each revision and can still delete rows through its existing cleanup policy.
 
 Each active canonical bundle has tenant-bound immutable lineage. Structured bundles record no authored fields. Authored bundles retain their published root digest, document revision, normalized identity, and evaluator digests. The database rejects updates to lineage rows. A release migration compares every authored lineage claim with the approved document, revision, review, audit, and source-bundle anchors before it writes a pointer or lineage row. A release migration copies verified lineage to its generated digest. It does not create a new human publication. The first migration seeds missing legacy lineage only after it validates the immutable publication anchors. A missing, ambiguous, or mismatched anchor stops the complete release transaction.
+
+### PR 11 route and resource authoring boundary
+
+The version 1 route registry and five-family resource registry are the only source of builder target options. The authoring API returns these browser-safe descriptors. Route controls show the method and mounted template, but drafts persist only the canonical action ID. Resource controls show the kind and operation and persist the canonical action ID. Raw paths, route IDs, resource IDs, request content, and content matchers are not authoring inputs.
+
+The generic draft projection preserves the authorization kind in each source row. It accepts registered route actions, registered route services, and exact registered resource operations. Unknown descriptors and cross-kind targets fail before bundle validation. Route and resource approval settings are fixed to human, organization approval with one replay because this is the only requirement the current engine emits and the route replay enforces. These contexts support no authoring obligations.
+
+Preview, revision, diff, review, publication, activation, release migration, and rollback use the existing immutable candidate and lineage paths. Preview builds the same source snapshot and calls the same Rust-to-WebAssembly evaluator. A route or resource rule cannot match tool, built-in, or workflow action input.

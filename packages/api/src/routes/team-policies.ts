@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
+import type { Context } from "hono";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
+import { PolicyResourceAuthorization } from "../services/policy-resource-authorization.js";
 import type { CanonicalPolicyMutationContext } from "../authorization/canonical-policy-manager.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { canViewTeam, getTeamInOrg } from "../services/teams.js";
@@ -11,6 +14,10 @@ import { toPolicyWire } from "./policies.js";
 
 export const teamPoliciesRouter = new Hono<AppEnv>();
 const NOT_FOUND = { error: "Team or policy not found. Open a team you belong to." };
+
+function policyResource(c: Context<AppEnv>): PolicyResourceAuthorization {
+  return new PolicyResourceAuthorization(c.var.providers.resourceAuthorizationPort, { organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) });
+}
 
 function parsePolicyFields(raw: unknown): Omit<UpdateOrgPolicyInput, "now"> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Send a policy as a JSON object.");
@@ -44,6 +51,7 @@ teamPoliciesRouter.get("/:id/policies", async (c) => {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   if (!(await getTeamInOrg(db, user.orgId, id)) || !(await canViewTeam(db, id, user.id))) return c.json(NOT_FOUND, 404);
+  await policyResource(c).authorize("read", { ownerType: "team", ownerId: id });
   const rows = await listPolicies(db, { orgId: user.orgId, type: "team", id });
   return c.json({ policies: rows.map(toPolicyWire) });
 });
@@ -56,6 +64,8 @@ teamPoliciesRouter.on(["POST", "PATCH", "DELETE"], ["/:id/policies", "/:id/polic
   const policyId = c.req.param("policyId");
   const method = c.req.method;
   if ((method === "POST") === (policyId !== undefined)) return c.json(NOT_FOUND, 404);
+  if (!(await getTeamInOrg(db, user.orgId, id))) return c.json(NOT_FOUND, 404);
+  await policyResource(c).authorize(method === "POST" ? "create" : method === "DELETE" ? "delete" : "update", { ...(policyId ? { id: policyId } : {}), ownerType: "team", ownerId: id });
   // Serialize creation with team deletion, and check roles inside the write.
   const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
   return canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: `team_policy_${method.toLowerCase()}`, idempotencyKey }, async (tx) => {
@@ -91,6 +101,7 @@ teamPoliciesRouter.get("/:id/grants", async (c) => {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   if (!(await getTeamInOrg(db, user.orgId, id)) || !(await canViewTeam(db, id, user.id))) return c.json(NOT_FOUND, 404);
+  await policyResource(c).authorize("read", { ownerType: "team", ownerId: id });
   return c.json({ grants: (await listTeamGrants(db, user.orgId, id)).map(toGrantWire) });
 });
 
@@ -100,6 +111,8 @@ teamPoliciesRouter.on(["PUT", "DELETE"], ["/:id/policy-overrides", "/:id/grants/
   const id = c.req.param("id");
   const grantId = c.req.param("grantId");
   if ((c.req.method === "DELETE") !== (grantId !== undefined)) return c.json(NOT_FOUND, 404);
+  if (!(await getTeamInOrg(c.var.providers.db, user.orgId, id))) return c.json(NOT_FOUND, 404);
+  await policyResource(c).authorize(grantId ? "delete" : "update", { ...(grantId ? { id: grantId } : {}), ownerType: "team", ownerId: id });
   const operation = async (tx: import("../lib/drizzle.js").AppTx, context?: CanonicalPolicyMutationContext) => {
     // Shared authority lock protects against role revocation and team deletion.
     if (!(await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, id))) return c.json({ error: "Ask a team admin to change policies or grants." }, 403);
