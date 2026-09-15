@@ -1046,7 +1046,9 @@ export async function copyWorkflowDefinition(
     }
     const name = destination.name.trim();
     if (!name) throw new ValidationError("Choose a name for the team workflow copy.");
-    await authorizeWorkflowResource(deps, owner, "create");
+    const now = Date.now();
+    const copyId = newWorkflowId("wf");
+    await authorizeWorkflowResource(deps, owner, "create", { id: copyId, ownerType: "team", ownerId: destination.teamId, version: now });
     return deps.db.transaction(async (tx) => {
       await lockTeamForOwnership(tx, destination.teamId);
       if (!(await getTeamInOrg(tx, owner.orgId, destination.teamId)) ||
@@ -1059,8 +1061,6 @@ export async function copyWorkflowDefinition(
       )).limit(1);
       if (existing) throw new ValidationError("A workflow with that name already exists in the team. Choose another name.");
       const definition = await copiedDefinitionForOwner(tx, owner.orgId, row.definition, { type: "team", id: destination.teamId });
-      const now = Date.now();
-      const copyId = newWorkflowId("wf");
       await tx.insert(workflowDefinitions).values({ id: copyId, orgId: owner.orgId, ownerType: "team", ownerId: destination.teamId, name, definition, origin: "local", createdAt: now, updatedAt: now });
       await snapshotVersion({ ...deps, db: tx }, copyId, 1, name, definition, now);
       return { id: copyId, name, definition, createdAt: now, updatedAt: now, ownerType: "team" as const, ownerId: destination.teamId };
@@ -1071,6 +1071,7 @@ export async function copyWorkflowDefinition(
   const copyId = newWorkflowId("wf");
   const name = `${row.name} (copy)`;
   const definition = await copiedDefinitionForOwner(deps.db, owner.orgId, row.definition, { type: "user", id: owner.userId });
+  await authorizeWorkflowResource(deps, owner, "create", { id: copyId, ownerType: "user", ownerId: owner.userId, version: now });
   // Personal, whatever the original's owner was. A team-owned mirror copied
   // into the team would be a second team workflow every member sees; the
   // person who wants to change the graph gets it in their own workspace,
