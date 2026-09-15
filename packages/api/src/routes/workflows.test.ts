@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testWorkflowResourceContext } from "../test-helpers/resource-authorization.js";
 /**
  * `/api/workflows` route tests (Phase 5 plan Task 10, decision 18). Route
  * CRUD + validation-400 exercise the real store; run-start/approval/cancel
@@ -1243,7 +1244,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     ]);
     const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
     const result = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, via: "agent" },
     );
@@ -1367,7 +1368,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     ]);
     // "local-user" is in "local-org" but not in "other-org" → org_mismatch
     const result = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, via: "web" },
     );
@@ -1393,7 +1394,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
     ]);
     const result = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, via: "web" },
     );
@@ -1425,7 +1426,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
 
     // First resolution: approve with scope=run (writes a grant)
     const first = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, scope: "run", via: "web" },
     );
@@ -1444,7 +1445,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
 
     // Second resolution: deny (simulates the racing loser arriving after the signal is stored)
     const second = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: false, scope: "once", via: "web" },
     );
@@ -1480,7 +1481,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     await workflowStore.parkRun(runId, 1, [
       { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
     ]);
-    const result = await cancelWorkflowRun({ db, workflowStore, workflowRunHost, credentials: engineCredentials }, { userId: "local-user", orgId: "local-org" }, runId);
+    const result = await cancelWorkflowRun({ db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext }, { userId: "local-user", orgId: "local-org" }, runId);
     expect(result).toBe("ok");
     const rows = await db
       .select({ status: actionInvocations.status })
@@ -1557,7 +1558,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );
@@ -1627,7 +1628,7 @@ describe("pendingGates + needsApproval wire", () => {
       { kind: "signal", signalType: "approval:t2", nodeId: "t2" },
     ]);
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );
@@ -1671,7 +1672,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );
@@ -1740,7 +1741,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const runs = await listWorkflowRuns(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       wf.id,
     );
@@ -1797,7 +1798,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, credentials: engineCredentials, resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );

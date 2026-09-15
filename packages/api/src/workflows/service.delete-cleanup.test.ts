@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testWorkflowResourceContext } from "../test-helpers/resource-authorization.js";
 /**
  * DB-backed tests for `deleteWorkflowDefinition` trigger cleanup and the
  * cross-workflow run list. Uses the same PGlite harness as the other
@@ -33,7 +34,7 @@ import { InMemoryCredentialStore } from "@valet/engine";
 
 /** Arm-gate deps for the create calls. Every workflow in this file is
  * user-owned, so the team readiness gate never runs. */
-const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), plugins: [githubPlugin] });
+const armDeps = () => ({ db, credentials: new InMemoryCredentialStore(), resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext, plugins: [githubPlugin] });
 
 
 /** Minimal run-host stub: this test file never starts or cancels runs. */
@@ -65,6 +66,7 @@ beforeAll(async () => {
     workflowStore: store,
     workflowRunHost: stubRunHost,
     credentials: new InMemoryCredentialStore(),
+    resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext,
   };
 });
 

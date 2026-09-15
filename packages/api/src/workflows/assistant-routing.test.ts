@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testWorkflowResourceContext } from "../test-helpers/resource-authorization.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { PluginActionContext } from "@valet/engine";
@@ -27,7 +28,7 @@ async function setup() {
     { id: "other", orgId: "local-org", ownerType: "team", ownerId: "team-b", sessionId: "assistant:other", isDefault: true, createdAt: 1 },
     { id: "foreign", orgId: "other-org", ownerType: "team", ownerId: "team-a", sessionId: "assistant:foreign", isDefault: false, createdAt: 1 },
   ]);
-  return { api, p, deps: { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials } };
+  return { api, p, deps: { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, resourceAuthorizationPort: p.resourceAuthorizationPort, resourceAuthorizationContext: testWorkflowResourceContext } };
 }
 const owner = { userId: "local-user", orgId: "local-org" };
 

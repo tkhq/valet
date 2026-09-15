@@ -34,6 +34,8 @@ import { resolveOrgId } from "../lib/org.js";
 import { agentSessions, users } from "../schema/index.js";
 import { requireActingUser, requirePrincipal, requireUser, resolveOptionalIdentity, type AuthUser, type RequestIdentity } from "../middleware/auth.js";
 import { userPrincipal } from "../lib/request-principal.js";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
+import { isValidInternalToken } from "../lib/internal-auth.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -470,6 +472,13 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
 
 export const artifactsRouter = new Hono<AppEnv>();
 
+function artifactAuthorization(c: Context<AppEnv>, orgId: string, scope: ArtifactScope) {
+  return {
+    port: c.var.providers.resourceAuthorizationPort,
+    context: { organizationId: orgId, actorUserId: scope.actorUserId, principal: isValidInternalToken(c.req.header("x-valet-internal")) ? { type: "app" as const, id: "artifact-tool" } : (requirePrincipal(c) ?? { type: "app" as const, id: "artifact-tool" }), deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) },
+  };
+}
+
 artifactsRouter.post("/copy-to-team", async (c) => {
   try {
     const scope = await resolveScope(c, "read");
@@ -480,7 +489,7 @@ artifactsRouter.post("/copy-to-team", async (c) => {
       return c.json({ error: "Provide artifactId, teamId and a new key to copy a personal artifact." }, 400);
     }
     const db = c.var.providers.db;
-    const row = await copyArtifactToTeam(db, scope, await orgIdForShare(c, db), { artifactId: body.artifactId, teamId: body.teamId, key: body.key });
+    const row = await copyArtifactToTeam(db, scope, await orgIdForShare(c, db), { artifactId: body.artifactId, teamId: body.teamId, key: body.key }, artifactAuthorization(c, c.var.user.orgId, scope));
     return c.json({ id: row.id, path: row.sourceMemoryPath, url: shareUrl(c, row.token), visibility: row.visibility }, 201);
   } catch (err) {
     const mapped = handleServiceError(err);
@@ -494,7 +503,7 @@ artifactsRouter.post("/share", async (c) => {
   try {
     const resolved = await resolveScope(c, "read");
     // Only the verified internal-token branch lacks a request principal.
-    scope = { ...resolved, principal: requirePrincipal(c) ?? resolved.owner };
+    scope = resolved;
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -519,7 +528,7 @@ artifactsRouter.post("/share", async (c) => {
     if (body.revoke === true) {
       // `key` and `path` share the publish-key namespace, so one revoke
       // path serves both shapes.
-      await revokeArtifactByPath(db, scope, hasPath ? body.path! : body.key!, orgId);
+      await revokeArtifactByPath(db, scope, hasPath ? body.path! : body.key!, orgId, artifactAuthorization(c, orgId, scope));
       return c.json({ ok: true });
     }
 
@@ -529,7 +538,7 @@ artifactsRouter.post("/share", async (c) => {
         path: body.path!,
         orgId,
         sourceSessionId: c.req.header("x-valet-session-id"),
-      });
+      }, artifactAuthorization(c, orgId, scope));
     } else {
       if (typeof body.content !== "string" || body.content.length === 0) {
         return c.json({ error: "content is required to publish with `key`" }, 400);
@@ -543,7 +552,7 @@ artifactsRouter.post("/share", async (c) => {
         icon: typeof body.icon === "string" ? body.icon : undefined,
         orgId,
         sourceSessionId: c.req.header("x-valet-session-id"),
-      });
+      }, artifactAuthorization(c, orgId, scope));
     }
     const resp: ShareArtifactResponse = {
       id: row.id,

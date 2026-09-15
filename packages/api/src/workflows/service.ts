@@ -28,6 +28,7 @@ import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
 import type { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import type { ResourceAuthorizationContext, ResourceAuthorizationPort } from "../authorization/resource-authorization.js";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
@@ -86,6 +87,8 @@ export interface WorkflowServiceDeps {
    * (`plugin.triggers`) for event-key validation and discovery. */
   plugins?: ValetPlugin[];
   canonicalAuthorizationService?: CanonicalAuthorizationService;
+  resourceAuthorizationPort: ResourceAuthorizationPort;
+  resourceAuthorizationContext(owner: WorkflowOwner): ResourceAuthorizationContext;
   canonicalPolicyManager?: CanonicalPolicyBundleManager;
 }
 
@@ -511,11 +514,30 @@ export function canAccessTriggerRowInScope(
  * checked the user may reach that owner (`isAuthorizedForOwner`), because
  * an id that arrives in a query string is a request, not a permission.
  */
+
+async function authorizeWorkflowResource(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  operation: "list" | "read" | "create" | "update" | "delete" | "execute",
+  resource?: { id: string; ownerType: "user" | "team" | "org"; ownerId: string; version: number },
+): Promise<void> {
+  const context = deps.resourceAuthorizationContext(owner);
+  if (context.organizationId !== owner.orgId || (context.principal.type !== "app" && context.actorUserId !== owner.userId)) throw new Error("Workflow resource authorization context does not match the caller.");
+  const plan = await deps.resourceAuthorizationPort.authorize({ ...context, resourceKind: "workflow", operation, ...(resource ? { resource } : {}) });
+  if (plan.resultLimit !== undefined || plan.fieldMask !== undefined || plan.redactions.length > 0 || (plan.readOnly && !["list", "read"].includes(operation))) throw new Error("Workflow service cannot enforce the required resource obligation.");
+}
+
+async function workflowResourceMetadata(deps: WorkflowServiceDeps, owner: WorkflowOwner, id: string) {
+  const rows = await deps.db.select({ id: workflowDefinitions.id, ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, updatedAt: workflowDefinitions.updatedAt }).from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId), await ownedDefinitionFilter(deps.db, owner))).limit(1);
+  return rows[0];
+}
+
 export async function listWorkflowDefinitions(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   scope?: WorkflowOwnerRef,
 ): Promise<WorkflowDefinitionSummary[]> {
+  await authorizeWorkflowResource(deps, owner, "list");
   // A scoped list reads one owner, so it never needs the team roster.
   const where = scope
     ? and(eq(workflowDefinitions.ownerType, scope.ownerType), eq(workflowDefinitions.ownerId, scope.ownerId))
@@ -534,6 +556,9 @@ export async function getWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<WorkflowDefinitionSummary | null> {
+  const metadata = await workflowResourceMetadata(deps, owner, id);
+  if (!metadata) return null;
+  await authorizeWorkflowResource(deps, owner, "read", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
   const names = await repoNamesFor(deps.db, [row]);
@@ -560,6 +585,7 @@ export async function createWorkflowDefinition(
   // 404 with a confusing "team null not found".
   if (typeof input.teamId === "string") {
     const teamId = input.teamId;
+    await authorizeWorkflowResource(deps, owner, "create", { id, ownerType: "team", ownerId: teamId, version: now });
     // The membership check and the insert happen inside one transaction
     // holding `lockTeamForOwnership`'s advisory lock, so this
     // can't race `deleteTeam` (`services/teams.ts`) — without it, a
@@ -585,6 +611,7 @@ export async function createWorkflowDefinition(
     ownerType = "team";
     ownerId = teamId;
   } else {
+    await authorizeWorkflowResource(deps, owner, "create", { id, ownerType: "user", ownerId: owner.userId, version: now });
     await validateWorkflowAssistant(deps.db, owner.orgId, { type: "user", id: owner.userId }, input.definition);
     await deps.db.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
   }
@@ -707,6 +734,9 @@ export async function updateWorkflowDefinition(
   id: string,
   input: { name?: string; definition?: unknown },
 ): Promise<WorkflowDefinitionSummary | null> {
+  const metadata = await workflowResourceMetadata(deps, owner, id);
+  if (!metadata) return null;
+  await authorizeWorkflowResource(deps, owner, "update", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
   await refuseRepoOwned(deps.db, row);
@@ -1077,6 +1107,9 @@ export async function deleteWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<DeleteWorkflowResult> {
+  const metadata = await workflowResourceMetadata(deps, owner, id);
+  if (!metadata) return "not_found";
+  await authorizeWorkflowResource(deps, owner, "delete", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   return deps.db.transaction(async (tx) => {
     const [candidate] = await tx.select().from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
     if (!candidate) return "not_found";
@@ -1206,6 +1239,9 @@ export async function startWorkflowRun(
   workflowId: string,
   input?: Record<string, unknown>,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
+  const metadata = await workflowResourceMetadata(deps, owner, workflowId);
+  if (!metadata) return null;
+  await authorizeWorkflowResource(deps, owner, "execute", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 

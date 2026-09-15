@@ -1,5 +1,6 @@
 import { CanonicalPolicyBundleManager } from "../authorization/canonical-policy-manager.js";
 import { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import { CanonicalResourceAuthorizationService, systemResourceAuthorizationContext } from "../authorization/resource-authorization.js";
 import { quarantineMissingActionProjections } from "../authorization/action-projections.js";
 import { configureCanonicalOrganizationProvisioner } from "../services/org.js";
 import { PGlite } from "@electric-sql/pglite";
@@ -388,6 +389,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   }
   const canonicalPolicyManager = new CanonicalPolicyBundleManager(db, actionPluginByService);
   const canonicalAuthorizationService = await CanonicalAuthorizationService.create(canonicalPolicyManager);
+  const resourceAuthorizationPort = new CanonicalResourceAuthorizationService(canonicalAuthorizationService, db);
   configureCanonicalOrganizationProvisioner(db, (id, name) => canonicalPolicyManager.provisionOrganization(id, name));
 
   // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
@@ -744,6 +746,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     credentials: engineCredentials,
     canonicalAuthorizationService,
     canonicalPolicyManager,
+    resourceAuthorizationPort,
+    resourceAuthorizationContext: (owner) => systemResourceAuthorizationContext(owner.orgId, "workflow-service", crypto.randomUUID()),
   };
 
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
@@ -824,6 +828,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     canonicalPolicyManager,
     canonicalAuthorizationService,
+    resourceAuthorizationPort,
     blobs,
     encryptionKey: opts.encryptionKey,
     engineStore,

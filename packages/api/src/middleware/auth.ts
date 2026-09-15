@@ -302,6 +302,18 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
   return async (c, next) => {
     // 1. Internal token — unconditional bypass.
     if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+      const actorId = c.req.header("x-valet-actor");
+      if (actorId) {
+        const [actor, orgId] = await Promise.all([
+          db.select().from(users).where(eq(users.id, actorId)).limit(1).then((rows) => rows[0]),
+          resolveOrgId(db),
+        ]);
+        if (actor && orgId) {
+          c.set("user", { id: actor.id, email: actor.email, name: actor.name ?? undefined, role: normalizeRole(actor.role), orgId });
+          c.set("principal", userPrincipal(actor.id));
+          c.set("authVia", "apiKey");
+        }
+      }
       await next();
       return;
     }

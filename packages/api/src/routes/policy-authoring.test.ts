@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testResourceContext } from "../test-helpers/resource-authorization.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -74,6 +75,8 @@ async function setup() {
   api = await bootTestApi();
   return api;
 }
+
+const resourceDeps = { resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: (scope: { organizationId: string }, actorId: string) => testResourceContext(scope.organizationId, actorId) };
 
 describe("canonical policy authoring routes", () => {
   it("activates a reviewed immutable candidate without changing structured rows", async () => {
@@ -425,7 +428,7 @@ describe("canonical policy authoring routes", () => {
         }),
       ];
     for (const [index, compile] of compilers.entries()) {
-      const service = new PolicyAuthoringService({
+      const service = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
         compiler: { compile, evaluate: async () => ({}) },
@@ -438,7 +441,7 @@ describe("canonical policy authoring routes", () => {
       ).rejects.toMatchObject({ code: "unsupported", statusCode: 422 });
     }
     const hash = "a".repeat(64),
-      service = new PolicyAuthoringService({
+      service = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
         compiler: {
@@ -471,11 +474,11 @@ describe("canonical policy authoring routes", () => {
     const app = await setup(),
       scope = { organizationId: "local-org" },
       authorizer = { authorize: async () => true as const };
-    const normal = new PolicyAuthoringService({
+    const normal = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
       }),
-      failing = new PolicyAuthoringService({
+      failing = new PolicyAuthoringService({ ...resourceDeps,
         db: app.providers.db,
         authorizer,
         auditWrite: async () => {
@@ -650,7 +653,7 @@ describe("canonical policy authoring routes", () => {
   it("authorizes before compilation and binds preparation to the engine", async () => {
     const app = await setup(),
       scope = { organizationId: "local-org" },
-      real = new PolicyAuthoringService({ db: app.providers.db, authorizer: { authorize: async () => true } });
+      real = new PolicyAuthoringService({ ...resourceDeps, db: app.providers.db, authorizer: { authorize: async () => true } });
     const created = await real.create("author", scope, { ...mutation("engine-create-key", 0, 0), draft });
     let calls = 0,
       allowed = false,
@@ -663,7 +666,7 @@ describe("canonical policy authoring routes", () => {
       },
       evaluate: async () => ({}),
     };
-    const guarded = new PolicyAuthoringService({ db: app.providers.db, authorizer: { authorize: async () => allowed }, compiler });
+    const guarded = new PolicyAuthoringService({ ...resourceDeps, db: app.providers.db, authorizer: { authorize: async () => allowed }, compiler });
     await expect(guarded.create("denied", scope, { ...mutation("denied-create-key", 0, 0), draft })).rejects.toMatchObject({ statusCode: 403 });
     await expect(guarded.edit("denied", scope, created.documentId, { ...mutation("denied-edit-key", 1, 1), draft })).rejects.toMatchObject({ statusCode: 403 });
     expect(calls).toBe(0);

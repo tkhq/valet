@@ -9,6 +9,7 @@
 import type { CredentialStore } from "@valet/engine";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { AppQueryable } from "../lib/drizzle.js";
+import type { ResourceAuthorizationContext, ResourceAuthorizationPort } from "../authorization/resource-authorization.js";
 import { githubHost } from "./github-host.js";
 
 export interface RepoHostDeps {
@@ -75,6 +76,18 @@ export interface RepoHost {
   /** Resolves a usable git/API credential for one `owner/repo`. See
    * `GitTokenResult`'s doc comment for the three-way result. */
   resolveGitToken(ctx: RepoHostContext, req: GitTokenRequest): Promise<GitTokenResult | null>;
+}
+
+export async function authorizeRepositoryOperation(authorization: { port: ResourceAuthorizationPort; context: ResourceAuthorizationContext }, operation: "list" | "metadata" | "link" | "unlink" | "import", resource?: { id?: string; ownerType?: "user" | "team" | "org"; ownerId?: string; version?: number }) {
+  const plan = await authorization.port.authorize({ ...authorization.context, resourceKind: "repository", operation, ...(resource ? { resource } : {}) });
+  if (plan.fieldMask !== undefined || plan.redactions.length > 0 || plan.readOnly) throw new Error("Repository service cannot enforce the required resource obligation.");
+  return plan;
+}
+
+export async function listAuthorizedRepos(host: RepoHost, ctx: RepoHostContext, authorization: { port: ResourceAuthorizationPort; context: ResourceAuthorizationContext }): Promise<RepoListItem[]> {
+  const plan = await authorizeRepositoryOperation(authorization, "list");
+  const rows = await host.listRepos(ctx);
+  return plan.resultLimit === undefined ? rows : rows.slice(0, plan.resultLimit);
 }
 
 const GITHUB_URL_PATTERN = /github\.com/;

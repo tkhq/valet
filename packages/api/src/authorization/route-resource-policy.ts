@@ -26,7 +26,6 @@ export interface ResourceAccessDescriptorV1 {
 export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readonly [PolicyRisk]>> = Object.freeze({
   "repository.list": ["low"],
   "repository.metadata": ["low"],
-  "repository.read": ["low"],
   "repository.link": ["low"],
   "repository.unlink": ["low"],
   "repository.import": ["medium"],
@@ -120,8 +119,8 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
       if (routeRefusal) return c.json(routeRefusal.body, routeRefusal.status);
       if (obligationPlan.readOnly && !["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return c.json({ error: "Policy permits read-only access. Use a read operation or ask an administrator to change access.", code: "authorization_read_only" }, 403);
       if (obligationPlan.resultLimit !== undefined || obligationPlan.fieldMask !== undefined || obligationPlan.redactions.length > 0) return c.json({ error: "This route does not support the required policy obligation. Ask an administrator to change the policy.", code: "authorization_obligation_unsupported" }, 403);
-      if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method) && c.req.header("Idempotency-Key") !== undefined) {
-        const reserved = await reserveRouteExecution(c.var.providers.db, canonicalDecisionId(user.orgId, routeRequest.idempotencyKey), c.req.header("Idempotency-Key")!, evaluationTimeMs);
+      if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
+        const reserved = await reserveRouteExecution(c.var.providers.db, canonicalDecisionId(user.orgId, routeRequest.idempotencyKey), c.req.header("Idempotency-Key") ?? delivery, evaluationTimeMs);
         if (reserved.kind === "completed") return c.json({ code: "authorization_completed_replay", originalStatus: reserved.status });
         if (reserved.kind === "indeterminate") return c.json({ error: "The operation may have completed. Inspect its state before you retry.", code: "authorization_indeterminate" }, 409);
         executionAttemptId = reserved.attemptId;

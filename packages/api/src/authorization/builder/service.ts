@@ -4,6 +4,7 @@ import type { AuthorizationRequest, JsonValue } from "@valet/engine/authorizatio
 import { builtinAuthorization } from "@valet/engine";
 import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
+import type { ResourceAuthorizationContext, ResourceAuthorizationPort } from "../resource-authorization.js";
 import { policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringOperations, policyAuthoringReviews, policyAuthoringRevisions } from "../../schema/index.js";
 import { buildCurrentPolicySource } from "../bundles/current-policy-source.js";
 import { SourceBundleHost } from "../bundles/host.js";
@@ -86,6 +87,8 @@ interface ServiceDeps {
   now?: () => number;
   auditWrite?: typeof writeAudit;
   canonicalPolicyManager?: CanonicalPolicyBundleManager;
+  resourceAuthorizationPort: ResourceAuthorizationPort;
+  resourceAuthorizationContext(scope: PolicyAuthoringScope, actorId: string): ResourceAuthorizationContext;
 }
 type DocumentRow = typeof policyAuthoringDocuments.$inferSelect;
 type RevisionRow = typeof policyAuthoringRevisions.$inferSelect;
@@ -125,8 +128,8 @@ export class PolicyAuthoringService {
   }
   async get(actor: string, scope: PolicyAuthoringScope, id: string) {
     return this.safe(async () => {
-      const row = await this.scoped(this.deps.db, scope, id);
       await this.allowed("view", actor, scope, this.deps.db);
+      const row = await this.scoped(this.deps.db, scope, id);
       return { document: toDocument(row), draft: (await this.revision(this.deps.db, row, row.revision)).draft };
     });
   }
@@ -140,7 +143,7 @@ export class PolicyAuthoringService {
       this.assertScope(input.draft, scope);
       const compiled = await this.normalized(input.draft, scope);
       return this.deps.db.transaction(async (tx) => {
-        await this.allowed("edit", actor, scope, tx);
+        await this.allowed("edit", actor, scope, tx, true);
         const again = await claim(tx, op, this.now());
         if (again) return again;
         const [{ value }] = await tx
@@ -167,7 +170,7 @@ export class PolicyAuthoringService {
       const compiled = await this.normalized(input.draft, scope);
       return this.deps.db.transaction(async (tx) => {
         const old = await this.scoped(tx, scope, id);
-        await this.allowed("edit", actor, scope, tx);
+        await this.allowed("edit", actor, scope, tx, true);
         const again = await claim(tx, op, this.now());
         if (again) return again;
         cas(old, input);
@@ -208,7 +211,7 @@ export class PolicyAuthoringService {
       if (replay) return replay;
       return this.deps.db.transaction(async (tx) => {
         const old = await this.scoped(tx, scope, id);
-        await this.allowed("review", actor, scope, tx);
+        await this.allowed("review", actor, scope, tx, true);
         const again = await claim(tx, op, this.now());
         if (again) return again;
         cas(old, input);
@@ -253,7 +256,7 @@ export class PolicyAuthoringService {
       if (replay) return replay;
       return this.deps.db.transaction(async (tx) => {
         const old = await this.scoped(tx, scope, id);
-        await this.allowed("restore_draft", actor, scope, tx);
+        await this.allowed("restore_draft", actor, scope, tx, true);
         const again = await claim(tx, op, this.now());
         if (again) return again;
         cas(old, input);
@@ -291,7 +294,7 @@ export class PolicyAuthoringService {
       const revision = await this.revision(this.deps.db, row, row.revision),
         rebuilt = (await this.normalized(revision.draft, scope)).result;
       row = await this.scoped(this.deps.db, scope, id);
-      await this.allowed("prepare_publication", actor, scope, this.deps.db);
+      await this.allowed("prepare_publication", actor, scope, this.deps.db, true);
       cas(row, expected);
       const review = (
         await this.deps.db
@@ -390,7 +393,7 @@ export class PolicyAuthoringService {
       if (replay) return replay;
       return this.deps.db.transaction(async (tx) => {
         const old = await this.scoped(tx, scope, id);
-        await this.allowed("submit_review", actor, scope, tx);
+        await this.allowed("submit_review", actor, scope, tx, true);
         const again = await claim(tx, op, this.now());
         if (again) return again;
         cas(old, input);
@@ -431,16 +434,20 @@ export class PolicyAuthoringService {
     }
   }
   private async preflight(op: PolicyAuthoringOperation, actor: string, scope: PolicyAuthoringScope, id: string) {
-    const row = await this.scoped(this.deps.db, scope, id);
     await this.allowed(op, actor, scope, this.deps.db);
+    const row = await this.scoped(this.deps.db, scope, id);
     return row;
   }
-  private async allowed(op: PolicyAuthoringOperation, actor: string, scope: PolicyAuthoringScope, db: AppQueryable) {
+  private async allowed(op: PolicyAuthoringOperation, actor: string, scope: PolicyAuthoringScope, db: AppQueryable, authorityOnly = false) {
     if (!actor || !scope.organizationId) throw new PolicyAuthoringError("forbidden", "Sign in with policy authoring access.", 403);
     try {
       const d = await this.deps.authorizer.authorize(op, actor, scope, db);
       if (d === "not_found") throw new PolicyAuthoringError("not_found", "Policy draft not found.", 404);
       if (!d) throw new PolicyAuthoringError("forbidden", "Ask a policy administrator for access to this scope.", 403);
+      if (authorityOnly) return;
+      const operation = op === "view" ? "read" : op === "review" ? "approve" : op === "prepare_publication" ? "publish" : op === "create" ? "create" : "update";
+      const plan = await this.deps.resourceAuthorizationPort.authorize({ ...this.deps.resourceAuthorizationContext(scope, actor), resourceKind: "policy", operation, resource: { ownerType: scope.teamId ? "team" : "org", ownerId: scope.teamId ?? scope.organizationId } });
+      if (plan.resultLimit !== undefined || plan.fieldMask !== undefined || plan.redactions.length > 0 || plan.readOnly) throw new PolicyAuthoringError("forbidden", "Policy authoring cannot enforce the required resource obligation.", 403);
     } catch (e) {
       if (e instanceof PolicyAuthoringError) throw e;
       throw new PolicyAuthoringError("forbidden", "Retry after policy authoring authorization is available.", 403);

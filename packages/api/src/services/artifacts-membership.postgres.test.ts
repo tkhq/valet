@@ -1,3 +1,4 @@
+import { allowArtifactAuthorization } from "../test-helpers/resource-authorization.js";
 /** Run with ARTIFACT_MEMBERSHIP_POSTGRES=1. This suite creates and removes its
  * own disposable Postgres container; it never uses DATABASE_URL or real data. */
 import { execFileSync } from "node:child_process";
@@ -81,19 +82,19 @@ describe.skipIf(!enabled)("artifact membership commit ordering (Postgres)", () =
           await db.insert(teamMembers).values({ teamId: id, userId: id, role: "member" });
           const source = await publishArtifact(db, {
             owner: { type: "user", id }, actorUserId: id,
-          }, { orgId: id, key: "source.md", content: "original", format: "markdown" });
+          }, { orgId: id, key: "source.md", content: "original", format: "markdown" }, allowArtifactAuthorization());
           if (operation === "refresh" || operation === "revoke") {
-            await publishArtifact(db, scope, { orgId: id, key: "target.md", content: "original", format: "markdown" });
+            await publishArtifact(db, scope, { orgId: id, key: "target.md", content: "original", format: "markdown" }, allowArtifactAuthorization());
           }
           const before = await db.select().from(artifacts).where(eq(artifacts.ownerId, id));
           const versionsBefore = await db.select().from(artifactVersions)
             .where(eq(artifactVersions.actorUserId, id));
           const mutate = (tx: AppDb) => operation === "revoke"
-            ? revokeArtifactByPath(tx, scope, "target.md", id)
+            ? revokeArtifactByPath(tx, scope, "target.md", id, allowArtifactAuthorization())
             : operation === "copy"
               ? copyArtifactToTeam(tx, { owner: { type: "user", id }, actorUserId: id }, id,
-                { artifactId: source.id, teamId: id, key: "target.md" })
-              : publishArtifact(tx, scope, { orgId: id, key: "target.md", content: "updated", format: "markdown" });
+                { artifactId: source.id, teamId: id, key: "target.md" }, allowArtifactAuthorization())
+              : publishArtifact(tx, scope, { orgId: id, key: "target.md", content: "updated", format: "markdown" }, allowArtifactAuthorization());
           const revoke = async (tx: AppDb) => {
             if (membership === "org") await tx.delete(orgMembers).where(eq(orgMembers.orgId, id));
             else await tx.delete(teamMembers).where(eq(teamMembers.teamId, id));
