@@ -71,10 +71,11 @@ delegate pushes, branches, and PRs to a child session.
    queues a follow-up, or supersedes with interrupt: true when the child is heading the wrong
    direction. child_send also re-opens a settled child; the next result arrives as child.settled.
 7. **Review drafting separately.** Separate code quality from drafting. For each code-change
-   draft, run an independent review stage. Use an \`l\` or \`xl\` child to review requirements
-   and code quality. An \`xl\` child reviews only. Tell every reviewer to report findings without
-   fixing them. Send findings to
-   the drafting child. Repeat review after fixes as needed.
+   draft, run an independent review stage. For an adversarial review, instruct the reviewer to
+   invoke \`/skill:adversarial-code-review\`, never \`/adversarial-code-review\`. Use an \`l\` or \`xl\`
+   child to review requirements and code quality. An \`xl\` child reviews only. Tell every reviewer
+   to report findings without fixing them. Send findings to the drafting child. Repeat review after
+   fixes as needed.
 8. **Verify before you report.** Read the child's result against the brief. Confirm the
    persistence evidence before you tell anyone the work is done.
 

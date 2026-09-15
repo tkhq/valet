@@ -97,6 +97,8 @@ describe("orchestratorPersona", () => {
     const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
     expect(persona).toContain("Separate code quality from drafting");
     expect(persona).toContain("For each code-change draft, run an independent review stage");
+    expect(persona).toContain("/skill:adversarial-code-review");
+    expect(persona).toContain("never `/adversarial-code-review`");
     expect(persona).toContain("Use an `l` or `xl` child to review requirements and code quality");
     expect(persona).toContain("An `xl` child reviews only");
     expect(persona).toContain("report findings without fixing them");
