@@ -1,6 +1,6 @@
 ---
 name: slack-user
-description: How to act AS the connected Slack user (xoxp) — search, read private channels/DMs, set status, and post on the user's behalf
+description: How to act AS the connected Slack user (xoxp) — search, read private channels/DMs and status, set status, and post on the user's behalf
 ---
 
 # Slack (personal) — acting AS the user
@@ -16,6 +16,7 @@ namespace.
 | Bot replies, channel binding, inbound routing     | `slack.*`   |
 | Search the user's messages across their workspace | `slack_user.search_messages` |
 | Read a private channel/DM the bot is NOT in       | `slack_user.read_history` / `read_thread` |
+| Read the user's custom status                      | `slack_user.get_status` |
 | Set the user's status, snooze DND                 | `slack_user.set_status` / `set_dnd` |
 | Post on behalf of the user (delegated)            | `slack_user.post_message` / `send_dm` |
 | Agent's own outbound communication                | `slack.send_message` / `slack.dm_owner` (NOT `slack_user.*`) |
@@ -43,6 +44,9 @@ plus `next_cursor` for pagination.
 `slack_user.read_history`, `slack_user.read_thread`, and
 `slack_user.list_channels` mirror the bot equivalents but operate on the user's
 full visible surface (public + private channels, DMs, group DMs).
+
+Use `slack_user.get_status` to read the connected user's custom status. It
+returns `status_text`, `status_emoji`, and `status_expiration`.
 
 ## Write / act-as
 

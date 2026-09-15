@@ -149,11 +149,12 @@ tsconfig referencing workspace deps, root tsconfig reference,
 Contents:
 
 - **Actions**: port `slack_user.*` from `main` (search messages, list
-  channels, read history, read thread, get status, set status, snooze/end DND,
-  send DM, post message, add reaction, upload file, pin, bookmark, reminder).
-  They are already an `ActionPlugin` over an injected credential. Apply
-  the current type-safety rules during the port (no `any`, no double
-  casts).
+  channels, read history, read thread, set status, snooze/end DND, send DM,
+  post message, add reaction, upload file, pin, bookmark, reminder). They are
+  already an `ActionPlugin` over an injected credential. Apply the current
+  type-safety rules during the port (no `any`, no double casts).
+- **Status read**: add `slack_user.get_status`. It reads the connected user's
+  custom status text, emoji, and expiration. It is new in v2.
 - **Credential declaration**: service `slack-user`, type `oauth2`, the
   full V1 user-scope bundle (read/search + act-as; bot-only and admin
   scopes excluded — see `provider.ts` on `main` for the list and the
