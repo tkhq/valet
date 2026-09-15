@@ -1210,6 +1210,8 @@ export interface Message {
   content: string;
   parts: MessagePart[];
   createdAt: number;
+  /** Stable store order for entries that have the same createdAt value. */
+  sequence?: number;
   /**
    * The submission (engine queue item) that produced this entry —
    * transcript↔submission linkage. Populated from the engine's
@@ -1219,7 +1221,7 @@ export interface Message {
    * `submission.settled` events to the originating user message.
    */
   queueItemId?: string;
-  /** True after an assistant message reaches a terminal stop reason. */
+  /** True once an assistant message ends its turn normally (`stopReason: "end_turn"`). False for an errored or aborted message, which is not a valid reply target. */
   completed?: boolean;
   /** Assistant message that this user message addresses. */
   replyTo?: MessageReplyReference;
@@ -2450,6 +2452,19 @@ export interface WorkflowTemplateSummary {
    * parked run, a batch-size cap. Shown in the install dialog.
    */
   caveats: string[];
+  /**
+   * False when this organization's model policy rejects the template. The
+   * install gate refuses the same template, so a card without this flag
+   * offers an Install button that always fails. The card stays in the
+   * gallery, because the reader may be the person who can clear the block.
+   *
+   * True when the policy accepts the template AND when the listing could
+   * not read the policy at all. A listing that cannot answer must not
+   * withhold a card; the install gate still answers on the install itself.
+   */
+  installable: boolean;
+  /** Why `installable` is false, and what to do about it. */
+  installBlockedReason?: string;
 }
 
 export interface ListWorkflowTemplatesResponse {

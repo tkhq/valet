@@ -19,10 +19,11 @@ import type {
   StoredCredential,
   ValetPlugin,
 } from "@valet/engine";
+import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs } from "../schema/index.js";
+import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teams, workflowDefinitions } from "../schema/index.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -30,6 +31,8 @@ import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword.js";
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
+import { workflowsActionPlugin } from "../workflows/actions.js";
+import { InMemoryWorkflowStore } from "@valet/workflow";
 import { createAssistant } from "../assistants/service.js";
 import { slackPlugin } from "@valet/plugin-slack/actions";
 
@@ -281,6 +284,48 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
     expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org"] });
+  });
+
+  it("team-owned run propagates its principal into a workflows tool action", async () => {
+    const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Org", createdAt: 1 });
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    const workflowStore = new InMemoryWorkflowStore();
+    const workflows = workflowsActionPlugin(() => ({
+      db,
+      workflowStore,
+      // save_workflow does not start or resume runs, and records no origin.
+      workflowRunHost: null as never,
+      engineStore: new InMemorySessionStore(),
+      credentials: new FakeCredentialStore(),
+    }));
+    const invoke = buildActionInvoker({
+      db,
+      credentials: new FakeCredentialStore(),
+      actionPluginByService: actionPluginByServiceOf("workflows", workflows),
+    });
+
+    const result = await invoke(
+      {
+        service: "workflows",
+        action: "save_workflow",
+        params: {
+          name: "Created by tool node",
+          definition: {
+            version: "dag/v1",
+            nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop" }],
+            edges: [{ from: "start", to: "done" }],
+          },
+        },
+        invocationId: "workflow:r1:workflows-save",
+      },
+      { userId: "former-member", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(await db.select().from(workflowDefinitions)).toEqual([
+      expect.objectContaining({ ownerType: "team", ownerId: "t1", name: "Created by tool node" }),
+    ]);
   });
 
   it("team-owned run: resolves a direct team credential", async () => {

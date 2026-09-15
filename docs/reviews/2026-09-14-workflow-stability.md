@@ -22,15 +22,15 @@ This branch is a draft. It does not import the open feature PRs.
 | [#643](https://github.com/tkhq/valet/pull/643) | Expose the existing workflow-copy tool to personal assistants without changing its authorization. | Merged with current test fixtures. |
 | [#688](https://github.com/tkhq/valet/pull/688) | Recommend approved models, retain explicit overrides, and apply focused workflow updates. | Merged after fixing test mocks, custom-model validation, bare-ID provider routing, and changelog metadata. |
 | [#650](https://github.com/tkhq/valet/pull/650) | Keep personal settings reachable without clearing the selected team. | Reduced to navigation after #700 superseded skill discovery. Merged; browser checks passed. |
-| Owner's thread-growth report | Stop recurring runs from creating an assistant thread for every run. | This branch proposes one thread per workflow definition within the selected assistant. |
+| Owner's thread-growth report | Stop recurring runs from filling the assistant's thread list. | This branch keeps one thread per run and archives it when the run settles. |
 
 The three linked Linear tickets above were read directly. Other rows use PR descriptions and repository specs; a matching Linear ticket was not verified.
 
 ## Confirmed findings and fixes
 
 1. **Release CI missed a web compile error.** After #683 changed the OAuth hook, Connected Accounts omitted the required mutation argument. Root typecheck excluded web. #703 supplied `undefined`, updated assertions, and added the production web build to CI.
-2. **Workflow runs create unbounded thread rows.** The dispatcher used `signal:workflow:{runId}`. This branch reuses `signal:workflow:definition:{workflowId}`. Run IDs remain in signal attributes and dispatch IDs. Existing run threads retain their receipts on retry.
-3. **Thread reuse requires narrower cancellation.** Workflow cancellation previously aborted a whole thread. This branch passes the queue-item ID through cancellation, stop, and foreach failure paths. Store scope includes session, thread, and item. Other submissions continue.
+2. **Workflow runs create unbounded thread rows.** The dispatcher uses `signal:workflow:{runId}`, one thread per run. A shared thread per definition was tried first and reverted: a thread is the engine's unit of serial execution and of abort, so one run's approval gate held every other run of the workflow, and the thread's Stop button cancelled all of them. The growth is solved where it belongs. When a run settles, the run host archives its thread, which leaves the default thread list and stays readable under "Show archived".
+3. **Cancellation must name the submission.** Workflow cancellation previously aborted a whole thread. This branch passes the queue-item ID through cancellation, stop, and foreach failure paths. Store scope includes session, thread, and item. Other submissions continue. Per-run threads keep this true for a `foreach` body, whose sibling runs share the parent's thread.
 4. **#696 could delete an unrelated selected node.** Edge-label selection did not clear node selection. The merged fix clears it. Browser verification covered node selection, edge-label selection, Backspace, and Cancel restoration.
 5. **#688 rejected valid custom models.** Validation used the bundled catalog instead of organization model configuration. The repair shares organization-aware validation across HTTP and assistant updates.
 6. **#688 could route bare provider model IDs incorrectly.** A bare OpenAI or Google model ID could first select the disabled Anthropic provider. The repair resolves bundled provider identity before model selection.

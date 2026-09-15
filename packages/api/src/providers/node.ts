@@ -62,7 +62,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { buildRunSettledAttention, workflowApprovalHref } from "../workflows/run-attention.js";
+import { buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -704,6 +704,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     store: workflowStore,
   });
   const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore });
+  const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore });
 
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
@@ -719,6 +720,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // failure in either never abandons the drive lease.
     onRunSettled: async (info) => {
       await runSettledAttention(info);
+      // The run's own assistant thread leaves the sidebar here, and only
+      // here: no sweep archives it later (`run-attention.ts`).
+      await runThreadArchive(info);
       await workflowSandboxReclaimer.reclaimRun(info.runId);
     },
     crashAt: opts.workflowCrashAt,
@@ -731,6 +735,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     plugins,
     credentials: engineCredentials,
+    // Run-origin validation probes the engine store for the origin thread
+    // (`activeWorkflowOrigin`).
+    engineStore,
   };
 
   // Workflow schedule loop — cron-driven run starts (time-based counterpart

@@ -30,7 +30,7 @@ import {
 } from "./service.js";
 import { PgWorkflowStore } from "./pg-store.js";
 import type { WorkflowOwner, WorkflowServiceDeps } from "./service.js";
-import { InMemoryCredentialStore } from "@valet/engine";
+import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 
 /** Records the owner every start is stamped with; this suite starts no real
  * run, and the owner is the thing under test. */
@@ -73,6 +73,7 @@ beforeAll(async () => {
     db,
     workflowStore: new PgWorkflowStore(boot.pgdb),
     workflowRunHost: stubRunHost,
+    engineStore: new InMemorySessionStore(),
     credentials: new InMemoryCredentialStore(),
   };
 

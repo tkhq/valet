@@ -2,12 +2,40 @@
 
 Workflow session decision gates use the workflow run owner for callback authorization.
 Personal owners and current team members can resolve their gates. Org-owned gates require an org admin.
-The host restores an authorized workflow session through its workflow session builder.
+Authorization reads the run, the workflow definition, and the owner's membership. It builds no session.
+Only a callback that resolves a gate restores the workflow session, through the workflow session builder.
 If restoration fails, the callback receives an actionable error and the gate stays pending.
 
+The attention router sends the same approval to each recipient who may resolve the gate.
+It authorizes a `wf:` session against the run, as the callback path does.
+If that authorization fails, the recipient receives the plain summary with the web link, not silence.
+
 Callbacks validate actions against the persisted pending gate.
-The host serializes callbacks by the mapped gate id, including prompts sent to different recipients.
+The host serializes callbacks by the server-recorded prompt mapping and resolved gate id.
+It never trusts a gate id from the callback payload for lookup or serialization.
 This also covers transports whose callbacks carry only the message reference.
+
+Malformed, stale, cross-org, and unauthorized callbacks receive the same expired response.
+This prevents a callback from probing whether a gate or workflow session exists.
+Drop logs retain the internal failure category for diagnosis: malformed, missing, deleted, or cross-org workflow sessions.
+A workflow category applies only to a `wf:` session id. A click on any other id whose session row is absent is logged as unauthorized.
 
 These callbacks resolve engine decision gates inside workflow sessions.
 Authored workflow approval nodes continue to use workflow approval signals and the workflow run page.
+
+## Rejections are visible on Slack
+
+Slack acknowledges a button click with an empty body, so a refused click shows nothing by itself.
+The Slack transport records the `response_url` of each parsed click, keyed by its trigger id.
+When the host refuses a callback, the transport posts the reason to that URL as an ephemeral reply.
+If the click carries no `response_url`, or the URL no longer accepts the post, the transport sends an ephemeral message to the channel and the clicker.
+The transport posts only to a Slack host, so a payload that arrives without Slack's signature cannot aim the answer at another address.
+A callback answered without text sends nothing, because the acknowledgement already stands.
+Every failure to answer is logged and the callback continues, because the gate outcome is already decided.
+
+## Withdrawn and expired gates
+
+A gate can end without a decision. The engine withdraws a gate when the run is steered, aborted, or cancelled, and expires a gate that no one answers in time.
+The host subscribes to both endings and settles the gate the same way a decision does.
+It writes the outcome line onto every prompt message for the gate, and clears the gate from its prompt, reference, and action maps.
+The buttons therefore stop accepting clicks when the run ends, and a long-lived process holds no state for a gate that is over.

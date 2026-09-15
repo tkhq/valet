@@ -312,7 +312,7 @@ describe("GET /api/me/github/callback", () => {
       { headers: HEADERS, redirect: "manual" },
     );
     expect(callbackRes.status).toBe(302);
-    expect(callbackRes.headers.get("location")).toBe("/integrations?github=connected");
+    expect(callbackRes.headers.get("location")).toBe("/integrations?connected=github");
 
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
     expect(stored?.accessToken).toBe("replacement-token");

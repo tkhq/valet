@@ -22,7 +22,7 @@ import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
@@ -31,7 +31,7 @@ import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { armableDefinitionRow } from "../workflows/service.js";
 import { checkAssistantForOwner } from "../assistants/service.js";
-import { isTeamMember } from "../services/teams.js";
+import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -656,27 +656,77 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   }
 
   const now = Date.now();
-  const id = randomUUID();
-  const inserted = await db
-    .insert(eventSubscriptions)
-    .values({
-      id,
-      orgId: user.orgId,
-      ownerType,
-      ownerId,
-      name: body.name,
-      eventKeys: body.eventKeys,
-      filters,
-      target: body.target,
-      enabled,
-      createdBy: user.id,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
+  const values = {
+    id: randomUUID(),
+    orgId: user.orgId,
+    ownerType,
+    ownerId,
+    name: body.name,
+    eventKeys: body.eventKeys,
+    filters,
+    target: body.target,
+    enabled,
+    createdBy: user.id,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  let insertedRow: typeof eventSubscriptions.$inferSelect | undefined;
+  if (ownerType === "team") {
+    // `deleteTeam` deletes a team's own event_subscriptions rows, reaps its
+    // workflows, and archives its assistants — all under this same lock
+    // (services/teams.ts). Without it, a create that already passed the
+    // ownership/membership/assistant checks above can still insert after
+    // the team (or its target workflow/assistant) is gone, landing as a
+    // permanent orphan — the race #709 closed for schedules.
+    const rows = await withAuthorizedTeamOwnership(
+      db,
+      { teamId: ownerId, orgId: user.orgId, userId: user.id, principalTeamId: null, requireMembership: true },
+      async (tx) => {
+        if (body.target.kind === "workflow") {
+          const [targetWorkflow] = await tx
+            .select({ id: workflowDefinitions.id })
+            .from(workflowDefinitions)
+            .where(
+              and(
+                eq(workflowDefinitions.id, body.target.workflowId),
+                eq(workflowDefinitions.orgId, user.orgId),
+                eq(workflowDefinitions.ownerType, "team"),
+                eq(workflowDefinitions.ownerId, ownerId),
+              ),
+            );
+          if (!targetWorkflow) return [];
+        }
+        // Mirrors the pre-lock check above (schedule-service.ts:255-257):
+        // `deleteTeam` archives a team's assistants under this same lock, so
+        // a named assistant needs the same in-lock recheck as the workflow
+        // target does.
+        if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
+          const bad = await checkAssistantForOwner(
+            tx,
+            user.orgId,
+            { type: ownerType, id: ownerId },
+            body.target.assistantId,
+          );
+          if (bad) return [];
+        }
+        return tx.insert(eventSubscriptions).values(values).returning();
+      },
+    );
+    if (!rows?.[0]) {
+      return c.json(
+        { error: "Team or subscription target is no longer available. Refresh and select an active target." },
+        400,
+      );
+    }
+    insertedRow = rows[0];
+  } else {
+    const inserted = await db.insert(eventSubscriptions).values(values).returning();
+    insertedRow = inserted[0];
+  }
 
   const resp: CreateEventSubscriptionResponse = {
-    ...rowToSubscription(inserted[0]),
+    ...rowToSubscription(insertedRow!),
     ...(collisions !== undefined ? { collisions } : {}),
   };
   return c.json(resp, 201);

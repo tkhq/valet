@@ -99,6 +99,14 @@ Rules, in order:
    `slack-user` OAuth).
 6. Otherwise → `"manual"`.
 
+Rules 4 and 5 read the team row before the org row when the caller names a
+team owner. A team that holds its own row for the service acts as that row
+at run time, so the catalog reports `"manual"` for it even when the org
+credential also exists. A team row that throws
+`CredentialReferenceBrokenError` reads as an absent row, so the org
+credential behind it still resolves to `"org"`. A caller that names no
+owner, or a user owner, reads the org row alone.
+
 `unavailableServiceSet(plugins, orgId, credentials, env)` returns the
 services that resolve to `"unconfigured"`, for the two enforcement points
 that gate by set membership (session builds, workflow invocations).

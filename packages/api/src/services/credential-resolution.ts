@@ -32,6 +32,7 @@
  * covers it without naming it.
  */
 import type { CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { findCredentialDeclaration } from "./integration-availability.js";
 import {
   ONEPASSWORD_SERVICE,
@@ -268,6 +269,14 @@ export async function resolveOrgCredentialRead(
  * `ctx.teamId` is the team principal. `ctx.userId` is unused for the team
  * row itself; a personal-tokenScope 1Password pointer on a team row fails
  * closed through `resolveRow` (`excluded: "resolve"`).
+ *
+ * A team row that throws `CredentialReferenceBrokenError` — a delegation
+ * whose delegator left the team, or whose source row no longer resolves —
+ * does not end the read. The fallback behind it is a credential the team is
+ * entitled to in its own right, and the catalog already reports the service
+ * as connected on that credential, so a broken delegation must not fail
+ * every team run. The error is raised again when nothing else answers, so
+ * the message that names the corrective action still reaches the user.
  */
 export async function resolveTeamCredentialRead(
   deps: CredentialReadDeps,
@@ -278,14 +287,32 @@ export async function resolveTeamCredentialRead(
   if (isDeniedCredentialService(service)) return null;
   const scopes = (ctx.scopes ?? onePasswordScopesFor("team", ctx.teamId)).filter((scope) => scope !== "personal");
   const readCtx = { orgId: ctx.orgId, teamId: ctx.teamId, userId: ctx.userId ?? "", scopes };
-  const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
-  const fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
+  let fromTeam: StoredCredential | null = null;
+  let broken: CredentialReferenceBrokenError | null = null;
+  try {
+    const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
+    fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
+  } catch (err) {
+    if (!(err instanceof CredentialReferenceBrokenError)) throw err;
+    // A delegation to a departed member, or to a source row that no longer
+    // resolves. The credential behind the fallback is a different one the
+    // team is entitled to, so the read continues. The error is held for the
+    // case where nothing else answers: the user still needs the message
+    // that names the corrective action.
+    broken = err;
+  }
   if (fromTeam) return fromTeam;
-  if (orgFallback === "none") return null;
+  if (orgFallback === "none") {
+    if (broken) throw broken;
+    return null;
+  }
   if (orgFallback === "org-provided") {
     const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
     const fromOrg = await resolveRow(deps, orgRow, readCtx, "resolve");
     if (fromOrg) return fromOrg;
   }
-  return lookupInOnePassword(deps, readCtx, service);
+  const fromVault = await lookupInOnePassword(deps, readCtx, service);
+  if (fromVault) return fromVault;
+  if (broken) throw broken;
+  return null;
 }

@@ -12,7 +12,7 @@ A user can reply to one completed assistant text message in an orchestrator chat
 2. The web app offers Reply only for assistant messages that contain visible text and have an explicit completed state.
 3. The composer shows a server-compatible excerpt and lets the user cancel the reply before send.
 4. The client sends only the target entry id. The API reads the target from the authorized session and requested thread.
-5. The API rejects a target from another thread or session. It also rejects user, tool-only, missing, and empty targets.
+5. The API rejects a target from another thread or session. It also rejects user, tool-only, missing, empty, errored, and aborted targets. Only a target that ends its turn normally (`stopReason: "end_turn"`) is a valid reply target.
 6. The API creates a normalized excerpt of at most 280 Unicode codepoints. Client text cannot replace this excerpt.
 7. The queue item and user entry store `{ messageId, excerpt }` in durable entry metadata. REST projects this value as `Message.replyTo`.
 8. The engine adds a delimited reply context before the current user text. It keeps all normal current context and does not remove later entries.

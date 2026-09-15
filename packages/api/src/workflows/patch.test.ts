@@ -153,6 +153,32 @@ describe("applyWorkflowModelPatch", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors[0]).toContain("not an llm or session node");
   });
+
+  /** The editor seeds a new llm or session node from `ui.defaultModel`. */
+  function withEditorState(): WorkflowDefinition {
+    return { ...structuredClone(definition), ui: { nodes: {}, defaultModel: "old" } };
+  }
+
+  it("moves the editor default with a patch that targets every node", () => {
+    const result = applyWorkflowModelPatch(withEditorState(), "l");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.definition.ui?.defaultModel).toBe("l");
+  });
+
+  it("leaves the editor default alone for a patch that targets a subset", () => {
+    const result = applyWorkflowModelPatch(withEditorState(), "l", ["one"]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.definition.ui?.defaultModel).toBe("old");
+  });
+
+  it("adds no editor state to a definition that carries none", () => {
+    const result = applyWorkflowModelPatch(definition, "l");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.definition.ui).toBeUndefined();
+  });
 });
 
 describe("appendRemovedEdgeHint", () => {

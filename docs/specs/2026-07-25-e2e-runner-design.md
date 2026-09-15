@@ -377,3 +377,5 @@ Recorded so they don't get lost:
 The sandbox timeout contract uses the provider suite timeout for provisioning and cleanup. Its separate two-second assertion still bounds the exec operation. Kubernetes provisioning can exceed ten seconds.
 
 The short-lived GitHub HTTP fixture closes each response connection. This prevents connection pooling from outliving an ephemeral test server. The fixture still uses real HTTP requests and responses.
+
+The web build and API bundle run sequentially before the static pool. The API bundle copies web assets, so it must wait for the web build.

@@ -29,7 +29,7 @@ import { PgWorkflowStore } from "./pg-store.js";
 import type { RunHost } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkflowServiceDeps, WorkflowOwner } from "./service.js";
-import { InMemoryCredentialStore } from "@valet/engine";
+import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 
 /** Arm-gate deps for the create calls. Every workflow in this file is
  * user-owned, so the team readiness gate never runs. */
@@ -64,6 +64,7 @@ beforeAll(async () => {
     db,
     workflowStore: store,
     workflowRunHost: stubRunHost,
+    engineStore: new InMemorySessionStore(),
     credentials: new InMemoryCredentialStore(),
   };
 });

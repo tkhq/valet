@@ -5,7 +5,7 @@
  * cases seed rows under a second org id (stub auth pins the caller to
  * `local-org`, so "another org" is expressed in data, not identity).
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
@@ -13,7 +13,11 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import type { ValetPlugin } from "@valet/engine";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { createAssistant } from "../assistants/service.js";
+import { createAssistant, retireAssistant } from "../assistants/service.js";
+import * as assistantsService from "../assistants/service.js";
+import { deleteTeam } from "../services/teams.js";
+import * as teamsService from "../services/teams.js";
+import * as workflowService from "../workflows/service.js";
 import {
   eventDeliveries,
   eventDropLog,
@@ -1205,6 +1209,99 @@ describe("event subscriptions — team ownership", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("team not found");
     expect(body.error).not.toContain("Other");
+  });
+
+  // `deleteTeam` deletes a team's own event_subscriptions rows under
+  // `lockTeamForOwnership` (services/teams.ts). An insert that already
+  // passed its membership/ownership checks before the delete's transaction
+  // commits, but writes after, lands as an orphan pointing at a team (or
+  // workflow) that no longer exists — the same race #709 closed for
+  // schedules. These two tests force that race deterministically by
+  // deleting the target from inside the pre-insert check's mock
+  // implementation, which still calls through to the real check first.
+  it("does not leave an orphaned subscription when the team is deleted between the membership check and the insert", async () => {
+    const a = await bootWithTeam();
+    const original = teamsService.isTeamMember;
+    const spy = vi.spyOn(teamsService, "isTeamMember").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await deleteTeam(a.providers.db, { teamId: "team_1" });
+      return result;
+    });
+    try {
+      const res = await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" });
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not leave an orphaned subscription when its target workflow is deleted before the insert", async () => {
+    const a = await bootWithTeam();
+    const now = Date.now();
+    await a.providers.db.insert(workflowDefinitions).values({
+      id: "wf_team_race",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: "team_1",
+      name: "target",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const original = workflowService.armableDefinitionRow;
+    const spy = vi.spyOn(workflowService, "armableDefinitionRow").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await a.providers.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, "wf_team_race"));
+      return result;
+    });
+    try {
+      const res = await postSubscription(
+        a.baseUrl,
+        { ...VALID_BODY, target: { kind: "workflow", workflowId: "wf_team_race" } },
+        { "x-valet-test-user-id": "test-member" },
+      );
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not leave an orphaned subscription when its target assistant is archived before the insert", async () => {
+    const a = await bootWithTeam();
+    const assistant = await createAssistant(
+      a.providers.db,
+      "local-org",
+      { type: "team", id: "team_1" },
+      "Team assistant",
+    );
+    const original = assistantsService.checkAssistantForOwner;
+    const spy = vi
+      .spyOn(assistantsService, "checkAssistantForOwner")
+      .mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        // `deleteTeam` retires a team's assistants under the same ownership
+        // lock (services/teams.ts). This forces that race deterministically:
+        // the check above still passes on stale data, then the assistant is
+        // archived before the (fixed) in-lock recheck runs.
+        await retireAssistant(a.providers.db, assistant.id);
+        return result;
+      });
+    try {
+      const res = await postSubscription(
+        a.baseUrl,
+        {
+          ...VALID_BODY,
+          target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", assistantId: assistant.id },
+        },
+        { "x-valet-test-user-id": "test-member" },
+      );
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("404s a team id that does not exist at all — same answer as one you're not on", async () => {

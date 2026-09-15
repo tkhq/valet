@@ -28,7 +28,7 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -270,7 +270,71 @@ describe("ChannelHost outbound delivery", () => {
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
+
+  async function seedWorkflowGate(args: {
+    workflowId: string;
+    runId: string;
+    workflowOrgId: string;
+    owner: { ownerType: "org" | "team" | "user"; ownerId: string };
+    gateId: string;
+    actions?: DecisionGate["actions"];
+  }): Promise<{ sessionId: string; ref: GatePromptRef }> {
+    const now = Date.now();
+    await testDb.appDb.insert(workflowDefinitions).values({
+      id: args.workflowId,
+      orgId: args.workflowOrgId,
+      ownerType: args.owner.ownerType,
+      ownerId: args.owner.ownerId,
+      name: args.workflowId,
+      definition: {},
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      args.runId,
+      { workflowId: args.workflowId, definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      args.owner,
+    );
+    const sessionId = `wf:${args.runId}:step`;
+    const session = await ensureWorkflowSession({
+      host: engineHost,
+      store: workflowStore,
+      db: testDb.appDb,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    }, sessionId);
+    const threadId = session.thread().id;
+    await engineStore.saveDecisionGate(sessionId, threadId, {
+      id: args.gateId,
+      sessionId,
+      threadId,
+      queueItemId: `q-${args.gateId}`,
+      resumeKey: `resume-${args.gateId}`,
+      ordinal: 0,
+      type: "approval",
+      title: "Approve workflow action?",
+      actions: args.actions ?? [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const ref = { conversationKey: `fake:dm:${args.gateId}`, messageId: `m-${args.gateId}` };
+    host.recordGatePrompt(args.gateId, ref, sessionId);
+    return { sessionId, ref };
+  }
+
+  async function callback(ref: GatePromptRef, callbackId: string, actionId = "approve"): Promise<void> {
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId, callbackId, ref },
+    }));
+  }
 
   it("automatically posts the first assistant text for a direct addressed turn", async () => {
     faux.setResponses([fauxAssistantMessage("internal response")]);
@@ -921,6 +985,115 @@ describe("ChannelHost outbound delivery", () => {
     expect(ref ? host.gateForRef(ref) : null).toBeNull();
   });
 
+  /**
+   * Opens one approval gate on a channel-bound thread and waits for its card.
+   * Returns the gate, the thread it lives on, and the card's prompt ref.
+   */
+  async function openChannelGate(): Promise<{ sessionId: string; threadId: string; gateId: string; ref: GatePromptRef }> {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const gateId = `gate-${randomUUID()}`;
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: {
+          type: "decision_gate",
+          threadId,
+          gate: {
+            id: gateId,
+            sessionId: session.id,
+            threadId,
+            queueItemId: `qi-${gateId}`,
+            resumeKey: `rk-${gateId}`,
+            ordinal: 1,
+            type: "approval",
+            title: "Approve the thing?",
+            actions: [
+              { id: "approve", label: "Approve", style: "primary" },
+              { id: "deny", label: "Deny", style: "danger" },
+            ],
+            status: "pending",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+      },
+      `gate-open-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+    });
+    const prompt = fakeTransport.gatePrompts[0];
+    return {
+      sessionId: session.id,
+      threadId,
+      gateId,
+      ref: { conversationKey: prompt?.conversationKey ?? "", messageId: prompt?.messageId ?? "" },
+    };
+  }
+
+  /** The three gate maps are private, and a leak is only visible in them.
+   * Element access reads them with their real types, so the assertion needs
+   * no cast and still breaks if a map's shape changes. */
+  function gateMapSizes(target: ChannelHost): { refs: number; prompts: number; actions: number } {
+    return {
+      refs: target["gateRefs"].size,
+      prompts: target["gatePrompts"].size,
+      actions: target["gateActions"].size,
+    };
+  }
+
+  it("a withdrawn gate clears its card instead of leaving live buttons", async () => {
+    const { sessionId, threadId, gateId, ref } = await openChannelGate();
+    expect(host.gateForRef(ref)).toMatchObject({ gateId });
+
+    await eventStream.append(
+      {
+        sessionId,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "decision_gate_withdrawn", threadId, gateId, reason: "abort" },
+      },
+      `gate-withdraw-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain(
+      "Withdrawn: the run was stopped. Start it again in Valet if you still need it.",
+    );
+    expect(fakeTransport.gateEdits[0]?.ref).toEqual(ref);
+    // Nothing may still map the card to the gate, and no map may keep a row.
+    expect(host.gateForRef(ref)).toBeNull();
+    expect(gateMapSizes(host)).toEqual({ refs: 0, prompts: 0, actions: 0 });
+  });
+
+  it("an expired gate clears its card instead of leaving live buttons", async () => {
+    const { sessionId, threadId, gateId, ref } = await openChannelGate();
+
+    await eventStream.append(
+      {
+        sessionId,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "decision_gate_expired", threadId, gateId },
+      },
+      `gate-expire-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain(
+      "Expired: no one answered in time. Start the run again in Valet.",
+    );
+    expect(host.gateForRef(ref)).toBeNull();
+    expect(gateMapSizes(host)).toEqual({ refs: 0, prompts: 0, actions: 0 });
+  });
+
   it("gate_callback round trip resolves the real gate", async () => {
 
     faux.setResponses([
@@ -1098,6 +1271,17 @@ describe("ChannelHost outbound delivery", () => {
     expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.status).toBe("pending");
     expect(fakeTransport.answered.find((answer) => answer.callbackId === "forged-workflow-callback")?.text).toContain("already resolved");
 
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: {
+        actionId: "approve", callbackId: "unmapped-workflow-callback", gateId: "workflow-slack-approval",
+        ref: { conversationKey: ref.conversationKey, messageId: "forged-message" },
+      },
+    }));
+    expect((await engineStore.getDecisionGate(sessionId, "workflow-slack-approval"))?.status).toBe("pending");
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "unmapped-workflow-callback")?.text).toContain("expired");
+
     const restoreFailure = vi.spyOn(engineHost, "workflowSessionFor").mockRejectedValueOnce(new Error("restore failed"));
     await host.handleUpdate("fake", inbound({
       dispatchId: `fake:${randomUUID()}`,
@@ -1138,6 +1322,176 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text?.includes("already resolved"))).toHaveLength(1);
   });
 
+  it("rejects a cross-org workflow callback with the uniform expired response", async () => {
+    const { ref } = await seedWorkflowGate({
+      workflowId: "workflow-cross-org",
+      runId: "workflow-cross-org-run",
+      workflowOrgId: "other-org",
+      owner: { ownerType: "user", ownerId: USER_ID },
+      gateId: "cross-org-gate",
+    });
+
+    await callback(ref, "cross-org-callback");
+
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "cross-org-callback")?.text).toContain("expired");
+  });
+
+  it("rejects cross-org workflow callbacks even after a session row is backfilled", async () => {
+    const { ref, sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-cross-org-backfilled",
+      runId: "workflow-cross-org-backfilled-run",
+      workflowOrgId: "other-org",
+      owner: { ownerType: "user", ownerId: USER_ID },
+      gateId: "cross-org-backfilled-gate",
+    });
+    await testDb.appDb.insert(agentSessions).values({
+      id: sessionId, orgId: "other-org", userId: USER_ID,
+      ownerType: "user", ownerId: USER_ID,
+      title: "Workflow", workspace: "test", status: "active", createdAt: 1, updatedAt: 1,
+    });
+    await callback(ref, "cross-org-backfilled-callback");
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "cross-org-backfilled-callback")?.text).toContain("expired");
+    expect((await engineStore.getDecisionGate(sessionId, "cross-org-backfilled-gate"))?.status).toBe("pending");
+  });
+
+  it.each([false, true])("rejects an org-owned workflow callback from a non-admin (backfilled: %s)", async (backfilled) => {
+    const { ref, sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-org-owned",
+      runId: "workflow-org-owned-run",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "org", ownerId: ORG_ID },
+      gateId: "org-owned-gate",
+    });
+
+    if (backfilled) await testDb.appDb.insert(agentSessions).values({
+      id: sessionId, orgId: ORG_ID, userId: USER_ID,
+      ownerType: "org", ownerId: ORG_ID,
+      title: "Workflow", workspace: "test", status: "active", createdAt: 1, updatedAt: 1,
+    });
+    await callback(ref, "org-owned-callback");
+
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "org-owned-callback")?.text).toContain("expired");
+    expect((await engineStore.getDecisionGate(sessionId, "org-owned-gate"))?.status).toBe("pending");
+  });
+
+  it("rejects a team-owned workflow callback from a non-member", async () => {
+    await testDb.appDb.insert(teams).values({ id: "workflow-team", orgId: ORG_ID, name: "Workflow team", createdAt: 1 });
+    const { ref, sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-team-owned",
+      runId: "workflow-team-owned-run",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "team", ownerId: "workflow-team" },
+      gateId: "team-owned-gate",
+    });
+
+    await callback(ref, "team-owned-callback");
+
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "team-owned-callback")?.text).toContain("expired");
+    expect((await engineStore.getDecisionGate(sessionId, "team-owned-gate"))?.status).toBe("pending");
+  });
+
+  it("lets an org admin resolve an org-owned workflow always_allow action", async () => {
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG_ID, userId: USER_ID, role: "admin", createdAt: Date.now() });
+    const { ref, sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-admin-owned",
+      runId: "workflow-admin-owned-run",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "org", ownerId: ORG_ID },
+      gateId: "admin-always-allow-gate",
+      actions: [{ id: "always_allow", label: "Always allow", style: "primary" }],
+    });
+
+    await callback(ref, "admin-always-allow-callback", "always_allow");
+
+    expect((await engineStore.getDecisionGate(sessionId, "admin-always-allow-gate"))?.status).toBe("resolved");
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "admin-always-allow-callback" && answer.text === undefined)).toBeDefined();
+  });
+
+  it("delivers the plain summary when a workflow gate authorization fails", async () => {
+    const { sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-attention-error",
+      runId: "run-attention-error",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "user", ownerId: USER_ID },
+      gateId: "gate-attention-error",
+    });
+    // The authorization read fails the way a database blip fails it.
+    vi.spyOn(workflowStore, "getRun").mockRejectedValue(new Error("workflow store unavailable"));
+
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      sessionId,
+      title: "Approve workflow action?",
+      body: "the run is waiting",
+      gate: { id: "gate-attention-error", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+    });
+
+    // A failed authorization may cost the buttons. It must not cost the DM.
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Approve workflow action?");
+  });
+
+  it("delivers the plain summary when the session lookup for a gate DM fails", async () => {
+    await testDb.appDb.insert(agentSessions).values({
+      id: "sess-attention-read",
+      userId: USER_ID,
+      orgId: ORG_ID,
+      workspace: "w",
+      ownerType: "user",
+      ownerId: USER_ID,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    // Put the `agent_sessions` table out of reach for the length of the
+    // delivery, the way a database fault puts it out of reach. Every other
+    // read the DM needs keeps working, so the session lookup is the only one
+    // that fails. The table is restored before any other test runs.
+    await testDb.pgdb.query("ALTER TABLE agent_sessions RENAME TO agent_sessions_unreachable");
+    try {
+      await host.attentionDeliverer().deliver(USER_ID, {
+        kind: "approval",
+        owner: { type: "user", id: USER_ID },
+        sessionId: "sess-attention-read",
+        title: "Approve the thing?",
+        body: "the run is waiting",
+        gate: { id: "gate-attention-read", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+      });
+    } finally {
+      await testDb.pgdb.query("ALTER TABLE agent_sessions_unreachable RENAME TO agent_sessions");
+    }
+
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Approve the thing?");
+  });
+
+  it("authorizes a workflow gate DM without building the workflow session", async () => {
+    const { sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-attention-cheap",
+      runId: "run-attention-cheap",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "user", ownerId: USER_ID },
+      gateId: "gate-attention-cheap",
+    });
+    // Seeding already built the session. Only a build by the DELIVERER counts.
+    const build = vi.spyOn(engineHost, "workflowSessionFor");
+
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      sessionId,
+      title: "Approve workflow action?",
+      gate: { id: "gate-attention-cheap", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+    });
+
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    // Asking whether a recipient MAY resolve a gate reads rows. It must not
+    // materialize a session per recipient per transport.
+    expect(build).not.toHaveBeenCalled();
+  });
+
   it("gate_callback from a user who may not resolve the session answers 'expired'", async () => {
     await testDb.appDb.insert(agentSessions).values({
       id: "sess-not-yours",
@@ -1163,6 +1517,32 @@ describe("ChannelHost outbound delivery", () => {
 
     const answer = fakeTransport.answered.find((a) => a.callbackId === "cb3");
     expect(answer?.text).toContain("expired");
+  });
+
+  it("a click on a session with no row drop-logs unauthorized, not a workflow reason", async () => {
+    // An ordinary session id whose row is gone (deleted, or never written).
+    // Nothing about it is a workflow, so the drop reason must not say so.
+    const ref = { conversationKey: "fake:dm:77", messageId: "m-ghost" };
+    host.recordGatePrompt("gate-ghost", ref, "sess-ghost");
+
+    await host.handleUpdate(
+      "fake",
+      inbound({
+        dispatchId: `fake:${randomUUID()}`,
+        kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId: "cb-ghost", ref },
+      }),
+    );
+
+    const drops = await testDb.appDb.select().from(eventDropLog);
+    const reasons = drops.map((row) => row.reason);
+    expect(reasons).toContain("unauthorized");
+    expect(reasons).not.toContain("workflow_session_malformed");
+    expect(drops.find((row) => row.reason === "unauthorized")?.detail).toBe(
+      "sender may not resolve this session's gates",
+    );
+    // The clicker still gets the uniform answer, so a probe learns nothing.
+    expect(fakeTransport.answered.find((answer) => answer.callbackId === "cb-ghost")?.text).toContain("expired");
   });
 
   it("gate_callback with always_allow from a non-org-admin answers with the admin requirement", async () => {

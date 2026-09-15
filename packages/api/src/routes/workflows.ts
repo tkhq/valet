@@ -154,9 +154,12 @@ function serviceCtx(c: {
     principal?: RequestPrincipal;
   };
 }): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
-  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials } = c.var.providers;
+  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials, engineStore } =
+    c.var.providers;
   return {
-    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials },
+    // `engineStore` is what run-origin validation probes for the origin
+    // thread (`activeWorkflowOrigin`).
+    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials, engineStore },
     owner: { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
     env: buildValidateEnvironment(actionPluginByService),
   };
@@ -204,7 +207,6 @@ workflowsRouter.post("/", async (c) => {
       name: body.name,
       definition: body.definition,
       teamId: createdOwner.owner.type === "team" ? createdOwner.owner.id : undefined,
-      skipMembershipCheck: principal.type === "team",
     });
   } catch (err) {
     // Same "cross-owner 404, never 403" convention as the rest of this

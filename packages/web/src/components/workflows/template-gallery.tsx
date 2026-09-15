@@ -13,6 +13,11 @@
  * that connects it. Whose credential that is depends on the active
  * workspace; see `template-requirements.ts`.
  *
+ * A template whose model the organization cannot run keeps its Install
+ * button, disabled, and prints the server's reason. The install gate
+ * refuses that template, so a live button would answer 400 on every press,
+ * and the reader cannot connect their way out of it.
+ *
  * No search box and no category chips. The catalog is small enough to read.
  * Add them when it outgrows one screen.
  */
@@ -77,7 +82,11 @@ function TemplateCard({ template, refreshing }: { template: WorkflowTemplateSumm
   const [open, setOpen] = useState(false);
   const missing = missingServices(template.requires);
   const unconfigured = unconfiguredServices(template.requires);
-  const ready = isInstallable(template.requires, template.blockers);
+  // The organization's model policy refuses this template. Connecting a
+  // service cannot clear it, so the card keeps its button and disables it,
+  // and the reason below names who can act and where.
+  const modelBlocked = template.installable === false;
+  const ready = isInstallable(template.requires, template.blockers) && !modelBlocked;
   const scope = useWorkspaceScope();
 
   return (
@@ -123,14 +132,17 @@ function TemplateCard({ template, refreshing }: { template: WorkflowTemplateSumm
               <Link to="/settings/organization/github">Organization GitHub settings</Link>
             </Button>
           )}
+          {!ready && missing.length > 0 && (
+            <Button size="sm" variant="secondary" asChild>
+              <Link to="/integrations">{connectLabel(missing, scope.teamId)}</Link>
+            </Button>
+          )}
           {ready ? (
             <Button size="sm" disabled={refreshing} onClick={() => setOpen(true)}>
               {refreshing ? "Checking access…" : "Use template"}
             </Button>
-          ) : missing.length > 0 ? (
-            <Button size="sm" variant="secondary" asChild>
-              <Link to="/integrations">{connectLabel(missing, scope.teamId)}</Link>
-            </Button>
+          ) : modelBlocked ? (
+            <Button size="sm" disabled>Use template</Button>
           ) : null}
         </div>
       </div>
@@ -139,6 +151,10 @@ function TemplateCard({ template, refreshing }: { template: WorkflowTemplateSumm
           reader can press. */}
       {unconfigured.length > 0 && !template.blockers?.length && (
         <p className="pt-2 text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>
+      )}
+
+      {template.installBlockedReason && (
+        <p className="pt-2 text-xs leading-relaxed text-muted">{template.installBlockedReason}</p>
       )}
 
       {template.blockers?.map((reason) => (

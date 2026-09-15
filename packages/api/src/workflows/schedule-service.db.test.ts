@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InMemoryCredentialStore } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { teamMembers, workflowDefinitions } from "../schema/index.js";
+import { teams, teamMembers, workflowDefinitions } from "../schema/index.js";
 import {
   createWorkflowSchedule,
   updateWorkflowSchedule,
@@ -214,6 +214,7 @@ describe("createWorkflowSchedule team readiness", () => {
   const MEMBER = { userId: "member-sched", orgId: "org_1" };
 
   async function seedTeamWorkflow(id: string): Promise<void> {
+    await db.insert(teams).values({ id: TEAM, orgId: MEMBER.orgId, name: "Schedule team", createdAt: NOW }).onConflictDoNothing();
     await db.insert(teamMembers).values({ teamId: TEAM, userId: MEMBER.userId, role: "member" }).onConflictDoNothing();
     await db.insert(workflowDefinitions).values({
       id,

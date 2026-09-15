@@ -61,8 +61,10 @@ import type {
   WorkflowPromptOrchestratorOptions,
   WorkflowPromptOrchestratorResult,
   WorkflowPromptReceipt,
+  WorkflowRunOrigin,
   WorkflowStore,
 } from "@valet/workflow";
+import { isTeamMember } from "../services/teams.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
@@ -70,6 +72,7 @@ import { workflowDefinitions } from "../schema/index.js";
 import {
   ArchivedAssistantError,
   loadAssistant,
+  loadAssistantBySessionId,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
@@ -162,12 +165,22 @@ export function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdPart
   return { runId, nodeId, iteration };
 }
 
+/**
+ * The key of the assistant thread one unattended run reports on. One
+ * thread per run: the engine runs a thread's queue in series and aborts it
+ * as a whole, so runs of one workflow must not share one. Read back by
+ * `run-attention.ts`, which archives the thread at settlement.
+ */
+export function workflowRunThreadKey(runId: string): string {
+  return `signal:workflow:${runId}`;
+}
+
 interface RunContext {
-  workflowId: string;
   orgId: string;
   actorUserId: string;
   owner: Principal;
   assistantId?: string;
+  origin?: WorkflowRunOrigin;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -192,8 +205,8 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { workflowId: run.params.workflowId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
-    assistantId: workflowAssistantId(run.definition) };
+  return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
+    assistantId: workflowAssistantId(run.definition), origin: run.params.origin };
 }
 
 /**
@@ -449,9 +462,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
      * `thread.submitPrompt` calls already have for the `session` node), so
      * it submits directly rather than waiting on that extension.
      *
-     * Reuse one thread per workflow definition within the selected assistant.
-     * Run-specific dispatch IDs and receipts keep submissions independent.
-     * Existing per-run threads remain readable; new runs do not add threads.
+     * An explicit assistant origin reuses its exact durable session and
+     * thread. Every other run reports on its own thread. A missing origin
+     * thread must not create a replacement.
      */
     async promptOrchestrator(
       promptText: string,
@@ -466,26 +479,53 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       }
       const ctx = await resolveRunContext(opts, runId);
 
-      // Explicit routing comes from the run snapshot. Older workflows use
-      // the owner's default assistant. No `agent_sessions` app row is written
-      // here: like the `wf:` sessions above, a workflow-woken session is
-      // owned by the run, and the app row is backfilled the first time a
-      // human opens the assistant (`POST /api/teams/:id/orchestrator`).
-      const assistant = ctx.assistantId
-        ? await loadAssistant(opts.db, ctx.assistantId)
-        : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
-      if (!assistant || assistant.orgId !== ctx.orgId || assistant.ownerType !== principal.type || assistant.ownerId !== principal.id) {
+      // An explicit conversation origin takes precedence over definition
+      // routing. Older and unattended runs keep the snapshot/default route.
+      //
+      // The origin resolves through the assistants table, never through an
+      // id prefix: rows migrated from `orchestrator_identities` keep legacy
+      // `orchestrator:*` session ids that no prefix parse recognizes
+      // (`assistants/service.ts#loadAssistantBySessionId`). A prefix parse
+      // here failed every orchestrator node of every run such a thread
+      // started. The lookup is by session id, so the loaded row always
+      // carries the origin's own session id.
+      const assistant = ctx.origin
+        ? await loadAssistantBySessionId(opts.db, ctx.origin.assistantSessionId)
+        : ctx.assistantId
+          ? await loadAssistant(opts.db, ctx.assistantId)
+          : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+      const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
+      const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
+      if (!assistant || assistant.orgId !== ctx.orgId ||
+          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor))) {
         throw new Error("Workflow orchestrator is unavailable. Select an orchestrator owned by this workflow's workspace.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
+      if (ctx.origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
+          !(await isTeamMember(opts.db, principal.id, ctx.actorUserId))) {
+        throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
+      }
       const session = await opts.host.assistantSessionFor(
         assistant.id,
         { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
         { sessionId: assistant.sessionId },
       );
-      // Preserve receipts for runs admitted before the thread-key change.
-      const thread = await session.threadByKey(`signal:workflow:${runId}`)
-        ?? session.thread(`signal:workflow:definition:${ctx.workflowId}`);
+      // One thread per run. A thread is the engine's unit of serial
+      // execution and of abort: a shared thread makes one run's approval
+      // gate hold every other run of the same workflow, and makes the
+      // thread's Stop button cancel all of them. `run-attention.ts`
+      // archives the thread when the run settles, so the sidebar does not
+      // fill up. An attended run reports into the thread it was started
+      // from instead.
+      const thread = ctx.origin
+        ? session.threadById(ctx.origin.threadId)
+        : session.thread(workflowRunThreadKey(runId));
+      if (!thread) {
+        throw new Error(
+          `Workflow origin thread ${ctx.origin?.threadId} is missing from session ${session.id}. ` +
+            "Start a new run from an active assistant thread.",
+        );
+      }
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
       // string-valued by contract (`SignalContent`), and nothing set it

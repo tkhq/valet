@@ -10,12 +10,13 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
+import type { WorkflowRunOrigin } from "@valet/workflow";
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
-import { fauxAssistantMessage } from "@valet/engine/test-helpers";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { assistants, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -28,7 +29,12 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<void> {
+async function seedRun(
+  a: TestApi,
+  runId: string,
+  workflowId: string,
+  origin?: WorkflowRunOrigin,
+): Promise<void> {
   const { db, workflowStore } = a.providers;
   const now = Date.now();
   await db
@@ -45,7 +51,7 @@ async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<v
     });
   await workflowStore.createRun(
     runId,
-    { workflowId, definitionVersionId: "v1" },
+    { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}) },
     { version: "dag/v1", nodes: [], edges: [] },
     "v1",
     { ownerType: "user", ownerId: LOCAL_USER.id },
@@ -321,6 +327,149 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     });
   });
 
+  it("routes a team-owned run to the team's default assistant", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, {
+      orgId: LOCAL_ORG.id,
+      name: "orchestrator-routing-team",
+      creatorUserId: LOCAL_USER.id,
+    });
+    const workflowId = "wf_orch_team";
+    const runId = "wfrun_orch_team";
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      orgId: LOCAL_ORG.id,
+      ownerType: "team",
+      ownerId: team.id,
+      name: "team-orchestrator-routing",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id },
+    );
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+
+    const receipt = await deps.promptOrchestrator("review team work", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: team.id },
+    });
+
+    const teamDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "team", id: team.id });
+    const personalDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
+    expect(receipt.sessionId).toBe(teamDefault.sessionId);
+    expect(receipt.sessionId).not.toBe(personalDefault.sessionId);
+  });
+
+  it("reuses the exact assistant thread recorded as the run origin", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: LOCAL_USER.id });
+    const session = await engineHost.assistantSessionFor(
+      assistant.id,
+      { actorUserId: LOCAL_USER.id, orgId: "local-org" },
+      { sessionId: assistant.sessionId },
+    );
+    const originThread = await session.createThread("web:origin");
+    const runId = "wfrun_orch_origin";
+    await seedRun(api, runId, "wf_orch_origin", {
+      assistantSessionId: assistant.sessionId,
+      threadId: originThread.id,
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+
+    const receipt = await deps.promptOrchestrator("continue here", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    expect(receipt).toMatchObject({ sessionId: assistant.sessionId, threadId: originThread.id });
+  });
+
+  it("reuses a legacy orchestrator-prefixed origin session", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    // Rows migrated from `orchestrator_identities` keep their legacy
+    // session id. The assistants table is the authority on which session
+    // ids are assistant sessions, so an origin must resolve through it.
+    const legacySessionId = `orchestrator:user:${LOCAL_USER.id}`;
+    await db.insert(assistants).values({
+      id: "legacy-assistant",
+      orgId: LOCAL_ORG.id,
+      ownerType: "user",
+      ownerId: LOCAL_USER.id,
+      sessionId: legacySessionId,
+      isDefault: false,
+      createdAt: Date.now(),
+    });
+    const session = await engineHost.assistantSessionFor(
+      "legacy-assistant",
+      { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id },
+      { sessionId: legacySessionId },
+    );
+    const originThread = await session.createThread("web:legacy-origin");
+    const runId = "wfrun_orch_legacy_origin";
+    await seedRun(api, runId, "wf_orch_legacy_origin", {
+      assistantSessionId: legacySessionId,
+      threadId: originThread.id,
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+
+    const receipt = await deps.promptOrchestrator("continue here", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    expect(receipt).toMatchObject({ sessionId: legacySessionId, threadId: originThread.id });
+  });
+
+  it("rejects a missing durable origin thread without creating a replacement", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: LOCAL_USER.id });
+    const session = await engineHost.assistantSessionFor(
+      assistant.id,
+      { actorUserId: LOCAL_USER.id, orgId: "local-org" },
+      { sessionId: assistant.sessionId },
+    );
+    const before = session.listThreads().length;
+    const runId = "wfrun_orch_missing_origin";
+    await seedRun(api, runId, "wf_orch_missing_origin", {
+      assistantSessionId: assistant.sessionId,
+      threadId: "th-missing-origin",
+    });
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+
+    await expect(deps.promptOrchestrator("continue here", {
+      dispatchId: `workflow:${runId}:node1`,
+      queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    })).rejects.toThrow("origin thread");
+    expect(session.listThreads()).toHaveLength(before);
+  });
+
   it("is idempotent by dispatchId: a duplicate dispatch returns the original receipt", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
@@ -379,7 +528,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     expect(second.sessionId).toBe(first.sessionId);
   });
 
-  it("reuses a workflow thread across runs without mixing receipts", async () => {
+  it("gives every run its own thread on the one assistant", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
@@ -393,12 +542,107 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
     });
     const [first, second] = await Promise.all([submit("run_first"), submit("run_second")]);
-    expect(second.threadId).toBe(first.threadId);
+    // Two runs of ONE definition. Each keeps its own thread, so neither
+    // waits behind the other's turn, gate, or Stop.
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(second.threadId).not.toBe(first.threadId);
     expect(second.queueItemId).not.toBe(first.queueItemId);
+    const session = engineHost.liveSession(first.sessionId);
+    expect(session?.threadById(first.threadId)?.key).toBe("signal:workflow:run_first");
+    expect(session?.threadById(second.threadId)?.key).toBe("signal:workflow:run_second");
     expect(await submit("run_first")).toEqual(first);
     expect((await submit("run_other")).threadId).not.toBe(first.threadId);
     const item = await engineStore.getQueueItem(second.sessionId, second.queueItemId);
     expect(item?.content).toMatchObject({ attributes: { runId: "run_second" } });
+  });
+
+  it("aborts one run's thread and leaves another run's queued work alone", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+      actionPluginByService, credentials: engineCredentials });
+    await seedRun(api, "run_stopped", "wf_stop");
+    await workflowStore.createRun("run_spared", { workflowId: "wf_stop", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: LOCAL_USER.id });
+    const submit = (runId: string) => deps.promptOrchestrator("report", {
+      dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    const stopped = await submit("run_stopped");
+    const spared = await submit("run_spared");
+
+    // The thread Stop button: `POST /threads/:id/abort` aborts the whole
+    // thread. It must reach one run only.
+    const session = engineHost.liveSession(stopped.sessionId);
+    if (!session) throw new Error("Assistant session is not live");
+    await session.abort({ threadId: stopped.threadId });
+
+    expect((await engineStore.getQueueItem(stopped.sessionId, stopped.queueItemId))?.status).toBe("settled");
+    expect((await engineStore.getQueueItem(spared.sessionId, spared.queueItemId))?.status).not.toBe("settled");
+  });
+
+  it("keeps a second run moving while the first parks on an approval gate", async () => {
+    // The incident this reverts: a gate holds its thread's claim until
+    // someone answers it (72 hours by default), and a thread runs its queue
+    // in series. On a shared thread, the second run of the same workflow
+    // waited behind the first run's unanswered approval.
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
+    try {
+      const gated: PluginAction = {
+        id: "demo.review",
+        name: "review",
+        description: "critical-risk fixture action, so calling it opens an approval gate",
+        riskLevel: "critical",
+        parameters: Type.Object({}),
+        execute: async () => ({ success: true, data: { reviewed: true } }),
+      };
+      const plugin: ValetPlugin = {
+        name: "demo", version: "0.0.1",
+        actions: [{ service: "demo", actions: [gated] }],
+      };
+      api = await bootTestApi({ plugins: [plugin] });
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials });
+      await seedRun(api, "run_parked", "wf_gate");
+      await workflowStore.createRun("run_next", { workflowId: "wf_gate", definitionVersionId: "v1" },
+        { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: LOCAL_USER.id });
+      const submit = (runId: string, text: string) => deps.promptOrchestrator(text, {
+        dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
+        ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+      });
+
+      // The first run's turn calls the critical-risk action and blocks.
+      faux.setResponses([
+        fauxAssistantMessage(
+          [fauxToolCall("call_tool", { tool_id: "demo.review", params: {}, summary: "review it" }, { id: "tc-gate" })],
+          { stopReason: "toolUse" },
+        ),
+      ]);
+      const parked = await submit("run_parked", "first run");
+      await vi.waitFor(async () => {
+        const gates = await engineStore.listDecisionGates(parked.sessionId, parked.threadId);
+        expect(gates.filter((gate) => gate.status === "pending")).toHaveLength(1);
+      }, { timeout: 15_000, interval: 50 });
+
+      // The second run of the SAME workflow, dispatched while that gate is
+      // open. Its own thread lets its turn run and settle.
+      faux.appendResponses([fauxAssistantMessage("second run reported")]);
+      const next = await submit("run_next", "second run");
+      expect(next.sessionId).toBe(parked.sessionId);
+      expect(next.threadId).not.toBe(parked.threadId);
+      await vi.waitFor(async () => {
+        expect((await engineStore.getQueueItem(next.sessionId, next.queueItemId))?.status).toBe("settled");
+      }, { timeout: 15_000, interval: 50 });
+
+      // The first run is still waiting for its answer, as it should be.
+      expect((await engineStore.getQueueItem(parked.sessionId, parked.queueItemId))?.status).not.toBe("settled");
+      const stillPending = await engineStore.listDecisionGates(parked.sessionId, parked.threadId);
+      expect(stillPending.filter((gate) => gate.status === "pending")).toHaveLength(1);
+    } finally {
+      faux.unregister();
+    }
   });
 
   it("keeps an existing per-run thread for retries after an upgrade", async () => {

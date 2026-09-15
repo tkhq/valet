@@ -44,12 +44,22 @@ export interface RunParkState {
   updatedAt: number;
 }
 
+/** Assistant conversation that explicitly started a workflow run. */
+export interface WorkflowRunOrigin {
+  /** The assistant session id. Thread ids are scoped to this session. */
+  assistantSessionId: string;
+  /** The exact durable assistant thread that started the run. */
+  threadId: string;
+}
+
 /** Parameters to start a run. JSON-serializable. */
 export interface RunParams {
   workflowId: string;
   definitionVersionId: string;
   triggerId?: string;
   input?: unknown; // JSON-serializable trigger/manual input
+  /** Present only when an assistant conversation explicitly started this run. */
+  origin?: WorkflowRunOrigin;
   /**
    * Set when this run was started by a `workflow` node in another run
    * (batch-fanout design decision 1). `parentRunId` wires settle-time

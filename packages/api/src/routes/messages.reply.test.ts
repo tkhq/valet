@@ -110,6 +110,44 @@ describe("message replies", () => {
     expect((await postReply(sessionId, thread.id, user.id)).status).toBe(400);
   });
 
+  it("rejects errored and aborted assistant targets, accepts end_turn", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession();
+    const session = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await session.ensureDefaultThread();
+    await thread.pause();
+    const errored = assistantEntry(sessionId, thread.id, "assistant-errored");
+    errored.stopReason = "error";
+    const aborted = assistantEntry(sessionId, thread.id, "assistant-aborted");
+    aborted.stopReason = "abort";
+    const completed = assistantEntry(sessionId, thread.id, "assistant-completed");
+    await api.providers.engineStore.appendEntries(sessionId, thread.id, [
+      errored,
+      aborted,
+      completed,
+    ]);
+
+    const erroredRes = await postReply(sessionId, thread.id, errored.id);
+    expect(erroredRes.status).toBe(400);
+    const erroredBody = (await erroredRes.json()) as { error: string };
+    expect(erroredBody.error).toContain("Reply to a completed assistant message.");
+
+    expect((await postReply(sessionId, thread.id, aborted.id)).status).toBe(400);
+    expect((await postReply(sessionId, thread.id, completed.id)).status).toBe(202);
+
+    const messages = await fetch(
+      `${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${thread.id}`,
+    );
+    const listed = (await messages.json()) as ListMessagesResponse;
+    expect(listed.messages.find((m) => m.id === errored.id)?.completed).toBe(false);
+    expect(listed.messages.find((m) => m.id === aborted.id)?.completed).toBe(false);
+    expect(listed.messages.find((m) => m.id === completed.id)?.completed).toBe(true);
+  });
+
   it("rejects cross-thread and cross-session target ids", async () => {
     api = await bootTestApi();
     const sessionId = await createSession();

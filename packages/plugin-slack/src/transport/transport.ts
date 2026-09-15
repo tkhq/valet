@@ -265,6 +265,20 @@ export class SlackTransport implements ChannelTransport {
    * approved, and the edit must not erase it from the thread. */
   private readonly gateRetainedTexts = new Map<string, string>();
   /**
+   * `trigger_id` of a parsed button click → how to answer that click.
+   *
+   * Slack acks an interaction with an empty body, so a refusal ("this
+   * approval expired") needs a second call. The click carries a
+   * `response_url` that accepts one for about 30 minutes without a token;
+   * the channel and the clicker are the fallback address when it does not.
+   * Capped like every other per-turn map, so a busy workspace cannot grow it
+   * without bound.
+   */
+  private readonly gateCallbackAnswers = new Map<
+    string,
+    { responseUrl?: string; channelId: string; userId: string }
+  >();
+  /**
    * conversationKey → `thread_ts` of the most recent inbound turn.
    *
    * Two host calls carry no per-turn handle: `sendTyping(conversationKey)`
@@ -473,6 +487,14 @@ export class SlackTransport implements ChannelTransport {
     const teamId = str(rec(u.team)?.id) ?? this.teamId;
     const threadTs = str(container?.thread_ts) ?? messageTs;
     const conversationKey = conversationKeyFor(teamId, channelId, threadTs);
+
+    // Remember how to answer this click before the host decides whether to
+    // refuse it. `answerCallback` receives the trigger id alone.
+    this.remember(this.gateCallbackAnswers, triggerId, {
+      ...(str(u.response_url) !== undefined ? { responseUrl: str(u.response_url) } : {}),
+      channelId,
+      userId,
+    });
 
     return {
       dispatchId: `slack:ia:${triggerId}`,
@@ -900,9 +922,9 @@ export class SlackTransport implements ChannelTransport {
         action_id: action.id,
         // Slack allows 2,000-char values, so the real gate id rides along
         // instead of being looked up by message reference (Telegram's
-        // 64-byte callback_data cannot carry it). The host uses it as a
-        // fallback when its in-memory ref map misses, but the map's
-        // sessionId is still required to resolve — an api restart still
+        // 64-byte callback_data cannot carry it). The id is advisory: the
+        // host resolves a click through its own recorded prompt reference
+        // and never trusts an id from the payload, so an api restart still
         // loses a pending gate.
         value: `g|${gate.gateId}|${action.id}`,
         ...(action.style !== undefined ? { style: action.style } : {}),
@@ -953,6 +975,69 @@ export class SlackTransport implements ChannelTransport {
       parse: "none",
     });
     this.gateRetainedTexts.delete(key);
+  }
+
+  /**
+   * Tell the clicker why their approval click did nothing.
+   *
+   * Slack's interaction ack carries no body, so a refused click is silent
+   * unless a second message says otherwise. Without `text` there is nothing
+   * to say and the ack already stands, so this sends nothing. Every failure
+   * is logged and swallowed: the gate outcome is already decided, and a lost
+   * notice must not fail the callback.
+   */
+  async answerCallback(callbackId: string, text?: string): Promise<void> {
+    if (text === undefined) return;
+    const answer = this.gateCallbackAnswers.get(callbackId);
+    if (!answer) {
+      console.warn(`[slack] no recorded answer address for callback ${callbackId}`);
+      return;
+    }
+    let responseUrl: string | undefined;
+    if (answer.responseUrl !== undefined) {
+      if (this.isSlackResponseUrl(answer.responseUrl)) responseUrl = answer.responseUrl;
+      else console.warn(`[slack] refused an approval answer to a non-Slack response_url for callback ${callbackId}`);
+    }
+    if (responseUrl !== undefined && (await this.postToResponseUrl(responseUrl, text))) return;
+    try {
+      await this.api.postEphemeral({ channel: answer.channelId, user: answer.userId, text });
+    } catch (err) {
+      console.error("[slack] could not answer an approval click", err);
+    }
+  }
+
+  /**
+   * Only Slack may receive a click answer. `response_url` arrives in the
+   * interaction payload, so a payload that reached this far without Slack's
+   * signature must not be able to point the api at an arbitrary address. The
+   * configured API base is allowed too, for a dev or test Slack.
+   */
+  private isSlackResponseUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname;
+      if (host === "slack.com" || host.endsWith(".slack.com")) return parsed.protocol === "https:";
+      return parsed.origin === new URL(this.api.baseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /** `true` when Slack accepted the reply. A response_url expires after
+   * about 30 minutes, and an expired one must fall back, not throw. */
+  private async postToResponseUrl(responseUrl: string, text: string): Promise<boolean> {
+    try {
+      const res = await fetch(responseUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }),
+      });
+      if (res.ok) return true;
+      console.warn(`[slack] response_url rejected an approval answer: http ${res.status}`);
+    } catch (err) {
+      console.error("[slack] response_url answer failed", err);
+    }
+    return false;
   }
 
   /**

@@ -39,6 +39,12 @@ export type ModelPatchResult =
 /**
  * Set the model on `llm` and `session` nodes, including a `foreach` body.
  * Orchestrator nodes use their assistant's model and have no per-node model.
+ *
+ * A patch that targets every node also moves `ui.defaultModel`, the model
+ * the editor gives a node the user adds next. Leaving it behind made the
+ * next added node carry the model the user just changed away from. A patch
+ * that names a subset leaves it alone: the rest of the workflow keeps its
+ * own models, so the editor default still describes them.
  */
 export function applyWorkflowModelPatch(
   definition: WorkflowDefinition,
@@ -70,6 +76,7 @@ export function applyWorkflowModelPatch(
   if (changed.length === 0) {
     return { ok: false, errors: ["workflow has no llm or session nodes. Add a model-capable node first."] };
   }
+  if (nodeIds === undefined && next.ui) next.ui.defaultModel = model;
   return { ok: true, definition: next, nodeIds: changed };
 }
 
