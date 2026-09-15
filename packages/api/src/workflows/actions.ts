@@ -166,6 +166,25 @@ export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null
     // author when it has one, else the session's own user id): every value
     // other than the assistant's own team principal id names a person, and
     // a person's turn always carries an author.
+    //
+    // Three submitters set that author, and each one sets it from an
+    // authenticated person: `routes/messages.ts` (the web client's own
+    // prompt), `channels/host.ts` (a linked channel identity), and
+    // `events/assistant-delivery.ts` (the actor an event subscription was
+    // created by).
+    //
+    // A fourth submitter sets NO author: `orchestrator/signals.ts`
+    // (`admitSignal`). A signal therefore reads as a machine turn and
+    // widens this gate. `authorizeEdge` in that file is what bounds the
+    // widening: it admits a parent-to-child or child-to-parent edge, and an
+    // org-owned assistant to a user-owned one within one organization. A
+    // user-to-user or user-to-team assistant edge is denied, so a person
+    // cannot reach a team's workflows by signalling its assistant.
+    //
+    // The comparison assumes a principal id holds no colon. A user id
+    // spelled `team:{id}` would otherwise read as that team's own machine
+    // principal. Every id this code sees is a generated identifier, so
+    // there is no runtime check here.
     const machinePrincipal = actorUserId === `${principal.type}:${principal.id}`;
     return {
       userId: actorUserId,
