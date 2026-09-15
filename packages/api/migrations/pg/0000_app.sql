@@ -1631,6 +1631,17 @@ CREATE TABLE IF NOT EXISTS "policy_bundle_lineage" (
   PRIMARY KEY ("org_id","digest"), CONSTRAINT "policy_bundle_lineage_source" CHECK (("source"='structured' AND "root_digest" IS NULL AND "document_id" IS NULL AND "revision" IS NULL AND "normalized_identity" IS NULL AND "policy_digest" IS NULL AND "engine_digest" IS NULL) OR ("source"='authored' AND "root_digest" IS NOT NULL AND "document_id" IS NOT NULL AND "revision">0 AND "normalized_identity" IS NOT NULL AND "policy_digest" IS NOT NULL AND "engine_digest" IS NOT NULL))
 );
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION reject_policy_bundle_lineage_update() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'policy_bundle_lineage rows are immutable; insert a matching row instead';
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS policy_bundle_lineage_immutable ON policy_bundle_lineage;
+--> statement-breakpoint
+CREATE TRIGGER policy_bundle_lineage_immutable BEFORE UPDATE ON policy_bundle_lineage
+FOR EACH ROW EXECUTE FUNCTION reject_policy_bundle_lineage_update();
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "policy_active_bundles" (
   "org_id" text PRIMARY KEY NOT NULL REFERENCES "orgs"("id"),
   "digest" text NOT NULL REFERENCES "policy_source_bundles"("digest"),

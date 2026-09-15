@@ -276,8 +276,13 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
         if (!stored) throw new Error(`Canonical policy bundle ${pointer.digest} is missing.`);
         const lineage = await lineageForActive(tx, transactionManager.host, pointer.orgId, pointer.digest);
         const authored = lineage.source === "authored";
-        const authoredRevision = authored ? await approvedAuthoredRevision(tx, transactionManager.host, pointer.orgId, lineage.rootDigest) : undefined;
+        let authoredRevision = authored ? await approvedAuthoredRevision(tx, transactionManager.host, pointer.orgId, lineage.rootDigest) : undefined;
+        if (authored && !authoredRevision) {
+          const candidates = await approvedAuthoredRevisions(tx, transactionManager.host, pointer.orgId);
+          if (candidates.length === 1) authoredRevision = candidates[0];
+        }
         if (authored && !authoredRevision) throw new Error(`Authored policy for ${pointer.orgId} cannot be reconstructed. Restore the exact approved document and revision before release migration.`);
+        if (lineage.source === "authored" && authoredRevision) verifyAuthoredLineage(pointer.orgId, lineage, authoredRevision);
         const bundle = await replacement({ organizationId: pointer.orgId, source: authored ? "authored" : "structured", active: { sourceBundleDigest: pointer.digest, generation: pointer.generation }, bundle: stored.bundle, ...(authoredRevision ? { authoredRevision, lineage: lineage.source === "authored" ? lineage : undefined } : {}) }, transactionManager);
         const identity = await this.runtime.run<ValidatedBundleIdentity>({ operation: "validate_bundle", bundle });
         if (canonicalJson(bundle) !== canonicalJson(stored.bundle) && identity.sourceBundleDigest === pointer.digest) throw new Error(`Canonical release migration changed source bytes for ${pointer.orgId} without changing its digest.`);
@@ -389,7 +394,17 @@ function revision(value: unknown): string {
   return `current-policy:${createHash("sha256").update(JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item)).digest("hex")}`;
 }
 
-async function approvedAuthoredRevision(db: AppQueryable, host: SourceBundleHost, organizationId: string, digest: string): Promise<{ documentId: string; revision: number; draft: NormalizedPolicyDraftV1 } | undefined> {
+interface ApprovedAuthoredRevision {
+  readonly rootDigest: string;
+  readonly documentId: string;
+  readonly revision: number;
+  readonly normalizedIdentity: string;
+  readonly policyDigest: string;
+  readonly engineDigest: string;
+  readonly draft: NormalizedPolicyDraftV1;
+}
+
+async function approvedAuthoredRevision(db: AppQueryable, host: SourceBundleHost, organizationId: string, digest: string): Promise<ApprovedAuthoredRevision | undefined> {
   const digestRevisions = await db.select().from(policyAuthoringRevisions).where(and(eq(policyAuthoringRevisions.orgId, organizationId), eq(policyAuthoringRevisions.sourceBundleDigest, digest)));
   const digestDocuments = await db.select().from(policyAuthoringDocuments).where(and(eq(policyAuthoringDocuments.orgId, organizationId), eq(policyAuthoringDocuments.sourceBundleDigest, digest)));
   const anchors = new Map<string, typeof digestRevisions[number]>();
@@ -424,7 +439,28 @@ async function approvedAuthoredRevision(db: AppQueryable, host: SourceBundleHost
   try { loaded = await host.load(digest); } catch { return fail("immutable source bundle"); }
   if (loaded.identity.sourceBundleDigest !== digest || loaded.identity.policyDigest !== revision.policyDigest || loaded.identity.engineDigest !== revision.engineDigest) fail("source bundle identity");
   if (canonicalJson(revision.bundle) !== canonicalJson(loaded.bundle)) fail("revision bundle bytes");
-  return { documentId: revision.documentId, revision: revision.revision, draft: normalized };
+  return { rootDigest: digest, documentId: revision.documentId, revision: revision.revision, normalizedIdentity: revision.normalizedIdentity, policyDigest: revision.policyDigest!, engineDigest: revision.engineDigest!, draft: normalized };
+}
+
+async function approvedAuthoredRevisions(db: AppQueryable, host: SourceBundleHost, organizationId: string): Promise<ApprovedAuthoredRevision[]> {
+  const rows = await db.select({ sourceBundleDigest: policyAuthoringRevisions.sourceBundleDigest }).from(policyAuthoringRevisions).where(eq(policyAuthoringRevisions.orgId, organizationId));
+  const digests = [...new Set(rows.map((row) => row.sourceBundleDigest).filter((digest): digest is string => digest !== null))];
+  const approved = await Promise.all(digests.map((digest) => approvedAuthoredRevision(db, host, organizationId, digest)));
+  return approved.filter((revision): revision is ApprovedAuthoredRevision => revision !== undefined);
+}
+
+function verifyAuthoredLineage(organizationId: string, lineage: AuthoredLineage, approved: ApprovedAuthoredRevision): void {
+  const claims: ReadonlyArray<[string, string | number, string | number]> = [
+    ["root digest", lineage.rootDigest, approved.rootDigest],
+    ["document ID", lineage.documentId, approved.documentId],
+    ["revision", lineage.revision, approved.revision],
+    ["normalized identity", lineage.normalizedIdentity, approved.normalizedIdentity],
+    ["policy digest", lineage.policyDigest, approved.policyDigest],
+    ["engine digest", lineage.engineDigest, approved.engineDigest],
+  ];
+  for (const [field, actual, expected] of claims) {
+    if (actual !== expected) throw new Error(`Authored policy lineage for ${organizationId} has a ${field} mismatch. Restore the exact approved document, revision, review, audit, and source bundle before release migration.`);
+  }
 }
 
 async function putLineage(db: AppQueryable, organizationId: string, digest: string, authored?: AuthoredLineage): Promise<void> {
@@ -445,8 +481,12 @@ async function currentSourceIsAuthored(db: AppQueryable, host: SourceBundleHost,
 async function lineageForActive(db: AppQueryable, host: SourceBundleHost, organizationId: string, digest: string): Promise<{ readonly source: "structured" } | ({ readonly source: "authored" } & AuthoredLineage)> {
   const row = (await db.select().from(policyBundleLineage).where(and(eq(policyBundleLineage.orgId, organizationId), eq(policyBundleLineage.digest, digest))).limit(1))[0];
   if (row) {
-    if (row.source === "structured") return { source: "structured" };
-    if (!row.rootDigest || !row.documentId || !row.revision || !row.normalizedIdentity || !row.policyDigest || !row.engineDigest) throw new Error("Canonical authored policy lineage is invalid.");
+    if (row.source === "structured") {
+      if (row.rootDigest !== null || row.documentId !== null || row.revision !== null || row.normalizedIdentity !== null || row.policyDigest !== null || row.engineDigest !== null) throw new Error(`Structured policy lineage for ${organizationId} has authored metadata. Remove all authored metadata before release migration.`);
+      await host.load(digest);
+      return { source: "structured" };
+    }
+    if (row.source !== "authored" || !row.rootDigest || !row.documentId || !row.revision || !row.normalizedIdentity || !row.policyDigest || !row.engineDigest) throw new Error(`Canonical policy lineage for ${organizationId} is invalid. Restore the exact lineage row before release migration.`);
     return { source: "authored", rootDigest: row.rootDigest, documentId: row.documentId, revision: row.revision, normalizedIdentity: row.normalizedIdentity, policyDigest: row.policyDigest, engineDigest: row.engineDigest };
   }
   if (await isRecordedCandidate(db, organizationId, digest)) {
@@ -454,7 +494,7 @@ async function lineageForActive(db: AppQueryable, host: SourceBundleHost, organi
     if (!revision) throw new Error("Authored policy for " + organizationId + " cannot be reconstructed. Restore the exact approved document and revision before release migration.");
     const source = (await db.select().from(policyAuthoringRevisions).where(and(eq(policyAuthoringRevisions.orgId, organizationId), eq(policyAuthoringRevisions.documentId, revision.documentId), eq(policyAuthoringRevisions.revision, revision.revision))).limit(1))[0];
     if (!source?.sourceBundleDigest || !source.policyDigest || !source.engineDigest) throw new Error("Canonical authored policy provenance is invalid.");
-    const lineage: AuthoredLineage = { rootDigest: digest, documentId: revision.documentId, revision: revision.revision, normalizedIdentity: source.normalizedIdentity, policyDigest: source.policyDigest, engineDigest: source.engineDigest };
+    const lineage: AuthoredLineage = { rootDigest: revision.rootDigest, documentId: revision.documentId, revision: revision.revision, normalizedIdentity: revision.normalizedIdentity, policyDigest: revision.policyDigest, engineDigest: revision.engineDigest };
     await putLineage(db, organizationId, digest, lineage);
     return { source: "authored", ...lineage };
   }

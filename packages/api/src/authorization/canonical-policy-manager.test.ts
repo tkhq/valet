@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles, runtimeGrants, teams, workflowRuns } from "../schema/index.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policyBundleLineage, policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles, runtimeGrants, teams, workflowRuns } from "../schema/index.js";
 import { CanonicalPolicyBundleManager, CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, migrateCanonicalPolicyReleaseSet, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
 import { deleteOverrideByTarget, listMyOverrides, listPolicies, revokePolicy, updatePolicy, upsertOverride } from "../policies/admin.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
@@ -350,6 +350,64 @@ describe("canonical policy readiness", () => {
       expect(rolledBack.every((row, index) => row.generation === before[index]!.generation + 2)).toBe(true);
       await manager.migrateReleaseSet("release-1-rollback", async (input) => originalBundles.get(input.organizationId)!);
       expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(rolledBack);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it.each(["source", "root_digest", "document_id", "revision", "normalized_identity", "policy_digest", "engine_digest"])("rejects direct lineage updates: %s", async (field) => {
+    const db = await setup();
+    await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      await expect(pg!.pgdb.query(`UPDATE policy_bundle_lineage SET ${field} = ${field} WHERE org_id = 'org-a'`)).rejects.toThrow(/immutable/);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it.each([
+    ["root digest", "root_digest", "forged-root"],
+    ["document ID", "document_id", "forged-document"],
+    ["revision", "revision", 2],
+    ["normalized identity", "normalized_identity", "forged-identity"],
+    ["policy digest", "policy_digest", "forged-policy"],
+    ["engine digest", "engine_digest", "forged-engine"],
+    ["all authored claims", "root_digest = 'forged-root', document_id = 'forged-document', revision = 2, normalized_identity = 'forged-identity', policy_digest = 'forged-policy', engine_digest = 'forged-engine'", undefined],
+  ] as const)("rejects forged authored lineage before pointer or lineage writes: %s", async (_name, field, value) => {
+    const db = await setup();
+    await db.insert(orgs).values([{ id: "org-a", name: "A", createdAt: 1 }, { id: "org-b", name: "B", createdAt: 1 }]);
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      await seedApprovedCandidate(db, manager);
+      await manager.migrateReleaseSet("lineage-seed", async (input) => {
+        const manifest = JSON.parse(input.bundle.manifestJson) as { source: { revision: string } };
+        manifest.source.revision += ":lineage-seed";
+        return { ...input.bundle, manifestJson: JSON.stringify(manifest) };
+      });
+      await db.execute(sql.raw("DROP TRIGGER IF EXISTS policy_bundle_lineage_immutable ON policy_bundle_lineage"));
+      if (value === undefined) await db.execute(sql.raw(`UPDATE policy_bundle_lineage SET ${field} WHERE org_id='org-b' AND source='authored'`));
+      else await pg!.pgdb.query(`UPDATE policy_bundle_lineage SET ${field} = $1 WHERE org_id = 'org-b' AND source = 'authored'`, [value]);
+      const pointers = await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId);
+      const lineage = await db.select().from(policyBundleLineage).orderBy(policyBundleLineage.orgId, policyBundleLineage.digest);
+      await expect(manager.migrateReleaseSet("lineage-forged", async (input) => input.bundle)).rejects.toThrow(/lineage.*mismatch/i);
+      expect(await db.select().from(policyActiveBundles).orderBy(policyActiveBundles.orgId)).toEqual(pointers);
+      expect(await db.select().from(policyBundleLineage).orderBy(policyBundleLineage.orgId, policyBundleLineage.digest)).toEqual(lineage);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("rejects structured lineage carrying authored metadata before pointer or lineage writes", async () => {
+    const db = await setup();
+    await db.insert(orgs).values({ id: "org-a", name: "A", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);
+    try {
+      await ensureCanonicalPolicyReadiness(manager);
+      await db.execute(sql.raw("DROP TRIGGER IF EXISTS policy_bundle_lineage_immutable ON policy_bundle_lineage"));
+      await db.execute(sql.raw("ALTER TABLE policy_bundle_lineage DROP CONSTRAINT policy_bundle_lineage_source"));
+      await db.execute(sql.raw("UPDATE policy_bundle_lineage SET root_digest = 'forged-root' WHERE org_id = 'org-a'"));
+      const pointers = await db.select().from(policyActiveBundles);
+      const lineage = await db.select().from(policyBundleLineage);
+      await expect(manager.migrateReleaseSet("structured-forged", async (input) => input.bundle)).rejects.toThrow(/structured policy lineage.*authored metadata/i);
+      expect(await db.select().from(policyActiveBundles)).toEqual(pointers);
+      expect(await db.select().from(policyBundleLineage)).toEqual(lineage);
     } finally { await manager.close(); }
   }, 120_000);
 

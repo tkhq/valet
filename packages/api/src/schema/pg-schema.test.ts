@@ -1089,6 +1089,22 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
+    it("repairs the policy bundle lineage immutability trigger", async () => {
+      await db.query("DROP TRIGGER policy_bundle_lineage_immutable ON policy_bundle_lineage");
+      await db.query("DROP FUNCTION reject_policy_bundle_lineage_update()");
+      expect((await missingSchemaRepairs(db)).map((repair) => repair.describe)).toEqual(expect.arrayContaining([
+        "policy bundle lineage immutability function",
+        "policy bundle lineage immutability trigger",
+      ]));
+      await applyAppMigrations(db);
+      await db.query("INSERT INTO orgs (id,name,created_at) VALUES ('lineage-repair-org','Lineage repair',1) ON CONFLICT DO NOTHING");
+      await db.query("INSERT INTO policy_source_bundles (digest,bundle,created_at) VALUES ('lineage-repair-digest','{}',1) ON CONFLICT DO NOTHING");
+      await db.query("INSERT INTO policy_bundle_lineage (org_id,digest,source) VALUES ('lineage-repair-org','lineage-repair-digest','structured') ON CONFLICT DO NOTHING");
+      await expect(db.query("UPDATE policy_bundle_lineage SET source='structured' WHERE org_id='lineage-repair-org' AND digest='lineage-repair-digest'"))
+        .rejects.toThrow(/immutable/);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
     it("restores apikey.team_id and its index on a database migrated before team keys", async () => {
       await db.query('ALTER TABLE "apikey" DROP COLUMN "team_id"'); // drops the index too
       const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
