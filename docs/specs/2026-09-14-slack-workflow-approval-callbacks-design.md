@@ -16,3 +16,13 @@ Drop logs retain the internal failure category for diagnosis: malformed, missing
 
 These callbacks resolve engine decision gates inside workflow sessions.
 Authored workflow approval nodes continue to use workflow approval signals and the workflow run page.
+
+## Rejections are visible on Slack
+
+Slack acknowledges a button click with an empty body, so a refused click shows nothing by itself.
+The Slack transport records the `response_url` of each parsed click, keyed by its trigger id.
+When the host refuses a callback, the transport posts the reason to that URL as an ephemeral reply.
+If the click carries no `response_url`, or the URL no longer accepts the post, the transport sends an ephemeral message to the channel and the clicker.
+The transport posts only to a Slack host, so a payload that arrives without Slack's signature cannot aim the answer at another address.
+A callback answered without text sends nothing, because the acknowledgement already stands.
+Every failure to answer is logged and the callback continues, because the gate outcome is already decided.

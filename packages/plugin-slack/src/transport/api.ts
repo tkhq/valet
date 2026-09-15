@@ -170,6 +170,20 @@ export class SlackApi {
   }
 
   /**
+   * chat.postEphemeral → a message only one reader sees, in place.
+   * The transport answers a rejected approval click with it when the click's
+   * own `response_url` is gone.
+   */
+  async postEphemeral(opts: { channel: string; user: string; text: string }): Promise<void> {
+    await this.call("chat.postEphemeral", {
+      channel: opts.channel,
+      user: opts.user,
+      text: opts.text,
+      mrkdwn: false,
+    });
+  }
+
+  /**
    * conversations.join → add the bot to a public channel. Idempotent: Slack
    * returns `already_in_channel: true` when the bot is already a member,
    * which surfaces here as `alreadyIn: true` on an otherwise ok response.

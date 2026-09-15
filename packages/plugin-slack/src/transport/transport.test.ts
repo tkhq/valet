@@ -647,6 +647,101 @@ describe("parseUpdate — gate callbacks", () => {
   });
 });
 
+describe("answerCallback", () => {
+  const EXPIRED = "This approval has expired — resolve it on the web.";
+
+  function click(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      type: "block_actions",
+      trigger_id: "TRIG-ANSWER",
+      user: { id: "U1", username: "someone" },
+      team: { id: TEAM },
+      channel: { id: CHANNEL },
+      container: { message_ts: "1700000000.000900", thread_ts: THREAD_TS },
+      actions: [{ value: "g|gate-77|deny" }],
+      response_url: `${fake.baseUrl}/response-url`,
+      ...over,
+    };
+  }
+
+  it("answers the click on its own response_url", async () => {
+    const transport = makeTransport();
+    transport.parseUpdate(click());
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    const answer = fake.calls.find((c) => c.method === "response-url");
+    expect(answer?.body).toEqual({ response_type: "ephemeral", replace_original: false, text: EXPIRED });
+    // The response_url is a capability URL. It carries no bot token.
+    expect(answer?.auth).toBeUndefined();
+    expect(fake.calls.some((c) => c.method === "chat.postEphemeral")).toBe(false);
+  });
+
+  it("answers with an ephemeral message when the click carried no response_url", async () => {
+    const transport = makeTransport();
+    const payload = click();
+    delete payload.response_url;
+    transport.parseUpdate(payload);
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    const ephemeral = fake.calls.find((c) => c.method === "chat.postEphemeral");
+    expect(ephemeral?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: EXPIRED });
+  });
+
+  it("answers with an ephemeral message when the response_url no longer accepts the post", async () => {
+    const transport = makeTransport();
+    transport.parseUpdate(click());
+    fake.failNext("response-url", "expired_url", 500);
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    const ephemeral = fake.calls.find((c) => c.method === "chat.postEphemeral");
+    expect(ephemeral?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: EXPIRED });
+  });
+
+  it("refuses a response_url that does not belong to Slack", async () => {
+    const transport = makeTransport();
+    // A reachable host is still the wrong host. A payload that reached the
+    // parser without Slack's signature must not aim the answer elsewhere.
+    const foreign = `${fake.baseUrl.replace("127.0.0.1", "localhost")}/response-url`;
+    transport.parseUpdate(click({ response_url: foreign }));
+
+    await transport.answerCallback("TRIG-ANSWER", EXPIRED);
+
+    expect(fake.calls.some((c) => c.method === "response-url")).toBe(false);
+    const ephemeral = fake.calls.find((c) => c.method === "chat.postEphemeral");
+    expect(ephemeral?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: EXPIRED });
+  });
+
+  it("says nothing when the callback carries no text", async () => {
+    const transport = makeTransport();
+    transport.parseUpdate(click());
+
+    await transport.answerCallback("TRIG-ANSWER");
+
+    expect(fake.calls.some((c) => c.method === "response-url")).toBe(false);
+    expect(fake.calls.some((c) => c.method === "chat.postEphemeral")).toBe(false);
+  });
+
+  it("stays quiet for a callback it never parsed", async () => {
+    const transport = makeTransport();
+
+    await expect(transport.answerCallback("TRIG-UNKNOWN", EXPIRED)).resolves.toBeUndefined();
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("keeps the ephemeral answer working when the message send fails", async () => {
+    const transport = makeTransport();
+    const payload = click();
+    delete payload.response_url;
+    transport.parseUpdate(payload);
+    fake.failNext("chat.postEphemeral", "channel_not_found");
+
+    await expect(transport.answerCallback("TRIG-ANSWER", EXPIRED)).resolves.toBeUndefined();
+  });
+});
+
 describe("verifyWebhook", () => {
   function signed(body: string, secret = SIGNING_SECRET, timestamp = Math.floor(Date.now() / 1000)) {
     const digest = createHmac("sha256", secret).update(`v0:${timestamp}:${body}`).digest("hex");
