@@ -100,6 +100,21 @@ describe("canViewSession", () => {
     expect(ok).toBe(false);
   });
 
+  it("rejects an organization member who may only mention the team assistant", async () => {
+    // A team mention rule with the organization audience lets any current
+    // organization member invoke the assistant in Slack. Invocation is not
+    // access: the assistant's own sessions stay with the team.
+    await db.insert(teams).values({ id: "team_1", orgId: "org-1", name: "Platform", createdAt: 1 });
+    await seedOrgMember("org-only-user", "member");
+
+    const ok = await canViewSession(
+      db,
+      { userId: "team:team_1", ownerType: "team", ownerId: "team_1" },
+      user("org-only-user"),
+    );
+    expect(ok).toBe(false);
+  });
+
   it("drops access the moment membership is removed — no caching across calls", async () => {
     await db.insert(teams).values({ id: "team_1", orgId: "org-1", name: "Platform", createdAt: 1 });
     await db.insert(teamMembers).values({ teamId: "team_1", userId: "member-user", role: "member" });

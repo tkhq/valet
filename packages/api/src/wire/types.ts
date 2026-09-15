@@ -4462,6 +4462,19 @@ export type EventSubscriptionTargetWire =
       follow?: boolean;
     };
 
+/**
+ * Who may invoke a team assistant by @-mention. `team` is the owning team's
+ * current members; `organization` is any current member of the organization.
+ * Absent means `team`.
+ *
+ * The audience decides invocation only. The rule still runs as the team's
+ * assistant, and a sender admitted by `organization` gets no access to that
+ * assistant's sessions, configuration, credentials, or team membership.
+ * Only a team assistant target carries it: every other target stays scoped
+ * to the rule's creator.
+ */
+export type EventSubscriptionAudienceWire = "team" | "organization";
+
 export interface EventSubscriptionWire {
   id: string;
   name: string;
@@ -4470,6 +4483,11 @@ export interface EventSubscriptionWire {
   eventKeys: string[];
   filters: EventSubscriptionFilterWire[];
   target: EventSubscriptionTargetWire;
+  /** Present only on a team assistant rule, the one kind that has an
+   * audience; a read fills in the resolved value there, so a caller never has
+   * to know the `team` default. Absent on every other rule, and a write that
+   * echoes it back unchanged is a no-op rather than a refusal. */
+  audience?: EventSubscriptionAudienceWire;
   enabled: boolean;
   createdBy: string;
   createdAt: number;
@@ -4540,6 +4558,10 @@ export interface CreateEventSubscriptionRequest {
   filters?: EventSubscriptionFilterWire[];
   target: EventSubscriptionTargetWire;
   enabled?: boolean;
+  /** Who may invoke a team assistant by mention. Absent means `team`. A
+   * write that CHANGES it is refused when the rule is not a team assistant
+   * rule; one that repeats what the rule already means passes. */
+  audience?: EventSubscriptionAudienceWire;
   /** Explicit opt-out of the channel requirement on a `slack.app_mention`
    * subscription (see `events/mention-scope.ts`). Ignored for other keys.
    * Not persisted: a stored mention subscription with no channel filter is
@@ -4576,6 +4598,9 @@ export interface PatchEventSubscriptionRequest {
    * so a rule that should belong elsewhere is rewritten, not patched.
    */
   assistantId?: string | null;
+  /** See `CreateEventSubscriptionRequest.audience`. Absent leaves the stored
+   * audience alone. */
+  audience?: EventSubscriptionAudienceWire;
   /** See `CreateEventSubscriptionRequest.anyChannel`. Only consulted when
    * the patch changes `filters` or `eventKeys`. */
   anyChannel?: boolean;

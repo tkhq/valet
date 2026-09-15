@@ -230,6 +230,40 @@ describe("SubscriptionsPanel", () => {
     expect(subscriptionsOwner).toEqual({ ownerType: "team", ownerId: "t_eng" });
   });
 
+  it("says who may mention each team assistant rule", () => {
+    scopeTeamId = "t_eng";
+    subscriptionsData = {
+      subscriptions: [
+        subscription({
+          id: "sub_open",
+          name: "Open replies",
+          ownerType: "team",
+          ownerId: "t_eng",
+          eventKeys: ["slack.app_mention"],
+          filters: [{ field: "channel", op: "eq", value: "C1", label: "#eng" }],
+          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
+          audience: "organization",
+        }),
+        subscription({
+          id: "sub_closed",
+          name: "Team replies",
+          ownerType: "team",
+          ownerId: "t_eng",
+          eventKeys: ["slack.app_mention"],
+          filters: [{ field: "channel", op: "eq", value: "C2", label: "#ops" }],
+          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
+        }),
+      ],
+    };
+    render(
+      <TooltipProvider>
+        <SubscriptionsPanel />
+      </TooltipProvider>,
+    );
+    expect(screen.getByText(/org members/)).toBeTruthy();
+    expect(screen.getByText(/team only/)).toBeTruthy();
+  });
+
   // The header names the active workspace, so the list must not show the
   // whole org for the frame before `useMe` lands. Same gate as the feed.
   it("holds the list until the workspace owner resolves", () => {

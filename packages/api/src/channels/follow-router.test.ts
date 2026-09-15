@@ -11,7 +11,7 @@ import { findFollowedThread, upsertFollowedThread } from "../events/followed-thr
 import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 
 import { eq } from "drizzle-orm";
-import { teams, teamMembers, orgMembers } from "../schema/index.js";
+import { eventSubscriptions, teams, teamMembers, orgMembers } from "../schema/index.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 
 const ORG = "org-1";
@@ -101,6 +101,142 @@ describe("handleFollowedMessage", () => {
     expect(fetchThreadWindow).not.toHaveBeenCalled();
     expect(ensure).not.toHaveBeenCalled();
     expect((await findFollowedThread(testDb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" }))?.lastSeenTs).toBe("1.3");
+  });
+
+  /** The mention rule a followed thread was bound from. */
+  async function seedMentionRule(audience: "team" | "organization" | null): Promise<void> {
+    const now = Date.now();
+    await testDb.appDb.insert(eventSubscriptions).values({
+      id: "sub-follow", orgId: ORG, ownerType: "team", ownerId: "team-follow",
+      name: "Team replies", eventKeys: ["slack.app_mention"], filters: [],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-follow" },
+      audience, enabled: true, createdBy: USER, createdAt: now, updatedAt: now,
+    });
+  }
+
+  it("continues a thread bound under the organization audience for a member of no team", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "org-only", role: "member" });
+    await seedMentionRule("organization");
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: "org-only", subscriptionId: "sub-follow",
+    });
+    const deps = { db: testDb.appDb, engineHost, botUserId: "UBOT" };
+    await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
+      type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "later thought",
+    }) });
+    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: "org-only", orgId: ORG });
+    await vi.waitFor(async () => {
+      const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
+      expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: "org-only" } });
+    });
+  });
+
+  it("drops an organization-audience follow once its actor leaves the organization", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await seedMentionRule("organization");
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: "org-only", subscriptionId: "sub-follow",
+      lastSeenTs: "1.3",
+    });
+    const fetchThreadWindow = vi.fn(async () => null);
+    const ensure = vi.spyOn(engineHost, "ensureFreshThread");
+    await handleFollowedMessage({ db: testDb.appDb, engineHost, fetchThreadWindow }, {
+      orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "reply" }),
+    });
+    expect(fetchThreadWindow).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+  });
+
+  it("narrowing the rule to the team narrows a thread it bound under the organization", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "org-only", role: "member" });
+    await seedMentionRule("organization");
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: "org-only",
+      subscriptionId: "sub-follow", lastSeenTs: "1.3",
+    });
+    // The rule is narrowed back to the team. The thread must narrow with it.
+    await testDb.appDb.update(eventSubscriptions).set({ audience: "team" }).where(eq(eventSubscriptions.id, "sub-follow"));
+    const fetchThreadWindow = vi.fn(async () => null);
+    const ensure = vi.spyOn(engineHost, "ensureFreshThread");
+    await handleFollowedMessage({ db: testDb.appDb, engineHost, fetchThreadWindow }, {
+      orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "reply" }),
+    });
+    expect(fetchThreadWindow).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+  });
+
+  it("a disabled rule stops the organization audience in the threads it opened", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "org-only", role: "member" });
+    await seedMentionRule("organization");
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: "org-only",
+      subscriptionId: "sub-follow", lastSeenTs: "1.3",
+    });
+    const deps = { db: testDb.appDb, engineHost, botUserId: "UBOT" };
+
+    await testDb.appDb.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "sub-follow"));
+    const fetchThreadWindow = vi.fn(async () => null);
+    const ensure = vi.spyOn(engineHost, "ensureFreshThread");
+    await handleFollowedMessage({ ...deps, fetchThreadWindow }, {
+      orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "while off" }, "EvOff"),
+    });
+    expect(fetchThreadWindow).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+
+    await testDb.appDb.update(eventSubscriptions).set({ enabled: true }).where(eq(eventSubscriptions.id, "sub-follow"));
+    await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
+      type: "message", channel: "C1", thread_ts: "1.2", ts: "1.8", user: "U9", text: "and back on",
+    }, "EvOn") });
+    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: "org-only", orgId: ORG });
+    await vi.waitFor(async () => {
+      const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
+      expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: "org-only" } });
+    });
+  });
+
+  it("a team member's follow keeps working after its binding rule is gone", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
+    // The rule is deleted; the binder is still a member, so the team keeps
+    // the thread. Only the wider audience is lost.
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: USER, subscriptionId: "sub-gone",
+    });
+    const deps = { db: testDb.appDb, engineHost, botUserId: "UBOT" };
+    await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
+      type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "still here",
+    }) });
+    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: USER, orgId: ORG });
+    await vi.waitFor(async () => {
+      const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
+      expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: USER } });
+    });
+  });
+
+  it("a follow that names no rule stays team-only", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "org-only", role: "member" });
+    // Every follow bound before the rule id existed looks like this. It must
+    // read as team-only, never as the wider audience.
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: "org-only", lastSeenTs: "1.3",
+    });
+    const fetchThreadWindow = vi.fn(async () => null);
+    const ensure = vi.spyOn(engineHost, "ensureFreshThread");
+    await handleFollowedMessage({ db: testDb.appDb, engineHost, fetchThreadWindow }, {
+      orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "reply" }),
+    });
+    expect(fetchThreadWindow).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
   });
 
   it("keeps the live team follow actor when a different sender replies", async () => {
