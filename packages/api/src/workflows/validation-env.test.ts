@@ -12,6 +12,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { setApprovedModels } from "../services/approved-models.js";
+import { DEFAULT_TIER_MAP, setOrgTierMap } from "../services/model-tiers.js";
 import {
   buildOrgValidateEnvironment,
   buildValidateEnvironment,
@@ -132,6 +133,29 @@ describe("buildOrgValidateEnvironment", () => {
     const isKnownModel = await orgEnv();
     expect(isKnownModel("openrouter/moonshotai/kimi-k2.6")).toBe(true);
     expect(isKnownModel("openrouter/deepseek/deepseek-v4-pro")).not.toBe(true);
+  });
+
+  it("accepts a size tier whose target provider is active", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+    const isKnownModel = await orgEnv();
+    for (const tier of ["xs", "s", "m", "l", "xl"]) expect(isKnownModel(tier)).toBe(true);
+    expect(isKnownModel("M")).toBe(true);
+  });
+
+  it("rejects a size tier that no provider can serve", async () => {
+    // The default tier map points at Anthropic; only OpenAI has a key here,
+    // so a preset that saves the "m" tier would fail at run time.
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    const isKnownModel = await orgEnv();
+    expect(isKnownModel("m")).toEqual(expect.stringContaining("Point the tier's first target"));
+  });
+
+  it("accepts a size tier the org re-pointed at a provider it can use", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, m: ["openai/gpt-6-astra"] });
+    const isKnownModel = await orgEnv();
+    expect(isKnownModel("m")).toBe(true);
+    expect(isKnownModel("l")).not.toBe(true);
   });
 
   it("falls back to the bundled ids when no org set is supplied", () => {

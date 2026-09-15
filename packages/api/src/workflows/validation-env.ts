@@ -10,7 +10,7 @@ import type { ValidateEnvironment } from "@valet/workflow";
 import { buildOrgCatalog, openrouterRegistryIds, type CatalogEntry } from "../services/model-catalog.js";
 import { parseModelId } from "../services/llm-providers.js";
 import type { WorkflowServiceDeps } from "./service.js";
-import { TIER_SET, TIER_TOKENS } from "../services/model-tiers.js";
+import { resolvableTiers, TIER_SET } from "../services/model-tiers.js";
 
 /**
  * Mirrors `engine-deps.ts`'s `resolveWorkflowModel` matching rules:
@@ -44,10 +44,17 @@ function bareIdProvider(modelId: string): string | undefined {
   return undefined;
 }
 
-/** What a member must do when the org set rejects their model. */
+/** What a member must do when the org set rejects a concrete model id. */
 const MODEL_NOT_ALLOWED =
   "Choose a model that this organization approved and activated in Settings > Models, " +
   "or a size tier (xs, s, m, l, xl) that has an active provider.";
+
+/** What an admin must do when the org set rejects a size tier. The remedy is
+ * the tier's own target list, not the member's model choice. */
+const TIER_NOT_ALLOWED =
+  "No provider this organization holds a key for serves this size tier. " +
+  "Point the tier's first target at a provider with a key in Settings > Models, " +
+  "or name a model id instead.";
 
 /**
  * The model ids a definition may name for one organization: every catalog
@@ -99,8 +106,8 @@ export function buildValidateEnvironment(
       // Tiers are case-insensitive at run time (`resolveModelSpec`), so a
       // definition that carries `L` must stay valid.
       const normalized = spec.trim().toLowerCase();
-      const wanted = TIER_SET.has(normalized) ? normalized : spec;
-      return orgModelIds.has(wanted) ? true : MODEL_NOT_ALLOWED;
+      if (TIER_SET.has(normalized)) return orgModelIds.has(normalized) ? true : TIER_NOT_ALLOWED;
+      return orgModelIds.has(spec) ? true : MODEL_NOT_ALLOWED;
     },
     isKnownAction: actionPluginByService
       ? (service, action) => {
@@ -150,12 +157,16 @@ export async function buildOrgValidateEnvironment(
   deps: OrgValidateDeps,
   orgId: string,
 ): Promise<ValidateEnvironment> {
-  const [catalog, openrouterIds] = await Promise.all([
+  const [catalog, tiers, openrouterIds] = await Promise.all([
     buildOrgCatalog(deps.db, deps.credentials, orgId),
+    // Only the tiers that reach a provider this org can use. A tier token is
+    // always "approved", so without this check a preset saves a tier that the
+    // run cannot resolve to any model.
+    resolvableTiers(deps.db, deps.credentials, orgId),
     openrouterRegistryIds(deps.db, deps.credentials, orgId),
   ]);
   return buildValidateEnvironment(
     deps.actionPluginByService,
-    orgWorkflowModelIds(catalog, TIER_TOKENS, openrouterIds),
+    orgWorkflowModelIds(catalog, tiers.keys(), openrouterIds),
   );
 }

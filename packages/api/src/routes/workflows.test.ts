@@ -565,6 +565,8 @@ describe("PATCH /api/workflows/:id/model", () => {
     ],
   };
 
+  /** Callers stub a provider key first: a size tier only validates while one
+   * of its targets holds a key (`resolvableTiers`). */
   async function createModelWorkflow(baseUrl: string): Promise<CreateWorkflowResponse> {
     const res = await fetch(`${baseUrl}/api/workflows`, {
       method: "POST",
@@ -576,6 +578,7 @@ describe("PATCH /api/workflows/:id/model", () => {
   }
 
   it("updates selected model-capable nodes and persists the tier", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();
     const created = await createModelWorkflow(api.baseUrl);
     const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
@@ -597,6 +600,7 @@ describe("PATCH /api/workflows/:id/model", () => {
   });
 
   it("round-trips an active custom catalog model through creation, editing, and focused updates", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();
     const provider = await createLlmProvider(api.providers.db, {
       orgId: "local-org", kind: "openai_compatible", name: "Custom",
@@ -649,6 +653,7 @@ describe("PATCH /api/workflows/:id/model", () => {
   });
 
   it("rejects unknown models and non-model-capable node ids without changing the workflow", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();
     const created = await createModelWorkflow(api.baseUrl);
     for (const body of [

@@ -287,6 +287,8 @@ describe("DB-backed actions", () => {
   }
 
   it("updates selected workflow models through the focused assistant action", async () => {
+    // Size tiers only validate while a target provider holds a key.
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     const created = await createWorkflowDefinition(
       deps,
       { userId: "user1", orgId: "org1" },
