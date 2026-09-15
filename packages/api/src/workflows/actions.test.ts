@@ -16,7 +16,7 @@ import {
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
-import { InMemoryCredentialStore } from "@valet/engine";
+import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { setApprovedModels } from "../services/approved-models.js";
@@ -272,6 +272,7 @@ describe("DB-backed actions", () => {
       db,
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: runHost,
+      engineStore: new InMemorySessionStore(),
       credentials: new InMemoryCredentialStore(),
     };
   });
@@ -1153,6 +1154,7 @@ describe("update actions", () => {
       db,
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: new StubRunHost(),
+      engineStore: new InMemorySessionStore(),
       credentials: new InMemoryCredentialStore(),
       plugins: [githubPlugin],
     };

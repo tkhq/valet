@@ -1385,9 +1385,9 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     await localApi.providers.workflowStore.parkRun(runId, 1, [
       { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
     ]);
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     const result = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, via: "agent" },
     );
@@ -1465,7 +1465,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     const now = Date.now();
     const wfId = `wf_mismatch_${now}`;
     // Insert a workflow that belongs to a different org ("other-org") that exists in DB
@@ -1511,7 +1511,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     ]);
     // "local-user" is in "local-org" but not in "other-org" → org_mismatch
     const result = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, via: "web" },
     );
@@ -1521,7 +1521,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
   it("audit stamp: approve of tool-node gate stamps invocation row approved + resolvedBy", async () => {
     const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     // Seed a pending audit row the way the workflow enforcer does.
     const invId = `pol:wf:workflow:${runId}:gate`;
     await persistInvocationAudit(db, {
@@ -1537,7 +1537,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
     ]);
     const result = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, via: "web" },
     );
@@ -1552,7 +1552,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
   it("resolution race: second sequential call with a different decision gets already_resolved and writes no grant or audit row", async () => {
     const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     const invId = `pol:wf:workflow:${runId}:gate`;
     await persistInvocationAudit(db, {
       invocationId: invId,
@@ -1569,7 +1569,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
 
     // First resolution: approve with scope=run (writes a grant)
     const first = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: true, scope: "run", via: "web" },
     );
@@ -1588,7 +1588,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
 
     // Second resolution: deny (simulates the racing loser arriving after the signal is stored)
     const second = await resolveWorkflowApproval(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       { runId, nodeId: "gate", approved: false, scope: "once", via: "web" },
     );
@@ -1609,7 +1609,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
   it("cancelWorkflowRun stamps pending tool-gate audit rows as cancelled", async () => {
     const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     // Seed a pending gate audit row.
     const invId = `pol:wf:workflow:${runId}:gate`;
     await persistInvocationAudit(db, {
@@ -1624,7 +1624,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     await workflowStore.parkRun(runId, 1, [
       { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
     ]);
-    const result = await cancelWorkflowRun({ db, workflowStore, workflowRunHost, credentials: engineCredentials }, { userId: "local-user", orgId: "local-org" }, runId);
+    const result = await cancelWorkflowRun({ db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials }, { userId: "local-user", orgId: "local-org" }, runId);
     expect(result).toBe("ok");
     const rows = await db
       .select({ status: actionInvocations.status })
@@ -1804,7 +1804,7 @@ describe("pendingGates + needsApproval wire", () => {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     const now = Date.now();
     const wfId = `wf_pg_a_${now}`;
     const def = {
@@ -1866,7 +1866,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );
@@ -1891,7 +1891,7 @@ describe("pendingGates + needsApproval wire", () => {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     const now = Date.now();
     const wfId = `wf_pg_trunc_${now}`;
     const def = {
@@ -1936,7 +1936,7 @@ describe("pendingGates + needsApproval wire", () => {
       { kind: "signal", signalType: "approval:t2", nodeId: "t2" },
     ]);
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );
@@ -1947,7 +1947,7 @@ describe("pendingGates + needsApproval wire", () => {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     const now = Date.now();
     const wfId = `wf_pg_b_${now}`;
     const def = {
@@ -1980,7 +1980,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );
@@ -2001,7 +2001,7 @@ describe("pendingGates + needsApproval wire", () => {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
     api = localApi;
-    const { workflowStore, workflowRunHost, db, engineCredentials } = localApi.providers;
+    const { workflowStore, workflowRunHost, db, engineStore, engineCredentials } = localApi.providers;
 
     // Create a workflow via the HTTP route (uses the default VALID_DEFINITION).
     const wfRes = await fetch(`${localApi.baseUrl}/api/workflows`, {
@@ -2049,7 +2049,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const runs = await listWorkflowRuns(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       wf.id,
     );
@@ -2065,7 +2065,7 @@ describe("pendingGates + needsApproval wire", () => {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
     api = localApi;
-    const { db, workflowStore, workflowRunHost, engineCredentials } = localApi.providers;
+    const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
     const now = Date.now();
     const wfId = `wf_pg_d_${now}`;
     const def = {
@@ -2106,7 +2106,7 @@ describe("pendingGates + needsApproval wire", () => {
     ]);
 
     const detail = await getWorkflowRunDetail(
-      { db, workflowStore, workflowRunHost, credentials: engineCredentials },
+      { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials },
       { userId: "local-user", orgId: "local-org" },
       runId,
     );

@@ -26,7 +26,7 @@ import {
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
-import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
@@ -34,6 +34,7 @@ import {
   assistants,
   contentSources,
   eventSubscriptions,
+  sessionThreads,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
@@ -80,6 +81,11 @@ export interface WorkflowServiceDeps {
    * caller cannot arm team work that no gate has judged. */
   credentials: CredentialStore;
   onePassword?: OnePasswordService;
+  /** The engine's own session store. `activeWorkflowOrigin` probes it for
+   * the origin thread: an origin that names a thread the engine no longer
+   * holds fails the run's first orchestrator node. Required, so that check
+   * cannot fail open in one caller and hold in another. */
+  engineStore: SessionStore;
   /** Plugin catalog index — enables save-time validation of tool nodes'
    * service/action pairs (validator env hook). Optional so tests that
    * exercise definition CRUD without a plugin catalog stay lightweight. */
@@ -1208,15 +1214,26 @@ export async function reapTeamWorkflows(tx: AppQueryable, teamId: string): Promi
   }
 }
 
-/** Keep an origin only when its active assistant belongs to the caller or run. */
+/**
+ * Keep an origin only when a run report can still reach it: an active
+ * assistant that belongs to the caller or the run, and a live thread on
+ * that assistant's session. The single validator for every path that
+ * records an origin — a manual start, an assistant's `start_run`, and a
+ * retry, which re-passes the failed run's stored origin.
+ *
+ * A dropped origin is not an error. The run falls back to its own thread
+ * (`signal:workflow:{runId}`), which is where an unattended run reports.
+ * The alternative is a report delivered into a thread the person archived,
+ * or a run that fails at its first orchestrator node.
+ */
 async function activeWorkflowOrigin(
-  db: AppDb,
+  deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   runOwner: { ownerType: string; ownerId: string },
   origin: WorkflowRunOrigin,
 ): Promise<WorkflowRunOrigin | undefined> {
   if (origin.assistantSessionId.length === 0 || origin.threadId.length === 0) return undefined;
-  const [assistant] = await db.select().from(assistants)
+  const [assistant] = await deps.db.select().from(assistants)
     .where(and(eq(assistants.sessionId, origin.assistantSessionId), eq(assistants.orgId, owner.orgId)))
     .limit(1);
   if (!assistant || assistant.archivedAt !== null) return undefined;
@@ -1225,7 +1242,25 @@ async function activeWorkflowOrigin(
     : { ownerType: "user", ownerId: owner.userId };
   const belongsToCaller = assistant.ownerType === callerOwner.ownerType && assistant.ownerId === callerOwner.ownerId;
   const belongsToRun = assistant.ownerType === runOwner.ownerType && assistant.ownerId === runOwner.ownerId;
-  return belongsToCaller || belongsToRun ? origin : undefined;
+  if (!belongsToCaller && !belongsToRun) return undefined;
+
+  // Archive state lives in the app mirror row, not in the engine: the
+  // PATCH that archives a thread stamps `session_threads.archived_at` and
+  // the engine thread is untouched. A missing row means the thread was
+  // never titled or archived, which is the same as not archived — the
+  // thread listing reads it the same way.
+  const [mirror] = await deps.db
+    .select({ archivedAt: sessionThreads.archivedAt })
+    .from(sessionThreads)
+    .where(and(eq(sessionThreads.id, origin.threadId), eq(sessionThreads.sessionId, origin.assistantSessionId)))
+    .limit(1);
+  if (mirror?.archivedAt != null) return undefined;
+
+  // The thread itself must still exist. A retry re-passes the stored
+  // origin of a run that failed months ago, and the delivery side has no
+  // fallback: a missing thread fails the orchestrator node.
+  const thread = await deps.engineStore.getThread(origin.assistantSessionId, origin.threadId);
+  return thread ? origin : undefined;
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an
@@ -1245,7 +1280,7 @@ export async function startWorkflowRun(
     ? { ownerType: "user", ownerId: owner.userId }
     : { ownerType: row.ownerType, ownerId: row.ownerId };
   const validOrigin = origin
-    ? await activeWorkflowOrigin(deps.db, owner, runOwner, origin)
+    ? await activeWorkflowOrigin(deps, owner, runOwner, origin)
     : undefined;
 
   const definition = row.definition;

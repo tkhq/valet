@@ -731,6 +731,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     plugins,
     credentials: engineCredentials,
+    // Run-origin validation probes the engine store for the origin thread
+    // (`activeWorkflowOrigin`).
+    engineStore,
   };
 
   // Workflow schedule loop — cron-driven run starts (time-based counterpart

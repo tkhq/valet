@@ -19,6 +19,7 @@ import type {
   StoredCredential,
   ValetPlugin,
 } from "@valet/engine";
+import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -293,8 +294,9 @@ describe("buildActionInvoker", () => {
     const workflows = workflowsActionPlugin(() => ({
       db,
       workflowStore,
-      // save_workflow does not start or resume runs.
+      // save_workflow does not start or resume runs, and records no origin.
       workflowRunHost: null as never,
+      engineStore: new InMemorySessionStore(),
       credentials: new FakeCredentialStore(),
     }));
     const invoke = buildActionInvoker({

@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { PluginActionContext } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { assistants, teams, teamMembers, workflowDefinitions } from "../schema/index.js";
+import { assistants, sessionThreads, teams, teamMembers, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
 import { workflowsActionPlugin } from "./actions.js";
-import { createWorkflowDefinition, copyWorkflowDefinition, updateWorkflowDefinition, startWorkflowRun } from "./service.js";
+import { createWorkflowDefinition, copyWorkflowDefinition, updateWorkflowDefinition, retryWorkflowRun, startWorkflowRun } from "./service.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -28,7 +28,7 @@ async function setup() {
     { id: "foreign", orgId: "other-org", ownerType: "team", ownerId: "team-a", sessionId: "assistant:foreign", isDefault: false, createdAt: 1 },
     { id: "personal", orgId: "local-org", ownerType: "user", ownerId: "local-user", sessionId: "assistant:personal", isDefault: false, createdAt: 1 },
   ]);
-  return { api, p, deps: { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials } };
+  return { api, p, deps: { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore } };
 }
 const owner = { userId: "local-user", orgId: "local-org" };
 
@@ -211,6 +211,83 @@ describe("workflow explicit assistant routing", () => {
       queueMode: "followup",
       ownerHint: { ownerType: "team", ownerId: "team-a" },
     })).rejects.toThrow("no longer a team member");
+  });
+
+  it("drops an origin whose thread is archived and dispatches elsewhere", async () => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, {
+      name: "Archived origin", teamId: "team-a", definition: { ...graph, assistantId: "chosen" },
+    });
+    const session = await p.engineHost.assistantSessionFor(
+      "chosen", { actorUserId: owner.userId, orgId: owner.orgId }, { sessionId: "assistant:chosen" },
+    );
+    const thread = await session.createThread("web:origin");
+    // What `PATCH /api/sessions/:id/threads/:threadId` writes: the engine
+    // thread stays, and the app mirror row records the archive.
+    await p.db.insert(sessionThreads).values({
+      id: thread.id, sessionId: "assistant:chosen", createdAt: Date.now(), archivedAt: Date.now(),
+    });
+    vi.spyOn(p.workflowRunHost, "start").mockImplementation(async (id, params, definition, runOwner) => {
+      await p.workflowStore.createRun(id, params, definition, params.definitionVersionId, runOwner);
+    });
+
+    const started = await startWorkflowRun(deps, owner, created.id, undefined, {
+      assistantSessionId: "assistant:chosen", threadId: thread.id,
+    });
+    if (!started || !("runId" in started)) throw new Error("Run not started");
+    const run = await p.workflowStore.getRun(started.runId);
+    expect(run?.params).not.toHaveProperty("origin");
+
+    const engine = buildWorkflowEngineDeps({
+      db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore,
+      actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials,
+    });
+    const receipt = await engine.promptOrchestrator("report", {
+      dispatchId: `workflow:${started.runId}:node1`, queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: "team-a" },
+    });
+    expect(receipt.threadId).not.toBe(thread.id);
+  });
+
+  it("retries a run whose origin thread is gone, without the origin", async () => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, {
+      name: "Gone origin", teamId: "team-a", definition: { ...graph, assistantId: "chosen" },
+    });
+    const runId = "wfrun_origin_gone";
+    await p.workflowStore.createRun(
+      runId,
+      {
+        workflowId: created.id,
+        definitionVersionId: "v1",
+        input: { type: "manual", timestamp: "2026-09-14T00:00:00.000Z", data: {}, metadata: {} },
+        origin: { assistantSessionId: "assistant:chosen", threadId: "th-deleted" },
+      },
+      created.definition,
+      "v1",
+      { ownerType: "team", ownerId: "team-a" },
+    );
+    await p.workflowStore.settleRun(runId, "failed");
+    vi.spyOn(p.workflowRunHost, "start").mockImplementation(async (id, params, definition, runOwner) => {
+      await p.workflowStore.createRun(id, params, definition, params.definitionVersionId, runOwner);
+    });
+
+    const retried = await retryWorkflowRun(deps, owner, runId);
+    if (typeof retried === "string" || !("runId" in retried)) throw new Error(`Retry refused: ${JSON.stringify(retried)}`);
+    const run = await p.workflowStore.getRun(retried.runId);
+    expect(run?.params).not.toHaveProperty("origin");
+
+    // The retry must also be able to dispatch: the missing thread used to
+    // throw at the first orchestrator node.
+    const engine = buildWorkflowEngineDeps({
+      db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore,
+      actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials,
+    });
+    const receipt = await engine.promptOrchestrator("report", {
+      dispatchId: `workflow:${retried.runId}:node1`, queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: "team-a" },
+    });
+    expect(receipt.threadId).toBeTruthy();
   });
 
   it("routes every node and repair to the run snapshot, preserves manual actor, and refuses archived targets", async () => {

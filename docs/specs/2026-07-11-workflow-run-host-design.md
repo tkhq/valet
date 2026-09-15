@@ -287,3 +287,15 @@ the same origin and failed the same way. The origin now resolves through
 the assistants table (`loadAssistantBySessionId`), which is the authority
 on which session ids belong to an assistant. The org, owner, and archived
 checks are unchanged.
+
+**Origin admission checks (2026-09-14).** An origin was admitted on the
+assistant row alone. Archiving a thread stamps `session_threads.archived_at`
+in the app mirror and leaves the engine thread in place, so a run started
+from an archived thread delivered its report into a conversation the person
+had put away. A retry re-passes the failed run's stored origin unchanged, so
+a run whose origin thread no longer exists failed again at its first
+orchestrator node. Admission now also drops an origin whose mirror row is
+archived, and one whose thread the engine store no longer holds. A dropped
+origin is not an error: the run reports on its own thread. Delivery keeps
+its own check for a thread that disappears after admission, and that error
+names the corrective action.
