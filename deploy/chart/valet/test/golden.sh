@@ -40,6 +40,12 @@ echo "== helm template (bundled postgres, default values) =="
 helm template valet "$CHART_DIR" --kube-version 1.30.0 > "$TMP_DIR/bundled.yaml"
 pass "renders with default values"
 
+echo "== helm template (platform-owned sandbox namespace) =="
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.createNamespace=false \
+  > "$TMP_DIR/platform-namespace.yaml"
+pass "renders with sandbox.createNamespace=false"
+
 echo "== helm template (external database) =="
 helm template valet "$CHART_DIR" --kube-version 1.30.0 \
   --set externalDatabase.url="postgres://ext:pw@external-host:5432/valet" \
@@ -76,86 +82,85 @@ grep -q 'VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "50Gi"' "$TMP_DIR/storage-overri
   || fail "sandbox storage limit override was lost"
 pass "independent sandbox storage request and limit"
 
+# --- sandbox namespace ownership -----------------------------------------
+[ "$(grep -c '^kind: Namespace$' "$TMP_DIR/bundled.yaml")" -eq 1 ] \
+  || fail "default render must include exactly one sandbox Namespace"
+NAMESPACE_BLOCK=$(awk '
+  /^---$/ {
+    if (is_namespace) printf "%s", block
+    block=""
+    is_namespace=0
+    next
+  }
+  { block=block $0 ORS }
+  $0 == "kind: Namespace" { is_namespace=1 }
+  END { if (is_namespace) printf "%s", block }
+' "$TMP_DIR/bundled.yaml")
+printf '%s\n' "$NAMESPACE_BLOCK" | grep -q '^  name: valet-sandboxes$' \
+  || fail "default render does not create sandbox.namespace"
+printf '%s\n' "$NAMESPACE_BLOCK" | grep -q '^    helm.sh/resource-policy: keep$' \
+  || fail "default sandbox Namespace must carry the Helm keep annotation"
+if grep -q '^kind: Namespace$' "$TMP_DIR/platform-namespace.yaml"; then
+  fail "sandbox.createNamespace=false must omit the Namespace manifest"
+fi
+grep -q '^kind: Role$' "$TMP_DIR/platform-namespace.yaml" \
+  || fail "sandbox.createNamespace=false removed namespaced application resources"
+if helm template valet "$CHART_DIR" --set-string sandbox.createNamespace=invalid >/dev/null 2>&1; then
+  fail "sandbox.createNamespace must reject non-boolean values"
+fi
+pass "sandbox namespace renders by default and is omitted for platform ownership"
+
 # --- RBAC: namespaced only, nothing cluster-scoped ---------------------
 grep -q '^kind: Role$' "$TMP_DIR/bundled.yaml" || fail "no namespaced Role rendered"
 grep -q '^kind: RoleBinding$' "$TMP_DIR/bundled.yaml" || fail "no RoleBinding rendered"
 if grep -qE '^kind: (ClusterRole|ClusterRoleBinding)$' "$TMP_DIR/bundled.yaml"; then
-  fail "cluster-scoped RBAC object found (ClusterRole/ClusterRoleBinding) — spec requires namespaced-only"
+  fail "cluster-scoped RBAC object found; spec requires namespaced-only"
 fi
 pass "no cluster-scoped RBAC objects"
 
-# Extract the Role's rule block and check exact expected resources/verbs.
-ROLE_BLOCK=$(awk '/^kind: Role$/,/^---$/' "$TMP_DIR/bundled.yaml")
-for resource in sandboxes pods pods/exec pods/log; do
-  echo "$ROLE_BLOCK" | grep -q "\"$resource\"" || fail "Role missing resource: $resource"
-done
-for verb in create get list watch delete; do
-  echo "$ROLE_BLOCK" | grep -q "\"$verb\"" || fail "Role missing verb: $verb"
-done
-# The sandboxes rule specifically needs `update`: the adopt-on-409 path calls
-# replaceNamespacedCustomObject (PUT = update). A generic whole-Role grep for
-# "update" is not enough — assert it on the sandboxes rule's own verb line.
-SANDBOX_VERBS=$(echo "$ROLE_BLOCK" | grep -A8 '"sandboxes"' | grep -m1 'verbs:')
-echo "$SANDBOX_VERBS" | grep -q '"update"' \
-  || fail "sandboxes rule missing 'update' verb — adopt/re-provision (replaceNamespacedCustomObject PUT) would 403"
-# `patch` guards hibernation: suspend/resume flip spec.operatingMode via a
-# JSON merge patch — omitting it 403s the idle sweep and the pause route.
-echo "$SANDBOX_VERBS" | grep -q '"patch"' \
-  || fail "sandboxes rule missing 'patch' verb — hibernation suspend/resume (merge-patch operatingMode) would 403"
-# On-demand workspace growth (Sandbox.growWorkspace, workspace-fit spec
-# 2026-09-03) reads and merge-patches the workspace PVC. EXACTLY get+patch:
-# PVC create/delete stay with the agent-sandbox controller (it
-# owner-references PVCs to the Sandbox CR), so any lifecycle verb here is
-# a regression.
-echo "$ROLE_BLOCK" | grep -q '"persistentvolumeclaims"' \
-  || fail "Role missing resource: persistentvolumeclaims — workspace growth (Sandbox.growWorkspace) would 403"
-PVC_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"persistentvolumeclaims"' | grep -m1 'verbs:')
-for verb in get patch; do
-  echo "$PVC_VERBS" | grep -q "\"$verb\"" || fail "persistentvolumeclaims rule missing verb: $verb"
-done
-for verb in create delete list watch update; do
-  if echo "$PVC_VERBS" | grep -q "\"$verb\""; then
-    fail "persistentvolumeclaims rule grants '$verb' — agent-sandbox controller owns PVC lifecycle; api gets get/patch only"
-  fi
-done
-pass "Role has the expected sandbox/pods/exec/log verbs incl. sandboxes:update, PVC get/patch only"
+# Assert each rule against its source call sites.
+ROLE_BLOCK=$(awk '
+  /^---$/ {
+    if (is_role && has_name) printf "%s", block
+    block=""
+    is_role=0
+    has_name=0
+    next
+  }
+  { block=block $0 ORS }
+  $0 == "kind: Role" { is_role=1 }
+  $0 == "  name: valet-sandbox-operator" { has_name=1 }
+  END { if (is_role && has_name) printf "%s", block }
+' "$TMP_DIR/bundled.yaml")
+RULE_COUNT=$(printf '%s\n' "$ROLE_BLOCK" | grep -c '^  - apiGroups:')
+[ "$RULE_COUNT" -eq 9 ] || fail "Role must contain exactly 9 audited rules, found $RULE_COUNT"
 
-# --- RBAC: batch/jobs (Task 5 BuildKit builder), scoped -------------------
-echo "$ROLE_BLOCK" | grep -q '"batch"' || fail "Role missing apiGroup: batch"
-echo "$ROLE_BLOCK" | grep -q '"jobs"' || fail "Role missing resource: jobs"
-JOBS_VERBS=$(echo "$ROLE_BLOCK" | grep -A6 '"jobs"' | grep -m1 'verbs:')
-for verb in create get list watch delete; do
-  echo "$JOBS_VERBS" | grep -q "\"$verb\"" || fail "jobs rule missing verb: $verb"
-done
-pass "Role has the expected batch/jobs verbs"
+rule_verbs() {
+  printf '%s\n' "$ROLE_BLOCK" | awk -v resource="$1" '
+    index($0, "resources: [\"" resource "\"]") { found=1; next }
+    found && /verbs:/ { print; exit }
+  '
+}
+assert_rule() {
+  actual=$(rule_verbs "$1")
+  [ "$actual" = "    verbs: [$2]" ] \
+    || fail "$1 verbs differ: expected [$2], got $actual"
+}
 
-# --- RBAC: configmaps/secrets (Task 5 Dockerfile/git-token resources) -----
-echo "$ROLE_BLOCK" | grep -q '"configmaps"' || fail "Role missing resource: configmaps"
-CONFIGMAPS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"configmaps"' | grep -m1 'verbs:')
-for verb in create delete; do
-  echo "$CONFIGMAPS_VERBS" | grep -q "\"$verb\"" || fail "configmaps rule missing verb: $verb"
-done
-# configmaps grant is deliberately minimal (mirrors secrets below): no `get` —
-# the api only creates/deletes build ConfigMaps by name, never reads one back.
-if echo "$CONFIGMAPS_VERBS" | grep -q '"get"'; then
-  fail "configmaps rule grants 'get' — the api never reads a build ConfigMap back, keep this grant minimal"
+assert_rule sandboxes '"create", "get", "list", "update", "patch", "delete"'
+assert_rule pods '"get", "list", "delete"'
+assert_rule events '"list"'
+assert_rule persistentvolumeclaims '"get", "patch"'
+assert_rule pods/exec '"get"'
+assert_rule pods/log '"get"'
+assert_rule jobs '"create", "get", "delete"'
+assert_rule configmaps '"create", "delete"'
+assert_rule secrets '"create", "get", "patch", "update", "delete"'
+
+if printf '%s\n' "$ROLE_BLOCK" | grep -q '"watch"'; then
+  fail "Role contains an unused watch permission"
 fi
-if echo "$CONFIGMAPS_VERBS" | grep -qE '"list"|"watch"'; then
-  fail "configmaps rule grants list/watch — unnecessary, keep this grant minimal"
-fi
-echo "$ROLE_BLOCK" | grep -q '"secrets"' || fail "Role missing resource: secrets"
-SECRETS_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"secrets"' | grep -m1 'verbs:')
-for verb in create delete; do
-  echo "$SECRETS_VERBS" | grep -q "\"$verb\"" || fail "secrets rule missing verb: $verb"
-done
-# Secrets grant: `get` is REQUIRED (Task 9). writeSecret/upsertSecret GET the
-# Secret for its resourceVersion before replace (optimistic concurrency) — the
-# api reads the metadata, never the decoded contents. `list`/`watch` stay
-# forbidden: nothing enumerates or watches Secrets.
-if echo "$SECRETS_VERBS" | grep -qE '"list"|"watch"'; then
-  fail "secrets rule grants list/watch — unnecessary, keep this grant minimal"
-fi
-pass "Role has the expected configmaps/secrets verbs (secrets: create/get/patch/update/delete for optimistic-concurrency writes, no list/watch; configmaps: create/delete only)"
+pass "Role rules exactly match Sandbox, pod, PVC, Job, ConfigMap, and Secret call sites"
 
 # --- DATABASE_URL wiring: bundled vs external ---------------------------
 grep -q 'name: DATABASE_URL' "$TMP_DIR/bundled.yaml" || fail "bundled render: api Deployment missing DATABASE_URL env"

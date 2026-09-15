@@ -2,6 +2,15 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "createNamespace": {
+          "description": "Create the sandbox namespace as part of the Helm release.",
+          "type": "boolean"
+        }
+      }
+    },
     "registry": {
       "type": "object",
       "required": ["minFreeGb", "minFreePercent"],

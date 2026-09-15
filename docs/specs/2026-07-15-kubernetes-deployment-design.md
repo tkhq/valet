@@ -25,7 +25,7 @@
    - **File ops ride exec** (no host mount exists): `readFile`/`writeFile`/`readBinary`/`writeBinary`/`readdir`/`stat`/`mkdir`/`rm` are implemented over the exec API with base64 framing for binary safety (`base64 -w0` / `base64 -d`), matching the byte-fidelity the docker provider gets from host fs ops. Paths quoted/escaped exactly as the docker provider's exec path does.
    - **Job-mode exec:** same design as the docker provider — `execJob` starts a detached process inside the pod writing to `/tmp/valet-jobs/{execId}.{out,exit}`, `pollJob` reads output from a byte offset, `cancelJob` kills the process group. This reuses the provider-conformance expectations already pinned by the engine's provider conformance suite, which this package runs (the same suite sandbox-docker and sandbox-local run).
    - **Liveness:** pod deleted/evicted out from under an exec surfaces as the sandbox-unavailable error class the attachment layer already handles (epoch re-provision) — the k8s analog of the docker provider's container-death detection.
-6. **In-cluster wiring:** the api pod runs under a ServiceAccount whose Role (namespaced to the sandbox namespace) grants the agent-sandbox `Sandbox` custom resource create/get/list/watch/**update**/delete (the `update` verb is required — the create-is-upsert adopt path re-asserts the CR via `replaceNamespacedCustomObject`, an HTTP PUT, which is exactly the workspace-preserving re-provision path in decision 5; omitting it 403s there) plus pods + pods/exec + pods/log create/get/list/watch/delete — nothing cluster-scoped (the agent-sandbox controller itself owns PVC management). Provider config (namespace, image default, resource defaults) comes from env vars fed by the chart. Out-of-cluster dev of the provider itself uses the local kubeconfig (client-node's default loading), so the provider's tests can run against Rancher Desktop k3s without deploying the api.
+6. **In-cluster wiring:** the api pod runs under a ServiceAccount with a Role in the sandbox namespace. The Role matches the api call sites: Sandbox CR create/get/list/update/patch/delete; pod get/list/delete; event list; PVC get/patch; pod exec get; pod log get; Job create/get/delete; ConfigMap create/delete; and Secret create/get/patch/update/delete. The api does not watch these resources. The agent-sandbox controller creates pods and PVCs. The Role has no cluster-scoped permissions. A restricted Helm reconciler must already hold the Sandbox CR verbs before it can create this Role. It does not need RBAC `escalate` or `bind`. Provider config (namespace, image default, resource defaults) comes from env vars fed by the chart. Out-of-cluster provider tests use the local kubeconfig.
 7. **Sandbox backend selection at boot:** `VALET_SANDBOX_BACKEND=docker|kubernetes|local` (default `docker`, today's behavior). The k8s deployment sets `kubernetes`. `make dev-local` keeps docker.
 8. **Helm chart** at `deploy/chart/valet/`: api Deployment (replicas pinned 1 — the engine is a stateful singleton; a values comment says so) with an **initContainer that waits for Postgres readiness** (the api runs migrations at boot; without the gate it crash-loops until PG is up), Service, Ingress (Traefik class by default; **TLS terminated at Traefik with a self-signed/default cert and `BETTER_AUTH_URL=https://…` — better-auth marks session cookies `Secure`, so plain-http login would silently fail**; adversarial-review catch), bundled Postgres StatefulSet + Service + Secret (or `externalDatabase.url`; note StatefulSet PVCs survive `helm uninstall` by Kubernetes design — `make k8s-down` documents the explicit PVC delete for a true reset), sandbox Namespace + ServiceAccount + Role + RoleBinding, app Secret (`BETTER_AUTH_SECRET`, `VALET_ENCRYPTION_KEY`, `ANTHROPIC_API_KEY`, optional `AUTH_*`) — **generated values use a `lookup`-based retain guard so `helm upgrade` reuses the existing Secret** (naive `randAlphaNum` regenerates per upgrade, which would invalidate every session AND rotate the sandbox JWT master, since `VALET_SANDBOX_JWT_MASTER` falls back to `BETTER_AUTH_SECRET`), ConfigMap for non-secret config (`BETTER_AUTH_URL`, sandbox backend/namespace/image). **The api pod template carries `checksum/secret` + `checksum/config` annotations** — Kubernetes injects `envFrom`/`secretKeyRef` env vars at pod start only, so without them a key rotation updates the Secret while the running pod keeps the old value and `helm upgrade --wait` still reports success. `checksum/secret` digests the supplied values (`api.secrets.*`, `externalDatabase.url`, `postgres.*`) rather than the rendered Secret: the retain guard emits a fresh `randAlphaNum` on any render that cannot `lookup`, so a digest over the rendered Secret would change when nothing changed and restart the api on the first upgrade after an install. Secrets reached through `api.extraEnvFrom` are outside the chart and outside both digests — rotate those with an explicit `kubectl rollout restart`. `helm test`-style smoke hook: a Job that curls `/api/health`.
 
@@ -206,6 +206,56 @@ pods or balance actual IO usage. Existing pods without the session label
 do not count toward the new selectors until recreated from an updated template.
 The constraints add no node-pool selector or toleration and do not change
 resource requests or PVC provisioning.
+
+## Update (2026-09-14): chart-native namespace ownership
+
+Chart 0.10.11 adds `sandbox.createNamespace`. The default is `true`, which
+keeps local installs self-contained. The rendered Namespace has
+`helm.sh/resource-policy: keep`. When the value is `false`, Helm omits the
+Namespace and still renders all namespaced application resources. The platform
+must create `sandbox.namespace` before Helm reconciliation.
+
+This mode lets Flux helm-controller render the OCI chart without a
+post-renderer or cluster-scoped Namespace access. An existing release must
+complete these steps in order:
+
+1. Add `helm.sh/resource-policy=keep` to the live Namespace.
+2. Upgrade once with `sandbox.createNamespace=true`.
+3. Verify that `helm get manifest` contains the annotated Namespace.
+4. Transfer the live Namespace to the platform.
+5. Set `sandbox.createNamespace=false`.
+
+The stored-manifest check is required. A live annotation alone does not change
+an old Helm release manifest. Helm can delete the Namespace if the next
+upgrade omits a manifest that lacks the keep annotation.
+
+The reverse transfer does not delete the Namespace. The platform must stop
+reconciling it first. An operator then adds these Helm ownership fields:
+
+- Label `app.kubernetes.io/managed-by=Helm`.
+- Annotation `meta.helm.sh/release-name=<release>`.
+- Annotation `meta.helm.sh/release-namespace=<release namespace>`.
+- Annotation `helm.sh/resource-policy=keep`.
+
+After verification, an operator can upgrade with
+`sandbox.createNamespace=true`. The same adoption must occur before a rollback
+to a revision that renders the Namespace. The chart README contains the exact
+migration, verification, adoption, and rollback commands.
+
+Helm owns application resources, including the api configuration ConfigMap and
+sandbox RBAC. Platform configuration can use `api.extraEnvFrom` to reference
+external ConfigMaps and Secrets. ExternalSecret resources and their target
+Secrets stay outside Helm. These external references do not affect chart
+checksums, so an operator must restart the api Deployment after a referenced
+value changes.
+
+The RBAC audit removed unused watch verbs, pod creation, pod log writes, and
+unused Job verbs. Pod deletion remains for image and resource convergence.
+Secret get, update, and patch remain for credential rotation and owner
+references. Sandbox update and patch remain for adoption, hibernation, and
+retained-home resume. The client-node exec path uses an HTTP GET WebSocket
+upgrade. The `pods/exec` rule grants only `get` and does not grant the SPDY
+`create` path.
 
 ## Non-goals
 

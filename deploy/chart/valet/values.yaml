@@ -130,6 +130,11 @@ sandbox:
   # pod itself.
   namespace: valet-sandboxes
 
+  # Create sandbox.namespace as part of this Helm release. Keep this true for
+  # local installs. Set it to false when the platform owns the namespace. The
+  # namespace must exist before Helm installs namespaced sandbox resources.
+  createNamespace: true
+
   # The SINGLE sandbox base image (via an auto-seeded kind='external'
   # source). Every sandbox and every bake chains on it: agent tooling,
   # gateway, ttyd, code-server, rootless docker toolchain, start scripts.
