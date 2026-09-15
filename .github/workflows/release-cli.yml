@@ -20,6 +20,7 @@ name: Release CLI
 # `xattr -d com.apple.quarantine` escape hatch. Real notarization needs an
 # Apple Developer cert wired into this workflow (not done).
 #
+# CI gates every publish path. Use CI's Run workflow button for manual builds.
 # Publish paths:
 #   - tag push (valet/v*): versioned GitHub Release with all binaries attached.
 #   - merge to dev-v2: the same binaries replace the assets of a single
@@ -27,20 +28,13 @@ name: Release CLI
 #     (…/releases/download/dev-v2-latest/valet-<os>-<arch>) stay stable.
 
 on:
-  push:
-    tags: ["valet/v*"]
-    branches: [dev-v2]
   workflow_call:
     inputs:
       release_tag:
-        description: Immutable application tag to publish
-        required: true
-        type: string
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Unused label; select a version tag as the ref to publish"
+        description: Application tag at the caller commit
         required: false
+        default: ''
+        type: string
 
 env:
   BUILD_REF: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
@@ -57,6 +51,8 @@ concurrency:
 
 jobs:
   binaries:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +71,9 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
+
+      - name: Verify source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       # pnpm version comes from package.json "packageManager".
       - uses: pnpm/action-setup@v4
@@ -175,19 +174,34 @@ jobs:
           path: packages/api/dist/valet-*-*
           if-no-files-found: error
 
+  # Publish only after both platform builds and native smoke tests succeed.
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/valet-binaries
+          pattern: valet-binaries-*
+          merge-multiple: true
+
       # Reusable calls upload assets without replacing the application release notes.
       - name: Attach application release binaries
         if: inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: gh release upload "$RELEASE_TAG" packages/api/dist/valet-*-* --clobber
+        run: gh release upload "$RELEASE_TAG" /tmp/valet-binaries/valet-*-* --clobber
 
       - name: Publish to GitHub Release
         if: inputs.release_tag == '' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: packages/api/dist/valet-*-*
+          files: /tmp/valet-binaries/valet-*-*
           fail_on_unmatched_files: true
           # Pre-release-suffixed tags (v0.2.0-rc.1) are marked prerelease.
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -220,7 +234,7 @@ jobs:
           tag_name: dev-v2-latest
           name: dev-v2 rolling build
           prerelease: true
-          files: packages/api/dist/valet-*-*
+          files: /tmp/valet-binaries/valet-*-*
           fail_on_unmatched_files: true
           body: |
             Rolling native `valet` binaries from the latest merge to `dev-v2`
