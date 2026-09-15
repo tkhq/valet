@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
-import { authorizedSubscriptionMatchesEvent } from "../events/team-slack-gate.js";
+import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
@@ -102,6 +102,14 @@ function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): EventSu
     eventKeys: row.eventKeys as string[],
     filters: row.filters as EventSubscriptionFilterWire[],
     target: row.target as EventSubscriptionTargetWire,
+    // Only a team assistant rule has an audience, so only those rows carry
+    // one on the wire. Filling it everywhere would hand a read-modify-write
+    // client a field the write path refuses on its own target. Null on such a
+    // row reads as `team`: the resolved value goes out, so no reader has to
+    // know the default.
+    ...(isTeamAssistantRule(row.ownerType, row.target)
+      ? { audience: row.audience ?? ("team" as const) }
+      : {}),
     enabled: row.enabled,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
@@ -575,6 +583,9 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   );
   if (!write.ok) return c.json({ error: write.error }, 400);
   const filters = write.filters;
+  // Absent stays null in the row, so an untouched rule keeps reading as
+  // team-only however the default is spelled later.
+  const audience = write.audience ?? null;
 
   // A workflow target must be OWNED by the caller, not only exist in their
   // org: org scope alone lets any member wire automation onto another's.
@@ -665,6 +676,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     eventKeys: body.eventKeys,
     filters,
     target: body.target,
+    audience,
     enabled,
     createdBy: user.id,
     createdAt: now,
@@ -832,6 +844,9 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     eventKeys: body.eventKeys ?? row.eventKeys,
     filters: body.filters ?? row.filters,
     target: patchedTarget,
+    // An absent audience keeps the stored one, which must still be legal
+    // against the patched target.
+    audience: body.audience ?? row.audience ?? undefined,
   };
   // Mention scoping is keyed to the CREATOR and skipped for a patch that
   // does not change the match — so an enabled-only or name-only patch still
@@ -847,9 +862,11 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       row.eventKeys as string[],
       row.filters as SubscriptionFilter[],
     ),
+    storedAudience: row.audience,
   });
   if (!write.ok) return c.json({ error: write.error }, 400);
   const filters = write.filters;
+  const audience = write.audience ?? null;
 
   // Collision gate (TKAI-294), against the row as it would exist after the
   // patch, minus itself. Runs when the result can fire AND the patch changes
@@ -904,6 +921,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       eventKeys: merged.eventKeys,
       filters,
       target: patchedTarget,
+      audience,
       enabled: willBeEnabled,
       updatedAt: Date.now(),
     })

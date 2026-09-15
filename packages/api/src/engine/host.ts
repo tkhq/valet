@@ -143,6 +143,7 @@ import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
+import { isTeamMember } from "../services/teams.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
 
@@ -1617,6 +1618,9 @@ export class EngineHost {
    *    fallback above and the team's 1Password scope, which is the contract
    *    every session had before team-owner resolution. The principal the
    *    engine hands over is ignored for the read; it still owns the session.
+   *    This holds only while that actor is a current member of the owning
+   *    team: a nonmember actor (an organization-audience Slack mention)
+   *    reads as the team, never as their own vault.
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -1683,8 +1687,20 @@ export class EngineHost {
       // session reads as the principal the engine hands over. The scope
       // follows the OWNER either way: a shared session never reaches the
       // frozen actor's personal vault.
-      const owner: CredentialOwner = actingMember ? { type: "user", id: userId } : sessionOwner;
-      const scopes = onePasswordScopesFor(actingMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
+      //
+      // "The member prompting it" must still be a member. An
+      // organization-audience Slack mention can make a person who is on no
+      // team the actor of a team assistant turn
+      // (`events/team-slack-gate.ts`), and their personal vault would then
+      // back the team's tool calls for everyone in the channel. Such an
+      // actor reads as the owning team instead. Checked live, per read, the
+      // same contract `isTeamMember` holds everywhere else.
+      let actsAsMember = actingMember;
+      if (actsAsMember && sessionOwner.type === "team") {
+        actsAsMember = db ? await isTeamMember(db, sessionOwner.id, userId) : false;
+      }
+      const owner: CredentialOwner = actsAsMember ? { type: "user", id: userId } : sessionOwner;
+      const scopes = onePasswordScopesFor(actsAsMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly

@@ -1897,6 +1897,10 @@ export const eventSubscriptions = pgTable(
     /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
+    /** Who may invoke a team assistant by mention. Null reads as `team` —
+     * the meaning every row written before this column carries. Only a team
+     * assistant target may set it (`events/mention-scope.ts`). */
+    audience: text("audience", { enum: ["team", "organization"] }),
     /** `repo` rows are armed from a mirrored workflow file. The sync updates
      * and deletes only these, so a subscription a person armed on the same
      * workflow is never touched. */
@@ -1936,6 +1940,12 @@ export const followedThreads = pgTable(
      * owner's default. Null on rows from before the column, and on any follow
      * whose rule named no assistant — both read as "the owner's default". */
     assistantId: text("assistant_id"),
+    /** The mention rule this thread was bound from. The follow router reads
+     * that row's CURRENT invocation audience, because the audience is the
+     * rule's state, not the conversation's: narrowing a rule back to the team
+     * must narrow every thread it opened. Null on a follow bound before the
+     * column, and on one no mention rule bound; both read as team-only. */
+    subscriptionId: text("subscription_id"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );
