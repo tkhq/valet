@@ -88,7 +88,7 @@ jobs:
     secrets: inherit
   docker:
     needs: release
-    uses: ./.github/workflows/docker-publish.yml
+    uses: ./.github/workflows/ci.yml
     with:
       release_tag: ${{ needs.release.outputs.tag }}
     secrets: inherit

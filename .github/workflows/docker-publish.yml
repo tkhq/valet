@@ -1,7 +1,8 @@
 name: Docker Images
 
-# Builds and publishes the two deployable images to GHCR on every merge to
-# dev-v2 (and on version tags):
+# CI calls this workflow after all required checks pass on dev-v2 pushes,
+# version tags, and manual runs. Use CI's Run workflow button to publish manually.
+# The caller context preserves github.sha for checkout and SHA tags.
 #
 #   ghcr.io/<owner>/valet-api      — docker/Dockerfile.api (api + baked web SPA)
 #   ghcr.io/<owner>/valet-sandbox  — docker/Dockerfile.sandbox-k8s
@@ -25,16 +26,13 @@ name: Docker Images
 # imagePullSecrets by default.
 
 on:
-  push:
-    branches: [dev-v2]
-    tags: ["valet/v*"]
   workflow_call:
     inputs:
       release_tag:
-        description: Immutable application tag to publish
-        required: true
+        description: Application tag at the caller commit
+        required: false
+        default: ''
         type: string
-  workflow_dispatch:
 
 env:
   BUILD_REF: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
@@ -71,6 +69,9 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
+
+      - name: Verify source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Generate changelog artifact
         if: matrix.image.name == 'valet-api' && (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/valet/v') || github.ref == 'refs/heads/dev-v2')
@@ -136,6 +137,9 @@ jobs:
           retention-days: 1
 
   merge:
+    # This joins ALL four build legs, across both images and architectures.
+    # No image receives tags if any build fails. GHCR tag writes across the
+    # two repositories are not atomic; a tagging failure can still be partial.
     needs: build
     runs-on: ubuntu-latest
     strategy:
@@ -176,6 +180,7 @@ jobs:
           tags: |
             type=ref,event=branch,enable=${{ inputs.release_tag == '' }}
             type=raw,value=${{ steps.img.outputs.version }},enable=${{ startsWith(env.BUILD_TAG, 'valet/v') }}
+            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')) && !contains(inputs.release_tag || github.ref_name, '-') }}
 

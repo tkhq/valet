@@ -3,6 +3,16 @@ name: CI
 on:
   push:
     branches: [main, dev-v2]
+    tags: ["v*", "valet/v*"]
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Application tag at the caller commit
+        required: false
+        default: ''
+        type: string
+  # Manual image publishing uses the same checks as branch and release pushes.
+  workflow_dispatch:
   # Deliberately unfiltered. A pull_request branches filter matches the PR's
   # base, so pinning it to main/dev-v2 skipped every stacked PR that targets
   # another feature branch, and those PRs showed no CI at all until they were
@@ -171,3 +181,16 @@ jobs:
             && test "${{ needs.test.result }}" = "success" \
             && test "${{ needs.cgroup_test.result }}" = "success" \
             && test "${{ needs.docs-lint.result }}" = "success"
+
+  # The aggregate check includes every required test shard and lint job.
+  # Keep the default success() condition so failed or cancelled CI cannot publish.
+  publish:
+    needs: ci
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/dev-v2' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/valet/v')))
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      release_tag: ${{ inputs.release_tag || '' }}
+    secrets: inherit
