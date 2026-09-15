@@ -441,6 +441,50 @@ describe("pg app schema + migrations", () => {
     await db.query("DELETE FROM security_needs WHERE id = 'need3'");
   });
 
+  it("round-trips security_engagements.credentials_json as JSONB, defaulting null (Part 12)", async () => {
+    const now = Date.now();
+    const credentials = [
+      { label: "adminLogin", kind: "password", env: "ADMIN_PASSWORD", reference: "op://vault/item/password" },
+    ];
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, credentials_json, created_at, updated_at) VALUES ('eng_cred', 's_cred', 'planning', 'acme/api', '', $2, $1, $1)",
+      [now, JSON.stringify(credentials)],
+    );
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_nocred', 's_nocred', 'planning', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    const rows = await db.query(
+      "SELECT id, credentials_json FROM security_engagements WHERE id IN ('eng_cred', 'eng_nocred') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_cred", credentials_json: credentials },
+      { id: "eng_nocred", credentials_json: null },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_cred', 'eng_nocred')");
+  });
+
+  it("stamps security_needs.credential_label on a resolved cred-typed need, defaulting null", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, credential_label, created_at, resolved_at) VALUES ('need_cred', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'adminLogin', $1, $1)",
+      [now],
+    );
+    const rows = await db.query("SELECT credential_label, resolution FROM security_needs WHERE id = 'need_cred'");
+    expect(rows.rows).toEqual([{ credential_label: "adminLogin", resolution: null }]);
+    await db.query("DELETE FROM security_needs WHERE id = 'need_cred'");
+  });
+
+  it("refuses a resolution on a cred-typed need (CHECK security_needs_credential_resolution_null)", async () => {
+    const now = Date.now();
+    await expect(
+      db.query(
+        "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at) VALUES ('need_bad', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'plaintext value leaked here', $1)",
+        [now],
+      ),
+    ).rejects.toThrow(/security_needs_credential_resolution_null|violates check constraint/);
+  });
+
   it("tracks the applied migration in __valet_app_migrations", async () => {
     const result = await db.query("SELECT filename FROM __valet_app_migrations WHERE filename = $1", [
       "0000_app.sql",
@@ -929,6 +973,7 @@ describe("pg app schema + migrations", () => {
       { table: "security_engagements", column: "config_tools" },
       { table: "security_engagements", column: "authorized_scope" },
       { table: "security_engagements", column: "has_repo_config" },
+      { table: "security_engagements", column: "credentials_json" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {
@@ -1082,6 +1127,83 @@ describe("pg app schema + migrations", () => {
 
       await applyAppMigrations(db);
       expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("restores security_needs.credential_label and its CHECK constraint together", async () => {
+      const constraintExists = async (): Promise<boolean> => {
+        const result = await db.query(
+          "SELECT 1 FROM pg_constraint WHERE conname = 'security_needs_credential_resolution_null'",
+        );
+        return result.rows.length > 0;
+      };
+      await db.query('ALTER TABLE "security_needs" DROP CONSTRAINT "security_needs_credential_resolution_null"');
+      await db.query('ALTER TABLE "security_needs" DROP COLUMN "credential_label"');
+      expect(await columnExists("security_needs", "credential_label")).toBe(false);
+      expect(await constraintExists()).toBe(false);
+
+      await applyAppMigrations(db);
+      expect(await columnExists("security_needs", "credential_label")).toBe(true);
+      expect(await constraintExists()).toBe(true);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+
+      // The restored CHECK enforces on a fresh write.
+      const now = Date.now();
+      await expect(
+        db.query(
+          "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at) VALUES ('need_repair_check', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'plaintext value leaked here', $1)",
+          [now],
+        ),
+      ).rejects.toThrow(/security_needs_credential_resolution_null|violates check constraint/);
+    });
+
+    it("restores the credential CHECK alone when only the constraint is gone", async () => {
+      const constraintExists = async (): Promise<boolean> => {
+        const result = await db.query(
+          "SELECT 1 FROM pg_constraint WHERE conname = 'security_needs_credential_resolution_null'",
+        );
+        return result.rows.length > 0;
+      };
+      await db.query(
+        'ALTER TABLE "security_needs" DROP CONSTRAINT "security_needs_credential_resolution_null"',
+      );
+      expect(await constraintExists()).toBe(false);
+      // The column is still there, so a column probe alone sees nothing wrong.
+      expect(await columnExists("security_needs", "credential_label")).toBe(true);
+
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("security_needs_credential_resolution_null constraint");
+
+      await applyAppMigrations(db);
+      expect(await constraintExists()).toBe(true);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+
+      // The restored CHECK enforces on a fresh write.
+      const now = Date.now();
+      await expect(
+        db.query(
+          "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at) VALUES ('need_check_only', 'eng1', 'cell1', 'credential', 'A staging API token.', 'answered', 'plaintext value leaked here', $1)",
+          [now],
+        ),
+      ).rejects.toThrow(/security_needs_credential_resolution_null|violates check constraint/);
+    });
+
+    it("recreates security_needs whole, then skips the duplicate CHECK", async () => {
+      await db.query('DROP TABLE "security_needs"');
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      // The table create must lead: the column and the constraint both ALTER it.
+      expect(missing.indexOf("security_needs table")).toBeGreaterThanOrEqual(0);
+      expect(missing.indexOf("security_needs table")).toBeLessThan(
+        missing.indexOf("security_needs.credential_label column"),
+      );
+      expect(missing.indexOf("security_needs table")).toBeLessThan(
+        missing.indexOf("security_needs_credential_resolution_null constraint"),
+      );
+
+      // The CREATE TABLE adds the CHECK inline, so the constraint repair that
+      // follows it hits a duplicate and must not fail the boot.
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      expect(await columnExists("security_needs", "credential_label")).toBe(true);
     });
 
     it("repairs team proxy attribution on an already migrated database", async () => {

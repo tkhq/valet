@@ -41,6 +41,12 @@ describe("commandWrapperScript", () => {
     for (const cmd of [
       { command: "stripe", env: "STRIPE_API_KEY", reference: "op://Eng/Stripe/secret key" },
       { command: "aws", env: "AWS_SECRET_ACCESS_KEY", credential: "aws" },
+      {
+        command: "admin",
+        env: "ADMIN_TOKEN",
+        reference: "op://Sec/Admin/token",
+        launcher: true,
+      },
     ]) {
       const file = write(commandWrapperScript(cmd));
       const parsed = spawnSync("sh", ["-n", file], { encoding: "utf8" });
@@ -76,6 +82,55 @@ describe("commandWrapperScript", () => {
     });
     expect(run.stdout.trim()).toBe("ran-real");
     expect(run.status).toBe(0);
+  });
+
+  it("launches the command in its arguments for a security credential", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-launcher-"));
+    writeFileSync(
+      join(dir, "valet-secrets"),
+      "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
+      { mode: 0o755 },
+    );
+    const file = write(
+      commandWrapperScript({
+        command: "admin",
+        env: "ADMIN_TOKEN",
+        reference: "op://Sec/Admin/token",
+        launcher: true,
+      }),
+    );
+    const run = spawnSync("sh", [file, "curl", "https://api.example.com"], {
+      encoding: "utf8",
+      env: { PATH: `${dir}:/usr/bin:/bin` },
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(
+      "run\n--env\nADMIN_TOKEN=op://Sec/Admin/token\n--\ncurl\nhttps://api.example.com\n",
+    );
+  });
+
+  it("resolves an mTLS key and certificate in the same launcher invocation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-mtls-"));
+    writeFileSync(join(dir, "valet-secrets"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", {
+      mode: 0o755,
+    });
+    const file = write(
+      commandWrapperScript({
+        command: "partner-api",
+        env: "CLIENT_KEY",
+        reference: "op://Sec/Partner/key",
+        additionalEnv: [{ env: "CLIENT_KEY_CERT", reference: "op://Sec/Partner/cert" }],
+        launcher: true,
+      }),
+    );
+    const run = spawnSync("sh", [file, "curl", "https://partner.example"], {
+      encoding: "utf8",
+      env: { PATH: `${dir}:/usr/bin:/bin` },
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(
+      "--env\nCLIENT_KEY=op://Sec/Partner/key\n--env\nCLIENT_KEY_CERT=op://Sec/Partner/cert\n--\ncurl\nhttps://partner.example\n",
+    );
   });
 });
 

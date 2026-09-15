@@ -50,6 +50,8 @@ import {
   type ToolDecl,
 } from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
+import { parseDeclaredCredentials, type SecurityCredentialDecl } from "@valet/shared";
+import type { CredentialCommand } from "../engine/credential-commands.js";
 import {
   securityCells,
   securityCoverage,
@@ -72,6 +74,7 @@ import {
   recordSecurityCellExhausted,
   recordSecurityCellsCreated,
   recordSecurityCellSettled,
+  recordSecurityEngagementCredentialCount,
 } from "../observability/security-metrics.js";
 
 // ── Limits (spec §Data Model size guard, §Tools) ──────────────────────────
@@ -163,6 +166,13 @@ export type NeedStatus = "open" | "auto_resolved" | "needs_human" | "answered" |
  * auto-resolution note or the human answer, not a report. */
 export const MAX_NEED_DESCRIPTION_CHARS = 2000;
 export const MAX_NEED_RESOLUTION_CHARS = 4000;
+
+/** What `resolveEngagementNeeds` throws when an answer to a credential need
+ * carries a `resolution` (INV-39). The needs-resolve route matches this exact
+ * text to answer 400 instead of 409, so both sides share the one string. */
+export const CREDENTIAL_NEED_TAKES_A_LABEL =
+  "A credential need takes a credential label, not a resolution. " +
+  "Choose a declared label in credentialLabel and leave resolution empty.";
 
 /** Cap on a coverage area label and its reason (NOT_ASSESSED ledger, M-P2d).
  * An area is a short scope label ("secrets scan"); a reason is one sentence
@@ -432,6 +442,10 @@ export function buildDispatchPrompt(
      * dispatch prompt names these explicitly and forbids acting outside them.
      * A non-live persona ignores the scope. */
     scopeHosts?: string[] | null;
+    /** Declared credentials (Part 12, INV-36/INV-38). Never carries
+     * `reference`: the `Pick` excludes it, so passing the raw op:// value
+     * here is a type error, not a review-time catch. */
+    credentials?: readonly PersonaCredential[] | null;
   } = {},
   needsResolutions: { kind: NeedKind; description: string; resolution: string }[] = [],
 ): string {
@@ -572,6 +586,14 @@ export function buildDispatchPrompt(
       );
     }
   }
+  // Declared credentials (Part 12, INV-36/INV-38): each credential surfaces
+  // as a named wrapper command, never the raw op:// reference. Only emitted
+  // when at least one credential is declared, so a normal dispatch stays
+  // byte-identical.
+  const credentialsSection = renderCredentialsSection(config.credentials);
+  if (credentialsSection !== "") {
+    lines.push(credentialsSection);
+  }
   // Needs resolutions (pivot-coordinator, M-P4c). On a delta re-run the human
   // (or the coordinator) answered a need this cell recorded — carry the answer
   // so the persona continues from where it was blocked. Only emitted when a
@@ -597,6 +619,174 @@ export function buildDispatchPrompt(
     "---",
     "",
     protocol,
+  );
+  return lines.join("\n");
+}
+
+/** The persona-facing projection of a declared credential: what
+ * `buildDispatchPrompt` may show. Excludes `reference` by construction, so
+ * the prompt cannot carry an op:// path (INV-38). */
+type PersonaCredential = Pick<SecurityCredentialDecl, "label" | "kind" | "env" | "meta">;
+
+/**
+ * The declared labels of a `security_engagements.credentials_json` value, for
+ * the sec_start observability signal (Part 12). Plucks only `label`, so a
+ * resolved value or an `op://` reference never reaches a metric attribute
+ * (INV-40 covers the reference; this stays stricter and drops it anyway).
+ */
+export function declaredCredentialLabels(value: unknown): string[] {
+  return parseDeclaredCredentials(value).map((decl) => decl.label);
+}
+
+/**
+ * The persona-facing fields of a `security_engagements.credentials_json`
+ * value. Deliberately drops `reference` (INV-38: the persona is named the
+ * credential, never the op:// reference) rather than reading and discarding
+ * it later.
+ */
+function credentialDeclsFromJson(value: unknown): PersonaCredential[] {
+  return parseDeclaredCredentials(value).map((decl) => ({
+    label: decl.label,
+    kind: decl.kind,
+    env: decl.env,
+    ...(decl.meta !== undefined ? { meta: decl.meta } : {}),
+  }));
+}
+
+/**
+ * The dispatch-prompt "Resolved needs" line for one answered need (Part 12,
+ * INV-39). A `kind: "credential"` need carries its answer in `credentialLabel`
+ * (a declared label), never `resolution`, the database CHECK forbids that.
+ * This reconstructs a persona-safe line naming the label, in the same
+ * vocabulary `renderCredentialsSection` uses ("the '{label}' wrapper
+ * command"), so the persona is pointed at the credential without the prompt
+ * ever carrying an `op://` reference or a resolved value. Every other kind
+ * still reads its answer straight from `resolution`.
+ */
+function resolutionTextForAnsweredNeed(
+  need: Pick<SecurityNeedRow, "kind" | "resolution" | "credentialLabel">,
+  credentials: readonly PersonaCredential[],
+): string {
+  if (need.kind !== "credential") return need.resolution ?? "";
+  if (need.credentialLabel === null || need.credentialLabel === "") return "";
+  const declared = credentials.some((c) => c.label === need.credentialLabel);
+  return declared
+    ? `Use the "${need.credentialLabel}" wrapper command declared in the Credentials section above.`
+    : `Use the "${need.credentialLabel}" credential (declared on this engagement).`;
+}
+
+/**
+ * Converts the engagement's declared credentials (`security_engagements.
+ * credentials_json`) into `CredentialCommand`s the security cell child's
+ * sandbox launcher installs. Closes the gap between the dispatch prompt's
+ * "run `<label> <cmd>`" instruction and the child having no such command.
+ *
+ * Unlike `credentialDeclsFromJson` (persona-facing, drops `reference` per
+ * INV-38), this KEEPS `reference`, because the launcher cannot resolve the
+ * credential without it. `label` becomes the installed command name and `env`
+ * becomes the variable it injects, and the shared vocabulary already held both
+ * to the name shape a path under /usr/local/bin and a shell `export` need.
+ *
+ * A repeated label is dropped rather than installed twice: two launchers of
+ * one name is ambiguous about which resolves, and the create route and the
+ * repo config parser both refuse a repeat before it can reach this column.
+ */
+export function engagementCredentialCommands(value: unknown): CredentialCommand[] {
+  const out: CredentialCommand[] = [];
+  const seen = new Set<string>();
+  for (const decl of parseDeclaredCredentials(value)) {
+    if (seen.has(decl.label)) continue;
+    seen.add(decl.label);
+    const certRef = decl.kind === "mtls" ? decl.meta?.certRef : undefined;
+    out.push({
+      command: decl.label,
+      env: decl.env,
+      reference: decl.reference,
+      launcher: true,
+      ...(certRef ? { additionalEnv: [{ env: `${decl.env}_CERT`, reference: certRef }] } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Merges the engagement's declared credential commands with the repo's
+ * `.valet/credentials.yaml` commands into the list a
+ * security cell child's sandbox installs. Both sources are legitimate: an
+ * engagement credential and a repo-declared one may coexist, but a command
+ * name declared by BOTH is ambiguous about which one wins, so this refuses
+ * rather than picking silently. The caller must rename one side; that is a
+ * safe default because the ambiguity is user-visible (Part 12 §Ownership,
+ * "ambiguity here is user-visible").
+ */
+export function mergeCredentialCommands(
+  engagementCommands: readonly CredentialCommand[],
+  repoCommands: readonly CredentialCommand[],
+): CredentialCommand[] {
+  const seen = new Set(engagementCommands.map((cmd) => cmd.command));
+  for (const cmd of repoCommands) {
+    if (seen.has(cmd.command)) {
+      throw new Error(
+        `Credential command "${cmd.command}" is declared both by the engagement and by ` +
+          ".valet/credentials.yaml. Rename one so each command name is declared once.",
+      );
+    }
+  }
+  return [...engagementCommands, ...repoCommands];
+}
+
+/** One line of persona-facing usage guidance per credential `kind` (Part 12
+ * §Credential shape and delivery), with the declared `env` substituted in
+ * place of the value. Never reads `reference`. */
+function credentialUsageHint(decl: Pick<PersonaCredential, "kind" | "env" | "meta">): string {
+  const shell = (script: string) => `run \`sh -c '${script}' sh <url>\`; the quoted script expands only after injection`;
+  switch (decl.kind) {
+    case "password":
+      return shell(`curl -d "pass=$${decl.env}" "$1"`);
+    case "session":
+      return shell(`printf "%s" "$${decl.env}" | curl -b - "$1"`);
+    case "headerToken": {
+      const scheme = typeof decl.meta?.scheme === "string" ? decl.meta.scheme : "Bearer";
+      return shell(`curl -H "Authorization: ${scheme} $${decl.env}" "$1"`);
+    }
+    case "mtls":
+      return shell(`d=$(mktemp -d); trap "rm -rf $d" EXIT; printf "%s" "$${decl.env}_CERT" >"$d/cert"; printf "%s" "$${decl.env}" >"$d/key"; chmod 600 "$d/cert" "$d/key"; curl --cert "$d/cert" --key "$d/key" "$1"`);
+    case "signingKey":
+      return shell(`your-signer --key "$${decl.env}" "$1"`);
+    case "toolAuth":
+      return shell(`your-tool --auth "$${decl.env}" "$1"`);
+    case "testData":
+      return shell(`curl --data "$${decl.env}" "$1"`);
+  }
+}
+
+/**
+ * Renders the Credentials section of the dispatch prompt (Part 12, INV-36,
+ * INV-38, INV-40). Each declared credential surfaces as a named command the
+ * persona invokes directly, matching `commandWrapperScript({command: label,
+ * env, reference})`'s installed wrapper name: the persona sees `label`, not
+ * the raw op:// reference. Returns "" when no credential is declared, so a
+ * dispatch with none stays byte-identical to today's prompt.
+ */
+function renderCredentialsSection(
+  decls: readonly PersonaCredential[] | null | undefined,
+): string {
+  if (!decls || decls.length === 0) return "";
+  const lines = [
+    "",
+    "--- Credentials ---",
+    "",
+    "Available credentials (resolved at run-time; the value never appears in this transcript):",
+  ];
+  for (const decl of decls) {
+    lines.push(`- ${decl.label} -> command "${decl.label}" (usage: ${credentialUsageHint(decl)})`);
+  }
+  lines.push(
+    "",
+    `Example: \`${decls[0].label} <the command that needs this credential>\``,
+    "",
+    "The wrapper resolves the credential and injects it into that one command's environment. It is not in this turn's transcript. Do not print the wrapper's output verbatim if it might contain the value.",
+    "If the target rejects the credential, raise a `credential` need naming the label; the human replaces the reference.",
   );
   return lines.join("\n");
 }
@@ -762,6 +952,11 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
        * `has_repo_config` stays false, because no `.valet/security.yml` seeded
        * it. */
       hasRepoConfig?: boolean;
+      /** Declared 1Password credential references (Part 12, INV-33),
+       * preflight-validated by `seedSecurityReview` before create. Null or
+       * absent (the setup page declared none) leaves `credentials_json`
+       * NULL. Never a resolved value (INV-37), references only. */
+      credentialsJson?: SecurityCredentialDecl[] | null;
     },
     dbh: AppDb = db,
   ): Promise<SecurityEngagementRow> {
@@ -794,6 +989,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         authorizedScope:
           config?.scope && config.scope.hosts.length > 0 ? JSON.stringify(config.scope) : null,
         hasRepoConfig: args.hasRepoConfig ?? config !== undefined,
+        credentialsJson:
+          args.credentialsJson && args.credentialsJson.length > 0 ? args.credentialsJson : null,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -1021,6 +1218,14 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       }
     });
     recordSecurityCellsCreated(cellValues.length);
+    // sec_start observability seam: this is the ONE planning → running write (the
+    // `status !== "planning"` guard above refuses a second call), so the
+    // metric and log line fire exactly once per engagement. `credentialsJson`
+    // was read before the transaction and this function never mutates it, so
+    // the loaded value is still current.
+    const credentialLabels = declaredCredentialLabels(engagement.credentialsJson);
+    recordSecurityEngagementCredentialCount(credentialLabels.length);
+    console.info("security engagement started", { engagementId, credentialLabels });
     const result = await getEngagement(engagementId);
     // The transaction above just wrote these rows; absence is impossible.
     if (!result) throw new Error(`No engagement ${engagementId}. Check the id with sec_status.`);
@@ -1034,7 +1239,19 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
    */
   async function dispatchCell(
     engagementId: string,
-    args: { cellId?: string; mode?: "fresh" | "resume"; spawn: SpawnCellChild },
+    args: {
+      cellId?: string;
+      mode?: "fresh" | "resume";
+      spawn: SpawnCellChild;
+      /**
+       * The repo's `.valet/credentials.yaml` commands, already resolved by
+       * the caller (the same merge the engine host applies),
+       * dispatchCell has no GitHub access of its own. Merged with the
+       * engagement's declared credentials; a label collision refuses
+       * the dispatch. Defaults to none.
+       */
+      repoCredentialCommands?: CredentialCommand[];
+    },
   ): Promise<{ cell: SecurityCellRow; prompt: string; replacedChildSessionId: string | null }> {
     const engagement = await loadEngagement(engagementId);
     if (engagement.status !== "running") {
@@ -1107,6 +1324,23 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       );
     }
 
+    // Declared-credential wiring (Part 12): merge the engagement's declared
+    // credentials with the repo's `.valet/credentials.yaml` commands. BEFORE
+    // the claim: a label collision is a hard refusal, not something to
+    // silently resolve, and the cell must stay pending when it happens.
+    try {
+      mergeCredentialCommands(
+        engagementCredentialCommands(engagement.credentialsJson),
+        args.repoCredentialCommands ?? [],
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `security dispatchCell: refusing to dispatch cell ${ordinalLabel(target)} of engagement ${engagementId}: ${message}`,
+      );
+      throw err;
+    }
+
     // Pre-mint the child session id (the same `child_` shape children.ts
     // mints — this IS the session id the spawn builds) and stamp it in the
     // claim, BEFORE the spawn: the host's child-session build resolves the
@@ -1156,6 +1390,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         ),
       )
       .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+    const credentials = credentialDeclsFromJson(engagement.credentialsJson);
     const prompt = buildDispatchPrompt(
       cell,
       plan,
@@ -1172,11 +1407,18 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         // Authorized scope (M-P4b): only a live persona reads it, but pass it
         // always — buildDispatchPrompt gates on the persona.
         scopeHosts: parseAuthorizedScopeHosts(engagement.authorizedScope),
+        // Declared credentials (Part 12, INV-36/INV-38): labels + usage hints
+        // only, never the op:// reference (credentialDeclsFromJson drops it).
+        credentials,
       },
       answeredNeeds.map((need) => ({
         kind: narrowNeedKind(need.kind),
         description: need.description,
-        resolution: need.resolution ?? "",
+        // A credential-typed need carries its answer in `credentialLabel`, never
+        // `resolution` (INV-39). Reconstruct a persona-safe resolution line
+        // naming the label so the prompt's "Resolved needs" block still shows
+        // it, without ever surfacing the op:// reference or a secret value.
+        resolution: resolutionTextForAnsweredNeed(need, credentials),
       })),
     );
 
@@ -2489,10 +2731,25 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
    * 'dismissed' and does NOT reset its cell (the human ruled the block is not
    * worth pursuing). Refuses a need id not in this engagement, or one that is
    * not needs_human. Runs in one transaction.
+   *
+   * A `kind: "credential"` need answers differently (Part 12, INV-39): the
+   * CHECK constraint on `security_needs` refuses a non-null `resolution` on
+   * that kind, so the answer must name `credentialLabel`, a label already
+   * declared in the engagement's `credentials_json`. The label lands in
+   * `credential_label`; `resolution` stays null. A `resolution` sent on a
+   * credential need is refused, not dropped, so a caller who put a secret in
+   * the free-text field learns the value went nowhere. `dispatchCell`
+   * reconstructs the wrapper-command reference from the label at prompt-build
+   * time.
    */
   async function resolveEngagementNeeds(
     engagementId: string,
-    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+    answers: {
+      needId: string;
+      resolution?: string;
+      credentialLabel?: string;
+      dismiss?: boolean;
+    }[],
   ): Promise<AnswerNeedsResult> {
     const engagement = await loadEngagement(engagementId);
     if (answers.length === 0) {
@@ -2520,6 +2777,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       const answered: SecurityNeedRow[] = [];
       const cellsToReset = new Set<string>();
       const ts = now();
+      const declaredLabels = declaredCredentialLabels(engagement.credentialsJson);
       for (const answer of answers) {
         const rows = await tx
           .select()
@@ -2538,7 +2796,55 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
           );
         }
         const dismiss = answer.dismiss === true;
-        const resolution = answer.resolution.trim();
+
+        if (need.kind === "credential") {
+          // INV-39: a credential-typed need never carries free text in
+          // `resolution`, the database CHECK refuses it. Refuse a submitted
+          // one instead of dropping it, so a caller who put a secret in the
+          // free-text field learns the value went nowhere. This runs ahead of
+          // the dismiss branch: a dismissal has no column to hold a note
+          // either.
+          if ((answer.resolution ?? "").trim() !== "") {
+            throw new Error(CREDENTIAL_NEED_TAKES_A_LABEL);
+          }
+          // Dismissal marks the need dismissed without a note; an answer names
+          // a declared label, stored in `credentialLabel`.
+          if (dismiss) {
+            const updated = await tx
+              .update(securityNeeds)
+              .set({ status: "dismissed", resolvedAt: ts })
+              .where(eq(securityNeeds.id, need.id))
+              .returning();
+            answered.push(updated[0]);
+            continue;
+          }
+          const label = (answer.credentialLabel ?? "").trim();
+          if (label === "") {
+            throw new Error(
+              `Need ${need.id} is a credential need. Send credentialLabel naming a declared credential's label, or dismiss it.`,
+            );
+          }
+          if (label.length > MAX_NEED_RESOLUTION_CHARS) {
+            throw new Error(
+              `A credential label is at most ${MAX_NEED_RESOLUTION_CHARS} characters. Give the label, not a report.`,
+            );
+          }
+          if (!declaredLabels.includes(label)) {
+            throw new Error(
+              `Credential "${label}" is not declared on this engagement. Declare it in the setup wizard's Advanced section, then answer again.`,
+            );
+          }
+          const updated = await tx
+            .update(securityNeeds)
+            .set({ status: "answered", credentialLabel: label, resolvedAt: ts })
+            .where(eq(securityNeeds.id, need.id))
+            .returning();
+          answered.push(updated[0]);
+          cellsToReset.add(need.cellId);
+          continue;
+        }
+
+        const resolution = (answer.resolution ?? "").trim();
         if (!dismiss && resolution === "") {
           throw new Error(
             `Need ${need.id} needs an answer. Give the credential, decision, or scope, or dismiss it.`,

@@ -4,9 +4,10 @@
  * gets back when it asks for something silly.
  */
 import { afterEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, teams } from "../schema/index.js";
+import { agentSessions, childWatches, securityCells, securityEngagements, teams } from "../schema/index.js";
 import { ONEPASSWORD_SERVICE, OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
 
@@ -684,5 +685,325 @@ describe("team token scope boundaries", () => {
       });
       expect(response.status).toBe(403);
     }
+  });
+});
+
+// ── Per-engagement allowlist (Part 12 §Broker allowlist enforcement, INV-34) ──
+//
+// A security persona's child sandbox is claimed by a `security_cells` row
+// (`childSessionId`). When that claim exists, the broker refuses any
+// reference the engagement did not declare in `credentials_json`, before it
+// ever calls `resolveReference`. Every other caller (a coding session, an
+// orchestrator, a workflow sandbox) claims no cell and is unaffected.
+describe("POST /api/sandbox-secrets/resolve allowlist (INV-34)", () => {
+  let engagementCounter = 0;
+
+  async function seedEngagement(
+    credentialsJson: unknown,
+    overrides: Partial<typeof securityEngagements.$inferInsert> = {},
+  ): Promise<{ engagementId: string; sessionId: string }> {
+    engagementCounter += 1;
+    const engagementId = `eng-allow-${engagementCounter}`;
+    const sessionId = `eng-allow-${engagementCounter}-session`;
+    await api!.providers.db.insert(securityEngagements).values({
+      id: engagementId,
+      sessionId,
+      repoFullName: "acme/widgets",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      credentialsJson,
+      status: "running",
+      ...overrides,
+    });
+    return { engagementId, sessionId };
+  }
+
+  async function claimWithCell(engagementId: string, childSessionId: string): Promise<void> {
+    await api!.providers.db.insert(securityCells).values({
+      id: `${childSessionId}-cell`,
+      engagementId,
+      ordinal: 0,
+      persona: "code-review",
+      goal: "test cell",
+      dir: "01-recon",
+      childSessionId,
+      status: "running",
+      createdAt: Date.now(),
+    });
+  }
+
+  async function find(query: string, token: string): Promise<Response> {
+    return fetch(`${api!.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ query }),
+    });
+  }
+
+  it("allows a reference on the engagement's declared list", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+    ]);
+    const childSessionId = "sess-allow-1";
+    await claimWithCell(engagementId, childSessionId);
+    const token = await mintToken(childSessionId);
+
+    const res = await resolve(["op://ok/Admin/password"], token);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Resp;
+    expect(decode(body.values[0])).toBe("secret-for-op://ok/Admin/password");
+  });
+
+  it("allows an mTLS certificate reference declared in meta.certRef", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([
+      {
+        label: "partner",
+        kind: "mtls",
+        env: "CLIENT_KEY",
+        reference: "op://ok/Partner/key",
+        meta: { certRef: "op://ok/Partner/cert" },
+      },
+    ]);
+    const childSessionId = "sess-allow-mtls";
+    await claimWithCell(engagementId, childSessionId);
+    const res = await resolve(
+      ["op://ok/Partner/key", "op://ok/Partner/cert"],
+      await mintToken(childSessionId),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses a reference not on the engagement's declared list, naming it", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+    ]);
+    const childSessionId = "sess-allow-2";
+    await claimWithCell(engagementId, childSessionId);
+    const token = await mintToken(childSessionId);
+
+    const res = await resolve(["op://ok/Other/password"], token);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.error).toContain("op://ok/Other/password");
+    expect(body.code).toBe("credential_ref_not_allowlisted");
+  });
+
+  it("never calls resolveReference for a refused reference (checked before resolution)", async () => {
+    api = await bootTestApi();
+    const calls: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async (scope, ctx, reference) => {
+        calls.push(reference);
+        return `secret-for-${reference}`;
+      },
+    };
+    const { engagementId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+    ]);
+    const childSessionId = "sess-allow-3";
+    await claimWithCell(engagementId, childSessionId);
+    const token = await mintToken(childSessionId);
+
+    const res = await resolve(["op://ok/Other/password"], token);
+    expect(res.status).toBe(403);
+    expect(calls).toEqual([]);
+  });
+
+  it("bypasses the allowlist for a session no security cell claims", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    // No security_engagements / security_cells row names this session at
+    // all: a plain coding session, orchestrator, or workflow sandbox.
+    const token = await mintToken("sess-allow-bypass");
+
+    const res = await resolve(["op://ok/Any/pw"], token);
+    expect(res.status).toBe(200);
+  });
+
+  it.each([
+    ["null", null],
+    ["an empty list", []],
+  ])("refuses every reference when the engagement declares %s", async (_name, credentialsJson) => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement(credentialsJson);
+    const childSessionId = "sess-allow-4";
+    await claimWithCell(engagementId, childSessionId);
+    const token = await mintToken(childSessionId);
+
+    const res = await resolve(["op://ok/Admin/password"], token);
+    expect(res.status).toBe(403);
+  });
+
+  it("matches a declared reference case-sensitively", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/Password" },
+    ]);
+    const childSessionId = "sess-allow-6";
+    await claimWithCell(engagementId, childSessionId);
+    const token = await mintToken(childSessionId);
+
+    // Same reference, different case on the last two segments: must not
+    // match the declared entry.
+    const res = await resolve(["op://ok/admin/password"], token);
+    expect(res.status).toBe(403);
+
+    const exact = await resolve(["op://ok/Admin/Password"], token);
+    expect(exact.status).toBe(200);
+  });
+
+  it("names only the refused reference, not the rest of the declared list", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+      { label: "signer", kind: "signingKey", env: "SIGNER", reference: "op://ok/Signer/key" },
+    ]);
+    const childSessionId = "sess-allow-7";
+    await claimWithCell(engagementId, childSessionId);
+    const token = await mintToken(childSessionId);
+
+    const res = await resolve(["op://ok/Admin/password", "op://ok/Other/password"], token);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("op://ok/Other/password");
+    // The response never lists the other declared references.
+    expect(body.error).not.toContain("op://ok/Admin/password");
+    expect(body.error).not.toContain("op://ok/Signer/key");
+  });
+
+  it("skips malformed declared entries instead of matching everything", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([
+      { label: "no-reference-field" },
+      "junk",
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+    ]);
+    const childSessionId = "sess-allow-8";
+    await claimWithCell(engagementId, childSessionId);
+    const token = await mintToken(childSessionId);
+
+    const allowed = await resolve(["op://ok/Admin/password"], token);
+    expect(allowed.status).toBe(200);
+
+    const refused = await resolve(["op://ok/Other/password"], token);
+    expect(refused.status).toBe(403);
+  });
+
+  it("allows discovery from the current running persona cell", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([]);
+    const childSessionId = "sess-find-running-cell";
+    await claimWithCell(engagementId, childSessionId);
+
+    expect((await find("admin", await mintToken(childSessionId))).status).toBe(200);
+  });
+
+  it("refuses discovery from a settled persona cell", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([]);
+    const childSessionId = "sess-find-settled-cell";
+    await claimWithCell(engagementId, childSessionId);
+    await api.providers.db
+      .update(securityCells)
+      .set({ status: "completed" })
+      .where(eq(securityCells.childSessionId, childSessionId));
+
+    expect((await find("admin", await mintToken(childSessionId))).status).toBe(403);
+  });
+
+  it("refuses discovery from a replaced child", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { sessionId: runnerSessionId } = await seedEngagement([]);
+    const staleChild = "sess-find-replaced-cell";
+    await api.providers.db.insert(childWatches).values({
+      childSessionId: staleChild,
+      queueItemId: "q-find-stale",
+      parentSessionId: runnerSessionId,
+      parentThreadId: "main",
+      actorUserId: "local-user",
+      orgId: "local-org",
+      createdAt: Date.now(),
+    });
+
+    expect((await find("admin", await mintToken(staleChild))).status).toBe(403);
+  });
+
+  it("refuses discovery from the engagement runner", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { sessionId } = await seedEngagement([]);
+
+    const refused = await find("admin", await mintToken(sessionId));
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as { error: string }).error).toContain(
+      "Only a running security persona cell",
+    );
+  });
+
+  it("refuses a settled persona cell", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { engagementId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+    ]);
+    const childSessionId = "sess-settled-cell";
+    await claimWithCell(engagementId, childSessionId);
+    await api.providers.db
+      .update(securityCells)
+      .set({ status: "completed" })
+      .where(eq(securityCells.childSessionId, childSessionId));
+
+    expect((await resolve(["op://ok/Admin/password"], await mintToken(childSessionId))).status).toBe(403);
+  });
+
+  it("refuses a replaced child whose watch still points at the security runner", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const { sessionId: runnerSessionId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+    ]);
+    const staleChild = "sess-replaced-cell";
+    await api.providers.db.insert(childWatches).values({
+      childSessionId: staleChild,
+      queueItemId: "q-stale",
+      parentSessionId: runnerSessionId,
+      parentThreadId: "main",
+      actorUserId: "local-user",
+      orgId: "local-org",
+      createdAt: Date.now(),
+    });
+
+    expect((await resolve(["op://ok/Admin/password"], await mintToken(staleChild))).status).toBe(403);
+  });
+
+  it("refuses the engagement's top-level runner session", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    // No cell claim exists: runners coordinate cells but may not resolve
+    // persona credentials themselves.
+    const { sessionId } = await seedEngagement([
+      { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://ok/Admin/password" },
+    ]);
+    const token = await mintToken(sessionId);
+
+    const refused = await resolve(["op://ok/Admin/password"], token);
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as { error: string }).error).toContain(
+      "Only a running security persona cell",
+    );
   });
 });
