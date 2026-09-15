@@ -135,7 +135,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     createdAt: wireCreatedAt(e.createdAt),
     sequence: e.sequence,
     queueItemId: e.queueItemId,
-    ...(role === "assistant" ? { completed: e.stopReason !== undefined } : {}),
+    ...(role === "assistant" ? { completed: e.stopReason === "end_turn" } : {}),
     replyTo: replyReferenceFromMetadata(e.metadata, role),
     signal: engineSignalToWire(e.signal),
     model: e.model,
@@ -899,12 +899,12 @@ messagesRouter.post("/:id/messages", async (c) => {
           entry.type === "message" && entry.id === body.replyToMessageId,
       );
       const excerpt =
-        target?.role === "assistant" && target.stopReason
+        target?.role === "assistant" && target.stopReason === "end_turn"
           ? assistantReplyExcerpt(target)
           : "";
-      if (!target || target.role !== "assistant" || !target.stopReason || !excerpt) {
+      if (!target || target.role !== "assistant" || target.stopReason !== "end_turn" || !excerpt) {
         return c.json(
-          { error: "Reply target not found in this thread. Select an assistant text message and retry." },
+          { error: "Reply target not found in this thread. Reply to a completed assistant message." },
           400,
         );
       }

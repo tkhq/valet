@@ -365,7 +365,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       if (idx >= 0) {
         next.messages = replaceAt(slice.messages, idx, {
           ...slice.messages[idx],
-          completed: ev.reason !== "tool_use",
+          completed: ev.reason === "end_turn",
         });
       }
       // On abort/error, sweep parts still in `streaming` status: their tool

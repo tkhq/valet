@@ -1221,7 +1221,7 @@ export interface Message {
    * `submission.settled` events to the originating user message.
    */
   queueItemId?: string;
-  /** True after an assistant message reaches a terminal stop reason. */
+  /** True once an assistant message ends its turn normally (`stopReason: "end_turn"`). False for an errored or aborted message, which is not a valid reply target. */
   completed?: boolean;
   /** Assistant message that this user message addresses. */
   replyTo?: MessageReplyReference;

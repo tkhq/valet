@@ -49,6 +49,23 @@ describe("entryToMessage — stable order projection", () => {
   });
 });
 
+describe("entryToMessage — assistant completed flag", () => {
+  it("marks an end_turn assistant message completed", () => {
+    const entry = baseEntry({ role: "assistant", stopReason: "end_turn" });
+    expect(entryToMessage(entry, "sess", "th")?.completed).toBe(true);
+  });
+
+  it("marks an errored assistant message not completed", () => {
+    const entry = baseEntry({ role: "assistant", stopReason: "error" });
+    expect(entryToMessage(entry, "sess", "th")?.completed).toBe(false);
+  });
+
+  it("marks an aborted assistant message not completed", () => {
+    const entry = baseEntry({ role: "assistant", stopReason: "abort" });
+    expect(entryToMessage(entry, "sess", "th")?.completed).toBe(false);
+  });
+});
+
 describe("entryToMessage — attachments projection", () => {
   it("passes through a data: URL attachment unchanged", () => {
     const entry = baseEntry({

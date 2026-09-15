@@ -164,6 +164,39 @@ describe("stream store reducer", () => {
     expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(false);
   });
 
+  it("keeps an errored or aborted message incomplete so it cannot be a reply target", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m1",
+      reason: "error",
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].completed).toBe(false);
+
+    ingest(SESSION, messageStart("m2", 3));
+    ingest(SESSION, {
+      seq: 4,
+      ts: Date.now(),
+      offset: offset(4),
+      type: "message_end",
+      threadId: THREAD,
+      messageId: "m2",
+      reason: "abort",
+    });
+
+    const m2 = useStreamStore
+      .getState()
+      .bySession[SESSION].messages.find((m) => m.id === "m2");
+    expect(m2?.completed).toBe(false);
+  });
+
   it("populates the queue.state slice for the thread", () => {
     const { ingest } = useStreamStore.getState();
     const ev: WireEvent = {
