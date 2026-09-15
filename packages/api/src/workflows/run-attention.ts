@@ -114,8 +114,9 @@ function truncate(text: string): string {
 export interface RunThreadArchiveDeps {
   db: AppDb;
   store: Pick<WorkflowStore, "getCheckpoints">;
-  /** The engine's own session store, for the thread's key and creation time. */
-  engineStore: Pick<SessionStore, "getThread">;
+  /** The engine's own session store, for the thread's key and creation time,
+   * and for the state of the submission the node dispatched onto it. */
+  engineStore: Pick<SessionStore, "getThread" | "getQueueItem">;
 }
 
 /**
@@ -135,6 +136,16 @@ export interface RunThreadArchiveDeps {
  * node's thread belongs to a workflow session, which has no sidebar. The
  * thread key is what tells them apart.
  *
+ * A third kind is left alone for a different reason: the run can settle
+ * before the assistant turn it started finishes. An orchestrator node with
+ * `wait: { mode: "none" }` completes its checkpoint at dispatch, so the run
+ * reaches `stop` with the prompt still queued. The strike-cap settle in
+ * `local-host.ts` aborts no submission either. In both cases the thread has
+ * not yet carried the report, so this hook reads the submission's state and
+ * archives only a thread whose submission has settled. Nothing re-runs
+ * later: an unarchived thread is the visible state, and the person can
+ * archive it themselves.
+ *
  * Contained by contract, like the notification above: the run is already
  * settled when this fires, so a throw would abandon a drive lease nothing
  * reclaims. Idempotent: a run reclaimed while `terminalizing` reports
@@ -144,13 +155,19 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
   return async (info) => {
     try {
       const key = workflowRunThreadKey(info.runId);
-      const done = new Set<string>();
+      // Grouped by thread, not deduplicated to the first checkpoint: several
+      // nodes can dispatch onto one per-run thread, and ONE unsettled
+      // submission among them holds the whole thread in the list.
+      const byThread = new Map<string, { sessionId: string; threadId: string; queueItemIds: string[] }>();
       for (const checkpoint of await deps.store.getCheckpoints(info.runId)) {
         const dispatch = submissionDispatch(checkpoint.effects);
         if (!dispatch) continue;
         const seen = `${dispatch.sessionId}\n${dispatch.threadId}`;
-        if (done.has(seen)) continue;
-        done.add(seen);
+        const group = byThread.get(seen);
+        if (group) group.queueItemIds.push(dispatch.queueItemId);
+        else byThread.set(seen, { ...dispatch, queueItemIds: [dispatch.queueItemId] });
+      }
+      for (const dispatch of byThread.values()) {
         const thread = await deps.engineStore.getThread(dispatch.sessionId, dispatch.threadId);
         if (!thread) {
           // A thread a node dispatched onto should still be there. Report
@@ -163,6 +180,18 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
           continue;
         }
         if (thread.key !== key) continue;
+        const items = await Promise.all(
+          dispatch.queueItemIds.map((itemId) => deps.engineStore.getQueueItem(dispatch.sessionId, itemId)),
+        );
+        const open = items.findIndex((item) => item?.status !== "settled");
+        if (open >= 0) {
+          console.debug(
+            `workflow run thread archive: run ${info.runId} settled while submission ` +
+              `${dispatch.queueItemIds[open]} is ${items[open]?.status ?? "no longer recorded"} — ` +
+              `leaving thread ${dispatch.threadId} in the list.`,
+          );
+          continue;
+        }
         await deps.db
           .insert(sessionThreads)
           .values({
@@ -180,17 +209,25 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
 }
 
 /**
- * The session and thread a submission node recorded when it dispatched
+ * The session, thread and submission a node recorded when it dispatched
  * (`@valet/workflow`'s `submission-node.ts` writes them into the node's
  * checkpoint effects). Returns null for every other node.
+ *
+ * The queue item id comes back with the thread because the run and the
+ * submission settle independently: a `wait: { mode: "none" }` node completes
+ * its checkpoint at dispatch, so the thread's own state is the only way to
+ * tell a finished turn from a queued one.
  */
 function submissionDispatch(
   effects: Record<string, unknown> | undefined,
-): { sessionId: string; threadId: string } | null {
+): { sessionId: string; threadId: string; queueItemId: string } | null {
   const sessionId = effects?.sessionId;
   const receipt = effects?.receipt;
   if (typeof sessionId !== "string") return null;
-  if (typeof receipt !== "object" || receipt === null || !("threadId" in receipt)) return null;
+  if (typeof receipt !== "object" || receipt === null) return null;
+  if (!("threadId" in receipt) || !("queueItemId" in receipt)) return null;
   const threadId = receipt.threadId;
-  return typeof threadId === "string" ? { sessionId, threadId } : null;
+  const queueItemId = receipt.queueItemId;
+  if (typeof threadId !== "string" || typeof queueItemId !== "string") return null;
+  return { sessionId, threadId, queueItemId };
 }

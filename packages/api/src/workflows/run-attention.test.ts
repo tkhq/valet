@@ -221,6 +221,9 @@ describe("buildRunThreadArchive", () => {
     const live = await dispatch("run_live");
     await recordDispatch(api, "run_done", done);
     await recordDispatch(api, "run_live", live);
+    // The settled run reported before it stopped: its turn is over, so the
+    // thread has nothing left to show and the archive may take it.
+    await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
 
     await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_done", "wf_archive"));
 
@@ -229,6 +232,30 @@ describe("buildRunThreadArchive", () => {
       expect.objectContaining({ id: done.threadId, sessionId: done.sessionId, archivedAt: 5_000 }),
     ]);
     expect(rows.find((r) => r.id === live.threadId)).toBeUndefined();
+  });
+
+  it("keeps the thread of a run that settled while its assistant turn is unsettled", async () => {
+    // An orchestrator node with `wait: { mode: "none" }` completes its
+    // checkpoint at dispatch, so the run can settle while the prompt is
+    // still queued. Archiving here hides the thread before it carries the
+    // report the person is waiting for.
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    await seedRun(api, "run_open", "wf_archive");
+    const open = await deps.promptOrchestrator("report", {
+      dispatchId: "workflow:run_open:node1", queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    await recordDispatch(api, "run_open", open);
+    const item = await engineStore.getQueueItem(open.sessionId, open.queueItemId);
+    expect(item?.status).not.toBe("settled");
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_open", "wf_archive"));
+
+    expect(await db.select().from(sessionThreads)).toEqual([]);
   });
 
   it("leaves the origin thread of an attended run in the sidebar", async () => {
