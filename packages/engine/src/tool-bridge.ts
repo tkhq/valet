@@ -5,7 +5,8 @@ import { attrTruncate, withSpan } from "./tracing.js";
 import { recordToolExecution } from "./metrics.js";
 import { redactCanonicalValue } from "./authorization/redaction.js";
 import { BuiltinAuthorizationError } from "./errors.js";
-import { projectBuiltinArguments } from "./authorization/builtin-tools.js";
+import { isDecisionGateExpired } from "./decision-gate.js";
+import { builtinApprovalDisplay, builtinIntentDigest, projectBuiltinArguments } from "./authorization/builtin-tools.js";
 
 /**
  * Adapt one engine ToolDef to a pi-agent-core AgentTool, capturing the engine
@@ -91,63 +92,75 @@ async function executeAuthorizedBuiltin<TParams extends import("typebox").TSchem
   if (!resolver) return def.execute(params, ctx);
   if (!def.authorization || !ctx.queueItemId || !ctx.owner) return { text: "[builtin_authorization_missing] This tool is unavailable because its canonical authorization metadata or invocation identity is incomplete. Ask an administrator to correct the tool registration.", ok: false };
   let input: BuiltinPolicyResolveInput = { descriptor: def.authorization, args: params as Record<string, unknown>, userId: ctx.userId, orgId: ctx.orgId, sessionId: ctx.sessionId, threadId: ctx.threadId, owner: ctx.owner, queueItemId: ctx.queueItemId, toolCallId, gateOrdinal: ctx.suspendedDecision?.ordinal ?? 0 };
+  const fallback = (reason: string): PolicyDecision => ({ mode: "deny", provenance: { baseMode: "deny", source: "resolver_error" }, canonical: { reasonCode: reason, obligations: [], redactions: [], requestId: "unavailable", requestSubjectDigest: "0".repeat(64), inputDigest: "0".repeat(64), policyDigest: "0".repeat(64), sourceBundleDigest: "0".repeat(64), evaluatorKind: "local_valet", engineDigest: "0".repeat(64), decisionDigest: "0".repeat(64) } });
   let decision: PolicyDecision;
-  try { decision = await resolver.resolve(input); } catch { return denied("fail_closed.service_error"); }
-  if (decision.mode === "deny") { emitBuiltinInvocation(resolver, input, decision, "denied"); return denied(decision.canonical?.reasonCode ?? "policy_denied"); }
+  try { decision = await resolver.resolve(input); } catch { decision = fallback("fail_closed.service_error"); await emitBuiltinInvocation(resolver, input, decision, "denied", undefined, decision.canonical?.reasonCode); return denied(decision.canonical!.reasonCode); }
+  if (decision.mode === "deny") { await emitBuiltinInvocation(resolver, input, decision, "denied"); return denied(decision.canonical?.reasonCode ?? "policy_denied"); }
   if (decision.mode === "require_approval") {
-    if (def.authorization.actionId === "builtin.ask_approval") throw new BuiltinAuthorizationError("recursive_approval");
+    if (def.authorization.actionId === "builtin.ask_approval") { await emitBuiltinInvocation(resolver, input, decision, "rejected", undefined, "recursive_approval"); throw new BuiltinAuthorizationError("recursive_approval"); }
     const canonical = decision.canonical;
-    if (!canonical?.approvalRequirement) return denied("fail_closed.invalid_approval");
-    const resolution = await ctx.requestDecision({ type: "approval", title: `Approve ${def.name}?`, body: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.`, resumeKey: `builtin:${canonical.requestSubjectDigest}:${canonical.decisionDigest}`, context: { authorization: { actionId: def.authorization.actionId, ...canonical } } });
-    if (resolution.actionId !== "approve") return { text: `denied: user did not approve ${def.name}. This denial is final for the current turn. Do not retry automatically.`, ok: false };
-    try { await resolver.onResolution?.(input, decision, resolution); } catch { return denied("fail_closed.approval_persistence"); }
+    if (!canonical?.approvalRequirement) { await emitBuiltinInvocation(resolver, input, decision, "denied", undefined, "fail_closed.invalid_approval"); return denied("fail_closed.invalid_approval"); }
+    const intent = builtinIntentDigest({ descriptor: def.authorization, arguments: params, organizationId: ctx.orgId, actorId: ctx.userId, owner: ctx.owner, sessionId: ctx.sessionId, threadId: ctx.threadId });
+    const display = builtinApprovalDisplay(def.name, params);
+    let resolution: import("./types.js").DecisionResolution;
+    try {
+      resolution = await ctx.requestDecision({ type: "approval", title: `Approve ${def.name}?`, body: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.`, resumeKey: `builtin:${intent}`, dedupeKey: `builtin:${intent}`, context: { tool_id: def.authorization.actionId, service: "builtin", riskLevel: def.authorization.riskLevel, args: display, summary: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.` } });
+    } catch (error) {
+      if (!isDecisionGateExpired(error)) throw error;
+      input = { ...input, gateOrdinal: error.ordinal ?? input.gateOrdinal };
+      await emitBuiltinInvocation(resolver, input, decision, "error", undefined, "approval_expired");
+      return { text: `approval request expired for ${def.name}. Do not retry automatically in this turn.`, ok: false };
+    }
     input = { ...input, gateOrdinal: resolution.gateOrdinal ?? input.gateOrdinal };
-    try { decision = await resolver.resolve(input); } catch { return denied("fail_closed.service_error"); }
-    if (decision.mode !== "allow") return denied(decision.canonical?.reasonCode ?? "approval_re_evaluation_denied");
+    if (resolution.actionId !== "approve") { await emitBuiltinInvocation(resolver, input, decision, "rejected"); return { text: `denied: user did not approve ${def.name}. This denial is final for the current turn. Do not retry automatically.`, ok: false }; }
+    try { await resolver.onResolution?.(input, decision, resolution); } catch { await emitBuiltinInvocation(resolver, input, decision, "error", undefined, "approval_persistence_failed"); return denied("fail_closed.approval_persistence"); }
+    try { decision = await resolver.resolve(input); } catch { decision = fallback("fail_closed.service_error"); await emitBuiltinInvocation(resolver, input, decision, "denied"); return denied(decision.canonical!.reasonCode); }
+    if (decision.mode !== "allow") { await emitBuiltinInvocation(resolver, input, decision, "denied"); return denied(decision.canonical?.reasonCode ?? "approval_re_evaluation_denied"); }
   }
-  enforceBuiltinObligations(decision, input, resolver);
+  try { enforceBuiltinObligations(decision, input, resolver); } catch { await emitBuiltinInvocation(resolver, input, decision, "denied", undefined, "obligation_failed"); return denied("fail_closed.obligation"); }
   let attemptId: string | undefined;
-  if (resolver.reserveExecution) {
-    const reservation = await resolver.reserveExecution(input, decision);
-    if (reservation.kind === "completed") { emitBuiltinInvocation(resolver, input, decision, "completed", reservation.result); return reservation.result; }
-    if (reservation.kind === "failed") { emitBuiltinInvocation(resolver, input, decision, "error", reservation.result, reservation.error); return reservation.result ?? { text: reservation.error, ok: false }; }
-    if (reservation.kind === "indeterminate") return { text: reservation.error, ok: false };
-    attemptId = reservation.attemptId;
-  }
+  try {
+    if (resolver.reserveExecution) {
+      const reservation = await resolver.reserveExecution(input, decision);
+      if (reservation.kind === "completed") { await emitBuiltinInvocation(resolver, input, decision, "completed", reservation.result); return reservation.result; }
+      if (reservation.kind === "failed") { await emitBuiltinInvocation(resolver, input, decision, "error", reservation.result, reservation.error); return reservation.result ?? { text: reservation.error, ok: false }; }
+      if (reservation.kind === "indeterminate") { await emitBuiltinInvocation(resolver, input, decision, "error", undefined, reservation.error); return { text: reservation.error, ok: false }; }
+      attemptId = reservation.attemptId;
+    }
+  } catch { await emitBuiltinInvocation(resolver, input, decision, "error", undefined, "execution_reservation_failed"); return denied("fail_closed.audit_reservation"); }
   let raw: ToolResult;
   try { raw = await def.execute(params, ctx); }
   catch {
-    if (attemptId && resolver.completeExecution) {
-      try { const settlement = await resolver.completeExecution(input, decision, attemptId, { outcome: "failed", error: "Tool execution failed." }); return { text: settlement.outcome === "failed" ? settlement.error : INDETERMINATE_BUILTIN, ok: false }; }
-      catch { return { text: INDETERMINATE_BUILTIN, ok: false }; }
-    }
-    return { text: "Tool execution failed.", ok: false };
+    const error = "Tool execution failed.";
+    if (attemptId && resolver.completeExecution) { try { await resolver.completeExecution(input, decision, attemptId, { outcome: "failed", error }); } catch { return { text: INDETERMINATE_BUILTIN, ok: false }; } }
+    await emitBuiltinInvocation(resolver, input, decision, "error", undefined, error);
+    return { text: error, ok: false };
   }
-  const live = redactCanonicalValue(raw, decision.canonical?.redactions.filter((item) => item.target === "user_output") ?? []);
-  if (attemptId && resolver.completeExecution) {
-    const stored = redactCanonicalValue(raw, decision.canonical?.redactions.filter((item) => item.target === "audit") ?? []);
-    try {
-      const settlement = await resolver.completeExecution(input, decision, attemptId, { outcome: "completed", result: stored });
-      if (settlement.outcome === "failed" && settlement.error.startsWith("indeterminate_execution:")) return { text: settlement.error, ok: false };
-    } catch { return { text: INDETERMINATE_BUILTIN, ok: false }; }
+  try {
+    const userResult = redactCanonicalValue(raw, decision.canonical?.redactions.filter((item) => item.target === "user_output") ?? []);
+    const auditResult = redactCanonicalValue(raw, decision.canonical?.redactions.filter((item) => item.target === "audit") ?? []);
+    const handledFailure = raw.ok === false;
+    if (attemptId && resolver.completeExecution) await resolver.completeExecution(input, decision, attemptId, handledFailure ? { outcome: "failed", error: "Tool returned a handled failure.", result: auditResult } : { outcome: "completed", result: auditResult });
+    await emitBuiltinInvocation(resolver, input, decision, handledFailure ? "error" : "completed", { text: "", code: "completed_output_unavailable", ok: !handledFailure }, handledFailure ? "Tool returned a handled failure." : undefined);
+    return userResult;
+  } catch {
+    if (attemptId && resolver.completeExecution) { try { await resolver.completeExecution(input, decision, attemptId, { outcome: "failed", error: "Post-execution policy processing failed." }); } catch { return { text: INDETERMINATE_BUILTIN, ok: false }; } }
+    return { text: INDETERMINATE_BUILTIN, ok: false };
   }
-  emitBuiltinInvocation(resolver, input, decision, "completed", { text: "", code: "completed_output_unavailable", ok: false });
-  return live;
 }
 
-function emitBuiltinInvocation(resolver: NonNullable<ToolContext["builtinPolicyResolver"]>, input: BuiltinPolicyResolveInput, decision: PolicyDecision, status: "completed" | "denied" | "error", result?: ToolResult, error?: string): void {
+async function emitBuiltinInvocation(resolver: NonNullable<ToolContext["builtinPolicyResolver"]>, input: BuiltinPolicyResolveInput, decision: PolicyDecision, status: "completed" | "denied" | "rejected" | "error", result?: ToolResult, error?: string): Promise<void> {
   if (!resolver.onInvocation) return;
-  const record = { toolId: input.descriptor.actionId, service: "builtin", actionId: input.descriptor.actionId, riskLevel: input.descriptor.riskLevel, sessionId: input.sessionId, threadId: input.threadId, userId: input.userId, orgId: input.orgId, appliesIn: "session" as const, status, resolvedMode: decision.mode, provenance: decision.provenance, resumeKey: `${input.queueItemId}:${input.toolCallId}`, queueItemId: input.queueItemId, gateOrdinal: input.gateOrdinal, params: projectBuiltinArguments(input.args, input.descriptor.projection.pointers), ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
-  try { void Promise.resolve(resolver.onInvocation(record)).catch(() => {}); } catch { /* Replay repairs a synchronous audit failure. */ }
+  const resumeKey = builtinIntentDigest({ descriptor: input.descriptor, arguments: input.args, organizationId: input.orgId, actorId: input.userId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId });
+  await resolver.onInvocation({ toolId: input.descriptor.actionId, service: "builtin", actionId: input.descriptor.actionId, riskLevel: input.descriptor.riskLevel, sessionId: input.sessionId, threadId: input.threadId, userId: input.userId, orgId: input.orgId, appliesIn: "session", status, resolvedMode: decision.mode, provenance: decision.provenance, resumeKey, queueItemId: input.queueItemId, gateOrdinal: input.gateOrdinal, params: projectBuiltinArguments(input.args, input.descriptor.projection.pointers), ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) });
 }
 
 function denied(reason: string): ToolResult { return { text: `denied by canonical built-in policy (${reason}). Do not retry automatically.`, ok: false }; }
 function enforceBuiltinObligations(decision: PolicyDecision, input: BuiltinPolicyResolveInput, resolver: NonNullable<ToolContext["builtinPolicyResolver"]>): void {
   for (const obligation of decision.canonical?.obligations ?? []) {
     if (obligation.type === "target_idempotency" && (!input.queueItemId || !resolver.reserveExecution || !resolver.completeExecution)) throw new Error("Canonical built-in idempotency obligation failed.");
-    else if (obligation.type === "sandbox_capabilities") {
-      if (obligation.capabilities.some((capability) => capability !== input.descriptor.capability)) throw new Error("Canonical built-in capability obligation failed.");
-    } else throw new Error("Canonical built-in obligation is unsupported.");
+    else if (obligation.type === "sandbox_capabilities") { if (obligation.capabilities.some((capability) => capability !== input.descriptor.capability)) throw new Error("Canonical built-in capability obligation failed."); }
+    else throw new Error("Canonical built-in obligation is unsupported.");
   }
 }
 function toAgentToolResult(result: ToolResult, toolName: string): AgentToolResult<unknown> {

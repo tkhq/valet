@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policySourceBundles, runtimeGrants, teams, workflowRuns } from "../schema/index.js";
+import { actionInvocations, actionPolicies, actionPolicyOverrides, orgs, policyActiveBundles, policyAuthoringDocuments, policyAuthoringReviews, policyAuthoringRevisions, policySourceBundles, runtimeGrants, teams, workflowRuns } from "../schema/index.js";
 import { CanonicalPolicyBundleManager, CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, ensureCanonicalPolicyReadiness, migrateCanonicalPolicyReleaseSet, sameConcurrentReleaseTarget } from "./canonical-policy-manager.js";
 import { deleteOverrideByTarget, listMyOverrides, listPolicies, revokePolicy, updatePolicy, upsertOverride } from "../policies/admin.js";
 import { PostgresSourceBundleStorage } from "./bundles/postgres-storage.js";
 import { currentPolicyCompatibilityReports } from "./policy-compatibility.js";
+import { normalizePolicyDraft } from "./builder/model.js";
+import { projectActionDraftToCurrentSnapshot } from "./builder/current-action-projection.js";
+import { buildCurrentPolicySource } from "./bundles/current-policy-source.js";
 
 let pg: TestPgDb | undefined;
 afterEach(async () => { await pg?.cleanup(); pg = undefined; });
@@ -239,19 +242,20 @@ describe("canonical policy readiness", () => {
     try {
       await ensureCanonicalPolicyReadiness(manager);
       await db.insert(actionPolicies).values({ id: "authored", orgId: "org-b", principalType: "org", principalId: "org-b", actionId: "gmail.send", mode: "deny", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
-      const authored = await manager.buildCurrent("org-b");
+      const normalized = normalizePolicyDraft({ schemaVersion: 1, draftId: "published", rules: [{ ruleId: "authored", context: "tool.action", authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": "gmail.send" }, matcherGroups: [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }], effect: "deny", appliesIn: "any", obligations: [], description: "", metadata: {} }] });
+      const authoredBuilt = buildCurrentPolicySource(projectActionDraftToCurrentSnapshot(normalized, "org-b"));
+      const authored = { built: authoredBuilt, identity: await manager.runtime.run<import("./bundles/types.js").ValidatedBundleIdentity>({ operation: "validate_bundle", bundle: authoredBuilt.bundle }) };
       await db.delete(actionPolicies).where(eq(actionPolicies.id, "authored"));
       await manager.activateCandidate("org-b", authored.identity, authored.built.bundle, { actorId: "admin", operation: "policy_authoring_publish", idempotencyKey: "authored" });
-
-      await Promise.race([
-        migrateCanonicalPolicyReleaseSet(manager, "current-release"),
-        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("production release wrapper exceeded 10 seconds")), 10_000)),
-      ]);
+      await db.insert(policyAuthoringDocuments).values({ id: "published", orgId: "org-b", scopeKey: "org", status: "approved_for_publication", revision: 1, stateVersion: 3, reviewCycle: 1, normalizedIdentity: normalized.normalizedIdentity, sourceBundleDigest: authored.identity.sourceBundleDigest, policyDigest: authored.identity.policyDigest, engineDigest: authored.identity.engineDigest, validationSummary: { valid: true, publishable: true, issues: [] }, createdBy: "author", createdAt: 2, updatedAt: 3 });
+      await db.insert(policyAuthoringRevisions).values({ orgId: "org-b", scopeKey: "org", documentId: "published", revision: 1, draft: normalized, normalizedIdentity: normalized.normalizedIdentity, bundle: authored.built.bundle, sourceBundleDigest: authored.identity.sourceBundleDigest, policyDigest: authored.identity.policyDigest, engineDigest: authored.identity.engineDigest, validationSummary: { valid: true, publishable: true, issues: [] }, createdBy: "author", createdAt: 2 });
+      await db.insert(policyAuthoringReviews).values({ id: "review", orgId: "org-b", scopeKey: "org", documentId: "published", revision: 1, reviewCycle: 1, normalizedIdentity: normalized.normalizedIdentity, sourceBundleDigest: authored.identity.sourceBundleDigest, policyDigest: authored.identity.policyDigest, engineDigest: authored.identity.engineDigest, reviewerId: "reviewer", verdict: "approve", requestId: "request", createdAt: 3 });
+      await Promise.race([migrateCanonicalPolicyReleaseSet(manager, "current-release"), new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("production release wrapper exceeded 10 seconds")), 10_000))]);
       const audits = await db.select().from(actionInvocations).where(eq(actionInvocations.actionId, "release_set_migration"));
-      expect(audits.sort((a, b) => (a.orgId ?? "").localeCompare(b.orgId ?? ""))).toMatchObject([
-        { orgId: "org-a", params: { source: "structured" } },
-        { orgId: "org-b", params: { source: "authored" } },
-      ]);
+      expect(audits).toHaveLength(2);
+      const active = await manager.host.loadActive("org-b");
+      const policy = active.bundle.files.find((file) => file.path.endsWith("policy.rego"));
+      expect(policy && Buffer.from(policy.contentBase64, "base64").toString("utf8")).toContain("builtin.ask_approval");
     } finally { await manager.close(); }
   }, 120_000);
 

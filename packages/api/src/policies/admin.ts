@@ -66,7 +66,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   const kind = eq(actionPolicyOverrides.authorizationKind, target.authorizationKind ?? "tool.action");
   if (target.service !== undefined) {
     return and(
-      kind
+      kind,
       eq(actionPolicyOverrides.service, target.service),
       isNull(actionPolicyOverrides.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -74,7 +74,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.actionId !== undefined) {
     return and(
-      kind
+      kind,
       isNull(actionPolicyOverrides.service),
       eq(actionPolicyOverrides.actionId, target.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -82,7 +82,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.riskLevel !== undefined) {
     return and(
-      kind
+      kind,
       isNull(actionPolicyOverrides.service),
       isNull(actionPolicyOverrides.actionId),
       eq(actionPolicyOverrides.riskLevel, target.riskLevel),
@@ -123,7 +123,6 @@ export async function createPolicy(db: AppQueryable, scope: PolicyScope, input: 
   const row = {
     id: randomUUID(),
     orgId: scope.orgId,
-    authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
     principalType: scope.type,
     principalId: scope.id,
     authorizationKind: input.authorizationKind ?? "tool.action",
@@ -243,7 +242,6 @@ export async function upsertOverride(
     .values({
       id: randomUUID(),
       orgId,
-      authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
       userId,
       authorizationKind: input.authorizationKind ?? "tool.action",
       service: input.service ?? null,

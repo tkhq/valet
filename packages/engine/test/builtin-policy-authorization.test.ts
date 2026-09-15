@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
-import { adaptInteractiveBuiltin, BUILTIN_TOOL_NAMES, BuiltinAuthorizationError, builtinAuthorization, builtinTools, projectBuiltinArguments, type BuiltinPolicyResolver, type ToolContext, type ToolDef } from "../src/index.js";
+import { adaptInteractiveBuiltin, BUILTIN_TOOL_NAMES, BuiltinAuthorizationError, builtinApprovalDisplay, builtinAuthorization, builtinIntentDigest, builtinTools, projectBuiltinArguments, type BuiltinPolicyResolver, type ToolContext, type ToolDef } from "../src/index.js";
 import { toAgentTool } from "../src/tool-bridge.js";
 import { pluginCatalogTools } from "../src/plugin-catalog.js";
 
@@ -10,6 +10,20 @@ function context(resolver: BuiltinPolicyResolver): ToolContext {
 function resolver(mode: "allow" | "deny"): BuiltinPolicyResolver { return { resolve: vi.fn(async () => ({ mode, provenance: { baseMode: mode, source: "canonical_service" } })) }; }
 
 describe("canonical built-in authorization", () => {
+  it("keeps intent identity stable across transient call IDs", () => {
+    const descriptor = builtinAuthorization("bash");
+    const value = { descriptor, arguments: { command: "CANARY", timeout: 5 }, organizationId: "org", actorId: "actor", owner: { type: "user" as const, id: "owner" }, sessionId: "session", threadId: "thread" };
+    expect(builtinIntentDigest(value)).toBe(builtinIntentDigest(value));
+    expect(builtinIntentDigest(value)).not.toBe(builtinIntentDigest({ ...value, arguments: { command: "CANARY", timeout: 6 } }));
+  });
+  it("keeps omitted content only in bounded human display", () => {
+    const canary = "DISPLAY_CANARY_" + "x".repeat(1_000);
+    const display = builtinApprovalDisplay("bash", { command: canary, timeout: 5 });
+    expect(JSON.stringify(display)).toContain("DISPLAY_CANARY_");
+    expect(JSON.stringify(display).length).toBeLessThan(600);
+    expect(JSON.stringify(projectBuiltinArguments({ command: canary, timeout: 5 }, builtinAuthorization("bash").projection.pointers))).not.toContain("DISPLAY_CANARY_");
+  });
+
   it("keeps the built-in registry exhaustive", () => {
     expect(builtinTools.map((tool) => tool.name).sort()).toEqual(["ask_approval", "bash", "child_read", "child_send", "child_status", "edit", "list_threads", "read", "switch_model", "task", "thread_read", "write"]);
     expect(builtinTools.every((tool) => tool.authorization?.actionId === `builtin.${tool.name}`)).toBe(true);
@@ -89,7 +103,8 @@ describe("canonical built-in authorization", () => {
     const execute = vi.fn(async () => ({ text: "ran" }));
     const decision = { mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "canonical_service" as const }, canonical: { reasonCode: "allow", obligations: [{ type: "unsupported" } as never], redactions: [] } };
     const def: ToolDef = { name: "probe", description: "probe", parameters: Type.Object({}), authorization: { ...builtinAuthorization("read"), actionId: "builtin.probe" }, execute };
-    await expect(toAgentTool(def, () => context({ resolve: vi.fn(async () => decision) })).execute("call", {}, new AbortController().signal, vi.fn())).rejects.toThrow("unsupported");
+    const result = await toAgentTool(def, () => context({ resolve: vi.fn(async () => decision) })).execute("call", {}, new AbortController().signal, vi.fn());
+    expect(JSON.stringify(result)).toContain("fail_closed.obligation");
     expect(execute).not.toHaveBeenCalled();
   });
   it("does not call a denied implementation", async () => {

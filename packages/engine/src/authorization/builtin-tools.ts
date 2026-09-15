@@ -70,7 +70,7 @@ export function adaptInteractiveBuiltin(input: InteractiveBuiltinAdapterInputV1)
   if (input.schemaVersion !== 1 || !input.organizationId || !input.actor.id || !input.requestId || !input.sessionId || !input.threadId || !input.queueItemId || !input.toolCallId || !Number.isSafeInteger(input.gateOrdinal) || input.gateOrdinal < 0) throw new TypeError("Canonical built-in adapter rejected incomplete identity.");
   if (input.approvalBindingContext && (!/^[a-f0-9]{64}$/.test(input.approvalBindingContext.requestSubjectDigest) || !/^[a-f0-9]{64}$/.test(input.approvalBindingContext.originalDecisionDigest))) throw new TypeError("Canonical built-in adapter rejected invalid approval binding.");
   const parameters = projectBuiltinArguments(input.arguments, input.descriptor.projection.pointers);
-  const invocationId = authorizationSha256Hex(canonicalAuthorizationJson({ queueItemId: input.queueItemId, toolCallId: input.toolCallId, gateOrdinal: input.gateOrdinal }));
+  const invocationId = builtinIntentDigest({ descriptor: input.descriptor, arguments: input.arguments, organizationId: input.organizationId, actorId: input.actor.id, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId });
   const subject = interactiveAuthorizationSubject({ orgId: input.organizationId, principal: input.owner, actorUserId: input.actor.id, sessionId: input.sessionId, threadId: input.threadId, queueItemId: invocationId, resumeKey: input.descriptor.actionId, gateOrdinal: input.gateOrdinal });
   const partial = { schemaVersion: 1 as const, requestId: input.requestId, kind: "tool.builtin" as const, subject, action: { id: input.descriptor.actionId, service: "builtin", riskLevel: input.descriptor.riskLevel, parameters }, context: { schemaVersion: 1, evaluationTimeMs: input.evaluationTimeMs, capability: input.descriptor.capability, projectionVersion: input.descriptor.projection.schemaVersion, ...(input.approvalBindingContext ?? {}) }, facts: input.facts ?? {} };
   return Object.freeze({ ...partial, idempotencyKey: authorizationIdentity(partial).idempotencyKey });
@@ -91,4 +91,33 @@ export function projectBuiltinArguments(value: unknown, pointers: readonly strin
   }
   if (new TextEncoder().encode(canonicalAuthorizationJson(output)).length > 16_384) throw new TypeError("Built-in safe projection exceeds 16 KiB.");
   return output;
+}
+
+/** Stable identity for one policy-visible built-in intent. */
+export function builtinIntentDigest(input: { readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly organizationId: string; readonly actorId: string; readonly owner: AuthorizationPrincipal; readonly sessionId: string; readonly threadId: string }): string {
+  return authorizationSha256Hex(canonicalAuthorizationJson({ kind: "tool.builtin", organizationId: input.organizationId, actorId: input.actorId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId, actionId: input.descriptor.actionId, capability: input.descriptor.capability, riskLevel: input.descriptor.riskLevel, parameters: projectBuiltinArguments(input.arguments, input.descriptor.projection.pointers) }));
+}
+
+const DISPLAY_VALUE_CAP = 480;
+function displayText(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const points = [...value.replace(/[\r\n\t]+/g, " ")];
+  return points.length > DISPLAY_VALUE_CAP ? points.slice(0, DISPLAY_VALUE_CAP - 1).join("") + "…" : points.join("");
+}
+
+/** Human-only bounded context. Callers may store this only on a decision gate. */
+export function builtinApprovalDisplay(name: string, value: unknown): Record<string, JsonValue> {
+  const args = trustedJsonClone(value);
+  if (!args || typeof args !== "object" || Array.isArray(args)) return {};
+  const row = args as Record<string, unknown>, out: Record<string, JsonValue> = {};
+  const add = (label: string, candidate: unknown) => { const text = displayText(candidate); if (text !== undefined) out[label] = text; };
+  if (name === "bash") { add("command", row.command); add("cwd", row.cwd); }
+  else if (name === "write") { add("path", row.path); add("content preview", row.content); }
+  else if (name === "edit") { add("path", row.path); add("operation preview", row.oldString); add("content preview", row.newString); }
+  else if (name === "task") { for (const key of ["repo", "branch", "model", "profile"] as const) add(key, row[key]); add("prompt", row.prompt); if (row.resources && typeof row.resources === "object" && !Array.isArray(row.resources)) out.resources = trustedJsonClone(row.resources) as JsonValue; }
+  else if (name === "switch_model") add("model", row.model);
+  else if (name === "call_tool") { add("tool", row.tool_id); add("summary", row.summary); }
+  else if (name === "list_tools") add("service", row.service);
+  else { for (const key of ["path", "repo", "branch", "model", "child_session_id"] as const) add(key, row[key]); }
+  return out;
 }

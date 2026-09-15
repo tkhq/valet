@@ -1355,6 +1355,8 @@ export interface DecisionGate {
   createdAt: number;
   updatedAt: number;
   provenance?: DecisionGateProvenance;
+  /** Bounded human-only built-in approval fields. */
+  humanContext?: Record<string, string>;
 }
 
 export interface DecisionResolution {

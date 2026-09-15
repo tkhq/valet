@@ -188,7 +188,7 @@ describe("busEventToWire", () => {
           createdAt: 100,
           updatedAt: 100,
           // engine-only fields the wire drops
-          context: { foo: "bar" },
+          context: { service: "builtin", args: { command: "echo DISPLAY_CANARY", cwd: "/workspace" } },
           origin: { channelType: "web" },
         },
       }),
@@ -199,6 +199,7 @@ describe("busEventToWire", () => {
     expect(wire.gate.id).toBe("g1");
     expect(wire.gate.actions).toHaveLength(2);
     expect(wire.gate.title).toBe("Run rm -rf?");
+    expect(wire.gate.humanContext).toEqual({ command: "echo DISPLAY_CANARY", cwd: "/workspace" });
     // engine-only fields are not in the wire shape
     const wireKeys = Object.keys(wire.gate);
     expect(wireKeys).not.toContain("context");

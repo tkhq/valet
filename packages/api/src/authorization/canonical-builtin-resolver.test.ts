@@ -81,11 +81,13 @@ describe("canonicalBuiltinPolicyResolver", () => {
       const gated = await resolver.resolve(request);
       expect(gated.mode).toBe("require_approval");
       await resolver.onResolution!(request, gated, { actionId: "approve", resolvedBy: "approver-1", resolvedAt: 25, gateOrdinal: 0 });
-      const allowed = await resolver.resolve(request);
+      const allowed = await resolver.resolve({ ...request, toolCallId: "call-after-restart" });
       expect(allowed.mode).toBe("allow");
+      expect((await resolver.resolve({ ...request, toolCallId: "call-retry" })).canonical?.decisionId).toBe(allowed.canonical?.decisionId);
+      expect((await resolver.resolve({ ...request, args: { command: "changed", timeout: 6 }, toolCallId: "call-changed" })).mode).toBe("require_approval");
       const reservations = await Promise.all([
-        resolver.reserveExecution!(request, allowed),
-        resolver.reserveExecution!(request, allowed),
+        resolver.reserveExecution!({ ...request, toolCallId: "new-a" }, allowed),
+        resolver.reserveExecution!({ ...request, toolCallId: "new-b" }, allowed),
       ]);
       expect(reservations.filter((item) => item.kind === "execute")).toHaveLength(1);
       expect(reservations.filter((item) => item.kind === "indeterminate")).toHaveLength(1);
