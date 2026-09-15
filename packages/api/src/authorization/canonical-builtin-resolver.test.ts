@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { builtinAuthorization, type BuiltinPolicyResolveInput } from "@valet/engine";
-import { authorizationDecisions, authorizationExecutionAttempts, orgs } from "../schema/index.js";
+import { actionInvocations, authorizationDecisions, authorizationExecutionAttempts, orgs } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { CanonicalAuthorizationService } from "./canonical-authorization-service.js";
 import { canonicalBuiltinPolicyResolver } from "./canonical-builtin-resolver.js";
@@ -69,6 +69,19 @@ describe("canonicalBuiltinPolicyResolver", () => {
     } finally { await manager.close(); }
   }, 120_000);
 
+  it("keeps audit rows immutable across deliveries and turns", async () => {
+    pg = await freshTestPgDb();
+    const resolver = canonicalBuiltinPolicyResolver({ db: pg.appDb, service: {} as CanonicalAuthorizationService, clock: () => 30 });
+    const record = (queueItemId: string, toolCallId: string, status: "rejected" | "completed") => ({ toolId: "builtin.bash", service: "builtin", actionId: "builtin.bash", riskLevel: "high" as const, sessionId: "session-1", threadId: "thread-1", userId: "user-1", orgId: "org-1", appliesIn: "session" as const, status, resolvedMode: "require_approval" as const, provenance: { baseMode: "require_approval" as const, source: "canonical_service" as const }, resumeKey: `builtin:delivery:${toolCallId}`, queueItemId, gateOrdinal: 0, params: { timeout: 5 } });
+    await resolver.onInvocation!(record("queue-1", "call-1", "rejected"));
+    await resolver.onInvocation!(record("queue-1", "call-1", "completed"));
+    await resolver.onInvocation!(record("queue-2", "call-2", "completed"));
+    const rows = await pg.appDb.select().from(actionInvocations);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.status).sort()).toEqual(["completed", "completed"]);
+    expect(JSON.stringify(rows)).not.toContain("AUDIT_CANARY");
+  });
+
   it("persists one-shot approval and arbitrates concurrent dispatch", async () => {
     pg = await freshTestPgDb();
     await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
@@ -81,13 +94,14 @@ describe("canonicalBuiltinPolicyResolver", () => {
       const gated = await resolver.resolve(request);
       expect(gated.mode).toBe("require_approval");
       await resolver.onResolution!(request, gated, { actionId: "approve", resolvedBy: "approver-1", resolvedAt: 25, gateOrdinal: 0 });
-      const allowed = await resolver.resolve({ ...request, toolCallId: "call-after-restart" });
+      const allowed = await resolver.resolve(request);
       expect(allowed.mode).toBe("allow");
-      expect((await resolver.resolve({ ...request, toolCallId: "call-retry" })).canonical?.decisionId).toBe(allowed.canonical?.decisionId);
-      expect((await resolver.resolve({ ...request, args: { command: "changed", timeout: 6 }, toolCallId: "call-changed" })).mode).toBe("require_approval");
+      expect((await resolver.resolve(request)).canonical?.decisionId).toBe(allowed.canonical?.decisionId);
+      expect((await resolver.resolve({ ...request, toolCallId: "call-new-delivery" })).mode).toBe("require_approval");
+      expect((await resolver.resolve({ ...request, args: { command: "changed", timeout: 5 }, toolCallId: "call-changed" })).mode).toBe("require_approval");
       const reservations = await Promise.all([
-        resolver.reserveExecution!({ ...request, toolCallId: "new-a" }, allowed),
-        resolver.reserveExecution!({ ...request, toolCallId: "new-b" }, allowed),
+        resolver.reserveExecution!(request, allowed),
+        resolver.reserveExecution!(request, allowed),
       ]);
       expect(reservations.filter((item) => item.kind === "execute")).toHaveLength(1);
       expect(reservations.filter((item) => item.kind === "indeterminate")).toHaveLength(1);

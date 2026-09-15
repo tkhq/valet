@@ -967,6 +967,8 @@ The safe projection includes only reviewed identifiers and bounded settings. Fil
 
 `ToolDef.exclusiveDispatch` controls sequential dispatch only. Canonical policy approval uses the separate `BuiltinPolicyResolver` port. The tool bridge authorizes before implementation access, re-evaluates after a durable approval fact, reserves immediately before execution, and stores a bounded replay result. Completed delivery does not call the implementation again. A started attempt returns an indeterminate result and cannot retry automatically.
 
+A built-in has three separate identities. The policy-visible intent contains only safe projected arguments. The approval dedupe key adds the queue item and is valid only for that turn. The delivery key adds the stable tool call ID as a suffix to that dedupe key. Decisions, one-shot approvals, execution reservations, and audit rows bind to the delivery key. Therefore, a repeated delivery replays once, but a new call with identical projections receives a new decision and execution attempt. Omitted content never enters these identities.
+
 The standard source bundle contains one explicit built-in default per registered stable tool. Low and medium risks allow. High and critical risks require human approval. An organization or team rule can target an exact built-in action, the `builtin` service, or its risk. Unknown tools, metadata, obligations, redactions, facts, bundles, or evaluator results fail closed. New organizations receive these defaults in their initial transaction. Existing organizations receive them when the canonical release-set migration rebuilds each active snapshot.
 
 The reviewed built-in baseline is:

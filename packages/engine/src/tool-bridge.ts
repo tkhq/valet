@@ -6,7 +6,7 @@ import { recordToolExecution } from "./metrics.js";
 import { redactCanonicalValue } from "./authorization/redaction.js";
 import { BuiltinAuthorizationError } from "./errors.js";
 import { isDecisionGateExpired } from "./decision-gate.js";
-import { builtinApprovalDisplay, builtinIntentDigest, projectBuiltinArguments } from "./authorization/builtin-tools.js";
+import { builtinApprovalDisplay, builtinApprovalDedupeKey, builtinDeliveryKey, projectBuiltinArguments } from "./authorization/builtin-tools.js";
 
 /**
  * Adapt one engine ToolDef to a pi-agent-core AgentTool, capturing the engine
@@ -100,11 +100,13 @@ async function executeAuthorizedBuiltin<TParams extends import("typebox").TSchem
     if (def.authorization.actionId === "builtin.ask_approval") { await emitBuiltinInvocation(resolver, input, decision, "rejected", undefined, "recursive_approval"); throw new BuiltinAuthorizationError("recursive_approval"); }
     const canonical = decision.canonical;
     if (!canonical?.approvalRequirement) { await emitBuiltinInvocation(resolver, input, decision, "denied", undefined, "fail_closed.invalid_approval"); return denied("fail_closed.invalid_approval"); }
-    const intent = builtinIntentDigest({ descriptor: def.authorization, arguments: params, organizationId: ctx.orgId, actorId: ctx.userId, owner: ctx.owner, sessionId: ctx.sessionId, threadId: ctx.threadId });
+    const identity = { descriptor: def.authorization, arguments: params, organizationId: ctx.orgId, actorId: ctx.userId, owner: ctx.owner, sessionId: ctx.sessionId, threadId: ctx.threadId, queueItemId: ctx.queueItemId };
+    const dedupeKey = builtinApprovalDedupeKey(identity);
+    const resumeKey = builtinDeliveryKey({ ...identity, toolCallId });
     const display = builtinApprovalDisplay(def.name, params);
     let resolution: import("./types.js").DecisionResolution;
     try {
-      resolution = await ctx.requestDecision({ type: "approval", title: `Approve ${def.name}?`, body: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.`, resumeKey: `builtin:${intent}`, dedupeKey: `builtin:${intent}`, context: { tool_id: def.authorization.actionId, service: "builtin", riskLevel: def.authorization.riskLevel, args: display, summary: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.` } });
+      resolution = await ctx.requestDecision({ type: "approval", title: `Approve ${def.name}?`, body: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.`, resumeKey, dedupeKey, context: { tool_id: def.authorization.actionId, service: "builtin", riskLevel: def.authorization.riskLevel, args: display, summary: `Canonical policy requires ${canonical.approvalRequirement.tier} approval.` } });
     } catch (error) {
       if (!isDecisionGateExpired(error)) throw error;
       input = { ...input, gateOrdinal: error.ordinal ?? input.gateOrdinal };
@@ -151,7 +153,7 @@ async function executeAuthorizedBuiltin<TParams extends import("typebox").TSchem
 
 async function emitBuiltinInvocation(resolver: NonNullable<ToolContext["builtinPolicyResolver"]>, input: BuiltinPolicyResolveInput, decision: PolicyDecision, status: "completed" | "denied" | "rejected" | "error", result?: ToolResult, error?: string): Promise<void> {
   if (!resolver.onInvocation) return;
-  const resumeKey = builtinIntentDigest({ descriptor: input.descriptor, arguments: input.args, organizationId: input.orgId, actorId: input.userId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId });
+  const resumeKey = builtinDeliveryKey({ descriptor: input.descriptor, arguments: input.args, organizationId: input.orgId, actorId: input.userId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, toolCallId: input.toolCallId });
   await resolver.onInvocation({ toolId: input.descriptor.actionId, service: "builtin", actionId: input.descriptor.actionId, riskLevel: input.descriptor.riskLevel, sessionId: input.sessionId, threadId: input.threadId, userId: input.userId, orgId: input.orgId, appliesIn: "session", status, resolvedMode: decision.mode, provenance: decision.provenance, resumeKey, queueItemId: input.queueItemId, gateOrdinal: input.gateOrdinal, params: projectBuiltinArguments(input.args, input.descriptor.projection.pointers), ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) });
 }
 

@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { adaptInteractiveBuiltin, authorizationIdentity, projectBuiltinArguments, builtinIntentDigest, authorizationSha256Hex, canonicalAuthorizationJson, decisionDigestOf, inputDigestOf, type AuthorizationRequest, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { adaptInteractiveBuiltin, authorizationIdentity, projectBuiltinArguments, builtinDeliveryKey, authorizationSha256Hex, canonicalAuthorizationJson, decisionDigestOf, inputDigestOf, type AuthorizationRequest, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { BuiltinPolicyResolveInput, BuiltinPolicyResolver, DecisionResolution, PolicyDecision, ToolResult } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { authorizationDecisions } from "../schema/index.js";
@@ -17,7 +17,9 @@ const RESULT_CAP = 64_000;
 export function canonicalBuiltinPolicyResolver(opts: { db: AppDb; service: CanonicalAuthorizationService; clock?: () => number }): BuiltinPolicyResolver {
   const now = opts.clock ?? Date.now;
   const requestFor = async (input: BuiltinPolicyResolveInput): Promise<AuthorizationRequest> => {
-    const base = { schemaVersion: 1 as const, organizationId: input.orgId, actor: { type: "user" as const, id: input.userId }, owner: input.owner, requestId: input.queueItemId, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, toolCallId: input.toolCallId, gateOrdinal: input.gateOrdinal, descriptor: input.descriptor, arguments: input.args };
+    const deliveryKey = executionDigest(input);
+    const requestId = authorizationSha256Hex(canonicalAuthorizationJson({ deliveryKey }));
+    const base = { schemaVersion: 1 as const, organizationId: input.orgId, actor: { type: "user" as const, id: input.userId }, owner: input.owner, requestId, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, toolCallId: input.toolCallId, gateOrdinal: input.gateOrdinal, descriptor: input.descriptor, arguments: input.args };
     const emptyFacts = { schemaVersion: 2 as const, organizationId: input.orgId, grants: [], approvalBinding: null, approvals: [] };
     const probe = adaptInteractiveBuiltin({ ...base, evaluationTimeMs: now(), facts: { currentPolicy: emptyFacts } });
     const original = await decisionRow(opts.db, input.orgId, probe.idempotencyKey);
@@ -49,7 +51,7 @@ export function canonicalBuiltinPolicyResolver(opts: { db: AppDb; service: Canon
     },
     async onResolution(input, decision, resolution) {
       if (resolution.actionId !== "approve" || !decision.canonical?.approvalRequirement) throw new Error("Canonical built-in approval was not approved.");
-      const resolutionId = `resolution:builtin:${executionDigest(input)}:${resolution.gateOrdinal ?? input.gateOrdinal}`;
+      const resolutionId = `resolution:builtin:${authorizationSha256Hex(canonicalAuthorizationJson({ deliveryKey: executionDigest(input), gateOrdinal: resolution.gateOrdinal ?? input.gateOrdinal }))}`;
       await persistCanonicalOneShotApproval({ db: opts.db, decision, resolutionId, organizationId: input.orgId, sessionId: input.sessionId, approverId: resolution.resolvedBy, resolvedAtMs: resolution.resolvedAt, executionInputDigest: executionDigest(input) });
     },
     async reserveExecution(input, decision) {
@@ -59,13 +61,13 @@ export function canonicalBuiltinPolicyResolver(opts: { db: AppDb; service: Canon
       return completeCanonicalExecution(opts.db, decision, executionDigest(input), attemptId, settlement, (value) => boundedSettlement(input, value), storedResult, now);
     },
     async onInvocation(record) {
-      const invocationId = `canonical-builtin:${record.resumeKey}`;
+      const invocationId = `canonical-builtin:${authorizationSha256Hex(canonicalAuthorizationJson({ sessionId: record.sessionId, queueItemId: record.queueItemId, resumeKey: record.resumeKey, gateOrdinal: record.gateOrdinal ?? 0 }))}`;
       await persistInvocationAudit(opts.db, { invocationId, service: record.service, actionId: record.actionId, riskLevel: record.riskLevel, resolvedMode: record.resolvedMode, baseMode: record.provenance.baseMode, matchedPolicyId: record.provenance.matchedPolicyId, matchedGrantId: record.provenance.matchedGrantId, matchedOverrideId: record.provenance.matchedOverrideId, status: record.status, sessionId: record.sessionId, userId: record.userId, orgId: record.orgId, params: record.params, result: record.result, error: record.error, durationMs: record.durationMs, startedAt: now(), createdAt: now() }, { strict: true, repair: true });
     },
   };
 }
 
-function executionDigest(input: BuiltinPolicyResolveInput): string { return builtinIntentDigest({ descriptor: input.descriptor, arguments: input.args, organizationId: input.orgId, actorId: input.userId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId }); }
+function executionDigest(input: BuiltinPolicyResolveInput): string { return builtinDeliveryKey({ descriptor: input.descriptor, arguments: input.args, organizationId: input.orgId, actorId: input.userId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, toolCallId: input.toolCallId }); }
 function asDecision(envelope: PolicyDecisionEnvelope, persisted: typeof authorizationDecisions.$inferSelect, executionInputDigest: string, grants: readonly string[]): PolicyDecision {
   const d = envelope.decision, matchedGrantId = d.matchedRuleIds.find((id) => grants.includes(id));
   return { mode: d.effect, provenance: { baseMode: d.effect, source: d.reasonCode === "dynamic_grant" ? "runtime_grant" : d.reasonCode === "risk_default" ? "risk_default" : "canonical_service", ...(matchedGrantId ? { matchedGrantId } : {}) }, canonical: { reasonCode: d.reasonCode, obligations: d.obligations, redactions: d.redactions, ...(d.approvalRequirement ? { approvalRequirement: d.approvalRequirement } : {}), requestId: envelope.requestId, requestSubjectDigest: envelope.requestSubjectDigest, inputDigest: envelope.inputDigest, policyDigest: envelope.policyDigest, sourceBundleDigest: envelope.sourceBundleDigest, evaluatorKind: envelope.evaluator.kind, engineDigest: envelope.evaluator.engineDigest, profileDigest: persisted.evidence?.profileDigest, interpreterDigest: persisted.evidence?.interpreterDigest, contractDigest: persisted.evidence?.contractDigest, decisionDigest: decisionDigestOf(d), executionInputDigest, decisionId: persisted.decisionId } };

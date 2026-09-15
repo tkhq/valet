@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
-import { adaptInteractiveBuiltin, BUILTIN_TOOL_NAMES, BuiltinAuthorizationError, builtinApprovalDisplay, builtinAuthorization, builtinIntentDigest, builtinTools, projectBuiltinArguments, type BuiltinPolicyResolver, type ToolContext, type ToolDef } from "../src/index.js";
+import { adaptInteractiveBuiltin, BUILTIN_TOOL_NAMES, BuiltinAuthorizationError, builtinApprovalDisplay, builtinApprovalDedupeKey, builtinAuthorization, builtinDeliveryKey, builtinIntentDigest, builtinTools, projectBuiltinArguments, type BuiltinPolicyResolver, type ToolContext, type ToolDef } from "../src/index.js";
 import { toAgentTool } from "../src/tool-bridge.js";
 import { pluginCatalogTools } from "../src/plugin-catalog.js";
 
@@ -15,6 +15,15 @@ describe("canonical built-in authorization", () => {
     const value = { descriptor, arguments: { command: "CANARY", timeout: 5 }, organizationId: "org", actorId: "actor", owner: { type: "user" as const, id: "owner" }, sessionId: "session", threadId: "thread" };
     expect(builtinIntentDigest(value)).toBe(builtinIntentDigest(value));
     expect(builtinIntentDigest(value)).not.toBe(builtinIntentDigest({ ...value, arguments: { command: "CANARY", timeout: 6 } }));
+  });
+  it("separates same-turn approval and delivery identities", () => {
+    const descriptor = builtinAuthorization("bash");
+    const base = { descriptor, arguments: { command: "CANARY_A", timeout: 5 }, organizationId: "org", actorId: "actor", owner: { type: "user" as const, id: "owner" }, sessionId: "session", threadId: "thread", queueItemId: "queue" };
+    const equivalent = { ...base, arguments: { command: "CANARY_B", timeout: 5 } };
+    expect(builtinApprovalDedupeKey(base)).toBe(builtinApprovalDedupeKey(equivalent));
+    expect(builtinDeliveryKey({ ...base, toolCallId: "call-a" })).not.toBe(builtinDeliveryKey({ ...equivalent, toolCallId: "call-b" }));
+    expect(builtinApprovalDedupeKey(base)).not.toContain("CANARY_");
+    expect(builtinDeliveryKey({ ...base, toolCallId: "call-a" })).not.toContain("CANARY_");
   });
   it("keeps omitted content only in bounded human display", () => {
     const canary = "DISPLAY_CANARY_" + "x".repeat(1_000);
@@ -61,6 +70,7 @@ describe("canonical built-in authorization", () => {
     const make = (secret: string) => adaptInteractiveBuiltin({ schemaVersion: 1, organizationId: "org-1", actor: { type: "user", id: "user-1" }, owner: { type: "user", id: "user-1" }, requestId: "q", sessionId: "s", threadId: "t", queueItemId: "q", toolCallId: "c", gateOrdinal: 0, descriptor, arguments: { timeout: 2, command: secret, content: secret, prompt: secret, message: secret, body: secret, params: { value: secret } }, evaluationTimeMs: 1 });
     const left = make("CANARY_A"), right = make("CANARY_B");
     expect(left).toEqual(right);
+    expect(adaptInteractiveBuiltin({ schemaVersion: 1, organizationId: "org-1", actor: { type: "user", id: "user-1" }, owner: { type: "user", id: "user-1" }, requestId: "q", sessionId: "s", threadId: "t", queueItemId: "q", toolCallId: "different-call", gateOrdinal: 0, descriptor, arguments: { timeout: 2, command: "CANARY_A" }, evaluationTimeMs: 1 })).not.toEqual(left);
     expect(JSON.stringify(left)).not.toMatch(/CANARY_[AB]/);
   });
   it("fails recursive ask_approval policy closed before opening a gate", async () => {

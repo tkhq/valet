@@ -70,8 +70,8 @@ export function adaptInteractiveBuiltin(input: InteractiveBuiltinAdapterInputV1)
   if (input.schemaVersion !== 1 || !input.organizationId || !input.actor.id || !input.requestId || !input.sessionId || !input.threadId || !input.queueItemId || !input.toolCallId || !Number.isSafeInteger(input.gateOrdinal) || input.gateOrdinal < 0) throw new TypeError("Canonical built-in adapter rejected incomplete identity.");
   if (input.approvalBindingContext && (!/^[a-f0-9]{64}$/.test(input.approvalBindingContext.requestSubjectDigest) || !/^[a-f0-9]{64}$/.test(input.approvalBindingContext.originalDecisionDigest))) throw new TypeError("Canonical built-in adapter rejected invalid approval binding.");
   const parameters = projectBuiltinArguments(input.arguments, input.descriptor.projection.pointers);
-  const invocationId = builtinIntentDigest({ descriptor: input.descriptor, arguments: input.arguments, organizationId: input.organizationId, actorId: input.actor.id, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId });
-  const subject = interactiveAuthorizationSubject({ orgId: input.organizationId, principal: input.owner, actorUserId: input.actor.id, sessionId: input.sessionId, threadId: input.threadId, queueItemId: invocationId, resumeKey: input.descriptor.actionId, gateOrdinal: input.gateOrdinal });
+  const deliveryKey = builtinDeliveryKey({ descriptor: input.descriptor, arguments: input.arguments, organizationId: input.organizationId, actorId: input.actor.id, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, toolCallId: input.toolCallId });
+  const subject = interactiveAuthorizationSubject({ orgId: input.organizationId, principal: input.owner, actorUserId: input.actor.id, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, resumeKey: deliveryKey, gateOrdinal: input.gateOrdinal });
   const partial = { schemaVersion: 1 as const, requestId: input.requestId, kind: "tool.builtin" as const, subject, action: { id: input.descriptor.actionId, service: "builtin", riskLevel: input.descriptor.riskLevel, parameters }, context: { schemaVersion: 1, evaluationTimeMs: input.evaluationTimeMs, capability: input.descriptor.capability, projectionVersion: input.descriptor.projection.schemaVersion, ...(input.approvalBindingContext ?? {}) }, facts: input.facts ?? {} };
   return Object.freeze({ ...partial, idempotencyKey: authorizationIdentity(partial).idempotencyKey });
 }
@@ -93,9 +93,21 @@ export function projectBuiltinArguments(value: unknown, pointers: readonly strin
   return output;
 }
 
-/** Stable identity for one policy-visible built-in intent. */
+/** Stable policy-visible intent. This is not an invocation or execution identity. */
 export function builtinIntentDigest(input: { readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly organizationId: string; readonly actorId: string; readonly owner: AuthorizationPrincipal; readonly sessionId: string; readonly threadId: string }): string {
   return authorizationSha256Hex(canonicalAuthorizationJson({ kind: "tool.builtin", organizationId: input.organizationId, actorId: input.actorId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId, actionId: input.descriptor.actionId, capability: input.descriptor.capability, riskLevel: input.descriptor.riskLevel, parameters: projectBuiltinArguments(input.arguments, input.descriptor.projection.pointers) }));
+}
+
+/** Terminal gate scope for equivalent policy-visible calls in one queue item. */
+export function builtinApprovalDedupeKey(input: { readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly organizationId: string; readonly actorId: string; readonly owner: AuthorizationPrincipal; readonly sessionId: string; readonly threadId: string; readonly queueItemId: string }): string {
+  return `builtin:${authorizationSha256Hex(canonicalAuthorizationJson({ queueItemId: input.queueItemId, intent: builtinIntentDigest(input) }))}`;
+}
+
+/** Exact queued delivery identity. A redelivery keeps its toolCallId; a new call does not. */
+export function builtinDeliveryKey(input: { readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly organizationId: string; readonly actorId: string; readonly owner: AuthorizationPrincipal; readonly sessionId: string; readonly threadId: string; readonly queueItemId: string; readonly toolCallId: string }): string {
+  const dedupeKey = builtinApprovalDedupeKey(input);
+  const suffix = authorizationSha256Hex(canonicalAuthorizationJson({ queueItemId: input.queueItemId, toolCallId: input.toolCallId }));
+  return `${dedupeKey}:${suffix}`;
 }
 
 const DISPLAY_VALUE_CAP = 480;

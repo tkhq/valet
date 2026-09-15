@@ -1115,11 +1115,10 @@ export interface PolicyInvocationRecord {
   durationMs?: number;
   error?: string;
   /**
-   * The deterministic resumeKey `call_tool` derives for this invocation
-   * (`${tool_id}:${stableJson(params)}`) — same value passed as
-   * `DecisionGateRequest.resumeKey` when a gate opens. Always present, even
-   * for `allow`/`deny` dispositions that never open a gate, so an audit sink
-   * can correlate every record for a given (tool, args) pair.
+   * The deterministic delivery key for this invocation. It is the same value
+   * passed as `DecisionGateRequest.resumeKey` when a gate opens. It must
+   * identify one queued delivery, not only a policy-visible intent. Always
+   * present, including allow and deny dispositions that do not open a gate.
    */
   resumeKey: string;
   /**
