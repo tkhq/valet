@@ -146,6 +146,13 @@ describe("TemplateGallery", () => {
 
     expect(screen.getByRole("button", { name: "Use template" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByText(reason)).toBeTruthy();
+    // "What it does" still opens, because the reader deciding whether to ask
+    // an admin needs the steps. The dialog carries the same refusal.
+    fireEvent.click(screen.getByRole("button", { name: "What it does" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText(reason)).toBeTruthy();
+    expect(dialog.getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
+    expect(installMutateAsync).not.toHaveBeenCalled();
   });
 
   it("shows what a template does, what it touches, and when it runs", () => {
