@@ -1150,13 +1150,20 @@ export class ChannelHost {
     }
   }
 
-  /** Loads an authorized workflow gate session without materializing guessed ids. */
-  private async workflowGateSession(
+  /**
+   * Decides whether a user may resolve the gates of a workflow session.
+   *
+   * Reads rows only. It builds no session, so asking the question for one
+   * more recipient on one more transport costs queries and nothing else —
+   * `workflowGateSessionFor` builds the session, and only the path that
+   * actually resolves a gate calls it.
+   */
+  private async authorizeWorkflowGate(
     sessionId: string,
     orgId: string,
     userId: string,
   ): Promise<
-    | { ok: true; session: Session; owner: SessionOwnerLike; orgId: string }
+    | { ok: true; owner: SessionOwnerLike; orgId: string }
     | { ok: false; reason: "workflow_session_malformed" | "workflow_session_missing" | "workflow_session_deleted" | "workflow_session_cross_org" | "unauthorized" }
   > {
     if (!this.deps.workflowStore || !this.deps.actionPluginByService || !sessionId.startsWith("wf:")) {
@@ -1191,17 +1198,29 @@ export class ChannelHost {
       ? await isOrgAdmin(this.deps.db, workflowOrgId, userId)
       : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
     if (!authorized) return { ok: false, reason: "unauthorized" };
-    const session = await ensureWorkflowSession({
+    return { ok: true, owner, orgId: workflowOrgId };
+  }
+
+  /**
+   * Builds the engine session for a workflow gate the caller already
+   * authorized with `authorizeWorkflowGate`. Throws when the workflow
+   * dependencies are absent, which that check refuses first.
+   */
+  private async workflowGateSessionFor(sessionId: string): Promise<Session> {
+    const { workflowStore, actionPluginByService } = this.deps;
+    if (!workflowStore || !actionPluginByService) {
+      throw new Error("workflow gate session requires the workflow store and action plugins");
+    }
+    return ensureWorkflowSession({
       host: this.deps.engineHost,
-      store: this.deps.workflowStore,
+      store: workflowStore,
       db: this.deps.db,
       engineStore: this.deps.engineStore,
-      actionPluginByService: this.deps.actionPluginByService,
+      actionPluginByService,
       plugins: this.deps.plugins,
       credentials: this.deps.engineCredentials,
       onePassword: this.deps.onePassword,
     }, sessionId);
-    return { ok: true, session, owner, orgId: workflowOrgId };
   }
 
   private async handleGateCallback(
@@ -1242,13 +1261,13 @@ export class ChannelHost {
       .where(eq(agentSessions.id, mapped.sessionId))
       .limit(1);
     const sessionRow = rows[0];
-    let workflow: Awaited<ReturnType<ChannelHost["workflowGateSession"]>> | null = null;
+    let workflow: Awaited<ReturnType<ChannelHost["authorizeWorkflowGate"]>> | null = null;
     try {
       workflow = mapped.sessionId.startsWith("wf:") || !sessionRow
-        ? await this.workflowGateSession(mapped.sessionId, orgId, userId)
+        ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId)
         : null;
     } catch (err) {
-      console.error("[channels] workflow gate resolve wake failed", err);
+      console.error("[channels] workflow gate authorization failed", err);
       await transport?.answerCallback?.(
         gateCallback.callbackId,
         "Valet could not process this approval. Open the session in Valet to resolve it.",
@@ -1296,7 +1315,7 @@ export class ChannelHost {
     let session: Session;
     try {
       if (workflow?.ok) {
-        session = workflow.session;
+        session = await this.workflowGateSessionFor(mapped.sessionId);
       } else {
         if (!sessionRow) throw new Error("missing session row for channel gate callback");
         const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
@@ -1374,34 +1393,23 @@ export class ChannelHost {
             // can be broader than the resolver set (org admins for an
             // org-owned session), and a button that always answers "expired"
             // is worse than the plain summary.
-            if (event.gate && event.sessionId) {
-              const rows = await this.deps.db
-                .select()
-                .from(agentSessions)
-                .where(eq(agentSessions.id, event.sessionId))
-                .limit(1);
-              const sessionRow = rows[0];
-              const workflow = sessionRow
-                ? null
-                : await this.workflowGateSession(event.sessionId, this.orgId ?? (await this.deps.resolveOrgId()), userId);
-              if ((sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) || workflow?.ok) {
-                await this.sendAndRecordGatePrompt(
-                  transport,
-                  conversationKey,
-                  {
-                    gateId: event.gate.id,
-                    title: event.title,
-                    body: this.attentionBody(event),
-                    fields: event.gate.fields,
-                    actions: event.gate.actions,
-                  },
-                  event.sessionId,
-                );
-                continue;
-              }
-              // Recipient cannot resolve this gate (or its app row is gone):
-              // fall through to the plain summary with the web link.
+            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId))) {
+              await this.sendAndRecordGatePrompt(
+                transport,
+                conversationKey,
+                {
+                  gateId: event.gate.id,
+                  title: event.title,
+                  body: this.attentionBody(event),
+                  fields: event.gate.fields,
+                  actions: event.gate.actions,
+                },
+                event.sessionId,
+              );
+              continue;
             }
+            // No gate, a recipient who cannot resolve it, or a lookup that
+            // failed: fall through to the plain summary with the web link.
             const sender = event.sessionId
               ? await this.assistantSenderIdentity(event.sessionId)
               : undefined;
@@ -1415,6 +1423,41 @@ export class ChannelHost {
         }
       },
     };
+  }
+
+  /**
+   * May this recipient resolve the gate on `sessionId`, so the attention DM
+   * can carry real buttons?
+   *
+   * Answering costs two or three reads, and any of them can fail. A failed
+   * read costs the buttons, never the message: the caller then sends the
+   * plain summary, which carries the web link. Throwing here instead would
+   * lose the whole notification for a run that is waiting on it.
+   */
+  private async mayResolveGateOverDm(sessionId: string, userId: string): Promise<boolean> {
+    try {
+      const rows = await this.deps.db
+        .select()
+        .from(agentSessions)
+        .where(eq(agentSessions.id, sessionId))
+        .limit(1);
+      const sessionRow = rows[0];
+      if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
+        return true;
+      }
+      // A `wf:` id is authorized by its run, the same way the click path
+      // authorizes it — a workflow session can also own an app row.
+      if (!sessionId.startsWith("wf:")) return false;
+      const workflow = await this.authorizeWorkflowGate(
+        sessionId,
+        this.orgId ?? (await this.deps.resolveOrgId()),
+        userId,
+      );
+      return workflow.ok;
+    } catch (err) {
+      console.error("[channels] gate DM authorization failed", err);
+      return false;
+    }
   }
 
   /** The one composer of the web deep link, shared by every outbound path. */

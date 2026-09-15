@@ -270,6 +270,7 @@ describe("ChannelHost outbound delivery", () => {
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   async function seedWorkflowGate(args: {
@@ -1400,6 +1401,91 @@ describe("ChannelHost outbound delivery", () => {
 
     expect((await engineStore.getDecisionGate(sessionId, "admin-always-allow-gate"))?.status).toBe("resolved");
     expect(fakeTransport.answered.find((answer) => answer.callbackId === "admin-always-allow-callback" && answer.text === undefined)).toBeDefined();
+  });
+
+  it("delivers the plain summary when a workflow gate authorization fails", async () => {
+    const { sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-attention-error",
+      runId: "run-attention-error",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "user", ownerId: USER_ID },
+      gateId: "gate-attention-error",
+    });
+    // The authorization read fails the way a database blip fails it.
+    vi.spyOn(workflowStore, "getRun").mockRejectedValue(new Error("workflow store unavailable"));
+
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      sessionId,
+      title: "Approve workflow action?",
+      body: "the run is waiting",
+      gate: { id: "gate-attention-error", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+    });
+
+    // A failed authorization may cost the buttons. It must not cost the DM.
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Approve workflow action?");
+  });
+
+  it("delivers the plain summary when the session lookup for a gate DM fails", async () => {
+    await testDb.appDb.insert(agentSessions).values({
+      id: "sess-attention-read",
+      userId: USER_ID,
+      orgId: ORG_ID,
+      workspace: "w",
+      ownerType: "user",
+      ownerId: USER_ID,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    // Put the `agent_sessions` table out of reach for the length of the
+    // delivery, the way a database fault puts it out of reach. Every other
+    // read the DM needs keeps working, so the session lookup is the only one
+    // that fails. The table is restored before any other test runs.
+    await testDb.pgdb.query("ALTER TABLE agent_sessions RENAME TO agent_sessions_unreachable");
+    try {
+      await host.attentionDeliverer().deliver(USER_ID, {
+        kind: "approval",
+        owner: { type: "user", id: USER_ID },
+        sessionId: "sess-attention-read",
+        title: "Approve the thing?",
+        body: "the run is waiting",
+        gate: { id: "gate-attention-read", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+      });
+    } finally {
+      await testDb.pgdb.query("ALTER TABLE agent_sessions_unreachable RENAME TO agent_sessions");
+    }
+
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Approve the thing?");
+  });
+
+  it("authorizes a workflow gate DM without building the workflow session", async () => {
+    const { sessionId } = await seedWorkflowGate({
+      workflowId: "workflow-attention-cheap",
+      runId: "run-attention-cheap",
+      workflowOrgId: ORG_ID,
+      owner: { ownerType: "user", ownerId: USER_ID },
+      gateId: "gate-attention-cheap",
+    });
+    // Seeding already built the session. Only a build by the DELIVERER counts.
+    const build = vi.spyOn(engineHost, "workflowSessionFor");
+
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval",
+      owner: { type: "user", id: USER_ID },
+      sessionId,
+      title: "Approve workflow action?",
+      gate: { id: "gate-attention-cheap", actions: [{ id: "approve", label: "Approve", style: "primary" }] },
+    });
+
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    // Asking whether a recipient MAY resolve a gate reads rows. It must not
+    // materialize a session per recipient per transport.
+    expect(build).not.toHaveBeenCalled();
   });
 
   it("gate_callback from a user who may not resolve the session answers 'expired'", async () => {

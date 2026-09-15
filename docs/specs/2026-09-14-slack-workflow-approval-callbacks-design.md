@@ -2,8 +2,13 @@
 
 Workflow session decision gates use the workflow run owner for callback authorization.
 Personal owners and current team members can resolve their gates. Org-owned gates require an org admin.
-The host restores an authorized workflow session through its workflow session builder.
+Authorization reads the run, the workflow definition, and the owner's membership. It builds no session.
+Only a callback that resolves a gate restores the workflow session, through the workflow session builder.
 If restoration fails, the callback receives an actionable error and the gate stays pending.
+
+The attention router sends the same approval to each recipient who may resolve the gate.
+It authorizes a `wf:` session against the run, as the callback path does.
+If that authorization fails, the recipient receives the plain summary with the web link, not silence.
 
 Callbacks validate actions against the persisted pending gate.
 The host serializes callbacks by the server-recorded prompt mapping and resolved gate id.
