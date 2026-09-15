@@ -1062,7 +1062,9 @@ describe("ChannelHost outbound delivery", () => {
     await vi.waitFor(() => {
       expect(fakeTransport.gateEdits).toHaveLength(1);
     });
-    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("Withdrawn");
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain(
+      "Withdrawn: the run was stopped. Start it again in Valet if you still need it.",
+    );
     expect(fakeTransport.gateEdits[0]?.ref).toEqual(ref);
     // Nothing may still map the card to the gate, and no map may keep a row.
     expect(host.gateForRef(ref)).toBeNull();
@@ -1085,7 +1087,9 @@ describe("ChannelHost outbound delivery", () => {
     await vi.waitFor(() => {
       expect(fakeTransport.gateEdits).toHaveLength(1);
     });
-    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("Expired");
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain(
+      "Expired: no one answered in time. Start the run again in Valet.",
+    );
     expect(host.gateForRef(ref)).toBeNull();
     expect(gateMapSizes(host)).toEqual({ refs: 0, prompts: 0, actions: 0 });
   });

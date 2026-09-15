@@ -117,9 +117,12 @@ function gateResolutionLabel(
   return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}${by}`;
 }
 
-/** Outcome lines for the two endings that carry no decision. */
-const GATE_EXPIRED_LABEL = "⏳ Expired — no one answered in time";
-const GATE_WITHDRAWN_LABEL = "🚫 Withdrawn — this approval is no longer needed";
+/** Outcome lines for the two endings that carry no decision. Each one names
+ * the next action: the card is the reader's only sign that the work stopped,
+ * and neither ending leaves a button to press. */
+const GATE_EXPIRED_LABEL = "⏳ Expired: no one answered in time. Start the run again in Valet.";
+const GATE_WITHDRAWN_LABEL =
+  "🚫 Withdrawn: the run was stopped. Start it again in Valet if you still need it.";
 
 const LOCALDEV_SUFFIX = ".localdev";
 
