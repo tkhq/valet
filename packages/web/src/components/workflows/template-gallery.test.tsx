@@ -53,6 +53,7 @@ const memorySweep: WorkflowTemplateSummary = {
   requires: [],
   inputs: [],
   caveats: [],
+  installable: true,
 };
 
 const triageDigest: WorkflowTemplateSummary = {
@@ -68,6 +69,7 @@ const triageDigest: WorkflowTemplateSummary = {
   ],
   inputs: [],
   caveats: [],
+  installable: true,
 };
 
 const batchAction: WorkflowTemplateSummary = {
@@ -87,6 +89,7 @@ const batchAction: WorkflowTemplateSummary = {
     },
   ],
   caveats: ["Runs over at most 100 rows. The report names anything past the cap."],
+  installable: true,
 };
 
 beforeEach(() => {
@@ -127,6 +130,22 @@ describe("TemplateGallery", () => {
     expect(dialog.getByText(reason)).toBeTruthy();
     expect(dialog.getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
     expect(installMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("disables Install and shows the fix when the org cannot run the model", () => {
+    // Every service is connected, so the card has no Connect link to fall
+    // back on. Without the flag the button is live and the install answers
+    // 400 with a remedy the reader never sees.
+    const reason =
+      'Template "nightly-memory-sweep" names a model this organization cannot use. ' +
+      'In Settings > Models, approve and activate "claude-sonnet-4-5", or add a key for the provider that serves it.';
+    templatesQuery.data = {
+      templates: [{ ...memorySweep, installable: false, installBlockedReason: reason }],
+    };
+    render(<TemplateGallery />);
+
+    expect(screen.getByRole("button", { name: "Use template" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(reason)).toBeTruthy();
   });
 
   it("shows what a template does, what it touches, and when it runs", () => {

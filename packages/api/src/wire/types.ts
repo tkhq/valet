@@ -2452,6 +2452,19 @@ export interface WorkflowTemplateSummary {
    * parked run, a batch-size cap. Shown in the install dialog.
    */
   caveats: string[];
+  /**
+   * False when this organization's model policy rejects the template. The
+   * install gate refuses the same template, so a card without this flag
+   * offers an Install button that always fails. The card stays in the
+   * gallery, because the reader may be the person who can clear the block.
+   *
+   * True when the policy accepts the template AND when the listing could
+   * not read the policy at all. A listing that cannot answer must not
+   * withhold a card; the install gate still answers on the install itself.
+   */
+  installable: boolean;
+  /** Why `installable` is false, and what to do about it. */
+  installBlockedReason?: string;
 }
 
 export interface ListWorkflowTemplatesResponse {

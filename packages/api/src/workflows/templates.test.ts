@@ -948,6 +948,36 @@ describe("installWorkflowTemplate", () => {
     expect(list.map((t) => t.id)).toContain("gmail-sweep");
   });
 
+  it("marks a template this organization cannot install, with both remedies", async () => {
+    // The card stays, and it says why the Install button is off. Without
+    // this the button is live and every press answers 400.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    await connect("gmail");
+    const card = (await listWorkflowTemplateSummaries(deps(), OWNER)).find((t) => t.id === "gmail-sweep");
+    expect(card?.installable).toBe(false);
+    const reason = card?.installBlockedReason ?? "";
+    expect(reason).toContain("gmail-sweep");
+    expect(reason).toContain("Settings > Models");
+    expect(reason).toContain("add a key for the provider");
+    // The bundled templates name model ids, never a size tier, so the tier
+    // remedy would send the reader to look for something that is not there.
+    expect(reason).not.toContain("size tier");
+    // The install gate refuses with the same sentence, so the card and the
+    // install can never disagree.
+    const refusal = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    expect(refusal.ok).toBe(false);
+    if (refusal.ok) throw new Error("expected a refusal");
+    expect(refusal.error).toBe(reason);
+  });
+
+  it("marks a template this organization can install", async () => {
+    await connect("gmail");
+    const card = (await listWorkflowTemplateSummaries(deps(), OWNER)).find((t) => t.id === "gmail-sweep");
+    expect(card?.installable).toBe(true);
+    expect(card?.installBlockedReason).toBeUndefined();
+  });
+
   it("refuses a template whose service the caller has not connected", async () => {
     const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
     expect(result.ok).toBe(false);
