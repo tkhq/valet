@@ -45,4 +45,6 @@ Do not merge the original PRs alongside this consolidation. After this replaceme
 
 ## Validation
 
-Final validation results will be recorded before this PR is marked ready. Live Slack interaction requires a staging check. Automated callbacks use a fake transport and the real authorization and gate paths.
+Every fix carries a regression test that failed before the change. The root typecheck, the changelog commit guard, and the conventions and docs-lint gates pass on every commit. The full api, web, engine, and workflow suites pass on the final head.
+
+`make e2e` on the final head: 25 passed, 1 failed, 9 skipped. The failed row was plugins-unit, where a GitHub pull-request pagination test timed out at 5 seconds while the Kubernetes suite ran beside it. This branch changes no file under `packages/plugin-github`, and the row passes alone. The 9 skipped rows need Anthropic, OpenAI, Telegram, GitHub App, 1Password, or Kubernetes credentials. Live Slack interaction requires a staging check. Automated callbacks use a fake transport and the real authorization and gate paths.
