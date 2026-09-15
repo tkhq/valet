@@ -669,6 +669,65 @@ describe("PATCH /api/workflows/:id/model", () => {
   });
 });
 
+describe("model validation on full workflow saves", () => {
+  function definitionWith(model: string): unknown {
+    return {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "draft", type: "llm", model, prompt: "Draft" },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [
+        { from: "trigger", to: "draft" },
+        { from: "draft", to: "stop" },
+      ],
+    };
+  }
+
+  async function save(baseUrl: string, model: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `save-${model}`, definition: definitionWith(model) }),
+    });
+  }
+
+  it("saves a model the org approved and activated", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    expect((await save(api.baseUrl, "anthropic/claude-haiku-4-5")).status).toBe(201);
+  });
+
+  it("rejects a model the org did not approve, as the model-only path does", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+    const res = await save(api.baseUrl, "anthropic/claude-haiku-4-5");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { errors: string[] };
+    expect(body.errors.join(" ")).toContain("Settings > Models");
+  });
+
+  it("rejects a model whose provider the org disabled", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    await createLlmProvider(api.providers.db, {
+      orgId: "local-org",
+      kind: "anthropic",
+      name: "Anthropic",
+      enabled: false,
+    });
+    expect((await save(api.baseUrl, "anthropic/claude-haiku-4-5")).status).toBe(400);
+  });
+
+  it("keeps a bare OpenAI id saveable while OpenAI is active", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    api = await bootTestApi();
+    expect((await save(api.baseUrl, "gpt-6-astra")).status).toBe(201);
+  });
+});
+
 describe("POST /api/workflows/:id/runs", () => {
   it("starts a run against the stub host with an owner + definition snapshot", async () => {
     const stub = new StubRunHost();

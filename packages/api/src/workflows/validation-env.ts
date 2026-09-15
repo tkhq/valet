@@ -7,9 +7,10 @@
 import { bundledModel } from "@valet/engine/model-catalog";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { ValidateEnvironment } from "@valet/workflow";
-import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { buildOrgCatalog, openrouterRegistryIds, type CatalogEntry } from "../services/model-catalog.js";
+import { parseModelId } from "../services/llm-providers.js";
 import type { WorkflowServiceDeps } from "./service.js";
-import { TIER_SET } from "../services/model-tiers.js";
+import { TIER_SET, TIER_TOKENS } from "../services/model-tiers.js";
 
 /**
  * Mirrors `engine-deps.ts`'s `resolveWorkflowModel` matching rules:
@@ -25,10 +26,59 @@ export function isKnownModelSpec(spec: string): boolean {
     const modelId = spec.slice(slash + 1);
     return bundledModel(provider, modelId) != null;
   }
-  for (const provider of ["anthropic", "openai", "google"] as const) {
-    if (bundledModel(provider, spec) != null) return true;
+  return bareIdProvider(spec) !== undefined;
+}
+
+/** The providers `resolveWorkflowModel` probes for a bare id, in its order. */
+const BARE_ID_PROVIDERS = ["anthropic", "openai", "google"] as const;
+
+/**
+ * The provider a bare (namespace-less) id reaches at run time. `llmComplete`
+ * in `engine-deps.ts` probes the bundled catalogs in this order and takes the
+ * first hit, so a bare id belongs to exactly one provider.
+ */
+function bareIdProvider(modelId: string): string | undefined {
+  for (const provider of BARE_ID_PROVIDERS) {
+    if (bundledModel(provider, modelId) != null) return provider;
   }
-  return false;
+  return undefined;
+}
+
+/** What a member must do when the org set rejects their model. */
+const MODEL_NOT_ALLOWED =
+  "Choose a model that this organization approved and activated in Settings > Models, " +
+  "or a size tier (xs, s, m, l, xl) that has an active provider.";
+
+/**
+ * The model ids a definition may name for one organization: every catalog
+ * entry that is active AND approved, in both spellings the engine resolves,
+ * plus the size tiers in `tiers` and the OpenRouter ids in `openrouterIds`
+ * that the catalog's curated list leaves out.
+ *
+ * A bare id gets in under two rules, both of which mirror how the run
+ * resolves it. A bare Anthropic id always resolves, because `parseModelId`
+ * reads a missing namespace as Anthropic. A bare OpenAI or Google id
+ * resolves only through the bundled probe in `engine-deps.ts`, and only
+ * when that probe lands on the same provider — so an id that Anthropic also
+ * bundles never enters under OpenAI or Google.
+ */
+function orgWorkflowModelIds(
+  entries: CatalogEntry[],
+  tiers: Iterable<string>,
+  openrouterIds: Iterable<string>,
+): Set<string> {
+  const ids = new Set<string>(openrouterIds);
+  for (const entry of entries) {
+    if (!entry.active || !entry.approved) continue;
+    ids.add(entry.id);
+    const { namespace, modelId } = parseModelId(entry.id);
+    if (namespace === "anthropic") ids.add(modelId);
+    else if (namespace === "openai" || namespace === "google") {
+      if (bareIdProvider(modelId) === namespace) ids.add(modelId);
+    }
+  }
+  for (const tier of tiers) ids.add(tier);
+  return ids;
 }
 
 /** Narrows a TypeBox schema (a plain object at runtime) without a cast. */
@@ -41,7 +91,17 @@ export function buildValidateEnvironment(
   orgModelIds?: ReadonlySet<string>,
 ): ValidateEnvironment {
   return {
-    isKnownModel: (spec) => orgModelIds?.has(spec) === true || isKnownModelSpec(spec),
+    // An org set REPLACES the bundled list. Accepting either one let a full
+    // save keep a model the org disabled or never approved, which the
+    // model-only update path rejects and the run then fails on.
+    isKnownModel: (spec) => {
+      if (!orgModelIds) return isKnownModelSpec(spec);
+      // Tiers are case-insensitive at run time (`resolveModelSpec`), so a
+      // definition that carries `L` must stay valid.
+      const normalized = spec.trim().toLowerCase();
+      const wanted = TIER_SET.has(normalized) ? normalized : spec;
+      return orgModelIds.has(wanted) ? true : MODEL_NOT_ALLOWED;
+    },
     isKnownAction: actionPluginByService
       ? (service, action) => {
           const entry = actionPluginByService.get(service);
@@ -76,11 +136,26 @@ export function buildValidateEnvironment(
   };
 }
 
-/** Include active org models while retaining validation of legacy bundled IDs. */
+/** What building the org environment reads. Narrower than
+ * `WorkflowServiceDeps` so a caller that holds no run host or store — the
+ * template service — can build the same environment. */
+export type OrgValidateDeps = Pick<WorkflowServiceDeps, "db" | "credentials" | "actionPluginByService">;
+
+/**
+ * The validator environment for one organization. Every definition that is
+ * saved whole validates against this, so a full save accepts exactly the
+ * models the model-only update path accepts.
+ */
 export async function buildOrgValidateEnvironment(
-  deps: WorkflowServiceDeps,
+  deps: OrgValidateDeps,
   orgId: string,
 ): Promise<ValidateEnvironment> {
-  const catalog = await buildOrgCatalog(deps.db, deps.credentials, orgId);
-  return buildValidateEnvironment(deps.actionPluginByService, catalogValidIds(catalog));
+  const [catalog, openrouterIds] = await Promise.all([
+    buildOrgCatalog(deps.db, deps.credentials, orgId),
+    openrouterRegistryIds(deps.db, deps.credentials, orgId),
+  ]);
+  return buildValidateEnvironment(
+    deps.actionPluginByService,
+    orgWorkflowModelIds(catalog, TIER_TOKENS, openrouterIds),
+  );
 }

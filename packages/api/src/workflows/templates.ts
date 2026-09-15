@@ -62,7 +62,7 @@ import {
   withNextStep,
   type TeamServiceReadiness,
 } from "./team-service-readiness.js";
-import { buildValidateEnvironment } from "./validation-env.js";
+import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
 import { toolNodesOf, workflowCallsOf } from "./tool-nodes.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
@@ -472,11 +472,19 @@ export interface SummarizeResult {
 /**
  * Summarizes one template, or reports why it cannot be offered.
  *
- * The definition goes through `validateDefinitionInput` with the SAME
- * environment `POST /api/workflows` uses, so a template that names an
- * unknown model, an unknown action, or a wrong node-reference path is
- * caught here — at list time, with the validator's own message — instead
- * of on the first run.
+ * The definition goes through `validateDefinitionInput` with the ORG-LESS
+ * environment, so a template that names an unknown model, an unknown
+ * action, or a wrong node-reference path is caught here — at list time,
+ * with the validator's own message — instead of on the first run. A
+ * failure here means the SHIPPED template is broken, which is why the
+ * gallery logs it and the install route answers 500.
+ *
+ * The org's own model policy is deliberately not applied here. It belongs
+ * to the org, not to the template, and applying it would empty the gallery
+ * for an organization whose approved list omits the bundled models, under a
+ * log line that calls every shipped template invalid. `installWorkflowTemplate`
+ * applies it instead, on the baked definition, so an install can never
+ * write a workflow the organization could not have saved itself.
  */
 export function summarizeTemplate(
   owned: OwnedTemplate,
@@ -1066,6 +1074,24 @@ export async function installWorkflowTemplate(
       code: "invalid_input",
       error: "The supplied values produced a workflow that cannot run. Check the values and install again.",
       errors: revalidated.errors,
+    };
+  }
+
+  // The organization's own model policy, on the SAME environment
+  // `POST /api/workflows` validates against. An install writes the row
+  // directly, so without this gate an organization whose approved list or
+  // provider settings exclude a template's model installs a workflow it can
+  // never save again — the editor refuses the first edit and says nothing
+  // about how the workflow got there.
+  const orgChecked = validateDefinitionInput(definition, await buildOrgValidateEnvironment(deps, owner.orgId));
+  if (!orgChecked.ok) {
+    return {
+      ok: false,
+      code: "invalid_input",
+      error:
+        `Template "${templateId}" names a model this organization cannot use. ` +
+        "Approve and activate the model in Settings > Models, or point the size tier at a provider with a key, then install again.",
+      errors: orgChecked.errors,
     };
   }
 
