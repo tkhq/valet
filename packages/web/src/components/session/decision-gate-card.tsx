@@ -128,6 +128,14 @@ export function DecisionGateCard({
         </div>
       )}
 
+      {humanGateFields(gate).length > 0 && (
+        <dl className="px-3.5 pb-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs" data-testid="gate-human-context">
+          {humanGateFields(gate).map(([label, value]) => (
+            <div key={label} className="contents"><dt className="font-medium text-muted">{label}</dt><dd className="break-all whitespace-pre-wrap">{value}</dd></div>
+          ))}
+        </dl>
+      )}
+
       {gate.type === "question" ? (
         <div className="px-3.5 pb-3 flex items-end gap-2">
           <Textarea
@@ -244,3 +252,7 @@ const TONE_FOR_TYPE: Record<
     label: "text-violet-800 dark:text-violet-300",
   },
 };
+
+function humanGateFields(gate: DecisionGate): [string, string][] {
+  return Object.entries(gate.humanContext ?? {});
+}

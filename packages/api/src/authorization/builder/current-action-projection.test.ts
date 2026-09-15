@@ -73,7 +73,7 @@ describe("browser draft to current source contract", () => {
   it("maps losslessly, validates the bundle, and evaluates through LocalValetEvaluator", async () => {
     const normalized = normalizePolicyDraft(draft);
     const snapshot = projectActionDraftToCurrentSnapshot(normalized, "org-1");
-    expect(snapshot.organizationPolicies[0]).toEqual({ id: "rule-1", organizationId: "org-1", actionId: "gmail.send_email", mode: "deny", paramMatchers: [{ path: "to", op: "eq", value: "a@example.com" }], createdAtMs: 1, updatedAtMs: 1, principalType: "org", principalId: "org-1", appliesIn: "any", expiresAtMs: null, revokedAtMs: null, sourceTable: "action_policies", sourcePath: "builder/draft-1/rule-1" });
+    expect(snapshot.organizationPolicies[0]).toEqual({ id: "rule-1", organizationId: "org-1", authorizationKind: "tool.action", actionId: "gmail.send_email", mode: "deny", paramMatchers: [{ path: "to", op: "eq", value: "a@example.com" }], createdAtMs: 1, updatedAtMs: 1, principalType: "org", principalId: "org-1", appliesIn: "any", expiresAtMs: null, revokedAtMs: null, sourceTable: "action_policies", sourcePath: "builder/draft-1/rule-1" });
     const built = buildCurrentPolicySource(snapshot);
     const provenance = JSON.parse(Buffer.from(built.bundle.files.find((file) => file.path.startsWith("provenance/"))!.contentBase64, "base64").toString("utf8"));
     expect(provenance.entries.find((entry: { rule_id: string }) => entry.rule_id === "rule-1")).toMatchObject({
@@ -95,12 +95,19 @@ describe("browser draft to current source contract", () => {
   it.each(["workflow.action", "approval", "description", "obligations", "subjects"] as const)("rejects lossy %s projection", field => {
     const patch: Partial<PolicyRuleDraftV1> = field === "workflow.action" ? { context: field } : field === "approval" ? { approval: { tier: "human", replay: "once" } } : field === "description" ? { description: "lost" } : field === "obligations" ? { obligations: [{ type: "redact" }] } : { subjects: ["user"] };
     const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], ...patch }] };
-    expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action/i);
+    expect(() => projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1")).toThrow(/preserve|approval|reject|tool.action|action and built-in/i);
   });
 
   it.each(PROJECTABLE_TARGETS)("projects every browser-valid target %j", target => {
     const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], target }] }, snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
     expect(() => buildCurrentPolicySource(snapshot)).not.toThrow(); expect(snapshot.organizationPolicies).toHaveLength(1);
+  });
+
+  it.each<Readonly<Record<string, JsonValue>>>([{ "action.id": "builtin.bash" }, { "action.service": "builtin" }, { "action.riskLevel": "high" }] as const)("round-trips built-in kind and target %j", (target) => {
+    const rule = { ...draft.rules[0], context: "tool.builtin" as const, target, matcherGroups: [] };
+    const snapshot = projectActionDraftToCurrentSnapshot(normalizePolicyDraft({ ...draft, rules: [rule] }), "org-1");
+    expect(snapshot.organizationPolicies[0]).toMatchObject({ authorizationKind: "tool.builtin" });
+    expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
   });
 
   it("projects a bare approval mode without custom approval fields", () => {

@@ -29,7 +29,7 @@ function snapshot(overrides: Partial<CurrentPolicySourceSnapshotV1> = {}): Curre
 }
 
 function orgRule(index: number, overrides: Partial<CurrentPolicySourceSnapshotV1["organizationPolicies"][number]> = {}): CurrentPolicySourceSnapshotV1["organizationPolicies"][number] {
-  return { id: `org-${index}`, organizationId: ORG, principalType: "org", principalId: ORG, actionId: "gmail.send_email", mode: "allow",
+  return { id: `org-${index}`, organizationId: ORG, authorizationKind: "tool.action", principalType: "org", principalId: ORG, actionId: "gmail.send_email", mode: "allow",
     paramMatchers: [{ path: "selector", op: "eq", value: `value-${index}` }], appliesIn: "any", expiresAtMs: null, revokedAtMs: null,
     createdAtMs: 1, updatedAtMs: index + 1, sourceTable: "action_policies", sourcePath: `org/${index}`, ...overrides };
 }
@@ -37,7 +37,7 @@ function teamRule(index: number): CurrentPolicySourceSnapshotV1["teamPolicies"][
   return { ...orgRule(index), id: `team-${index}`, principalType: "team", principalId: "team-1", sourcePath: `team/${index}` };
 }
 function overrideRule(index: number): CurrentPolicySourceSnapshotV1["personalOverrides"][number] {
-  return { id: `override-${index}`, organizationId: ORG, userId: "user-1", actionId: "gmail.send_email", mode: "allow",
+  return { id: `override-${index}`, organizationId: ORG, authorizationKind: "tool.action", userId: "user-1", actionId: "gmail.send_email", mode: "allow",
     paramMatchers: [{ path: "selector", op: "eq", value: `value-${index}` }], createdAtMs: 1, updatedAtMs: index + 1,
     sourceTable: "action_policy_overrides", sourcePath: `override/${index}` };
 }

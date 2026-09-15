@@ -1,0 +1,155 @@
+import type { RiskLevel } from "../types.js";
+import { authorizationIdentity, authorizationSha256Hex, canonicalAuthorizationJson, interactiveAuthorizationSubject } from "./identity.js";
+import { trustedJsonClone } from "./trusted-json.js";
+import type { AuthorizationPrincipal, AuthorizationRequest, JsonObject, JsonValue } from "./types.js";
+
+export type BuiltinCapability = "file.read" | "file.write" | "process.execute" | "approval.request" | "thread.read" | "thread.write" | "child.manage" | "model.switch" | "integration.wrapper" | "memory.read" | "memory.write" | "skill.read" | "security.read" | "security.write";
+
+export interface BuiltinAuthorizationDescriptorV1 {
+  readonly schemaVersion: 1;
+  readonly actionId: `builtin.${string}`;
+  readonly capability: BuiltinCapability;
+  readonly riskLevel: RiskLevel;
+  readonly projection: { readonly schemaVersion: 1; readonly pointers: readonly string[] };
+  readonly obligations: readonly ("target_idempotency" | "sandbox_capabilities")[];
+  readonly redactions: readonly ("audit" | "user_output")[];
+  readonly audit: { readonly result: "bounded"; readonly replay: "at_most_once" };
+  /** Content-bearing outputs are never persisted and cannot be replayed. */
+  readonly replay: { readonly result: "output_unavailable" };
+}
+
+type RegistryRow = Omit<BuiltinAuthorizationDescriptorV1, "schemaVersion" | "actionId" | "projection" | "obligations" | "redactions" | "audit" | "replay"> & { pointers?: readonly string[] };
+const rows: Record<string, RegistryRow> = {
+  read: { capability: "file.read", riskLevel: "low", pointers: ["/path"] },
+  write: { capability: "file.write", riskLevel: "medium", pointers: ["/path"] },
+  edit: { capability: "file.write", riskLevel: "medium", pointers: ["/path"] },
+  bash: { capability: "process.execute", riskLevel: "high", pointers: ["/timeout"] },
+  thread_read: { capability: "thread.read", riskLevel: "low", pointers: ["/key", "/limit", "/includeCompacted"] },
+  list_threads: { capability: "thread.read", riskLevel: "low" },
+  switch_model: { capability: "model.switch", riskLevel: "medium", pointers: ["/model"] },
+  ask_approval: { capability: "approval.request", riskLevel: "low" },
+  task: { capability: "child.manage", riskLevel: "high", pointers: ["/repo", "/branch", "/model", "/resources/cpu", "/resources/memory", "/profile", "/docker"] },
+  child_read: { capability: "thread.read", riskLevel: "low", pointers: ["/child_session_id", "/limit"] },
+  child_send: { capability: "thread.write", riskLevel: "medium", pointers: ["/child_session_id", "/interrupt"] },
+  child_status: { capability: "thread.read", riskLevel: "low", pointers: ["/child_session_id"] },
+  list_tools: { capability: "integration.wrapper", riskLevel: "low", pointers: ["/service", "/limit"] },
+  call_tool: { capability: "integration.wrapper", riskLevel: "low", pointers: ["/tool_id", "/summary"] },
+  skill: { capability: "skill.read", riskLevel: "low", pointers: ["/name"] },
+  mem_write: { capability: "memory.write", riskLevel: "medium", pointers: ["/path"] }, mem_patch: { capability: "memory.write", riskLevel: "medium", pointers: ["/path"] },
+  mem_read: { capability: "memory.read", riskLevel: "low", pointers: ["/path"] }, mem_search: { capability: "memory.read", riskLevel: "low" },
+  mem_move: { capability: "memory.write", riskLevel: "medium", pointers: ["/from", "/to"] }, mem_copy_to_team: { capability: "memory.write", riskLevel: "high", pointers: ["/path", "/teamId"] }, mem_copy_from_team: { capability: "memory.write", riskLevel: "high", pointers: ["/path", "/teamId"] }, artifact_copy_to_team: { capability: "memory.write", riskLevel: "high" },
+  mem_links: { capability: "memory.read", riskLevel: "low", pointers: ["/path"] }, mem_share: { capability: "memory.write", riskLevel: "high", pointers: ["/path"] }, artifact_publish: { capability: "memory.write", riskLevel: "high" }, mem_rm: { capability: "memory.write", riskLevel: "high", pointers: ["/path"] },
+};
+for (const name of ["sec_status", "sec_wait", "sec_fs_read", "sec_fs_list", "sec_protocol_read", "sec_findings_list"] as const) rows[name] = { capability: "security.read", riskLevel: "low" };
+for (const name of ["sec_plan_set", "sec_dispatch", "sec_cell_complete", "sec_cell_fail", "sec_handoff", "sec_fs_write", "sec_finding_report", "sec_finding_review", "sec_coverage_report", "sec_report_write", "sec_need_report"] as const) rows[name] = { capability: "security.write", riskLevel: "medium" };
+for (const name of ["sec_start", "sec_close"] as const) rows[name] = { capability: "security.write", riskLevel: "high" };
+
+export const BUILTIN_TOOL_NAMES = Object.freeze(Object.keys(rows).sort());
+
+export function builtinAuthorizationFor(name: string): BuiltinAuthorizationDescriptorV1 | undefined { return rows[name] ? builtinAuthorization(name) : undefined; }
+
+export function builtinAuthorization(name: string, overrides?: Partial<Pick<BuiltinAuthorizationDescriptorV1, "actionId" | "riskLevel">>): BuiltinAuthorizationDescriptorV1 {
+  const row = rows[name];
+  if (!row) throw new TypeError(`Built-in tool ${JSON.stringify(name)} has no canonical authorization metadata. Register it before exposing the tool.`);
+  return Object.freeze({ schemaVersion: 1, actionId: overrides?.actionId ?? `builtin.${name}`, capability: row.capability, riskLevel: overrides?.riskLevel ?? row.riskLevel, projection: Object.freeze({ schemaVersion: 1, pointers: Object.freeze([...(row.pointers ?? [])]) }), obligations: Object.freeze(["target_idempotency", "sandbox_capabilities"] as const), redactions: Object.freeze(["audit", "user_output"] as const), audit: Object.freeze({ result: "bounded", replay: "at_most_once" }), replay: Object.freeze({ result: "output_unavailable" }) });
+}
+
+export function registerBuiltinAlias(name: string, descriptor: BuiltinAuthorizationDescriptorV1): void {
+  if (rows[name]) throw new TypeError(`Built-in tool ${JSON.stringify(name)} is already registered.`);
+  rows[name] = { capability: descriptor.capability, riskLevel: descriptor.riskLevel, pointers: descriptor.projection.pointers };
+}
+
+export interface InteractiveBuiltinAdapterInputV1 {
+  readonly schemaVersion: 1; readonly organizationId: string; readonly actor: { readonly type: "user"; readonly id: string }; readonly owner: AuthorizationPrincipal;
+  readonly requestId: string; readonly sessionId: string; readonly threadId: string; readonly queueItemId: string; readonly toolCallId: string; readonly gateOrdinal: number;
+  readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly evaluationTimeMs: number; readonly facts?: JsonObject;
+  readonly approvalBindingContext?: { readonly requestSubjectDigest: string; readonly originalDecisionDigest: string };
+}
+
+export function adaptInteractiveBuiltin(input: InteractiveBuiltinAdapterInputV1): AuthorizationRequest {
+  if (input.schemaVersion !== 1 || !input.organizationId || !input.actor.id || !input.requestId || !input.sessionId || !input.threadId || !input.queueItemId || !input.toolCallId || !Number.isSafeInteger(input.gateOrdinal) || input.gateOrdinal < 0) throw new TypeError("Canonical built-in adapter rejected incomplete identity.");
+  if (input.approvalBindingContext && (!/^[a-f0-9]{64}$/.test(input.approvalBindingContext.requestSubjectDigest) || !/^[a-f0-9]{64}$/.test(input.approvalBindingContext.originalDecisionDigest))) throw new TypeError("Canonical built-in adapter rejected invalid approval binding.");
+  const parameters = projectBuiltinArguments(input.arguments, input.descriptor.projection.pointers);
+  const deliveryKey = builtinDeliveryKey({ descriptor: input.descriptor, arguments: input.arguments, organizationId: input.organizationId, actorId: input.actor.id, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, toolCallId: input.toolCallId });
+  const subject = interactiveAuthorizationSubject({ orgId: input.organizationId, principal: input.owner, actorUserId: input.actor.id, sessionId: input.sessionId, threadId: input.threadId, queueItemId: input.queueItemId, resumeKey: deliveryKey, gateOrdinal: input.gateOrdinal });
+  const partial = { schemaVersion: 1 as const, requestId: input.requestId, kind: "tool.builtin" as const, subject, action: { id: input.descriptor.actionId, service: "builtin", riskLevel: input.descriptor.riskLevel, parameters }, context: { schemaVersion: 1, evaluationTimeMs: input.evaluationTimeMs, capability: input.descriptor.capability, projectionVersion: input.descriptor.projection.schemaVersion, ...(input.approvalBindingContext ?? {}) }, facts: input.facts ?? {} };
+  return Object.freeze({ ...partial, idempotencyKey: authorizationIdentity(partial).idempotencyKey });
+}
+
+export function projectBuiltinArguments(value: unknown, pointers: readonly string[]): JsonObject {
+  const source = trustedJsonClone(value);
+  if (!source || typeof source !== "object" || Array.isArray(source)) throw new TypeError("Built-in tool arguments must be an object.");
+  const output: Record<string, JsonValue> = Object.create(null);
+  for (const pointer of pointers) {
+    const parts = pointer.slice(1).split("/");
+    if (!pointer.startsWith("/") || parts.some((part) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) throw new TypeError("Built-in projection contains an invalid pointer.");
+    let current: unknown = source;
+    for (const part of parts) { if (!current || typeof current !== "object" || Array.isArray(current) || !Object.hasOwn(current, part)) { current = undefined; break; } current = (current as Record<string, unknown>)[part]; }
+    if (current === undefined) continue;
+    let target: Record<string, JsonValue> = output;
+    for (const [index, part] of parts.entries()) { if (index === parts.length - 1) target[part] = trustedJsonClone(current) as JsonValue; else { const next = target[part]; if (!next || typeof next !== "object" || Array.isArray(next)) target[part] = {}; target = target[part] as Record<string, JsonValue>; } }
+  }
+  if (new TextEncoder().encode(canonicalAuthorizationJson(output)).length > 16_384) throw new TypeError("Built-in safe projection exceeds 16 KiB.");
+  return output;
+}
+
+/** Stable policy-visible intent. This is not an invocation or execution identity. */
+export function builtinIntentDigest(input: { readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly organizationId: string; readonly actorId: string; readonly owner: AuthorizationPrincipal; readonly sessionId: string; readonly threadId: string }): string {
+  return authorizationSha256Hex(canonicalAuthorizationJson({ kind: "tool.builtin", organizationId: input.organizationId, actorId: input.actorId, owner: input.owner, sessionId: input.sessionId, threadId: input.threadId, actionId: input.descriptor.actionId, capability: input.descriptor.capability, riskLevel: input.descriptor.riskLevel, parameters: projectBuiltinArguments(input.arguments, input.descriptor.projection.pointers) }));
+}
+
+/** Terminal gate scope for equivalent policy-visible calls in one queue item. */
+export function builtinApprovalDedupeKey(input: { readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly organizationId: string; readonly actorId: string; readonly owner: AuthorizationPrincipal; readonly sessionId: string; readonly threadId: string; readonly queueItemId: string }): string {
+  return `builtin:${authorizationSha256Hex(canonicalAuthorizationJson({ queueItemId: input.queueItemId, intent: builtinIntentDigest(input) }))}`;
+}
+
+/** Exact queued delivery identity. A redelivery keeps its toolCallId; a new call does not. */
+export function builtinDeliveryKey(input: { readonly descriptor: BuiltinAuthorizationDescriptorV1; readonly arguments: unknown; readonly organizationId: string; readonly actorId: string; readonly owner: AuthorizationPrincipal; readonly sessionId: string; readonly threadId: string; readonly queueItemId: string; readonly toolCallId: string }): string {
+  const dedupeKey = builtinApprovalDedupeKey(input);
+  const suffix = authorizationSha256Hex(canonicalAuthorizationJson({ queueItemId: input.queueItemId, toolCallId: input.toolCallId }));
+  return `${dedupeKey}:${suffix}`;
+}
+
+const DISPLAY_VALUE_BYTES = 480;
+const displayEncoder = new TextEncoder();
+function displayText(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const text = value.replace(/[\r\n\t]+/g, " ");
+  if (displayEncoder.encode(text).byteLength <= DISPLAY_VALUE_BYTES) return text;
+  const marker = "… [truncated]";
+  let output = "";
+  for (const point of text) {
+    if (displayEncoder.encode(output + point + marker).byteLength > DISPLAY_VALUE_BYTES) break;
+    output += point;
+  }
+  return output + marker;
+}
+
+/** Human-only bounded context. Callers may store this only on a decision gate. */
+export function builtinApprovalDisplay(name: string, value: unknown): Record<string, JsonValue> {
+  const args = trustedJsonClone(value);
+  if (!args || typeof args !== "object" || Array.isArray(args)) return {};
+  const row = args as Record<string, unknown>, out: Record<string, JsonValue> = {};
+  const add = (label: string, candidate: unknown) => { const text = displayText(candidate); if (text !== undefined) out[label] = text; };
+  if (name === "bash") { add("command", row.command); add("cwd", row.cwd); }
+  else if (name === "write") { add("path", row.path); add("content preview", row.content); }
+  else if (name === "edit") { add("path", row.path); add("operation preview", row.oldString); add("content preview", row.newString); }
+  else if (name === "task") {
+    // Allowlist display fields. Do not clone resources: it may contain arbitrary
+    // caller data that would otherwise enter suspended-turn persistence.
+    for (const key of ["repo", "branch", "model", "profile"] as const) add(key, row[key]);
+    add("prompt", row.prompt);
+    if (typeof row.docker === "boolean") out.docker = row.docker;
+    const resources = row.resources;
+    if (resources && typeof resources === "object" && !Array.isArray(resources)) {
+      const reviewed = resources as Record<string, unknown>;
+      if (typeof reviewed.cpu === "number" && Number.isFinite(reviewed.cpu)) out.cpu = reviewed.cpu;
+      add("memory", reviewed.memory);
+    }
+  }
+  else if (name === "switch_model") add("model", row.model);
+  else if (name === "call_tool") { add("tool", row.tool_id); add("summary", row.summary); }
+  else if (name === "list_tools") add("service", row.service);
+  else { for (const key of ["path", "repo", "branch", "model", "child_session_id"] as const) add(key, row[key]); }
+  return out;
+}

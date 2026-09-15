@@ -73,6 +73,14 @@ describe("DecisionGateCard — action rendering", () => {
   });
 });
 
+describe("DecisionGateCard — human approval context", () => {
+  it("renders bounded built-in fields from the wire payload", () => {
+    renderCard(gate({ humanContext: { command: "echo DISPLAY_CANARY", cwd: "/workspace" } }));
+    expect(screen.getByTestId("gate-human-context").textContent).toContain("DISPLAY_CANARY");
+    expect(screen.getByTestId("gate-human-context").textContent).toContain("/workspace");
+  });
+});
+
 describe("DecisionGateCard — policy provenance", () => {
   it("renders the why-gated line when the gate carries provenance", () => {
     renderCard(gate({ provenance: { baseMode: "require_approval", source: "org_policy", matchedPolicyId: "apol_1" } }));

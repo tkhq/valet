@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
+import { builtinAuthorizationFor } from "../authorization/builtin-tools.js";
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired } from "../decision-gate.js";
 import type {
@@ -163,7 +164,7 @@ async function pollJobToCompletion(
  * `args` in `execute` is typed precisely instead of `unknown`.
  */
 export function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return def;
+  return { ...def, authorization: def.authorization ?? builtinAuthorizationFor(def.name) };
 }
 
 /**

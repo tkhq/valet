@@ -124,7 +124,7 @@ export function assertEnvelope(untrustedRequest: AuthorizationRequest, untrusted
 
 function validateActionRequest(request: AuthorizationRequest): void {
   exact(request, ["schemaVersion", "requestId", "idempotencyKey", "kind", "subject", "action", "context", "facts", "resource", "approval"]);
-  if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || !ID.test(request.requestId) || (request.kind !== "tool.action" && request.kind !== "workflow.action") || !record(request.context) || !record(request.facts)) fail("invalid_decision");
+  if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || !ID.test(request.requestId) || (request.kind !== "tool.action" && request.kind !== "workflow.action" && request.kind !== "tool.builtin") || !record(request.context) || !record(request.facts)) fail("invalid_decision");
   if (!record(request.subject)) fail("invalid_decision"); exact(request.subject, ["orgId", "principal", "invocation", "actorUserId", "sessionId", "threadId", "workflowExecutionId", "workflowNodeId", "parentSessionId"]);
   if (typeof request.subject.orgId !== "string" || !ID.test(request.subject.orgId) || !record(request.subject.principal) || !record(request.subject.invocation)) fail("invalid_decision");
   exact(request.subject.principal, ["type", "id"]); exact(request.subject.invocation, ["type", "id"]);

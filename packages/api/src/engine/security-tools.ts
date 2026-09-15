@@ -24,7 +24,7 @@
  */
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
-import { encodeToolOutput, type ToolContext, type ToolDef, type ToolResult } from "@valet/engine";
+import { builtinAuthorizationFor, encodeToolOutput, type ToolContext, type ToolDef, type ToolResult } from "@valet/engine";
 
 const UNAVAILABLE_TEXT = "[security_unavailable] security endpoint not configured";
 
@@ -38,7 +38,7 @@ export const ESTIMATED_TOKENS_PER_CELL = 500_000;
 /** Same idiom as memory-tools' local `defineTool`: preserves the schema's
  * static type so `args` in `execute` is typed precisely. */
 function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return def;
+  return { ...def, authorization: def.authorization ?? builtinAuthorizationFor(def.name) };
 }
 
 interface SecurityToolConfig {

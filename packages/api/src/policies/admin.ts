@@ -29,6 +29,7 @@ import { type ParamMatcher } from "./matchers.js";
 /** One-of-three target shape shared by `action_policies` and
  *  `action_policy_overrides` — mirrors the DB CHECK constraint. */
 export interface PolicyTarget {
+  authorizationKind?: "tool.action" | "tool.builtin";
   service?: string;
   actionId?: string;
   riskLevel?: RiskLevel;
@@ -62,9 +63,10 @@ export function isApprovalMode(v: unknown): v is ApprovalMode {
  *  `action_policy_overrides` — used
  *  by the override upsert/delete-by-target paths. */
 function overrideTargetEquals(target: PolicyTarget) {
+  const kind = eq(actionPolicyOverrides.authorizationKind, target.authorizationKind ?? "tool.action");
   if (target.service !== undefined) {
     return and(
-      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
+      kind,
       eq(actionPolicyOverrides.service, target.service),
       isNull(actionPolicyOverrides.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -72,7 +74,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.actionId !== undefined) {
     return and(
-      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
+      kind,
       isNull(actionPolicyOverrides.service),
       eq(actionPolicyOverrides.actionId, target.actionId),
       isNull(actionPolicyOverrides.riskLevel),
@@ -80,7 +82,7 @@ function overrideTargetEquals(target: PolicyTarget) {
   }
   if (target.riskLevel !== undefined) {
     return and(
-      eq(actionPolicyOverrides.authorizationKind, ACTION_POLICY_AUTHORIZATION_KIND),
+      kind,
       isNull(actionPolicyOverrides.service),
       isNull(actionPolicyOverrides.actionId),
       eq(actionPolicyOverrides.riskLevel, target.riskLevel),
@@ -121,9 +123,9 @@ export async function createPolicy(db: AppQueryable, scope: PolicyScope, input: 
   const row = {
     id: randomUUID(),
     orgId: scope.orgId,
-    authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
     principalType: scope.type,
     principalId: scope.id,
+    authorizationKind: input.authorizationKind ?? "tool.action",
     service: input.service ?? null,
     actionId: input.actionId ?? null,
     riskLevel: input.riskLevel ?? null,
@@ -240,8 +242,8 @@ export async function upsertOverride(
     .values({
       id: randomUUID(),
       orgId,
-      authorizationKind: ACTION_POLICY_AUTHORIZATION_KIND,
       userId,
+      authorizationKind: input.authorizationKind ?? "tool.action",
       service: input.service ?? null,
       actionId: input.actionId ?? null,
       riskLevel: input.riskLevel ?? null,

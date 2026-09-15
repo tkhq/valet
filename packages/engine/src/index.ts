@@ -19,6 +19,7 @@ export {
   SandboxSupersededError,
   SandboxUnavailableError,
   SandboxEvictedError,
+  BuiltinAuthorizationError,
   SandboxStartupError,
   SandboxPreparationError,
 } from "./errors.js";
@@ -277,5 +278,6 @@ export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 export { formatTranscriptText } from "./transcript-formatter.js";
 export * from "./authorization/types.js";
 export * from "./authorization/identity.js";
+export * from "./authorization/builtin-tools.js";
 
 export { adaptPluginCatalogAction, adaptResolvedPluginCatalogAction } from "./plugin-catalog-authorization.js";

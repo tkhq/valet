@@ -12,7 +12,7 @@ import {
   type ToolDef,
   type WriteFence,
 } from "../src/index.js";
-import { findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
+import { canonicalHumanContext, DecisionGateContextError, findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -341,6 +341,53 @@ describe("decision gates: steer cancels pending gate", () => {
     expect(s?.outcome).toEqual({ outcome: "completed" });
 
     faux.unregister();
+  });
+});
+
+describe("decision gate human context boundary", () => {
+  it("persists bounded UTF-8 context without Node Buffer", () => {
+    const original = globalThis.Buffer;
+    // The engine must remain portable in browser-like runtimes.
+    Reflect.deleteProperty(globalThis, "Buffer");
+    try {
+      const gate = fromRequest(
+        { type: "approval", title: "large", resumeKey: "large", context: { service: "gmail", tool_id: "gmail.send", summary: "send mail", args: { body: "😀漢".repeat(300_000) } } },
+        { sessionId: "s", threadId: "t", queueItemId: "q", resumeKey: "large", ordinal: 0 },
+      );
+      expect(new TextEncoder().encode(JSON.stringify(gate.context)).byteLength).toBeLessThanOrEqual(16 * 1024);
+      expect(JSON.stringify(gate.context)).toContain("[truncated]");
+      expect(gate.context).toMatchObject({ service: "gmail", tool_id: "gmail.send", summary: "send mail" });
+    } finally { globalThis.Buffer = original; }
+  });
+
+  it("truncates fields, arrays, depth, nodes, and four-byte text", () => {
+    let deep: Record<string, unknown> = { end: "end" };
+    for (let index = 0; index < 12; index++) deep = { next: deep };
+    const context = canonicalHumanContext({ emoji: "😀".repeat(400), array: Array.from({ length: 100 }, (_, i) => i), object: Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`field-${i}`, i])), deep });
+    const json = JSON.stringify(context);
+    expect(new TextEncoder().encode(json).byteLength).toBeLessThanOrEqual(16 * 1024);
+    expect(json).toContain("truncated");
+    expect(json).not.toContain("�");
+  });
+
+  it("uses a bounded unique suffix for three colliding truncated keys", () => {
+    const prefix = "x".repeat(300);
+    const context = canonicalHumanContext({ [`${prefix}a`]: 1, [`${prefix}b`]: 2, [`${prefix}c`]: 3 });
+    expect(context).toBeDefined();
+    expect(Object.keys(context!)).toHaveLength(3);
+    expect(new Set(Object.keys(context!)).size).toBe(3);
+  });
+  it("rejects malformed values without evaluating accessors", () => {
+    let getterCalls = 0;
+    const accessor = Object.defineProperty({}, "secret", { enumerable: true, get() { getterCalls++; return "trap"; } });
+    const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
+    const sparse = Array(2); sparse[1] = "x";
+    const extra = ["x"] as unknown[] & { extra?: string }; extra.extra = "x";
+    const proxy = new Proxy({ safe: "trap-controlled" }, {});
+    for (const bad of [accessor, cyclic, sparse, extra, proxy, { bad: undefined }, { bad: Symbol("x") }, { bad: 1n }, { bad: () => 1 }, { bad: NaN }, Object.create({ inherited: true })]) {
+      expect(() => canonicalHumanContext({ bad })).toThrow(DecisionGateContextError);
+    }
+    expect(getterCalls).toBe(0);
   });
 });
 

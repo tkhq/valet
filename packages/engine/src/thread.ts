@@ -4547,6 +4547,10 @@ export class Thread {
 
   private buildTools(): AgentTool[] {
     const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])];
+    if (this.session.options.builtinPolicyResolver) {
+      const missing = all.filter((tool) => !tool.authorization).map((tool) => tool.name);
+      if (missing.length) throw new Error(`Canonical built-in authorization metadata is missing for: ${missing.join(", ")}`);
+    }
     return all.map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
@@ -4584,6 +4588,7 @@ export class Thread {
       config: session.options.toolConfig,
       owner: session.owner,
       policyResolver: session.options.policyResolver,
+      builtinPolicyResolver: session.options.builtinPolicyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
       queueItemId: this.runningItem?.id,
       // The running submission's channel origin, when it came from a channel,

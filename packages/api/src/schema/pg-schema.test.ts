@@ -80,6 +80,9 @@ const APP_TABLES = [
   "policy_authoring_reviews",
   "policy_authoring_operations",
   "policy_authoring_audit",
+  "policy_source_bundles",
+  "policy_bundle_lineage",
+  "policy_active_bundles",
   "llm_providers",
   "session_repos",
   "github_installations",
@@ -1081,6 +1084,24 @@ describe("pg app schema + migrations", () => {
       await expect(db.query(`INSERT INTO policy_authoring_documents (id,org_id,scope_key,team_id,status,revision,state_version,normalized_identity,validation_summary,created_by,created_at,updated_at) VALUES ('bad','o','org','t','live',1,1,'i','{}','u',1,1)`)).rejects.toThrow();
       await db.query(`INSERT INTO policy_authoring_documents (id,org_id,scope_key,status,revision,state_version,normalized_identity,validation_summary,created_by,created_at,updated_at) VALUES ('doc','o','org','draft',1,1,'i','{}','u',1,1)`);
       await expect(db.query(`INSERT INTO policy_authoring_revisions (org_id,scope_key,document_id,revision,draft,normalized_identity,validation_summary,created_by,created_at) VALUES ('other','org','doc',1,'{}','i','{}','u',1)`)).rejects.toThrow();
+      await db.query(`INSERT INTO policy_authoring_revisions (org_id,scope_key,document_id,revision,draft,normalized_identity,validation_summary,created_by,created_at) VALUES ('o','org','doc',1,'{}','i','{}','u',1)`);
+      await expect(db.query(`UPDATE policy_authoring_revisions SET created_by='other' WHERE document_id='doc'`)).rejects.toThrow(/immutable/);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("repairs the policy bundle lineage immutability trigger", async () => {
+      await db.query("DROP TRIGGER policy_bundle_lineage_immutable ON policy_bundle_lineage");
+      await db.query("DROP FUNCTION reject_policy_bundle_lineage_update()");
+      expect((await missingSchemaRepairs(db)).map((repair) => repair.describe)).toEqual(expect.arrayContaining([
+        "policy bundle lineage immutability function",
+        "policy bundle lineage immutability trigger",
+      ]));
+      await applyAppMigrations(db);
+      await db.query("INSERT INTO orgs (id,name,created_at) VALUES ('lineage-repair-org','Lineage repair',1) ON CONFLICT DO NOTHING");
+      await db.query("INSERT INTO policy_source_bundles (digest,bundle,created_at) VALUES ('lineage-repair-digest','{}',1) ON CONFLICT DO NOTHING");
+      await db.query("INSERT INTO policy_bundle_lineage (org_id,digest,source) VALUES ('lineage-repair-org','lineage-repair-digest','structured') ON CONFLICT DO NOTHING");
+      await expect(db.query("UPDATE policy_bundle_lineage SET source='structured' WHERE org_id='lineage-repair-org' AND digest='lineage-repair-digest'"))
+        .rejects.toThrow(/immutable/);
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 

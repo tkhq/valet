@@ -22,7 +22,7 @@
  */
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
-import { encodeToolOutput, serializePrincipal, type Principal } from "@valet/engine";
+import { builtinAuthorizationFor, encodeToolOutput, serializePrincipal, type Principal } from "@valet/engine";
 import type { ToolContext, ToolDef, ToolResult } from "@valet/engine";
 import { artifactSizeError, artifactSizeErrorForBytes } from "@valet/shared";
 import { normalizePath } from "../lib/okf.js";
@@ -34,7 +34,7 @@ const UNAVAILABLE_TEXT = "[memory_unavailable] memory endpoint not configured";
  * `packages/engine/src/builtin-tools/index.ts`'s `defineTool` — not
  * exported from `@valet/engine`, so reproduced locally here). */
 function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return def;
+  return { ...def, authorization: def.authorization ?? builtinAuthorizationFor(def.name) };
 }
 
 interface MemoryToolConfig {

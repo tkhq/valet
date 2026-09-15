@@ -309,7 +309,7 @@ export interface AuditInvocationRow {
  * makes a replay double-fire a no-op; a random id records every distinct
  * emission.
  */
-export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow): Promise<void> {
+export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow, options: { strict?: boolean; repair?: boolean } = {}): Promise<void> {
   try {
     const params = row.params === undefined ? null : capAuditField(row.params);
     const result = row.result === undefined ? null : capAuditField(row.result);
@@ -344,8 +344,12 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         durationMs: row.durationMs ?? null,
         startedAt: row.startedAt ?? null,
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: actionInvocations.invocationId,
+        set: options.repair ? { status: row.status ?? null, result: result ? result.value : null, resultTruncated: result ? result.truncated : null, error, durationMs: row.durationMs ?? null } : { invocationId: row.invocationId },
+      });
   } catch (err) {
+    if (options.strict) throw err;
     console.error(`policy audit write failed for invocation ${row.invocationId}:`, err);
   }
 }

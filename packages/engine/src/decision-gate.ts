@@ -341,6 +341,106 @@ export async function persistTerminalGate(
   return terminal;
 }
 
+const HUMAN_CONTEXT_LIMITS = { bytes: 16 * 1024, stringBytes: 1024, keyBytes: 128, depth: 8, nodes: 256, fields: 64 } as const;
+const HUMAN_TRUNCATION = "… [truncated]";
+const encoder = new TextEncoder();
+
+function utf8Bytes(value: string): number { return encoder.encode(value).byteLength; }
+
+/** Truncate text without splitting a UTF-8 code point. */
+function truncateUtf8(value: string, limit: number, marker = HUMAN_TRUNCATION): string {
+  if (utf8Bytes(value) <= limit) return value;
+  const markerBytes = utf8Bytes(marker);
+  let used = 0;
+  let output = "";
+  for (const point of value) {
+    const size = utf8Bytes(point);
+    if (used + size + markerBytes > limit) break;
+    output += point;
+    used += size;
+  }
+  return output + marker;
+}
+
+export class DecisionGateContextError extends TypeError {
+  constructor() { super("Decision gate context must contain plain JSON data."); this.name = "DecisionGateContextError"; }
+}
+
+/** Validate all input, then create a bounded human-only JSON preview. */
+export function canonicalHumanContext(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  const active = new WeakSet<object>();
+  const validate = (item: unknown): void => {
+    if (item === null || typeof item === "string" || typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item) && !Object.is(item, -0))) return;
+    if (typeof item !== "object" || active.has(item)) throw new DecisionGateContextError();
+    active.add(item);
+    try {
+      const descriptors = Object.getOwnPropertyDescriptors(item);
+      if (Reflect.ownKeys(descriptors).some((key) => typeof key !== "string") || Object.values(descriptors).some((entry) => entry.get || entry.set)) throw new DecisionGateContextError();
+      if (Array.isArray(item)) {
+        const keys = Object.keys(descriptors).filter((key) => key !== "length");
+        if (keys.length !== item.length || keys.some((key, index) => key !== String(index))) throw new DecisionGateContextError();
+        for (const key of keys) validate(descriptors[key]!.value);
+      } else {
+        const prototype = Object.getPrototypeOf(item);
+        if (prototype !== Object.prototype && prototype !== null) throw new DecisionGateContextError();
+        for (const descriptor of Object.values(descriptors)) validate(descriptor.value);
+      }
+    } finally { active.delete(item); }
+  };
+  try {
+    validate(value);
+    // Proxy objects can spoof reflection traps. The platform clone rejects
+    // them. Run it only after accessor validation, so getters never execute.
+    structuredClone(value);
+  } catch (error) {
+    if (error instanceof DecisionGateContextError) throw error;
+    throw new DecisionGateContextError();
+  }
+
+  let nodes = 0;
+  const preview = (item: unknown, depth: number): unknown => {
+    if (item === null || typeof item === "boolean" || typeof item === "number") return item;
+    if (typeof item === "string") return truncateUtf8(item, HUMAN_CONTEXT_LIMITS.stringBytes);
+    if (depth >= HUMAN_CONTEXT_LIMITS.depth || nodes >= HUMAN_CONTEXT_LIMITS.nodes) return HUMAN_TRUNCATION;
+    nodes++;
+    if (Array.isArray(item)) {
+      const count = Math.min(item.length, HUMAN_CONTEXT_LIMITS.fields, HUMAN_CONTEXT_LIMITS.nodes - nodes);
+      const output = item.slice(0, Math.max(0, count)).map((entry) => preview(entry, depth + 1));
+      if (count < item.length) output.push(HUMAN_TRUNCATION);
+      return output;
+    }
+    const output: Record<string, unknown> = Object.create(null);
+    const entries = Object.entries(item as Record<string, unknown>);
+    const count = Math.min(entries.length, HUMAN_CONTEXT_LIMITS.fields);
+    for (const [index, [rawKey, entry]] of entries.slice(0, count).entries()) {
+      let key = truncateUtf8(rawKey, HUMAN_CONTEXT_LIMITS.keyBytes, "…");
+      for (let suffix = 0; Object.hasOwn(output, key); suffix++) {
+        if (suffix >= HUMAN_CONTEXT_LIMITS.fields) throw new DecisionGateContextError();
+        key = `${truncateUtf8(rawKey, HUMAN_CONTEXT_LIMITS.keyBytes - 12, "…")}:${index}:${suffix}`;
+      }
+      output[key] = preview(entry, depth + 1);
+    }
+    if (count < entries.length) output.__truncated__ = `${entries.length - count} fields omitted`;
+    return output;
+  };
+  const bounded = preview(value, 0) as Record<string, unknown>;
+  if (utf8Bytes(JSON.stringify(bounded)) <= HUMAN_CONTEXT_LIMITS.bytes) return bounded;
+
+  // Keep early identity and summary fields. Omit later preview fields until
+  // the canonical JSON fits the durable gate limit.
+  const fitted: Record<string, unknown> = Object.create(null);
+  for (const [key, item] of Object.entries(bounded)) {
+    const candidate = { ...fitted, [key]: item };
+    if (utf8Bytes(JSON.stringify(candidate)) > HUMAN_CONTEXT_LIMITS.bytes) {
+      fitted.__truncated__ = "Additional context omitted";
+      break;
+    }
+    fitted[key] = item;
+  }
+  return fitted;
+}
+
 export function fromRequest(
   req: DecisionGateRequest,
   gateCtx: GateContext & { ordinal: number },
@@ -372,7 +472,7 @@ export function fromRequest(
         : []),
     expiresAt: req.expiresAt ?? now + GATE_EXPIRY_DEFAULT_MS[req.type],
     status: "pending",
-    context: req.context,
+    context: canonicalHumanContext(req.context),
     origin: req.origin,
     createdAt: now,
     updatedAt: now,

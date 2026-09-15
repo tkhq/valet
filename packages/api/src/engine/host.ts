@@ -27,6 +27,7 @@ import {
   type StoredCredential,
   type ResolvedModel,
   type PolicyResolver,
+  type BuiltinPolicyResolver,
   type PluginStore,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
@@ -92,6 +93,7 @@ import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { canonicalInteractivePolicyResolver } from "../authorization/canonical-interactive-resolver.js";
+import { canonicalBuiltinPolicyResolver } from "../authorization/canonical-builtin-resolver.js";
 import {
   agentSessions,
   orgs,
@@ -723,6 +725,7 @@ export class EngineHost {
    * pre-policy approval path.
    */
   private policyResolverInstance: PolicyResolver | null = null;
+  private builtinPolicyResolverInstance: BuiltinPolicyResolver | null = null;
 
   constructor(private readonly opts: EngineHostOpts) {
     const idleMinutes = opts.idleMinutes ?? 0;
@@ -1076,6 +1079,7 @@ export class EngineHost {
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
+    const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     // Runner tools sit before the plugin tools so the loop surface reads
     // first in the tool list. The toolConfig mirrors the orchestrator's
@@ -1109,7 +1113,7 @@ export class EngineHost {
             // Discipline): stamp + staleness alert on the claiming cell.
             // `claimedSecurityCell` returned a row, so a db handle exists;
             // the guard narrows the type only.
-            ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
+      ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
           }
         : {};
     // The persona role registers on the session (roles registry) so the
@@ -1147,8 +1151,9 @@ export class EngineHost {
             ...(commandOptions ?? {}),
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
+          ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+          ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
       : await engine.createSession({
@@ -1173,8 +1178,9 @@ export class EngineHost {
           ...(commandOptions ?? {}),
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
+          ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+          ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
     builtSession = session;
@@ -1658,6 +1664,16 @@ export class EngineHost {
       this.policyResolverInstance = canonicalInteractivePolicyResolver({ db: this.opts.db, service: this.opts.canonicalAuthorizationService, plugins: this.opts.actionPluginByService ?? new Map() });
     }
     return this.policyResolverInstance;
+  }
+
+
+  private getBuiltinPolicyResolver(): BuiltinPolicyResolver | undefined {
+    if (!this.opts.db) return undefined;
+    if (!this.builtinPolicyResolverInstance) {
+      if (!this.opts.canonicalAuthorizationService) throw new Error("Canonical authorization service is unavailable.");
+      this.builtinPolicyResolverInstance = canonicalBuiltinPolicyResolver({ db: this.opts.db, service: this.opts.canonicalAuthorizationService });
+    }
+    return this.builtinPolicyResolverInstance;
   }
 
   private buildCredentialResolver(
@@ -2510,6 +2526,7 @@ export class EngineHost {
       pinnedIds,
     );
     const policyResolver = this.getPolicyResolver();
+    const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, [], behavior);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistantId);
@@ -2520,8 +2537,9 @@ export class EngineHost {
       purpose: "orchestrator" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
+      ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
       queueMode,
@@ -3498,6 +3516,7 @@ export class EngineHost {
       resolvesAsActingMember({ ownerType: opts.owner.type, credentialOwnerMode: opts.credentialOwnerMode ?? null }),
     );
     const policyResolver = this.getPolicyResolver();
+    const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const parentAssistant = this.opts.db
       ? await loadAssistantBySessionId(this.opts.db, opts.parentSessionId)
@@ -3576,8 +3595,9 @@ export class EngineHost {
       purpose: "child" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+      ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
@@ -3628,7 +3648,7 @@ export class EngineHost {
             // Discipline) — same hook as the post-restart rebuild path in
             // `buildSession`. Db guard narrows the type only (the claim
             // lookup already required one).
-            ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
+      ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
           }
         : {}),
       ...(skillsProvider ? { skillsProvider } : {}),
@@ -3724,6 +3744,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
     const policyResolver = this.getPolicyResolver();
+    const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
     const sessionOptions = {
@@ -3733,8 +3754,9 @@ export class EngineHost {
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
-            ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
+      ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
       // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are

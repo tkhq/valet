@@ -1,8 +1,10 @@
+import { redactCanonicalValue } from "./authorization/redaction.js";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
 import { matchesSearchQuery, parseSearchQuery, rankSearchResults } from "@valet/shared";
 import { builtinTools } from "./builtin-tools/index.js";
+import { builtinAuthorization } from "./authorization/builtin-tools.js";
 import type {
   CredentialProvider,
   DecisionAction,
@@ -18,7 +20,7 @@ import type {
   ToolDef,
   ToolResult,
 } from "./types.js";
-import { isDecisionGateExpired } from "./decision-gate.js";
+import { canonicalHumanContext, isDecisionGateExpired } from "./decision-gate.js";
 import { encodeToolOutput } from "./tool-output.js";
 import type { SafeParameterProjectionV1 } from "./authorization/action-adapters.js";
 
@@ -407,21 +409,18 @@ function approvalGateRequest(
   summary: string,
   resumeKey: string,
 ): DecisionGateRequest {
+  const bounded = canonicalHumanContext({ service: entry.service, tool_id: actionId, summary, riskLevel: entry.action.riskLevel, args: args ?? {} })!;
+  const preview = bounded.args && typeof bounded.args === "object" && !Array.isArray(bounded.args) ? bounded.args as Record<string, unknown> : {};
+  const boundedSummary = typeof bounded.summary === "string" ? bounded.summary : "Approval requested";
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: `${boundedSummary}\n\ntool_id=${actionId}\nargs=${stableJson(preview)}`,
     resumeKey,
     dedupeKey: qualifiedId(entry),
-    context: {
-      riskLevel: entry.action.riskLevel,
-      service: entry.service,
-      tool_id: actionId,
-      args,
-      // The one-line human summary, separate from the machine-readable body
-      // above. Channel deliverers render it instead of the tool_id/args dump.
-      summary,
-    },
+    // Persist only the bounded structured human preview. Policy evaluation,
+    // proof, execution, and audit continue to use the validated raw args.
+    context: bounded,
   };
 }
 
@@ -778,6 +777,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
     services.length > 0 ? ` Available services: ${services.join(", ")}.` : "";
   return {
     name: "list_tools",
+    authorization: builtinAuthorization("list_tools"),
     description:
       "List available plugin tools. Filter by service or search by name/description. " +
       "Returns tool_ids plus their parameter schemas; use call_tool to invoke one." +
@@ -923,6 +923,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
 function makeCallTool(catalog: Catalog): ToolDef {
   return {
     name: "call_tool",
+    authorization: builtinAuthorization("call_tool"),
     description:
       "Invoke a plugin action by tool_id (discovered via list_tools). Approval gates may suspend execution for high/critical risk actions.",
     parameters: Type.Object({
@@ -1166,8 +1167,7 @@ function splitSummaryArg(args: Record<string, unknown> | undefined): {
  * {@link invokeAction}, the same core `call_tool` and the slash-command
  * path call. That is what keeps the approval gate, `prepareActionArgs`
  * validation, credential scoping and the audit record identical on both
- * routes. `requiresApproval` is deliberately NOT set: nothing in the engine
- * reads that field, so setting it would look like a gate and do nothing.
+ * routes. Canonical policy and sequential dispatch are independent.
  */
 function makePinnedTool(
   catalog: Catalog,
@@ -1187,6 +1187,7 @@ function makePinnedTool(
   return {
     name,
     description: parts.join(" "),
+    authorization: { ...builtinAuthorization("call_tool"), actionId: `builtin.pinned.${actionId}` },
     parameters: published.schema,
     riskLevel: entry.action.riskLevel,
     execute: async (args, ctx): Promise<ToolResult> => {
@@ -1303,8 +1304,8 @@ async function executeAction(
       prepared.args as Static<typeof entry.action.parameters>,
       actionCtx,
     );
-    let userResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "user_output") ?? []) : result;
-    const auditResult = audit ? redactResult(result, audit.redactions?.filter((item) => item.target === "audit") ?? []) : result;
+    let userResult = audit ? redactCanonicalValue(result, audit.redactions?.filter((item) => item.target === "user_output") ?? []) : result;
+    const auditResult = audit ? redactCanonicalValue(result, audit.redactions?.filter((item) => item.target === "audit") ?? []) : result;
     if (audit && audit.resolver.completeExecution && attemptId) {
       try {
         const settlement = result.success
@@ -1530,16 +1531,4 @@ function fnv1a64Hex(bytes: Uint8Array): string {
     hash = (hash * 0x100000001b3n) & mask;
   }
   return hash.toString(16).padStart(16, "0");
-}
-
-function redactResult<T>(value: T, directives: import("./authorization/types.js").RedactionDirective[]): T {
-  if (directives.length === 0) return value;
-  const copy = JSON.parse(JSON.stringify(value)) as T;
-  for (const directive of directives) for (const path of directive.jsonPaths) {
-    if (!/^\$(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(path)) throw new Error("Unsupported canonical redaction path.");
-    const parts = path.slice(2).split("."); let parent: any = copy;
-    for (const part of parts.slice(0, -1)) { if (!parent || typeof parent !== "object") break; parent = parent[part]; }
-    if (parent && typeof parent === "object") delete parent[parts.at(-1)!];
-  }
-  return copy;
 }
