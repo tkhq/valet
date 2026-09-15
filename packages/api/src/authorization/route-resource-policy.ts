@@ -23,8 +23,7 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
     if (!matched) return c.json({ error: "This API route has no authorization descriptor. Contact an administrator.", code: "authorization_descriptor_missing" }, 403);
     const user = requireUser(c), principal = requirePrincipal(c);
     if (!user || !principal) {
-      const securityRoute = matched.descriptor.service === "api_sessions" && matched.descriptor.template.includes("/security/");
-      if (securityRoute && isValidInternalToken(c.req.header("x-valet-internal"))) { await next(); return; }
+      if (isInternalSecurityRoute(c.req.method, matched.descriptor.template, c.req.header("x-valet-internal")) || isInternalArtifactRoute(c.req.method, c.req.path, c.req.header("x-valet-internal"), c.req.header("x-valet-owner"), c.req.header("x-valet-actor"))) { await next(); return; }
       return c.json({ error: "Authorization identity is unavailable. Authenticate again.", code: "authorization_identity_missing" }, 401);
     }
     const delivery = deliveryIdentity(c.req.header("Idempotency-Key"));
@@ -66,6 +65,16 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
       throw error;
     }
   };
+}
+
+function isInternalSecurityRoute(method: string, template: string, token: string | undefined): boolean {
+  return (method.toUpperCase() === "GET" || method.toUpperCase() === "POST")
+    && (template === "/api/sessions/:id/security" || template.startsWith("/api/sessions/:id/security/"))
+    && isValidInternalToken(token);
+}
+
+function isInternalArtifactRoute(method: string, path: string, token: string | undefined, owner: string | undefined, actor: string | undefined): boolean {
+  return method.toUpperCase() === "POST" && path === "/api/artifacts/share" && owner !== undefined && actor !== undefined && isValidInternalToken(token);
 }
 
 export function resolveRouteDescriptor(registry: readonly ApiRouteDescriptorV1[], method: string, path: string): { descriptor: ApiRouteDescriptorV1; resourceId?: string } | undefined {
