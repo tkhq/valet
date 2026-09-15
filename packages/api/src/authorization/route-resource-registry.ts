@@ -6,7 +6,7 @@ export type ResourceOperation = "create" | "list" | "metadata" | "read" | "updat
 export interface ResourceAccessDescriptorV1 { readonly schemaVersion: 1; readonly resourceKind: ResourceKind; readonly operation: ResourceOperation; readonly service: string; readonly actionId: string; readonly riskLevel: PolicyRisk; readonly safeMetadata: readonly ["resourceId", "ownerType", "ownerId", "version"]; }
 export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readonly [PolicyRisk]>> = Object.freeze({
   "repository.list": ["low"], "repository.metadata": ["low"], "repository.link": ["low"], "repository.unlink": ["low"], "repository.import": ["medium"],
-  "secret.list": ["high"], "secret.metadata": ["high"], "secret.update": ["high"], "secret.delete": ["high"],
+  "secret.list": ["high"], "secret.metadata": ["high"], "secret.create": ["high"], "secret.update": ["high"], "secret.delete": ["high"], "secret.attach": ["high"],
   "policy.list": ["low"], "policy.read": ["low"], "policy.create": ["medium"], "policy.update": ["medium"], "policy.delete": ["high"], "policy.approve": ["high"], "policy.publish": ["high"],
   "workflow.list": ["low"], "workflow.read": ["low"], "workflow.create": ["medium"], "workflow.update": ["medium"], "workflow.delete": ["high"], "workflow.execute": ["medium"],
   "artifact.delete": ["high"], "artifact.share": ["medium"], "artifact.publish": ["high"], "artifact.copy": ["low"],

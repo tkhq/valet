@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { adaptApiRoute, buildRouteResourceObligationPlan, inputDigestOf, requestSubjectDigest, type AuthorizationRequest, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope, type RouteResourceObligationPlanV1 } from "@valet/engine/authorization";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { isValidInternalToken } from "../lib/internal-auth.js";
 import { authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions } from "../schema/index.js";
 import { loadCanonicalDynamicFacts } from "./canonical-facts.js";
 import { canonicalDecisionId } from "./canonical-authorization-service.js";
@@ -18,10 +19,14 @@ export { RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1, RESOURCE_ACCESS_REGISTRY } from ".
 export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteDescriptorV1[]): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     if (isProtectedBoundaryExclusion(c.req.method, c.req.path)) { await next(); return; }
-    const user = requireUser(c), principal = requirePrincipal(c);
-    if (!user || !principal) return c.json({ error: "Authorization identity is unavailable. Authenticate again.", code: "authorization_identity_missing" }, 401);
     const matched = resolveRouteDescriptor(registry(), c.req.method, c.req.path);
     if (!matched) return c.json({ error: "This API route has no authorization descriptor. Contact an administrator.", code: "authorization_descriptor_missing" }, 403);
+    const user = requireUser(c), principal = requirePrincipal(c);
+    if (!user || !principal) {
+      const securityRoute = matched.descriptor.service === "api_sessions" && matched.descriptor.template.includes("/security/");
+      if (securityRoute && isValidInternalToken(c.req.header("x-valet-internal"))) { await next(); return; }
+      return c.json({ error: "Authorization identity is unavailable. Authenticate again.", code: "authorization_identity_missing" }, 401);
+    }
     const delivery = deliveryIdentity(c.req.header("Idempotency-Key"));
     let obligationPlan: RouteResourceObligationPlanV1;
     let executionAttemptId: string | undefined;

@@ -365,13 +365,13 @@ credentialsRouter.put("/:service", async (c) => {
   const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, "write");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
-  await authorizeCredentialMetadata(c, owner, "update", service);
   if (body.createOnly !== undefined && typeof body.createOnly !== "boolean") {
     return c.json({ error: "createOnly must be a boolean. Send true to add a team connection." }, 400);
   }
   if (body.createOnly && (scope !== "team" || body.onepassword)) {
     return c.json({ error: "createOnly supports direct team tokens. Select team scope and enter a token." }, 400);
   }
+  const operation = body.createOnly ? "create" : "update";
 
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
@@ -560,6 +560,7 @@ credentialsRouter.put("/:service", async (c) => {
       const rejected = await verifySlackCredential(c, scope, credential, resolved);
       if (rejected) return rejected;
     }
+    await authorizeCredentialMetadata(c, owner, operation, service);
     await engineCredentials.save(owner, service, credential);
     await refreshCredentialReadiness(c.var.providers, owner, service);
     const resp: PutCredentialResponse = { ok: true };
@@ -571,6 +572,7 @@ credentialsRouter.put("/:service", async (c) => {
         body.accessToken !== undefined || body.refreshToken !== undefined || body.metadata !== undefined) {
       return c.json({ error: "Send a service_account with apiKey only. Configure vault permissions in 1Password." }, 400);
     }
+    await authorizeCredentialMetadata(c, owner, operation, service);
     const ok = await mutateTeamOnePassword(db, c.var.providers.encryptionKey,
       { orgId: user.orgId, userId: user.id, teamId: owner.id }, { kind: "token", token: body.apiKey.trim() });
     if (!ok) return c.json({ error: "Team not found." }, 404);
@@ -615,6 +617,7 @@ credentialsRouter.put("/:service", async (c) => {
     if (rejected) return rejected;
   }
 
+  await authorizeCredentialMetadata(c, owner, operation, service);
   if (owner.type === "team") {
     const outcome = await db.transaction(async (tx) => {
       if (!(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id }))) {
