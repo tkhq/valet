@@ -1625,6 +1625,12 @@ CREATE TABLE IF NOT EXISTS "policy_source_bundles" (
   "digest" text PRIMARY KEY NOT NULL, "bundle" jsonb NOT NULL, "created_at" bigint NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "policy_bundle_lineage" (
+  "org_id" text NOT NULL REFERENCES "orgs"("id") ON DELETE CASCADE, "digest" text NOT NULL REFERENCES "policy_source_bundles"("digest"), "source" text NOT NULL,
+  "root_digest" text, "document_id" text, "revision" integer, "normalized_identity" text, "policy_digest" text, "engine_digest" text,
+  PRIMARY KEY ("org_id","digest"), CONSTRAINT "policy_bundle_lineage_source" CHECK (("source"='structured' AND "root_digest" IS NULL AND "document_id" IS NULL AND "revision" IS NULL AND "normalized_identity" IS NULL AND "policy_digest" IS NULL AND "engine_digest" IS NULL) OR ("source"='authored' AND "root_digest" IS NOT NULL AND "document_id" IS NOT NULL AND "revision">0 AND "normalized_identity" IS NOT NULL AND "policy_digest" IS NOT NULL AND "engine_digest" IS NOT NULL))
+);
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "policy_active_bundles" (
   "org_id" text PRIMARY KEY NOT NULL REFERENCES "orgs"("id"),
   "digest" text NOT NULL REFERENCES "policy_source_bundles"("digest"),

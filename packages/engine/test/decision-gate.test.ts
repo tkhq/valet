@@ -370,6 +370,13 @@ describe("decision gate human context boundary", () => {
     expect(json).not.toContain("�");
   });
 
+  it("uses a bounded unique suffix for three colliding truncated keys", () => {
+    const prefix = "x".repeat(300);
+    const context = canonicalHumanContext({ [`${prefix}a`]: 1, [`${prefix}b`]: 2, [`${prefix}c`]: 3 });
+    expect(context).toBeDefined();
+    expect(Object.keys(context!)).toHaveLength(3);
+    expect(new Set(Object.keys(context!)).size).toBe(3);
+  });
   it("rejects malformed values without evaluating accessors", () => {
     let getterCalls = 0;
     const accessor = Object.defineProperty({}, "secret", { enumerable: true, get() { getterCalls++; return "trap"; } });

@@ -1591,6 +1591,17 @@ export const policySourceBundles = pgTable("policy_source_bundles", {
   bundle: jsonb("bundle").$type<CanonicalSourceBundle>().notNull(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
+export const policyBundleLineage = pgTable(
+  "policy_bundle_lineage",
+  {
+    orgId: text("org_id").notNull().references(() => orgs.id, { onDelete: "cascade" }),
+    digest: text("digest").notNull().references(() => policySourceBundles.digest),
+    source: text("source", { enum: ["structured", "authored"] }).notNull(),
+    rootDigest: text("root_digest"), documentId: text("document_id"), revision: integer("revision"),
+    normalizedIdentity: text("normalized_identity"), policyDigest: text("policy_digest"), engineDigest: text("engine_digest"),
+  },
+  (t) => [primaryKey({ columns: [t.orgId, t.digest] }), check("policy_bundle_lineage_source", sql`${t.source}='structured' AND ${t.rootDigest} IS NULL AND ${t.documentId} IS NULL AND ${t.revision} IS NULL AND ${t.normalizedIdentity} IS NULL AND ${t.policyDigest} IS NULL AND ${t.engineDigest} IS NULL OR ${t.source}='authored' AND ${t.rootDigest} IS NOT NULL AND ${t.documentId} IS NOT NULL AND ${t.revision}>0 AND ${t.normalizedIdentity} IS NOT NULL AND ${t.policyDigest} IS NOT NULL AND ${t.engineDigest} IS NOT NULL`)],
+);
 export const policyActiveBundles = pgTable(
   "policy_active_bundles",
   {

@@ -415,7 +415,10 @@ export function canonicalHumanContext(value: Record<string, unknown> | undefined
     const count = Math.min(entries.length, HUMAN_CONTEXT_LIMITS.fields);
     for (const [index, [rawKey, entry]] of entries.slice(0, count).entries()) {
       let key = truncateUtf8(rawKey, HUMAN_CONTEXT_LIMITS.keyBytes, "…");
-      while (Object.hasOwn(output, key)) key = `${truncateUtf8(rawKey, HUMAN_CONTEXT_LIMITS.keyBytes - 12, "…")}:${index}`;
+      for (let suffix = 0; Object.hasOwn(output, key); suffix++) {
+        if (suffix >= HUMAN_CONTEXT_LIMITS.fields) throw new DecisionGateContextError();
+        key = `${truncateUtf8(rawKey, HUMAN_CONTEXT_LIMITS.keyBytes - 12, "…")}:${index}:${suffix}`;
+      }
       output[key] = preview(entry, depth + 1);
     }
     if (count < entries.length) output.__truncated__ = `${entries.length - count} fields omitted`;

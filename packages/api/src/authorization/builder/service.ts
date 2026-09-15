@@ -319,7 +319,7 @@ export class PolicyAuthoringService {
       )
         throw conflict("The approved candidate identity changed. Submit it for a new review before preparation.");
       if (!this.deps.canonicalPolicyManager) throw new Error("Canonical policy manager is unavailable.");
-      await this.deps.canonicalPolicyManager.activateCandidate(scope.organizationId, rebuilt.identity, rebuilt.bundle, { actorId: actor, operation: "policy_authoring_publish", idempotencyKey: `${id}:${row.revision}:${row.stateVersion}` });
+      await this.deps.canonicalPolicyManager.activateCandidate(scope.organizationId, rebuilt.identity, rebuilt.bundle, { actorId: actor, operation: "policy_authoring_publish", idempotencyKey: `${id}:${row.revision}:${row.stateVersion}` }, { documentId: row.id, revision: row.revision, normalizedIdentity: revision.normalizedIdentity, policyDigest: revision.policyDigest!, engineDigest: revision.engineDigest! });
       return { document: toDocument(row), draft: revision.draft, bundle: rebuilt.bundle, notice: "This candidate is the active canonical policy bundle." };
     });
   }
