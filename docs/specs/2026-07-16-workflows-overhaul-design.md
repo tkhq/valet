@@ -199,3 +199,27 @@ triggers, and webhook in the team scope because the copy does not move them.
 Delete the personal workflow only after the team workflow runs successfully.
 
 Team schedule creation holds the team ownership lock for both workflow and assistant targets. It rechecks the target after readiness checks. Deletion cannot leave a new schedule behind.
+
+## 2026-09-14 addendum: team event subscriptions hold the same lock
+
+A team-owned event trigger (`trigger-service.ts`) or event subscription
+(`routes/events.ts`) insert now holds the same team ownership lock the
+schedule create path takes, and for the same reason: `deleteTeam` deletes a
+team's schedules, triggers, and subscriptions under that lock, so an insert
+that only checks readiness or ownership beforehand can still land after the
+delete commits, orphaned against a team or workflow that no longer exists.
+
+Both insert paths recheck the target inside the lock before writing the row.
+A workflow target rechecks the workflow row — team, org, and workflow id
+must all still match. An orchestrator team target rechecks team existence
+and membership, and, when the target names an assistant, rechecks that
+assistant the same way `schedule-service.ts` does: `deleteTeam` archives a
+team's assistants under this same lock, so a named assistant is exposed to
+the identical race as a workflow target. A recheck failure returns the same
+"no longer available" error the schedule path uses, naming the retry as the
+fix.
+
+The lock's own authorization check (`withAuthorizedTeamOwnership`) also
+requires the team row itself to still exist (`getTeamInOrg`), not just live
+membership — a stricter bar than the plain membership check either insert
+path made before this addendum.

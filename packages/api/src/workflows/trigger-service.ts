@@ -13,8 +13,9 @@ import { and, eq, sql } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import type { WorkflowDefinition } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventSubscriptions } from "../schema/index.js";
+import { eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
+import { withAuthorizedTeamOwnership } from "../services/teams.js";
 import { catalogForService } from "../events/ingest.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
@@ -118,25 +119,65 @@ export async function createWorkflowTrigger(
   }
 
   const now = Date.now();
-  const inserted = await db
-    .insert(eventSubscriptions)
-    .values({
-      id: randomUUID(),
-      orgId: owner.orgId,
-      // Owner follows the workflow, team only — see the insert in `routes/events.ts`.
-      ownerType: owned.ownerType === "team" ? "team" : "user",
-      ownerId: owned.ownerType === "team" ? owned.ownerId : owner.userId,
-      name: input.name,
-      eventKeys: input.eventKeys,
-      filters,
-      target,
-      enabled: true,
-      createdBy: owner.userId,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
-  const trigger = rowToTrigger(inserted[0]!);
+  const values = {
+    id: randomUUID(),
+    orgId: owner.orgId,
+    // Owner follows the workflow, team only — see the insert in `routes/events.ts`.
+    ownerType: owned.ownerType === "team" ? ("team" as const) : ("user" as const),
+    ownerId: owned.ownerType === "team" ? owned.ownerId : owner.userId,
+    name: input.name,
+    eventKeys: input.eventKeys,
+    filters,
+    target,
+    enabled: true,
+    createdBy: owner.userId,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  let insertedRow: typeof eventSubscriptions.$inferSelect | undefined;
+  if (owned.ownerType === "team") {
+    // `deleteTeam` reaps a team's own workflows and event_subscriptions
+    // under this same lock (services/teams.ts). Without it, a trigger that
+    // already passed `teamArmBlock` above can still insert after the team
+    // (or its target workflow) is gone, landing as a permanent orphan — the
+    // race #709 closed for schedules. Rechecking the workflow row inside
+    // the lock mirrors `schedule-service.ts`'s create path.
+    const rows = await withAuthorizedTeamOwnership(
+      db,
+      {
+        teamId: owned.ownerId,
+        orgId: owner.orgId,
+        userId: owner.userId,
+        principalTeamId: owner.principal?.type === "team" ? owner.principal.id : null,
+        requireMembership: owner.requireTeamMembership === true,
+      },
+      async (tx) => {
+        const [targetWorkflow] = await tx
+          .select({ id: workflowDefinitions.id })
+          .from(workflowDefinitions)
+          .where(
+            and(
+              eq(workflowDefinitions.id, input.workflowId),
+              eq(workflowDefinitions.orgId, owner.orgId),
+              eq(workflowDefinitions.ownerType, "team"),
+              eq(workflowDefinitions.ownerId, owned.ownerId),
+            ),
+          );
+        if (!targetWorkflow) return [];
+        return tx.insert(eventSubscriptions).values(values).returning();
+      },
+    );
+    if (!rows?.[0]) {
+      return { ok: false, error: "Team or trigger target is no longer available. Refresh and select an active target." };
+    }
+    insertedRow = rows[0];
+  } else {
+    const inserted = await db.insert(eventSubscriptions).values(values).returning();
+    insertedRow = inserted[0];
+  }
+
+  const trigger = rowToTrigger(insertedRow!);
   if (!trigger) return { ok: false, error: "trigger insert produced an unexpected row shape" };
   return { ok: true, trigger };
 }
