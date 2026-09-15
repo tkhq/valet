@@ -989,6 +989,7 @@ export interface PodContainerStatus {
   image?: string;
   waitingReason?: string;
   waitingMessage?: string;
+  lastTerminationMessage?: string;
 }
 
 /** Standard Kubernetes pod condition shape (`type`/`status`/`reason`/
@@ -1060,6 +1061,7 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
         image: images.get(cs.name) ?? cs.image,
         waitingReason: cs.state?.waiting?.reason,
         waitingMessage: cs.state?.waiting?.message,
+        lastTerminationMessage: cs.lastState?.terminated?.message,
       }));
       const conditions: PodStatusCondition[] = (pod.status?.conditions ?? [])
         .filter(
@@ -1233,6 +1235,19 @@ export async function livePodDrift(
  * returns `null` — a merely-still-provisioning CR must never be classified
  * as an error.
  */
+const MAX_TERMINATION_MESSAGE_LENGTH = 320;
+
+/** Return only bounded startup errors, with common credential forms removed. */
+function safeTerminationMessage(message: string | undefined): string | undefined {
+  if (!message) return undefined;
+  let safe = message.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!safe.startsWith("Error: ")) return undefined;
+  safe = safe
+    .replace(/\b(authorization|bearer|token|secret|password|api[_-]?key)\b\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|op:\/\/\S+)\b/g, "[redacted]");
+  return safe.slice(0, MAX_TERMINATION_MESSAGE_LENGTH);
+}
+
 export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?: SandboxCondition): string | null {
   if (pod === null) return null;
 
@@ -1245,7 +1260,8 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
 
   for (const cs of pod.containerStatuses ?? []) {
     if (cs.waitingReason === "CrashLoopBackOff") {
-      return "container crash-looping (CrashLoopBackOff)";
+      const detail = safeTerminationMessage(cs.lastTerminationMessage);
+      return `container crash-looping (CrashLoopBackOff)${detail ? `; startup error: ${detail}` : ""}`;
     }
   }
 

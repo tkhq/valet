@@ -87,7 +87,7 @@ The capability kernel is `(requestedBoolean, providerReport) -> decision`.
 It MUST return `ignore` for false, `allow` for true plus `v1`, and `reject:unsupported_provider` otherwise. [K18]
 A rejection MUST say `Nested Kubernetes requires the Kubernetes sandbox provider. Change the provider or remove kubernetes: true.` [K19]
 The API MUST reject Docker, local, and virtual providers before sandbox create or restore. [K20]
-The Kubernetes provider MUST finish admission and startup checks before it reports Ready. [K21]
+The Kubernetes provider MUST finish admission and startup checks before it reports Ready or a bounded safe startup error. [K21]
 A false request MUST leave bake identity, manifest, environment, startup, and kubeconfig unchanged. [K22]
 
 ## 02. Bounded provider profile
@@ -113,10 +113,12 @@ It MUST exclude kmsg `1:11`, wildcard device rules, and cgroup device permission
 Kubernetes 1.35 sandbox nodes MUST set `userNamespaces.idsPerPod:131072`. [K33]
 The image MUST declare UID and GID subordinate ranges `65536:65535` for UID 1500. [K34]
 
-Only capability-enabled image startup MUST perform K36 through K37. [K35]
-Enabled startup MUST create Services, empty Manager, and enable `cpu cpuset memory pids`. [K36]
-Enabled startup MUST delegate Manager control files to UID 1500 without changing outer limits. [K37]
+Docker-enabled or capability-enabled image startup MUST run the generic cgroup bootstrap. [K35]
+The bootstrap MUST create Services, empty Manager, enable `cpu cpuset memory pids`, and preserve outer limits. [K36]
+Enabled startup MUST run bootstrap, fail-closed preflight, optional Docker, and profile readiness in that order. [K37]
 Ordinary sandbox startup MUST NOT install, validate, export, or modify nested Kubernetes state. [K38]
+
+A capability-enabled sandbox runs the bootstrap when Docker is disabled. The preflight keeps the epoch, full-map, device, read-only sys, and pinned-tool checks. Kubernetes uses failed container logs as its termination message. The provider reports only a bounded, sanitized startup error from that message.
 
 ## 03. Artifact and process contract
 

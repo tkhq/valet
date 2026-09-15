@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${VALET_SANDBOX_DOCKER:-0}" = 1 ] || [ "${VALET_SANDBOX_KUBERNETES:-0}" = 1 ]; then
+  /cgroup-bootstrap.sh
+  export VALET_CGROUP_BOOTSTRAPPED=1
+fi
 [ "${VALET_SANDBOX_KUBERNETES:-}" != 1 ] || /kubernetes-preflight.sh
+if [ -x /start-docker.sh ]; then /start-docker.sh; fi
 WORK_DIR=/workspace
 mkdir -p "$WORK_DIR"
-if [ -x /start-docker.sh ]; then /start-docker.sh; fi
 if [ "${VALET_SANDBOX_PROFILE:-headless}" = "full" ]; then
   code-server --bind-addr "127.0.0.1:8765" --auth none \
     --disable-telemetry --disable-update-check --welcome-text "Valet Workspace" "$WORK_DIR" &

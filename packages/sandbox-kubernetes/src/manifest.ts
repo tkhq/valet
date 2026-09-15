@@ -265,6 +265,7 @@ export function buildSandboxManifest(
     // The controller/exec surface does the actual work; this just keeps the
     // container's PID 1 alive.
     command: ["sh", "-c", "tail -f /dev/null"],
+    terminationMessagePolicy: "FallbackToLogsOnError",
     volumeMounts: [{ name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH, subPath: WORKSPACE_SUBPATH }],
     // See SandboxContainer.workingDir's docblock (types.ts) — the k8s
     // pods/exec API has no per-call --workdir, so this container-level

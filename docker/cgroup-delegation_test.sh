@@ -145,30 +145,85 @@ run_fails writable "$tree" "$USER_NAME"; contains "$TMP/writable.err" "is not wr
 
 # The disabled gate and local rootless branch do not call the helper.
 VALET_SANDBOX_DOCKER=0 bash "$ROOT/start-docker.sh"
+contains "$ROOT/Dockerfile.sandbox-k8s" 'COPY docker/cgroup-bootstrap.sh /cgroup-bootstrap.sh'
 contains "$ROOT/Dockerfile.sandbox-k8s" 'COPY docker/cgroup-delegation.sh /cgroup-delegation.sh'
 sed '/^# ── Rootless dockerd/,$c\exit 0' "$ROOT/start-docker.sh" > "$TMP/gate.sh"
 ! grep -q '^+ /cgroup-delegation.sh' <(VALET_SANDBOX_DOCKER=1 VALET_DOCKER_USERNS=0 bash -x "$TMP/gate.sh" 2>&1) \
   || fail "local rootless Docker called cgroup topology setup"
 
-# Both profiles propagate setup failure.
-fail_docker=$TMP/fail-docker; printf '#!/bin/sh\nexit 42\n' > "$fail_docker"; chmod +x "$fail_docker"
-for profile in headless full; do
-  sed -e "s|/start-docker.sh|$fail_docker|g" -e "s|WORK_DIR=/workspace|WORK_DIR=$TMP/workspace|" \
-    "$ROOT/start-$profile.sh" > "$TMP/start-$profile.sh"
-  set +e; bash "$TMP/start-$profile.sh"; status=$?; set -e
-  expected=42
-  [ "$status" -eq "$expected" ] || fail "$profile returned $status instead of $expected"
+# Generic bootstrap migrates root members and is safe to repeat.
+bootstrap_root=$TMP/bootstrap-root; mkdir -p "$bootstrap_root/init"
+printf 'cpu cpuset io memory pids\n' > "$bootstrap_root/cgroup.controllers"
+printf '7\n8\n' > "$bootstrap_root/cgroup.procs"
+: > "$bootstrap_root/cgroup.subtree_control"; : > "$bootstrap_root/init/cgroup.procs"
+mkdir "$TMP/bootstrap-bin"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/bootstrap-bin/mount"
+cat > "$TMP/bootstrap-bin/xargs" <<'SH'
+#!/bin/sh
+cat
+: > "$FAKE_ROOT/cgroup.procs"
+SH
+cat > "$TMP/bootstrap-delegation" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_ROOT/delegation.log"
+mkdir -p "$FAKE_ROOT/init/services"
+: > "$FAKE_ROOT/init/cgroup.procs"
+SH
+chmod +x "$TMP/bootstrap-bin/"* "$TMP/bootstrap-delegation"
+sed -e "s|/sys/fs/cgroup|$bootstrap_root|g" \
+  -e "s|/cgroup-delegation.sh|$TMP/bootstrap-delegation|g" \
+  -e "s|LOG=/var/log/valet/dockerd.log|LOG=$TMP/bootstrap.log|" \
+  -e 's|mkdir -p /var/log/valet|:|' "$ROOT/cgroup-bootstrap.sh" > "$TMP/cgroup-bootstrap.sh"
+for _ in 1 2; do
+  FAKE_ROOT=$bootstrap_root PATH="$TMP/bootstrap-bin:$PATH" VALET_SANDBOX_KUBERNETES=1 bash "$TMP/cgroup-bootstrap.sh"
 done
-for error in "$TMP"/*.err; do contains "$error" 'valet-docker RuntimeClass'; done
-# Headless Kubernetes startup must propagate preflight failure without later side effects.
-fail_preflight=$TMP/fail-preflight; printf '#!/bin/sh\nexit 37\n' > "$fail_preflight"; chmod +x "$fail_preflight"
-side_effect=$TMP/headless-side-effect
-fake_docker=$TMP/fake-docker; printf '#!/bin/sh\necho docker >> "%s"\n' "$side_effect" > "$fake_docker"; chmod +x "$fake_docker"
-sed -e "s|/kubernetes-preflight.sh|$fail_preflight|" -e "s|/start-docker.sh|$fake_docker|" \
-  -e "s|exec tail -f /dev/null|echo tail >> '$side_effect'|" "$ROOT/start-headless.sh" > "$TMP/start-headless-k8s.sh"
-set +e; VALET_SANDBOX_KUBERNETES=1 bash "$TMP/start-headless-k8s.sh"; status=$?; set -e
-[ "$status" -eq 37 ] || fail "headless preflight returned $status"
-[ ! -e "$side_effect" ] || fail "headless startup continued after preflight failure"
+[ ! -s "$bootstrap_root/cgroup.procs" ] || fail "bootstrap left root members"
+[ -d "$bootstrap_root/init/services" ] || fail "bootstrap did not create services"
+[ "$(tail -n1 "$bootstrap_root/delegation.log")" = "$bootstrap_root dockerd cpu cpuset memory pids" ] \
+  || fail "bootstrap delegated the wrong controllers"
+: > "$bootstrap_root/delegation.log"
+FAKE_ROOT=$bootstrap_root PATH="$TMP/bootstrap-bin:$PATH" VALET_SANDBOX_KUBERNETES=0 VALET_DOCKER_USERNS=0 bash "$TMP/cgroup-bootstrap.sh"
+[ ! -s "$bootstrap_root/delegation.log" ] || fail "ordinary bootstrap changed cgroups"
+
+# Startup uses bootstrap, preflight, Docker, and readiness in that order.
+startup_log=$TMP/startup.log
+for helper in bootstrap preflight docker; do
+  cat > "$TMP/$helper" <<SH
+#!/bin/sh
+[ "\${FAIL_STAGE:-}" != $helper ] || exit 4
+echo $helper >> "$startup_log"
+SH
+  chmod +x "$TMP/$helper"
+done
+sed -i '/echo docker/i [ "${VALET_SANDBOX_DOCKER:-0}" = 1 ] || exit 0\
+[ "${VALET_CGROUP_BOOTSTRAPPED:-0}" = 1 ] || exit 5' "$TMP/docker"
+for profile in headless full; do
+  sed -e "s|/cgroup-bootstrap.sh|$TMP/bootstrap|g" \
+    -e "s|/kubernetes-preflight.sh|$TMP/preflight|g" \
+    -e "s|/start-docker.sh|$TMP/docker|g" \
+    -e "s|WORK_DIR=/workspace|WORK_DIR=$TMP/workspace|" \
+    -e "s|exec tail -f /dev/null|echo ready >> '$startup_log'|" \
+    "$ROOT/start-$profile.sh" > "$TMP/start-$profile.sh"
+  for docker in 0 1; do
+    : > "$startup_log"
+    VALET_SANDBOX_KUBERNETES=1 VALET_SANDBOX_DOCKER=$docker bash "$TMP/start-$profile.sh"
+    expected=$'bootstrap\npreflight'
+    [ "$docker" = 0 ] || expected=$'bootstrap\npreflight\ndocker'
+    expected="$expected"$'\nready'
+    [ "$(cat "$startup_log")" = "$expected" ] || fail "$profile docker=$docker startup order"
+  done
+  for stage in bootstrap preflight docker; do
+    : > "$startup_log"; set +e
+    FAIL_STAGE=$stage VALET_SANDBOX_KUBERNETES=1 VALET_SANDBOX_DOCKER=1 bash "$TMP/start-$profile.sh"
+    status=$?; set -e
+    [ "$status" -eq 4 ] || fail "$profile $stage failure returned $status"
+    case $stage in bootstrap) forbidden='preflight|docker|ready';; preflight) forbidden='docker|ready';; *) forbidden=ready;; esac
+    ! grep -Eq "$forbidden" "$startup_log" || fail "$profile continued after $stage failure"
+  done
+  : > "$startup_log"
+  VALET_SANDBOX_KUBERNETES=0 VALET_SANDBOX_DOCKER=0 bash "$TMP/start-$profile.sh"
+  [ "$(cat "$startup_log")" = ready ] || fail "$profile ordinary startup changed"
+done
 
 # Kubernetes-only preflight forces the full outer map check.
 map_probe=$TMP/map-probe; cat > "$map_probe" <<'SH'
