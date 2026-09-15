@@ -1733,6 +1733,52 @@ describe("GET /api/workflows/action-required", () => {
     expect(await adminList.json()).toMatchObject({ count: 1, items: [{ runId: "wfrun_org_action" }] });
   });
 
+  // A run executes the definition it started with. Re-pinning the workflow
+  // while a run waits for approval must not change the assistant the
+  // approval screen names: that badge is beside a permission decision.
+  it("reports the assistant from the run's snapshot, not the current definition", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const { db, workflowStore } = api.providers;
+    const now = Date.now();
+    const node = { id: "review", type: "approval", prompt: "Ship it?" };
+    const snapshot = { version: "dag/v1", assistantId: "asst_snapshot", nodes: [node], edges: [] };
+    const broken = { version: "dag/v1", assistantId: "   ", nodes: [node], edges: [] };
+
+    async function park(workflowId: string, runId: string, definition: unknown) {
+      await db.insert(workflowDefinitions).values({
+        id: workflowId, orgId: "local-org", name: workflowId, definition,
+        ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+      });
+      await workflowStore.createRun(
+        runId, { workflowId, definitionVersionId: "v1" }, definition, "v1",
+        { ownerType: "user", ownerId: "local-user" },
+      );
+      await workflowStore.parkRun(runId, 1, [
+        { kind: "signal", signalType: "approval:review", nodeId: "review" },
+      ]);
+    }
+
+    await park("wf_pinned", "wfrun_pinned", snapshot);
+    await park("wf_broken", "wfrun_broken", broken);
+    // The workflow moves to another assistant while the run waits.
+    await db
+      .update(workflowDefinitions)
+      .set({ definition: { ...snapshot, assistantId: "asst_repinned" }, updatedAt: now + 1 })
+      .where(eq(workflowDefinitions.id, "wf_pinned"));
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/action-required`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListWorkflowActionRequiredResponse;
+    expect(body.items.find((item) => item.runId === "wfrun_pinned")?.assistantId).toBe(
+      "asst_snapshot",
+    );
+    // A snapshot with an unusable id reports none, and the row still lists:
+    // its approval is the only way that run ever settles.
+    const brokenItem = body.items.find((item) => item.runId === "wfrun_broken");
+    expect(brokenItem).toBeDefined();
+    expect(brokenItem?.assistantId).toBeUndefined();
+  });
+
   it("lists both gate classes and hides another user's gate", async () => {
     const stub = new StubRunHost();
     api = await bootTestApi({ workflowRunHost: stub });

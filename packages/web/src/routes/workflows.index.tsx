@@ -17,7 +17,7 @@ import {
   useWorkflowTriggers,
   useWorkflows,
 } from "~/api/workflows";
-import { OwnerBadge } from "~/components/owner-badge";
+import { AssistantBadge } from "~/components/assistant-badge";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { runCountLabel } from "~/lib/run-count";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
@@ -33,6 +33,7 @@ import { Pager } from "~/components/pager";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
+import { workflowAssistantId } from "~/lib/workflow-assistant";
 
 /**
  * `/workflows` — tabbed hub (Workflows | Runs | Triggers | Templates). The
@@ -207,7 +208,13 @@ function ActionRequiredTab({
   );
 }
 
-function ActionRequiredRow({ item, focused }: { item: WorkflowActionRequiredItem; focused: boolean }) {
+function ActionRequiredRow({
+  item,
+  focused,
+}: {
+  item: WorkflowActionRequiredItem;
+  focused: boolean;
+}) {
   const { gate } = item;
   const policy = gate.kind === "policy_gate";
   const action = policy && gate.service && gate.action ? `${gate.service}.${gate.action}` : gate.nodeId;
@@ -229,7 +236,15 @@ function ActionRequiredRow({ item, focused }: { item: WorkflowActionRequiredItem
               <ShieldAlert className="h-3 w-3" aria-hidden />
               {policy ? "Tool permission" : "Workflow approval"}
             </span>
-            <OwnerBadge ownerType={item.owner.type} ownerId={item.owner.id} />
+            {/* The run's OWN snapshot names this assistant, so re-pinning
+                the workflow while the run waits does not move the badge
+                beside a permission decision. Absent means the snapshot pins
+                none, and the owner's default assistant runs it. */}
+            <AssistantBadge
+              ownerType={item.owner.type}
+              ownerId={item.owner.id}
+              assistantId={item.assistantId}
+            />
           </div>
           <Link
             to="/workflows/$workflowId"
@@ -415,7 +430,7 @@ function DefinitionRow({
     // row opens the workflow, because a row that looks like one target should
     // be one: clicking the empty space beside the name did nothing before.
     <li className="group relative flex flex-wrap items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
-      {/* The owner badge is a link of its own, so it sits beside the name
+      {/* The assistant badge is a link of its own, so it sits beside the name
           link, not inside it. Anything interactive here must sit ABOVE the
           stretched area — nesting it inside the anchor would be invalid and
           would swallow its own click. */}
@@ -428,7 +443,11 @@ function DefinitionRow({
           {workflow.name}
         </Link>
         <span className="relative z-10">
-          <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
+          <AssistantBadge
+            ownerType={workflow.ownerType}
+            ownerId={workflow.ownerId}
+            assistantId={workflowAssistantId(workflow.definition)}
+          />
         </span>
         {workflow.origin === "repo" && workflow.upstream && (
           <span
