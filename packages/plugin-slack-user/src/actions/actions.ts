@@ -258,7 +258,9 @@ const listChannels = action(
 const getStatus = action(Type.Object({}))({
   id: "slack_user.get_status",
   name: "Get Status (as user)",
-  description: "Read the connected user's Slack custom status text, emoji, and expiration.",
+  description: "Read YOUR Slack custom status (text, emoji, expiration) via users.profile.get.",
+  // A custom status is workspace-public metadata, so this stays `low` while
+  // the message-reading actions are `medium`.
   riskLevel: "low",
   execute: async (_p, ctx) => {
     const token = await getUserToken(ctx);
@@ -393,7 +395,7 @@ const setStatus = action(
   id: "slack_user.set_status",
   name: "Set Status (as user)",
   description:
-    "Set YOUR Slack status text + emoji (acts as the user via users.profile.set). Use this only when the user has explicitly delegated a status change — this writes to the user's profile.",
+    "Set YOUR Slack status text + emoji (acts as the user via users.profile.set). Use this only when the user has explicitly delegated a status change — this writes to the user's profile. Call slack_user.get_status first: this call replaces the whole status, so an omitted emoji clears the user's emoji.",
   riskLevel: "high",
   execute: async (p, ctx) => {
     const token = await getUserToken(ctx);

@@ -429,11 +429,12 @@ describe("action surface metadata", () => {
 
   // Message-reading actions default to `medium` (require_approval) — a
   // shared/agent-driven session with the owner's xoxp token shouldn't be
-  // able to exfiltrate DMs without a human tap. Only list_channels (which
-  // just enumerates channel membership metadata) stays `low`.
-  it("marks message-reading actions medium-risk and channel listing low-risk", () => {
+  // able to exfiltrate DMs without a human tap. The reads that return no
+  // message content stay `low`: list_channels enumerates channel membership
+  // metadata, and get_status returns the workspace-public custom status.
+  it("marks message-reading actions medium-risk and metadata reads low-risk", () => {
     const mediumIds = ["slack_user.search_messages", "slack_user.read_history", "slack_user.read_thread"];
-    const lowIds = ["slack_user.list_channels"];
+    const lowIds = ["slack_user.list_channels", "slack_user.get_status"];
     const actions = slackUserActionPlugin.actions;
     for (const id of mediumIds) {
       const a = actions.find((x) => x.id === id);

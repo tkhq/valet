@@ -16,7 +16,7 @@ namespace.
 | Bot replies, channel binding, inbound routing     | `slack.*`   |
 | Search the user's messages across their workspace | `slack_user.search_messages` |
 | Read a private channel/DM the bot is NOT in       | `slack_user.read_history` / `read_thread` |
-| Read the user's custom status                      | `slack_user.get_status` |
+| Read the user's custom status                     | `slack_user.get_status` |
 | Set the user's status, snooze DND                 | `slack_user.set_status` / `set_dnd` |
 | Post on behalf of the user (delegated)            | `slack_user.post_message` / `send_dm` |
 | Agent's own outbound communication                | `slack.send_message` / `slack.dm_owner` (NOT `slack_user.*`) |
@@ -59,6 +59,10 @@ or be denied unless explicitly allowed for the session.
 
 Default rules:
 - Only call write/act-as actions when the user explicitly delegated the task.
+- Before you call `set_status`, call `slack_user.get_status`. If the current
+  status is the same as the requested status, do not call `set_status`.
+- `set_status` replaces the whole status. If you change only the text, pass the
+  `status_emoji` and `status_expiration` from `get_status` back in.
 - The agent's OWN routine outbound (DMs to the owner, channel updates) should
   continue to use the bot `slack.*` actions, not `slack_user.*`.
 
