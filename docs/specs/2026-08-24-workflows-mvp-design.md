@@ -458,3 +458,10 @@ This applies to explicit cancellation, stop nodes, and failed foreach siblings.
 Legacy callers without a submission ID retain thread-wide abort behavior.
 
 The keyless HTTP integration test starts the same workflow twice through the real API, LocalRunHost, engine, and PGlite store. It substitutes only the model transport. Both runs must complete with separate persisted results and receipts on one workflow thread.
+
+
+### Team runs with no acting user (2026-09-14)
+
+A schedule, an event, or a webhook starts a team run with no acting user. The team assistant then calls the workflow tools with the team's own principal id (`team:{id}`) in place of a user id. A membership read of that value can never succeed, so every `workflows.*` call was refused: the list came back empty, and each named workflow read as not found.
+
+The membership gate now applies only when a person acts. The gate reads the acting user id: the turn's author when it has one, and the tool context's own user id when it does not. When that value is the assistant's own team principal id, the call authorizes through the session's server-derived owner. Every other value names a person, and a person's turn always carries an author. A person who left the team keeps no reach through the same assistant: their turn carries their user id, and the membership read still refuses it.

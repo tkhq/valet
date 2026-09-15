@@ -64,7 +64,9 @@ describe("workflow explicit assistant routing", () => {
     const implicit = rows.find((r) => r.name === "Implicit");
     if (!implicit) throw new Error("Missing implicit workflow");
     const teamContext = { ...ctx, userId: "team:team-a" };
-    expect((await save.execute({ workflow_id: implicit.id, name: "Rejected", definition: graph }, teamContext)).success).toBe(false);
+    // An unattended team run carries the synthetic team principal as its
+    // user id and no actor. That is the team assistant acting for itself.
+    expect((await save.execute({ workflow_id: implicit.id, name: "Unattended", definition: graph }, teamContext)).success).toBe(true);
     expect((await save.execute({ workflow_id: implicit.id, name: "Edited", definition: graph }, {
       ...teamContext, actor: { id: "local-user" },
     })).success).toBe(true);
@@ -74,6 +76,39 @@ describe("workflow explicit assistant routing", () => {
     // A team assistant has team reach, not its first user's other teams.
     const other = await createWorkflowDefinition(deps, owner, { name: "Other", teamId: "team-b", definition: graph });
     expect((await save.execute({ workflow_id: other.id, definition: graph }, ctx)).success).toBe(false);
+  });
+
+  it("admits the team principal itself and still refuses a departed member", async () => {
+    const { deps } = await setup();
+    const plugin = workflowsActionPlugin(() => deps);
+    const save = plugin.actions.find((a) => a.id === "workflows.save_workflow");
+    const list = plugin.actions.find((a) => a.id === "workflows.list_workflows");
+    if (!save || !list) throw new Error("Missing workflows actions");
+    // What the scheduler, the event dispatcher, and the webhook route
+    // produce: a run with no acting user, so the engine fills the tool
+    // context's user id from the team assistant session's own principal.
+    const machine = {
+      userId: "team:team-a",
+      orgId: "local-org",
+      sessionId: "assistant:default-a",
+      owner: { type: "team", id: "team-a" },
+      sessionPurpose: "orchestrator",
+      actionId: "workflows.save_workflow",
+      service: "workflows",
+    } as PluginActionContext;
+
+    const saved = await save.execute({ name: "Unattended", definition: graph }, machine);
+    expect(saved).toMatchObject({ success: true });
+    const listed = await list.execute({}, { ...machine, actionId: "workflows.list_workflows" });
+    expect(listed.success).toBe(true);
+    expect(listed.data).toMatchObject({ workflows: [{ name: "Unattended" }] });
+    const workflowId = (saved.data as { workflowId: string }).workflowId;
+
+    // A person who left the team keeps no reach through the same assistant.
+    const departed = { ...machine, userId: "departed-user" } as PluginActionContext;
+    expect((await save.execute({ workflow_id: workflowId, definition: graph }, departed)).success).toBe(false);
+    const departedList = await list.execute({}, { ...departed, actionId: "workflows.list_workflows" });
+    expect(departedList.data).toMatchObject({ workflows: [] });
   });
 
   it("rebinds cross-workspace copies and retains routing for same-owner copies", async () => {

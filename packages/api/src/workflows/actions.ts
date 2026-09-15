@@ -156,11 +156,22 @@ export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null
     return { userId: actorUserId, orgId, principal: { type: "user", id: principal.id } };
   }
   if (principal?.type === "team") {
+    // A team assistant with no acting user carries the team's own
+    // principal id as its user id (`team:{id}`). That value is the
+    // session's server-derived owner, not a person, so a membership read
+    // of it always fails. Unattended runs — schedules, events, webhooks —
+    // reach the workflow tools through exactly that context.
+    //
+    // The gate therefore turns on the ACTING user id above (the turn's
+    // author when it has one, else the session's own user id): every value
+    // other than the assistant's own team principal id names a person, and
+    // a person's turn always carries an author.
+    const machinePrincipal = actorUserId === `${principal.type}:${principal.id}`;
     return {
       userId: actorUserId,
       orgId,
       principal: { type: "team", id: principal.id },
-      requireTeamMembership: ctx.sessionPurpose !== "workflow",
+      requireTeamMembership: ctx.sessionPurpose !== "workflow" && !machinePrincipal,
     };
   }
   return { userId: actorUserId, orgId };
