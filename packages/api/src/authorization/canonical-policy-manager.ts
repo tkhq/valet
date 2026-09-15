@@ -150,7 +150,7 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
       return;
     }
     const loaded = await this.host.loadActive(organizationId);
-    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && (await lineageForActive(this.db, this.host, organizationId, pointer.sourceBundleDigest)).source !== "authored") {
+    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && !(await currentSourceIsAuthored(this.db, this.host, organizationId, pointer.sourceBundleDigest))) {
       throw new Error(`Canonical policy pointer for ${organizationId} is stale. Publish the exact current policy before startup.`);
     }
   }
@@ -340,7 +340,7 @@ export async function ensureCanonicalPolicyReadiness(manager: CanonicalPolicyBun
       continue;
     }
     const loaded = await manager.host.loadActive(row.id);
-    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && (await lineageForActive(manager.db, manager.host, row.id, pointer.sourceBundleDigest)).source !== "authored") {
+    if (loaded.identity.sourceBundleDigest !== expected.identity.sourceBundleDigest && !(await currentSourceIsAuthored(manager.db, manager.host, row.id, pointer.sourceBundleDigest))) {
       throw new Error(`Canonical policy pointer for ${row.id} is stale. Publish the exact current policy before startup.`);
     }
   }
@@ -434,6 +434,14 @@ async function putLineage(db: AppQueryable, organizationId: string, digest: stri
   const existing = (await db.select().from(policyBundleLineage).where(and(eq(policyBundleLineage.orgId, organizationId), eq(policyBundleLineage.digest, digest))).limit(1))[0];
   if (!existing || canonicalJson(existing) !== canonicalJson(value)) throw new Error("Canonical policy bundle lineage conflict.");
 }
+async function currentSourceIsAuthored(db: AppQueryable, host: SourceBundleHost, organizationId: string, digest: string): Promise<boolean> {
+  try { return (await lineageForActive(db, host, organizationId, digest)).source === "authored"; }
+  catch (error) {
+    if (await isRecordedCandidate(db, organizationId, digest)) return true;
+    throw error;
+  }
+}
+
 async function lineageForActive(db: AppQueryable, host: SourceBundleHost, organizationId: string, digest: string): Promise<{ readonly source: "structured" } | ({ readonly source: "authored" } & AuthoredLineage)> {
   const row = (await db.select().from(policyBundleLineage).where(and(eq(policyBundleLineage.orgId, organizationId), eq(policyBundleLineage.digest, digest))).limit(1))[0];
   if (row) {
