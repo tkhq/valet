@@ -147,7 +147,7 @@ Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/mig
 - The engine no longer uses a `prepareSandbox` closure. Sandbox prep is declarative: an injected `SpecProvider` returns ordered `PrepStep[]`; `attachment.reconcile` converges them at each run-start window. The old `prebuild_configs`/`prebuilds` tables are replaced by `image_sources` + `bakes`. See `docs/specs/2026-08-02-sandbox-reconcile-design.md`.
 - The in-sandbox gateway enforces `sid === VALET_SESSION_ID` from JWT claims — one session's JWT is rejected in another session's sandbox.
 - `VALET_SANDBOX_IDLE_MINUTES` (default 30) only matters on the kubernetes backend; hibernation is a no-op elsewhere.
-- **An api restart revokes running sandboxes' tokens without telling them**: on providers without a creds mount, cache rebuilds mint a fresh `VALET_SANDBOX_TOKEN` and revoke the old one, but nothing pushes the new value into a still-running sandbox — in-sandbox consumers (git-credential helper, `valet-gh`) 403 until the sandbox is recreated. The `credsMount`-capable providers (kubernetes Secret volume; docker host-dir bind mount) close this gap via the rotate sweep. See the GitHub integration design's Deviations section.
+- **Sandbox tokens survive API restarts.** The host adopts durable tokens with the stable instance encryption key. Teardown revokes them. Credential mounts remain supported, but token validity does not depend on refresh sweeps. See `docs/specs/2026-09-16-durable-sandbox-tokens-design.md`.
 
 ### Kubernetes context safety (binding)
 

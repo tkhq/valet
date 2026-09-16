@@ -44,7 +44,6 @@ import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from ".
 import { ensureEnvProviders } from "./proxy/upstream.js";
 import { resolveOrgId } from "./lib/org.js";
 import { webDistPath } from "./assets/base.js";
-import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
 import {
   startInstallationSweep,
   type InstallationSweepHandle,
@@ -368,7 +367,6 @@ getAttachmentRefStore().startSweep();
 // from starting more services.
 let closed = false;
 let bootReady = false;
-let rotateSweep: RotateSweepHandle | undefined;
 let installationSweep: InstallationSweepHandle | undefined;
 
 // `startServer` from createApp is renamed at the destructure so it can't
@@ -605,18 +603,6 @@ async function runBootChain(): Promise<void> {
 
   if (closed) return;
 
-  // Hourly sandbox-token rotation (sandbox-reconciliation plan, Task 12):
-  // re-mints tokens for long-running sandboxes whose initial token is > 12 h
-  // old, pushing the fresh token via `SandboxProvider.updateCreds` into the
-  // live /etc/valet/creds/ mount. A no-op when the provider does not report
-  // `credsMount` (docker dev, local). The interval is `.unref()`'d inside
-  // `startRotateSweep` so it never prevents process exit on its own.
-  rotateSweep = startRotateSweep({
-    host: providers.engineHost,
-    provider: providers.sandboxProvider,
-    db: providers.db,
-  });
-
   // GitHub App installations: pick up a new installation without anybody
   // pressing "Refresh installations". The tick wakes every minute and checks at
   // most one org that is past its own due time, so most ticks do nothing. An
@@ -690,11 +676,6 @@ async function close(): Promise<void> {
     providers.prebuildService.stop();
   } catch (err) {
     console.error("prebuildService.stop failed:", err);
-  }
-  try {
-    rotateSweep?.stop();
-  } catch (err) {
-    console.error("rotateSweep.stop failed:", err);
   }
   try {
     // Awaited, unlike the sweeps above it: a pass in flight holds a database

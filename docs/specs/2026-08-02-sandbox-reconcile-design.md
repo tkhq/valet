@@ -33,7 +33,7 @@ One sentence: **a sandbox is a cache materialization of a pure spec over a durab
 | Verb | Definition |
 |---|---|
 | **reconcile** | Observe (applied state + running image) → diff against the spec → converge, within policy. The only sandbox lifecycle verb above the provider port. Single-flight per attachment. |
-| **rotate** | A periodic host sweep (hourly): re-mint the sandbox token for every live sandbox whose token passed ~12h and push it through the creds mount. Sweep-driven, NOT run-start-triggered — rotating at the prompt would race Secret propagation (~1 min) against an already-expired token on long-idle sandboxes. Needs no idle window and no replacement. |
+| **adopt token** | Recover the session bearer from its persisted row and the stable instance encryption key. API restarts do not rotate it. |
 | **bake / skip** | The nightly job per source: recompute identity + head SHA; bake when either moved, skip when both match the current bake. |
 | **prune** | Retention, unchanged from sandbox-images-v2 (keep last 2 per source). |
 
@@ -48,15 +48,11 @@ One sentence: **a sandbox is a cache materialization of a pure spec over a durab
    - only some step hashes differ → re-run exactly those steps in place. A shim fix converges in seconds with zero state loss and no pod replacement.
    - applied file missing/empty/corrupt (pod restarted, fresh container fs) → re-apply all steps.
    - hibernated and stale → skip resume, provision fresh. Wake is not a separate path; it is reconcile.
-   - There is NO age-based divergence. Token freshness is `rotate`'s job (decision 5); container state lives until a real diff appears.
+   - There is NO age-based divergence. Sandbox tokens remain valid until teardown (decision 5); container state lives until a real diff appears.
 
 4. **All convergence happens at the run-start window; mid-run `ensureReady` is a pure fast-path.** The first acquisition of a run grants the window; reconcile (single-flight) may replace the pod or run steps there. Every later acquisition in the run does neither — no step convergence mid-run (the clone step's fetch+checkout under a live command would corrupt the working tree; distinguishing "safe" steps buys nothing). Busy = active runs across **all** threads + pending exec jobs. Gateway terminal/VS Code connections are NOT consulted this pass (documented limitation: a replacement drops an open terminal into a fresh pod).
 
-5. **Credentials ride the creds mount, not env and not prep.** Shims read `/etc/valet/creds/token` first, `$VALET_SANDBOX_TOKEN` env as fallback (back-compat with pre-mount sandboxes). The port gains `SandboxProvider.updateCreds(sandboxId, files: Record<string, string>)` and `capabilities().credsMount: boolean`:
-   - kubernetes: per-sandbox Secret, mounted as a **whole-directory volume** (env-from-Secret is frozen at process start; subPath mounts never update — both are traps, both prohibited here). Rotation = PATCH the Secret; kubelet propagates within ~1 min, which is fine against a 24h TTL rotated at 12h.
-   - docker/local: a second small host-dir bind mount; rotation = write the host file (instant). Docker mounts are immutable after create — existing containers gain the mount on their next replacement; env fallback covers the gap.
-   - virtual: in-memory.
-   The `rotate` sweep (verbs table) drives updates hourly, so tokens are always fresh regardless of run activity. A restarted pod mounts the CURRENT secret at boot, so credentials are fresh before any prep runs. This closes the 24h token-strand gap properly and removes the motivation for age-based recycling. Providers without `credsMount` keep today's env-only behavior and its documented TTL limitation. Gateway processes (ttyd/code-server auth) still read env; migrating them to the mount is future work.
+5. **Credentials survive API restarts (TKAI-498).** Shims read `/etc/valet/creds/token` first and use `$VALET_SANDBOX_TOKEN` as fallback. Kubernetes uses a whole-directory Secret mount; Docker uses a host-directory bind mount. The host adopts the same durable bearer on rebuild. Teardown revokes all session bearers. No rotation sweep or Secret propagation window controls validity. The `updateCreds` provider port remains available. See [Durable sandbox tokens](2026-09-16-durable-sandbox-tokens-design.md).
 
 6. **Observation is cached and throttled.** The attachment caches observed state (applied hashes, running image) in memory; the applied file is re-read via exec only (a) after a provisioning/ready transition and (b) on a ~5 min throttle. The throttle bounds pod-restart detection latency — a restarted pod may run up to ~5 min with missing prep artifacts before the next run-start window catches it. Explicit trade: per-prompt exec cost vs restart-detection latency.
 
@@ -110,12 +106,12 @@ Phases 1–3 are the sandbox path and land independently of phase 4; the current
 
 1. **Spec extraction.** `ResolveSnapshot` + `computeSpec` + `specHash` goldens. Pure refactor; no behavior change.
 2. **PrepPlan in the engine.** `SpecProvider` seam, step model, applied.json, in-place step convergence at run start. Conformance suites updated. Ships standalone value: shim deploys stop requiring pod deletion.
-3. **Replacement + creds mount.** Verify the two named risks first. Then: run-start windows, release+create preserving workspace, wake folding, backoff memo, divergence-age metric, `updateCreds` port + Secret/bind-mount implementations + shim file-first read + rotate loop.
+3. **Replacement + creds mount.** Verify the two named risks first. Then: run-start windows, release+create preserving workspace, wake folding, backoff memo, divergence-age metric, `updateCreds` port + Secret/bind-mount implementations + shim file-first read. TKAI-498 replaces the rotate loop with durable credentials.
 4. **Generation unification.** `image_sources`/`bakes` tables, org base source + settings editor, zero-config auto-create with decay, parent-first nightly bake-or-skip, retention ported, UI relabel.
 
 ## Exit criteria (the dogfood)
 
-On the local k8s deploy: edit a shim script, deploy — next prompt on a running session converges in place (no pod replacement, applied.json updated, new shim present). Push a new stock image tag — next prompt replaces the pod; a file written in `/workspace` beforehand survives, a file written in `/root` does not. Kill a sandbox pod manually — the divergence is OBSERVED within one throttle window, all steps re-apply at the next prompt (convergence only happens in the run-start window, decision 4), and the restarted pod booted with the CURRENT token from the Secret mount. A sandbox older than 12h has a rotated token file and its credential helper still mints — with no pod replacement having occurred. Edit the org base commands — the next nightly pass bakes the base AND rebakes dependent repo sources the same night; sessions pick both up lazily. Bind a fresh repo — source auto-created, first bake runs in background, second session on that repo boots prebuilt. Two consecutive nightly passes with no upstream commits — second pass skips every source. A repo unbound for 30 days stops baking; re-binding resumes it.
+On the local k8s deploy: edit a shim script, deploy — next prompt on a running session converges in place (no pod replacement, applied.json updated, new shim present). Push a new stock image tag — next prompt replaces the pod; a file written in `/workspace` beforehand survives, a file written in `/root` does not. Kill a sandbox pod manually — the divergence is OBSERVED within one throttle window, all steps re-apply at the next prompt (convergence only happens in the run-start window, decision 4), and the restarted pod booted with the CURRENT token from the Secret mount. A sandbox older than 24 hours retains its original token and its credential helper still works after an API restart. Edit the org base commands — the next nightly pass bakes the base AND rebakes dependent repo sources the same night; sessions pick both up lazily. Bind a fresh repo — source auto-created, first bake runs in background, second session on that repo boots prebuilt. Two consecutive nightly passes with no upstream commits — second pass skips every source. A repo unbound for 30 days stops baking; re-binding resumes it.
 
 ## Testing
 

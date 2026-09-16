@@ -14,6 +14,7 @@ import {
   type OnApprovalPending,
   type OnGateResolved,
 } from "@valet/workflow";
+import { preserveLegacySandboxTokens } from "../auth/sandbox-tokens.js";
 import { applyAppMigrations, buildAppDb, buildAppQueryable } from "../lib/drizzle.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { writeExecutionGrant, updateInvocationOutcome } from "../policies/service.js";
@@ -259,6 +260,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   await applyEngineMigrations(pgdb, pgDirHint);
 
   const db = buildAppDb(source);
+  await preserveLegacySandboxTokens(db);
 
   // Seed the local-dev identity. Idempotent. Skipped whenever real auth is
   // configured (`opts.seedLocalIdentity: false`, set by `main.ts` when
@@ -447,6 +449,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     apiBaseUrl: opts.apiBaseUrl,
     sandboxJwtMaster: opts.sandboxJwtMaster,
+    sandboxTokenMaster: opts.encryptionKey,
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
     actionPluginByService,
