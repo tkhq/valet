@@ -26,8 +26,29 @@ const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
  */
 export const CONTAINER_DEATH_PATTERN = /No such container|is not running|Connection refused|socket hang up/i;
 
-function isTransportError(err: unknown): boolean {
-  return err instanceof Error && CONTAINER_DEATH_PATTERN.test(err.message);
+/** Classify original causes independently of bounded, user-facing messages. */
+export function isSandboxTransportError(err: unknown): boolean {
+  const pending: unknown[] = [err];
+  const seen = new Set<object>();
+  for (let visited = 0; pending.length && visited < 16; visited++) {
+    const current = pending.shift();
+    if (typeof current === "string" && CONTAINER_DEATH_PATTERN.test(current)) return true;
+    if (current === null || (typeof current !== "object" && typeof current !== "function") || seen.has(current)) continue;
+    seen.add(current);
+    for (const key of ["message", "cause", "error"]) {
+      try {
+        const value: unknown = Reflect.get(current, key);
+        if (key === "message" || typeof value === "string") {
+          if (typeof value === "string" && CONTAINER_DEATH_PATTERN.test(value)) return true;
+        } else if (value !== null && (typeof value === "object" || typeof value === "function")) {
+          pending.push(value);
+        }
+      } catch {
+        // A throwing getter must not hide another readable cause.
+      }
+    }
+  }
+  return false;
 }
 
 /** posix-style dirname; used only to compute the parent for the wrapper's
@@ -376,7 +397,7 @@ export class PolicySandbox implements Sandbox {
     try {
       result = await op(sandbox);
     } catch (err) {
-      if (err instanceof SandboxEvictedError || isTransportError(err)) {
+      if (err instanceof SandboxEvictedError || isSandboxTransportError(err)) {
         this.attachment.reportFailure(epoch, err);
         if (err instanceof SandboxEvictedError) throw err;
         throw new SandboxUnavailableError(err);

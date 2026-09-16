@@ -154,24 +154,27 @@ export class PodExecTransportError extends Error {
   ) {
     super(
       `Kubernetes exec connection failed for ${namespace}/${podName} (${containerName}): ` +
-      `${formatSandboxErrorCause(execTransportCause(cause))}. Check Kubernetes API access and the sandbox pod status before retrying.`,
+      `${formatExecTransportCause(cause)}. Check Kubernetes API access and the sandbox pod status before retrying.`,
     );
     this.name = "PodExecTransportError";
   }
 }
 
-function execTransportCause(cause: unknown): unknown {
+function formatExecTransportCause(cause: unknown): string {
   // ws exposes the original Error through a prototype getter on ErrorEvent.
   // Do not traverse event.target: it contains the socket and request headers.
   if (cause !== null && typeof cause === "object") {
     try {
       const underlying: unknown = Reflect.get(cause, "error");
-      if (underlying !== undefined && underlying !== null) return underlying;
+      if (typeof underlying === "string" || (underlying !== null && typeof underlying === "object")) {
+        const detail = formatSandboxErrorCause(underlying);
+        if (detail.trim() && detail !== "unserializable cause" && detail !== "[object Object]") return detail;
+      }
     } catch {
       // Preserve readable fields on the outer rejection if its getter fails.
     }
   }
-  return cause;
+  return formatSandboxErrorCause(cause);
 }
 
 // ── Narrow client interface (real k8s.Exec adapts to this; tests fake it) ──

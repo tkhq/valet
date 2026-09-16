@@ -252,14 +252,14 @@ function preparationField(cause: object, key: string): string | number | undefin
 
 // Unknown fields can contain diagnostics or private payloads. Keep scalar
 // diagnostics, but describe nested values without copying their contents.
-const PRIVATE_PREPARATION_FIELD = /auth|cookie|token|secret|pass(?:word|phrase)|credential|api.?key|private.?key|headers?|command|config|body|payload|request|response|stdout|stderr|environment|^env|^data$|^url$|^cmd$|^args?$|^argv$|^arguments$|^input$|^output$/i;
+const PRIVATE_PREPARATION_FIELD = /auth|cookie|token|secret|pass(?:word|phrase)|^pass$|credential|api.?key|private.?key|keydata|^key$|headers?|command|config|body|payload|request|response|std(?:in|out|err)|environment|^env|^data$|^url$|^cmd$|^args?$|^argv$|^arguments$|^input$|^output$/i;
 
 function preparationFallback(cause: object): string {
   try {
     const entries: [string, string | number | boolean | null][] = [];
     const keys = Object.getOwnPropertyNames(cause);
     for (const key of keys.slice(0, 64)) {
-      if (PRIVATE_PREPARATION_FIELD.test(key)) continue;
+      if (PRIVATE_PREPARATION_FIELD.test(key.replace(/[^a-z0-9]/gi, ""))) continue;
       // Do not invoke accessors or provider serialization methods.
       try {
         const descriptor = Object.getOwnPropertyDescriptor(cause, key);
@@ -292,7 +292,11 @@ export function formatSandboxErrorCause(cause: unknown): string {
     const code = preparationField(cause, "code");
     const messageText = typeof message === "string" ? message : "";
     const codeText = code === undefined ? "" : String(code);
-    if (messageText && codeText) return boundPreparationDetail(`${messageText} (${codeText})`);
+    if (messageText && codeText) {
+      // Another wrapper can add context and truncate this message again.
+      // Keep the code at the start, even when this diagnostic fits the limit.
+      return boundPreparationDetail(`(${codeText}) ${messageText}`);
+    }
     if (messageText || codeText) return messageText || codeText;
 
     // Only copy scalar diagnostics. Requests, commands, and nested payloads can

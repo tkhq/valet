@@ -5,7 +5,7 @@ import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvid
 describe("preparation failure tool results", () => {
   it.each([
     { cause: { failure: "mount denied", retryable: false }, detail: '{"failure":"mount denied","retryable":false}' },
-    { cause: { message: "clone denied", code: "EACCES" }, detail: "clone denied (EACCES)" },
+    { cause: { message: "clone denied", code: "EACCES" }, detail: "(EACCES) clone denied" },
   ])("delivers $detail to the model and persisted history", async ({ cause, detail }) => {
     const faux = registerFauxProvider({ provider: "preparation-tool-result" });
     let received: Context | undefined;

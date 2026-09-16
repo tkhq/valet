@@ -67,7 +67,7 @@ import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
+import { isSandboxTransportError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -536,7 +536,7 @@ export class KubernetesSandbox implements Sandbox {
     );
     if (error instanceof SandboxEvictedError) throw error;
     await this.checkEviction(podName, dispatchUid);
-    if (CONTAINER_DEATH_PATTERN.test(error.message)) throw error;
+    if (isSandboxTransportError(error)) throw error;
 
     // PodFileOpError carries its exit code as a typed field; jobs.ts's
     // kickoff-failure Error ("execJob kickoff failed (exit N): ...", see

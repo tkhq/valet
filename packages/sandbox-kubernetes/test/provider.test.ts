@@ -127,7 +127,7 @@ describe("preparation transport diagnostics", () => {
       const failure = await attachment.ensureReady({ timeoutMs: 1000 }).catch((error: unknown) => error);
       expect(failure).toMatchObject({
         name: "SandboxPreparationError",
-        message: expect.stringContaining("Unexpected server response: 403 (EACCES)"),
+        message: expect.stringContaining("(EACCES) Unexpected server response: 403"),
         cause: {
           name: "PodExecTransportError", namespace: "valet-sandboxes", podName: "prep-pod",
           cause: event,
@@ -160,12 +160,12 @@ describe("preparation transport diagnostics", () => {
       const receipt = await session.prompt("Read the file.");
       await session.thread().awaitResult(receipt.queueItemId, { timeoutMs: 2000 });
       expect(modelResult).toMatchObject({ isError: true, content: [{
-        type: "text", text: expect.stringContaining("Unexpected server response: 403 (EACCES)"),
+        type: "text", text: expect.stringContaining("(EACCES) Unexpected server response: 403"),
       }] });
       const entries = await session.readEntries("web:default");
       const parts = entries.flatMap((entry) => entry.type === "message" ? entry.parts ?? [] : []);
       expect(parts.find((part) => part.type === "tool_call")).toMatchObject({
-        status: "error", result: { text: expect.stringContaining("Unexpected server response: 403 (EACCES)") },
+        status: "error", result: { text: expect.stringContaining("(EACCES) Unexpected server response: 403") },
       });
     } finally {
       await session.destroy();

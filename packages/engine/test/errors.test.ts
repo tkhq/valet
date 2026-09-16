@@ -13,7 +13,9 @@ describe("SandboxPreparationError", () => {
     const cause = {
       failure: "mount denied", metadata: { phase: "mount", access_token: "secret" },
       headers: { Authorization: "secret" }, command: "secret", config: { value: "secret" },
-      body: "secret", stderr: "secret", password: "secret", apiKey: "secret",
+      body: "secret", stderr: "secret", stdin: "secret", password: "secret", apiKey: "secret",
+      key: "secret", clientKeyData: "secret", pass: "secret",
+      "client-key-data": "secret", client_key_data: "secret", "client.key.data": "secret",
       cmd: "secret", argv: ["secret"], output: "secret",
       variables: [{ name: "API_TOKEN", value: "secret" }],
     };
@@ -50,6 +52,12 @@ describe("SandboxPreparationError", () => {
     expect(error.message).toContain("[truncated]");
   });
 
+  it("keeps an error code when the message is truncated", () => {
+    const error = new SandboxPreparationError({ message: "x".repeat(3000), code: "EACCES" });
+    expect(error.message).toContain("EACCES");
+    expect(error.message.length).toBeLessThanOrEqual("sandbox preparation failed: ".length + 2048);
+  });
+
   it("survives a revoked proxy", () => {
     const { proxy, revoke } = Proxy.revocable({}, {});
     revoke();
@@ -83,7 +91,7 @@ describe("SandboxPreparationError", () => {
 
   it.each([
     { cause: new Error("clone failed"), detail: "clone failed" },
-    { cause: { message: "clone failed", code: "EACCES" }, detail: "clone failed (EACCES)" },
+    { cause: { message: "clone failed", code: "EACCES" }, detail: "(EACCES) clone failed" },
     { cause: { message: "clone failed" }, detail: "clone failed" },
     { cause: { code: 403 }, detail: "403" },
     { cause: { reason: "clone denied", status: 403 }, detail: '{"reason":"clone denied","status":403}' },
@@ -104,7 +112,7 @@ describe("SandboxPreparationError", () => {
       message: { value: "permission denied" },
       code: { value: "EACCES" },
     });
-    expect(new SandboxPreparationError(cause).message).toContain("permission denied (EACCES)");
+    expect(new SandboxPreparationError(cause).message).toContain("(EACCES) permission denied");
   });
 
   it("does not replace the prep failure when serialization fails", () => {

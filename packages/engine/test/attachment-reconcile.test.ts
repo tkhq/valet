@@ -367,12 +367,27 @@ describe("SandboxAttachment.reconcile", () => {
 
     await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toMatchObject({
       name: "SandboxPreparationError",
-      message: "sandbox preparation failed: clone denied (EACCES)",
+      message: "sandbox preparation failed: (EACCES) clone denied",
       code: "sandbox_preparation_failed",
       cause,
     });
     expect(att.state).toBe("error");
     await att.destroy();
+  });
+
+  it("logs in-place prep diagnostics without inspecting retained request causes", async () => {
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [] });
+    const att = await reachReady(new RecordingProvider(), fake);
+    const failure = new Error("exec connection failed", { cause: { target: { url: "SECRET_COMMAND" } } });
+    fake.spec = { specHash: "h2", steps: [step("s1", "h2", async () => { throw failure; })] };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await att.reconcile();
+      expect(log).toHaveBeenCalledWith("SandboxAttachment.reconcile failed", "exec connection failed");
+    } finally {
+      log.mockRestore();
+      await att.destroy();
+    }
   });
 
   it("a critical prep failure releases adopted compute without destroying its workspace", async () => {
