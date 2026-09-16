@@ -7,7 +7,7 @@ description: How to effectively use Slack tools to read, understand, and interac
 
 ## Reading Channels
 
-Use `slack.list_channels` to find channel IDs. Use `slack.read_history` to read messages. Key parameters:
+Use `slack.list_channels` to find channel IDs. Use `slack.read_history` to read messages. Read results include `channel_name`; use it in explanations and output. Keep the `channel` ID for tool arguments. Key parameters:
 
 - **`filter`** -- case-insensitive keyword filter, useful for finding specific topics in noisy channels
 - **`threads_only`** -- only return messages with thread replies, good for finding discussions in alert channels
@@ -22,7 +22,7 @@ Messages include **reactions** (name + count) that signal consensus and attentio
 
 ## Threads
 
-`read_history` shows thread parents with `reply_count`. Use `slack.read_thread` to read replies on threads that matter. Don't read every thread -- prioritize by:
+`read_history` shows thread parents with `reply_count`. Use `slack.read_thread` to read replies on threads that matter. Use its `channel_name` in explanations; keep its `channel` ID for follow-up tool calls. Don't read every thread -- prioritize by:
 
 1. High `reply_count` -- active discussions
 2. Reactions on the parent -- signals importance

@@ -359,43 +359,84 @@ describe('slack actions', () => {
     });
   });
 
-  it('read_history reads channel history and filters noise subtypes by default', async () => {
+  it('read_history returns the requested channel ID and readable name', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, {
         ok: true,
         messages: [
-          { user: 'U1', text: 'hello', ts: '1.1' },
+          { text: 'hello', ts: '1.1' },
           { subtype: 'channel_join', text: 'joined', ts: '1.2' },
         ],
         has_more: false,
-      }),
-    );
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { name: 'support' } }));
 
-    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+    const result = await action('slack.read_history').execute({ channel: 'C495H' }, pluginCtx());
 
-    const [url] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(url).toContain('https://slack.com/api/conversations.history');
-    expect(url).toContain('channel=C1');
-    expect(url).toContain('limit=100');
+    const [historyUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const [infoUrl] = fetchMock.mock.calls[2] as [string, RequestInit];
+    expect(historyUrl).toContain('https://slack.com/api/conversations.history');
+    expect(historyUrl).toContain('channel=C495H');
+    expect(historyUrl).toContain('limit=100');
+    expect(infoUrl).toContain('https://slack.com/api/conversations.info');
+    expect(infoUrl).toContain('channel=C495H');
     expect(result).toMatchObject({
       success: true,
-      data: { has_more: false, total: 1 },
+      data: { channel: 'C495H', channel_name: 'support', has_more: false, total: 1 },
     });
   });
 
-  it('read_thread reads replies for a thread_ts', async () => {
+  it('read_thread returns the requested channel ID and readable name', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, { ok: true, messages: [{ user: 'U1', text: 'reply', ts: '1.2' }], has_more: false }),
-    );
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'reply', ts: '1.2' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { name: 'engineering' } }));
 
-    const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
+    const result = await action('slack.read_thread').execute({ channel: 'C495T', thread_ts: '1.1' }, pluginCtx());
 
-    const [url] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(url).toContain('https://slack.com/api/conversations.replies');
-    expect(url).toContain('ts=1.1');
-    expect(result).toMatchObject({ success: true, data: { has_more: false, total: 1 } });
+    const [repliesUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const [infoUrl] = fetchMock.mock.calls[2] as [string, RequestInit];
+    expect(repliesUrl).toContain('https://slack.com/api/conversations.replies');
+    expect(repliesUrl).toContain('ts=1.1');
+    expect(infoUrl).toContain('https://slack.com/api/conversations.info');
+    expect(infoUrl).toContain('channel=C495T');
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C495T', channel_name: 'engineering', has_more: false, total: 1 },
+    });
+  });
+
+  it('caches a read channel name for repeated reads', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [], has_more: false }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { name: 'cached' } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [], has_more: false }));
+
+    const first = await action('slack.read_history').execute({ channel: 'C495C' }, pluginCtx());
+    const second = await action('slack.read_history').execute({ channel: 'C495C' }, pluginCtx());
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(first).toMatchObject({ success: true, data: { channel_name: 'cached' } });
+    expect(second).toMatchObject({ success: true, data: { channel_name: 'cached' } });
+  });
+
+  it('read_history preserves a successful result when the channel name lookup fails', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [], has_more: false }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
+
+    const result = await action('slack.read_history').execute({ channel: 'C495F' }, pluginCtx());
+
+    expect(result).toEqual({
+      success: true,
+      data: { channel: 'C495F', has_more: false, next_cursor: undefined, total: 0, messages: [] },
+    });
   });
 
   it('list_users lists non-bot, non-deleted members', async () => {

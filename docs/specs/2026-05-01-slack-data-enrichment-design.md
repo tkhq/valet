@@ -19,6 +19,12 @@ When the agent reads Slack via `read_history` and `read_thread`, it gets a minim
 
 ## Design
 
+### Read result channel metadata
+
+`read_history` and `read_thread` return the requested channel ID in `channel` and the resolved Slack name in `channel_name`. Agents use `channel_name` in explanations and user-facing output. They keep `channel` for follow-up tool calls.
+
+The actions resolve the name with `conversations.info` after a successful read. A bounded, least-recently-used cache stores up to 100 channel names per action module. If the lookup fails, the read still succeeds and returns the channel ID without `channel_name`.
+
 ### 1. Enriched Message Data
 
 #### File metadata in `slimMessage`

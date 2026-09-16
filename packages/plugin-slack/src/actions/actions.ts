@@ -119,6 +119,45 @@ const userCache = new Map<string, string>();
 const channelCache = new Map<string, string>();
 const botCache = new Map<string, string>();
 
+// Keep this small because action modules can live for a worker isolate's lifetime.
+const MAX_READ_CHANNEL_NAME_CACHE_ENTRIES = 100;
+const readChannelNameCache = new Map<string, string>();
+
+function readChannelNameCacheKey(token: string, channelId: string): string {
+  return `${token}\0${channelId}`;
+}
+
+function cacheReadChannelName(cacheKey: string, channelName: string): void {
+  readChannelNameCache.delete(cacheKey);
+  readChannelNameCache.set(cacheKey, channelName);
+  if (readChannelNameCache.size > MAX_READ_CHANNEL_NAME_CACHE_ENTRIES) {
+    const oldestCacheKey = readChannelNameCache.keys().next().value;
+    if (oldestCacheKey) readChannelNameCache.delete(oldestCacheKey);
+  }
+}
+
+/** Resolve the requested read channel without making channel-name lookup fatal. */
+async function resolveReadChannelName(token: string, channelId: string): Promise<string | undefined> {
+  const cacheKey = readChannelNameCacheKey(token, channelId);
+  const cached = readChannelNameCache.get(cacheKey);
+  if (cached) {
+    // Refresh its insertion order so frequently read channels remain cached.
+    cacheReadChannelName(cacheKey, cached);
+    return cached;
+  }
+
+  try {
+    const res = await slackGet('conversations.info', token, { channel: channelId });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { ok: boolean; channel?: { name?: unknown } };
+    if (!data.ok || typeof data.channel?.name !== 'string') return undefined;
+    cacheReadChannelName(cacheKey, data.channel.name);
+    return data.channel.name;
+  } catch {
+    return undefined;
+  }
+}
+
 function formatUserDisplay(uid: string, user: Record<string, unknown>): string {
   const profile = (user.profile || {}) as Record<string, unknown>;
   const handle = ((profile.display_name as string) || (user.name as string) || uid);
@@ -470,7 +509,7 @@ const readHistory = action(Type.Object({
   }))({
   id: 'slack.read_history',
   name: 'Read History',
-  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
+  description: 'Read recent messages from a Slack channel the bot has joined. Results include channel_name for explanations; use the channel ID only in tool arguments. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -510,10 +549,11 @@ const readHistory = action(Type.Object({
 
     messages = await resolveAndEnrichMessages(token, messages);
 
+    const channel_name = await resolveReadChannelName(token, p.channel);
     const next_cursor = data.response_metadata?.next_cursor || undefined;
     const filtered = p.filter || p.threads_only;
     // Put pagination metadata first — large message arrays may be truncated by tool output limits
-    return { success: true, data: { has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
+    return { success: true, data: { channel: p.channel, ...(channel_name ? { channel_name } : {}), has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
   },
 });
 
@@ -525,7 +565,7 @@ const readThread = action(Type.Object({
   }))({
   id: 'slack.read_thread',
   name: 'Read Thread',
-  description: 'Read replies in a Slack thread. Bot must be a member of the channel.',
+  description: 'Read replies in a Slack thread. Results include channel_name for explanations; use the channel ID only in tool arguments. Bot must be a member of the channel.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -550,8 +590,9 @@ const readThread = action(Type.Object({
       (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>)),
     );
 
+    const channel_name = await resolveReadChannelName(token, p.channel);
     const next_cursor = data.response_metadata?.next_cursor || undefined;
-    return { success: true, data: { has_more: data.has_more, next_cursor, total: messages.length, messages } };
+    return { success: true, data: { channel: p.channel, ...(channel_name ? { channel_name } : {}), has_more: data.has_more, next_cursor, total: messages.length, messages } };
   },
 });
 
