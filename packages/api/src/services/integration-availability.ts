@@ -17,7 +17,9 @@
  *      integration's foundation — e.g. the Slack app. One exception: a
  *      team owner that holds its own row for the service (team credentials
  *      design) resolves "manual" — the team token is the integration for
- *      that team alone, and no other owner reads it.
+ *      that team alone, and no other owner reads it. That row is read
+ *      BEFORE the org row, because a team run reads it in that order; a
+ *      row that throws `CredentialReferenceBrokenError` reads as absent.
  *   5. `requires.orgCredential` met       → "org". The org credential IS the
  *      integration; sessions resolve it by owner escalation. There is
  *      nothing for a user to connect, so the UI offers no token entry —
@@ -42,6 +44,7 @@ import type {
   CredentialStore,
   ValetPlugin,
 } from "@valet/engine";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { authCodeEnvReady, findOAuthDeclaration } from "./integration-oauth.js";
 
 export type ConnectMode = "oauth" | "manual" | "org" | "unconfigured";
@@ -83,15 +86,26 @@ export async function connectModeFor(
     return authCodeEnvReady(found.oauth, params.env) ? "oauth" : "unconfigured";
   }
   if (params.decl.requires?.orgCredential) {
+    // The team row comes first, the order a team run reads it in
+    // (`services/credential-resolution.ts#resolveTeamCredentialRead`). A team
+    // that holds its own token acts as that token, so the catalog must not
+    // name the org bot for it.
+    if (params.owner?.type === "team") {
+      try {
+        const teamCredential = await params.credentials.get(params.owner, params.service);
+        if (teamCredential !== null) return "manual";
+      } catch (err) {
+        // A broken delegated row is not a usable team credential. Read it as
+        // an absent row: the org bot behind it still serves the team, and a
+        // member's own credential never does.
+        if (!(err instanceof CredentialReferenceBrokenError)) throw err;
+      }
+    }
     const orgCredential = await params.credentials.get(
       { type: "org", id: params.orgId },
       params.service,
     );
     if (orgCredential !== null) return "org";
-    if (params.owner?.type === "team") {
-      const teamCredential = await params.credentials.get(params.owner, params.service);
-      if (teamCredential !== null) return "manual";
-    }
     return "unconfigured";
   }
   return "manual";

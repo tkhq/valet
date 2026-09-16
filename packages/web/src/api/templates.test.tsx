@@ -38,6 +38,7 @@ const PERSONAL: ListWorkflowTemplatesResponse = {
       requires: [{ service: "linear", connected: true }],
       inputs: [],
       caveats: [],
+      installable: true,
     },
   ],
 };

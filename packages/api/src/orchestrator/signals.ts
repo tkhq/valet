@@ -88,6 +88,12 @@ export async function writeDropLog(
  * Edge authorization (decision 16). Returns the two sessions' durable
  * `SessionData` rows on success (callers reuse them — no need to re-fetch).
  * Throws `SignalEdgeDeniedError` (and drop-logs) on denial.
+ *
+ * This is also the bound on a second rule. `admitSignal` submits with no
+ * author, and `workflows/actions.ts#ownerFromContext` reads an author-less
+ * turn as a machine turn, which waives the team-membership check on the
+ * `workflows.*` tools. The edges below are what keep that safe, so read
+ * that gate before you widen one.
  */
 async function authorizeEdge(
   deps: AdmitSignalDeps,

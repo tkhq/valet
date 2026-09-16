@@ -36,8 +36,14 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import type { TeamServiceReadinessDeps } from "./team-service-readiness.js";
-import { buildValidateEnvironment } from "./validation-env.js";
-import { appendRemovedEdgeHint, applyWorkflowPatch, type WorkflowEdgeRef } from "./patch.js";
+import { buildValidateEnvironment, buildOrgValidateEnvironment } from "./validation-env.js";
+import {
+  appendRemovedEdgeHint,
+  applyWorkflowModelPatch,
+  applyWorkflowPatch,
+  type WorkflowEdgeRef,
+} from "./patch.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import {
   createWorkflowTrigger,
   deleteWorkflowTrigger,
@@ -143,11 +149,51 @@ export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
   if (typeof userId !== "string" || userId.length === 0) return null;
   if (typeof orgId !== "string" || orgId.length === 0) return null;
-  const owner: WorkflowOwner = { userId: ctx.actor?.id ?? userId, orgId };
-  if (ctx.owner?.type === "team") {
-    owner.principal = { type: "team", id: ctx.owner.id };
+  const actorUserId = ctx.actor?.id ?? userId;
+  const principal = ctx.owner;
+  if (principal?.type === "user") {
+    if (principal.id !== actorUserId) return null;
+    return { userId: actorUserId, orgId, principal: { type: "user", id: principal.id } };
   }
-  return owner;
+  if (principal?.type === "team") {
+    // A team assistant with no acting user carries the team's own
+    // principal id as its user id (`team:{id}`). That value is the
+    // session's server-derived owner, not a person, so a membership read
+    // of it always fails. Unattended runs — schedules, events, webhooks —
+    // reach the workflow tools through exactly that context.
+    //
+    // The gate therefore turns on the ACTING user id above (the turn's
+    // author when it has one, else the session's own user id): every value
+    // other than the assistant's own team principal id names a person, and
+    // a person's turn always carries an author.
+    //
+    // Three submitters set that author, and each one sets it from an
+    // authenticated person: `routes/messages.ts` (the web client's own
+    // prompt), `channels/host.ts` (a linked channel identity), and
+    // `events/assistant-delivery.ts` (the actor an event subscription was
+    // created by).
+    //
+    // A fourth submitter sets NO author: `orchestrator/signals.ts`
+    // (`admitSignal`). A signal therefore reads as a machine turn and
+    // widens this gate. `authorizeEdge` in that file is what bounds the
+    // widening: it admits a parent-to-child or child-to-parent edge, and an
+    // org-owned assistant to a user-owned one within one organization. A
+    // user-to-user or user-to-team assistant edge is denied, so a person
+    // cannot reach a team's workflows by signalling its assistant.
+    //
+    // The comparison assumes a principal id holds no colon. A user id
+    // spelled `team:{id}` would otherwise read as that team's own machine
+    // principal. Every id this code sees is a generated identifier, so
+    // there is no runtime check here.
+    const machinePrincipal = actorUserId === `${principal.type}:${principal.id}`;
+    return {
+      userId: actorUserId,
+      orgId,
+      principal: { type: "team", id: principal.id },
+      requireTeamMembership: ctx.sessionPurpose !== "workflow" && !machinePrincipal,
+    };
+  }
+  return { userId: actorUserId, orgId };
 }
 
 const NO_OWNER: PluginActionResult = {
@@ -185,7 +231,9 @@ function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
 
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
-    workflow_id: Type.String(), team_id: Type.String(), name: Type.String(),
+    workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
+    team_id: Type.String({ description: "Explicit destination team ID." }),
+    name: Type.String({ description: "New workflow name in the destination team. Must not exist." }),
   }))({
     id: "workflows.copy_to_team",
     name: "Copy workflow to team",
@@ -212,7 +260,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const listWorkflows = action(Type.Object({}))({
     id: "workflows.list_workflows",
     name: "List workflows",
-    description: "List the user's workflow definitions (id, name, timestamps).",
+    description: "List the assistant owner's workflow definitions (id, name, timestamps).",
     riskLevel: "low",
     execute: async (_args, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -263,7 +311,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     id: "workflows.save_workflow",
     name: "Save workflow",
     description:
-      "Create a workflow (omit workflow_id) or update one (pass workflow_id). " +
+      "Create a workflow for the assistant owner (omit workflow_id) or update one (pass workflow_id). " +
       "`definition` MUST be a dag/v1 object: { version: 'dag/v1', nodes: [...], edges: [...] } " +
       "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
@@ -276,13 +324,16 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // The validate env is best-effort: if deps aren't wired (early boot,
       // or a test that only exercises validation), lint without the
       // catalog hooks rather than failing the whole call.
-      let catalog: WorkflowServiceDeps["actionPluginByService"];
+      let validationDeps: WorkflowServiceDeps | undefined;
       try {
-        catalog = getDeps().actionPluginByService;
+        validationDeps = getDeps();
       } catch {
-        catalog = undefined;
+        validationDeps = undefined;
       }
-      const validation = validateDefinitionInput(definition, buildValidateEnvironment(catalog));
+      const env = validationDeps
+        ? await buildOrgValidateEnvironment(validationDeps, owner.orgId)
+        : buildValidateEnvironment();
+      const validation = validateDefinitionInput(definition, env);
       if (!validation.ok) {
         return {
           success: false,
@@ -311,7 +362,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const created = await createWorkflowDefinition(getDeps(), owner, {
         name: name ?? "Untitled workflow",
         definition: routedDefinition,
-        ...(ctx.owner?.type === "team" ? { teamId: ctx.owner.id, skipMembershipCheck: true } : {}),
+        ...(owner.principal?.type === "team" ? { teamId: owner.principal.id } : {}),
       });
       return {
         success: true,
@@ -335,7 +386,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const started = await startWorkflowRun(getDeps(), owner, workflow_id, input);
+      const deps = getDeps();
+      // The calling conversation, as-is. `startWorkflowRun` is the one
+      // validator: it drops a session that is no assistant's, an assistant
+      // that belongs to neither the caller nor the run, and a thread that
+      // is archived or gone.
+      const origin = ctx.sessionId && ctx.threadId
+        ? { assistantSessionId: ctx.sessionId, threadId: ctx.threadId }
+        : undefined;
+      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
         return {
@@ -600,7 +659,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         (remove_edges !== undefined && remove_edges.length > 0);
 
       if (changesGraph) {
-        const env = buildValidateEnvironment(deps.actionPluginByService);
+        const env = await buildOrgValidateEnvironment(deps, owner.orgId);
         const validation = validateDefinitionInput(patched.definition, env);
         if (!validation.ok) {
           // Validate the stored definition too, so the reply can say which
@@ -636,6 +695,55 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const updateModel = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      model: Type.String({ description: "An approved catalog model id or a size tier: xs, s, m, l, xl." }),
+      node_ids: Type.Optional(Type.Array(Type.String(), {
+        description: "Only these llm or session nodes. Omit to update all model-capable nodes.",
+      })),
+    }),
+  )({
+    id: "workflows.update_model",
+    name: "Update workflow model",
+    description:
+      "Change the model on selected llm or session nodes without replacing the workflow definition. " +
+      "Omit node_ids to update all such nodes, including foreach bodies. Orchestrator nodes use their " +
+      "assistant's saved model and are not changed. The model must be an approved active catalog model " +
+      "or an org model tier.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, model, node_ids }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const catalog = await buildOrgCatalog(deps.db, deps.credentials, owner.orgId);
+      if (!catalogValidIds(catalog).has(model)) {
+        return {
+          success: false,
+          error: `unknown or inactive model: ${model}. Pick an approved model from GET /api/models, or use xs, s, m, l, or xl.`,
+        };
+      }
+      const concrete = catalog.find((entry) =>
+        entry.id === model || (entry.id.startsWith("anthropic/") && entry.id.slice("anthropic/".length) === model),
+      );
+      if (concrete && !concrete.approved) {
+        return { success: false, error: `model ${model} is not approved. Choose an approved model or an org model tier.` };
+      }
+
+      const wf = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!wf) return { success: false, error: `workflow not found: ${workflow_id}` };
+      const stored = validateDefinitionInput(wf.definition);
+      if (!stored.ok) return { success: false, error: formatLintErrors(stored.errors) };
+      const patched = applyWorkflowModelPatch(stored.definition, model, node_ids);
+      if (!patched.ok) return { success: false, error: formatLintErrors(patched.errors) };
+      const validation = validateDefinitionInput(patched.definition, await buildOrgValidateEnvironment(deps, owner.orgId));
+      if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
+      const updated = await updateWorkflowDefinition(deps, owner, workflow_id, { definition: patched.definition });
+      if (!updated) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: updated.id, model, nodeIds: patched.nodeIds } };
+    },
+  });
+
   const addAggregate = action(
     Type.Object({
       workflow_id: Type.String(),
@@ -665,7 +773,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         owner,
         workflow_id,
         { mode, model, nodeId: node_id, sources, instructions },
-        buildValidateEnvironment(deps.actionPluginByService),
+        await buildOrgValidateEnvironment(deps, owner.orgId),
       );
       if (!result.ok) {
         if (result.reason === "not_found") return { success: false, error: `workflow not found: ${workflow_id}` };
@@ -875,7 +983,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await createWorkflowSchedule(
         armDepsFrom(getDeps()),
         owner,
-        { workflowId: workflow_id, prompt, name, cron, timezone, input },
+        {
+          workflowId: workflow_id,
+          prompt,
+          name,
+          cron,
+          timezone,
+          input,
+          teamId: owner.principal?.type === "team" ? owner.principal.id : undefined,
+        },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.schedule };
@@ -1092,6 +1208,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       getWorkflow,
       saveWorkflow,
       patchWorkflow,
+      updateModel,
       addAggregate,
       deleteWorkflow,
       startRun,

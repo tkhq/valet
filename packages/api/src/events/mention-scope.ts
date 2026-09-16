@@ -7,6 +7,10 @@
  *
  * Team assistant rules replace creator scope with live membership checks in
  * `team-slack-gate.ts`. Their stored user filters are removed on match edits.
+ * They alone carry an invocation audience (`readMentionAudience` below): the
+ * owning team's members, or every member of the organization. Ownership and
+ * administration stay with the team either way. `isTeamAssistantRule` decides
+ * which rows those are, for this gate and for the runtime gate alike.
  * The following creator rules apply to personal, org, and workflow targets.
  *
  * 1. **User scope.** The filters must carry a `user` filter equal to the
@@ -29,6 +33,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { identityForUser } from "../channels/identity-links.js";
 import { allCatalogEntries } from "./ingest.js";
 import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
+import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
 
 export const SLACK_MENTION_KEY = "slack.app_mention";
 
@@ -71,6 +76,47 @@ function selectedEntries(plugins: ValetPlugin[], eventKeys: string[]) {
  */
 export function storedAnyChannelState(eventKeys: string[], filters: SubscriptionFilter[]): boolean {
   return selectsSlackMention(eventKeys) && !filters.some(isChannelScopeFilter);
+}
+
+export type MentionAudienceResult =
+  | { ok: true; audience: MentionAudience | undefined }
+  | { ok: false; error: string };
+
+/**
+ * Reads the requested invocation audience. Absent means `team`, so the column
+ * stays null and the row keeps today's behavior. Only a team assistant rule
+ * (`isTeamAssistantRule`, the same predicate the runtime gate uses) may carry
+ * one: on any other target the write would store a choice no gate reads.
+ *
+ * `current` is the stored value on a patch. A value that matches what the row
+ * already means passes as a no-op, whatever the target: a client that reads a
+ * rule and writes the object back must not be refused for echoing a field.
+ * Only a CHANGE to an audience the target cannot carry is refused.
+ */
+export function readMentionAudience(
+  audience: unknown,
+  scope: { ownerType?: string; target: unknown; current?: string | null },
+): MentionAudienceResult {
+  if (audience === undefined || audience === null) return { ok: true, audience: undefined };
+  if (audience !== "team" && audience !== "organization") {
+    return {
+      ok: false,
+      error:
+        'audience must be "team" or "organization". ' +
+        "Choose one of those two values, or remove the audience.",
+    };
+  }
+  if (isTeamAssistantRule(scope.ownerType, scope.target)) return { ok: true, audience };
+  // Null and every other stored value read as `team`, the same way the gate
+  // reads them.
+  const stored: MentionAudience = scope.current === "organization" ? "organization" : "team";
+  if (audience === stored) return { ok: true, audience: scope.current === "organization" ? "organization" : undefined };
+  return {
+    ok: false,
+    error:
+      "Only a team assistant mention rule has an invocation audience. " +
+      "Point the rule at a team assistant, or remove the audience.",
+  };
 }
 
 export type MentionScopeResult =

@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { contentSources, credentials, orgMembers, users } from "../schema/index.js";
+import { contentSources, credentials, orgMembers, orgs, users } from "../schema/index.js";
 import { createContentSource } from "../services/content-sources.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { addMember, createTeam, removeMember, setRole, deleteTeam } from "../services/teams.js";
@@ -621,15 +621,16 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     });
   });
 
-  it("member + tokenScope:\"personal\" with the toggle off 403s", async () => {
+  // TKAI-487: a member's own personal reference needs no organization
+  // permission. The org-wide switch that used to refuse this is gone, and a
+  // row left over from it must not resurrect the refusal.
+  it("member + tokenScope:\"personal\" is accepted with the retired feature key set to false", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
-
-    await fetch(`${api.baseUrl}/api/onepassword/settings`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ allowPersonal: false }),
-    });
+    await api.providers.db
+      .update(orgs)
+      .set({ features: { allowPersonalOnePassword: false } })
+      .where(eq(orgs.id, "local-org"));
 
     const put = await fetch(`${api.baseUrl}/api/credentials/linear`, {
       method: "PUT",
@@ -639,10 +640,7 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
         onepassword: { reference: "op://vault/item/field", tokenScope: "personal" },
       }),
     });
-    expect(put.status).toBe(403);
-    expect(await put.json()).toEqual({
-      error: "personal 1Password tokens are disabled by your organization",
-    });
+    expect(put.status).toBe(200);
   });
 
   it("reference that does not start with op:// 400s", async () => {
@@ -740,26 +738,22 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     expect(await put.json()).toEqual({ error: "org admin required" });
   });
 
-  it("plain token write to the reserved 'onepassword' service is 403'd when the personal toggle is off", async () => {
+  it("a member connects their own personal 1Password token with no organization permission", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
-
-    await fetch(`${api.baseUrl}/api/onepassword/settings`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ allowPersonal: false }),
-    });
+    await api.providers.db
+      .update(orgs)
+      .set({ features: { allowPersonalOnePassword: false } })
+      .where(eq(orgs.id, "local-org"));
 
     const put = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
       method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ type: "api_key", apiKey: "ops_sometoken" }),
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_sometoken" }),
     });
-    expect(put.status).toBe(403);
-    expect(await put.json()).toEqual({
-      error: "personal 1Password tokens are disabled by your organization",
-    });
+    expect(put.status).toBe(200);
   });
+
   // The row's type decides which field the resolved secret lands in, and a
   // plugin's transport reads one fixed field. The declaration names the type
   // it consumes; a reference of another type verified green and then never
@@ -976,15 +970,9 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     });
   });
 
-  it("rejects the reserved service name before checking the personal toggle", async () => {
+  it("rejects the reserved service name for a reference write", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
-
-    await fetch(`${api.baseUrl}/api/onepassword/settings`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ allowPersonal: false }),
-    });
 
     const put = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
       method: "PUT",

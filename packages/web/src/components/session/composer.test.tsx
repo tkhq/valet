@@ -682,3 +682,58 @@ describe("Composer — slash-command keyboard handling", () => {
     expect(screen.queryAllByRole("option")).toHaveLength(0);
   });
 });
+
+describe("Composer — reply target", () => {
+  it("shows and cancels the immutable quote chip", () => {
+    const onCancelReply = vi.fn();
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Composer
+          sessionId="orchestrator:user-1"
+          threadId="thread-1"
+          agentStatus="idle"
+          replyTarget={{ messageId: "assistant-7", excerpt: "Use the blue deployment." }}
+          onCancelReply={onCancelReply}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText("Replying to Assistant")).toBeTruthy();
+    expect(screen.getByText("Use the blue deployment.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel reply" }));
+    expect(onCancelReply).toHaveBeenCalledOnce();
+  });
+
+  it("submits the stable target id and mirrors the quote optimistically", async () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Composer
+          sessionId="orchestrator:user-1"
+          threadId="thread-1"
+          agentStatus="idle"
+          replyTarget={{ messageId: "assistant-7", excerpt: "Use the blue deployment." }}
+        />
+      </QueryClientProvider>,
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "What about staging?" },
+    });
+    fireEvent.submit(screen.getByRole("textbox", { name: "Message" }).closest("form")!);
+
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+    expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      text: "What about staging?",
+      threadId: "thread-1",
+      replyToMessageId: "assistant-7",
+    }));
+    expect(addUserMessage).toHaveBeenCalledWith(
+      "orchestrator:user-1",
+      "What about staging?",
+      "thread-1",
+      undefined,
+      { messageId: "assistant-7", excerpt: "Use the blue deployment." },
+    );
+  });
+});

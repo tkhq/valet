@@ -14,6 +14,7 @@ import {
   InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
+  formatTransientRetryMessage,
   type BusEvent,
 } from "../src/index.js";
 
@@ -69,6 +70,60 @@ describe("isRetryableAssistantError (pi-ai taxonomy, TKAI-319)", () => {
   });
 });
 
+// Message copy the retry event carries (TKAI-325). The old text embedded
+// the provider's raw JSON error blob verbatim and named no corrective
+// action — these tests pin the replacement.
+describe("formatTransientRetryMessage (TKAI-325)", () => {
+  const rawAnthropicError =
+    '{"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011CeecukWxUPBswkk1ZCLgg"}';
+
+  it("names the upstream cause, the wait, the counter, and the corrective action — never the raw JSON", () => {
+    const msg = formatTransientRetryMessage({
+      provider: "anthropic",
+      errorMessage: rawAnthropicError,
+      waitMs: 30_000,
+      attempt: 2,
+      maxAttempts: 2,
+    });
+    expect(msg).toContain("Anthropic's API");
+    expect(msg).toContain("30s");
+    expect(msg).toContain("attempt 2/2");
+    expect(msg).toContain("If retries fail");
+    expect(msg).toContain("switch to a different model");
+    expect(msg).toContain("req_011CeecukWxUPBswkk1ZCLgg");
+    // No raw JSON — a support escalation only needs the request id.
+    expect(msg).not.toContain('"type":"error"');
+    expect(msg).not.toContain("overloaded_error");
+    expect(msg).not.toContain("{");
+  });
+
+  it("omits the request ID clause when the upstream error carries none", () => {
+    const msg = formatTransientRetryMessage({
+      provider: "openai",
+      errorMessage: "429 rate limit exceeded",
+      waitMs: 10_000,
+      attempt: 1,
+      maxAttempts: 2,
+    });
+    expect(msg).toContain("Openai's API");
+    expect(msg).toContain("If retries fail, switch to a different model");
+    expect(msg).not.toContain("request ID");
+  });
+
+  it("handles a missing error message without crashing", () => {
+    const msg = formatTransientRetryMessage({
+      provider: "anthropic",
+      errorMessage: undefined,
+      waitMs: 10_000,
+      attempt: 1,
+      maxAttempts: 2,
+    });
+    expect(msg).toContain("Anthropic's API");
+    expect(msg).toContain("attempt 1/2");
+    expect(msg).not.toContain("request ID");
+  });
+});
+
 describe("turn-level transient retry (TKAI-319)", () => {
   it("an unattended (child) session retries past a transient error and completes", async () => {
     const faux = registerFauxProvider({
@@ -104,10 +159,18 @@ describe("turn-level transient retry (TKAI-319)", () => {
       (e) => e.type === "message" && e.role === "assistant",
     );
     expect(lastAssistant?.type === "message" && lastAssistant.content).toBe("recovered response");
-    // The retry announced itself.
-    expect(
-      events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry"),
-    ).toBe(true);
+    // The retry announced itself with human-readable text — no raw JSON,
+    // provider named, corrective action stated (TKAI-325).
+    const retryEvent = events.find(
+      (e) => e.event.type === "error" && e.event.code === "turn_transient_retry",
+    )?.event;
+    expect(retryEvent).toBeDefined();
+    if (retryEvent && retryEvent.type === "error") {
+      expect(retryEvent.error).toContain("API");
+      expect(retryEvent.error).toContain("If retries fail");
+      expect(retryEvent.error).not.toContain('"type":"error"');
+      expect(retryEvent.error).not.toContain("{");
+    }
     faux.unregister();
   });
 

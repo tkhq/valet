@@ -271,6 +271,33 @@ export function buildSpilledInputMarker(args: {
  */
 const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
 
+/**
+ * Build the user-facing text for a `turn_transient_retry` event (TKAI-325).
+ * The old text embedded the raw provider error blob and read as an internal
+ * Valet judgment. This version names the upstream cause, tells the reader
+ * what to do if retries fail, and keeps the raw JSON out — the request ID
+ * (when the error carries one) is enough for a support escalation. Exported
+ * so tests can pin the copy without spinning up a whole retry loop.
+ */
+export function formatTransientRetryMessage(args: {
+  provider: string;
+  errorMessage: string | undefined;
+  waitMs: number;
+  attempt: number;
+  maxAttempts: number;
+}): string {
+  const providerLabel = args.provider
+    ? args.provider.charAt(0).toUpperCase() + args.provider.slice(1)
+    : "The upstream provider";
+  const requestId = args.errorMessage?.match(/request_id["':\s]+"?([A-Za-z0-9_-]+)"?/)?.[1];
+  const seconds = Math.round(args.waitMs / 1000);
+  const primary = `${providerLabel}'s API is unavailable or overloaded. The turn will retry automatically in ${seconds}s (attempt ${args.attempt}/${args.maxAttempts}).`;
+  const detail = requestId
+    ? ` If retries fail, switch to a different model or contact support (request ID: ${requestId}).`
+    : " If retries fail, switch to a different model.";
+  return primary + detail;
+}
+
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
@@ -1217,6 +1244,27 @@ export class Thread {
     } catch (err) {
       console.error("skill context attribution telemetry write failed:", err);
     }
+  }
+
+  /** Cancel one submission without aborting other work on this thread. */
+  async abortSubmission(queueItemId: string): Promise<void> {
+    const store = this.session.providers.store;
+    // Mark the live item before I/O so a stale store read cannot start it.
+    if (this.runningItem?.id === queueItemId) this.runningItem.abortRequestedAt ??= Date.now();
+    await store.requestAbort(this.session.id, this.id, queueItemId);
+    const running = this.runningItem?.id === queueItemId;
+    if (running && this.runningItem) {
+      this.runningItem.abortRequestedAt ??= Date.now();
+      this.agent.abort();
+    }
+    for (const gate of this.pendingDecisionGates()) {
+      if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, "abort");
+    }
+    const settled = await store.settleUnclaimed(this.session.id, this.id, queueItemId, { outcome: "aborted" });
+    if (settled) await this.emitSettled(queueItemId, { outcome: "aborted" });
+    if (running) await this.agent.waitForIdle();
+    await this.emitQueueState();
+    void this.kick();
   }
 
   async abort(): Promise<void> {
@@ -3291,7 +3339,8 @@ export class Thread {
       // Host resolver (if any) delivers this resumed turn's per-turn key before
       // the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(item);
-      if (await this.publishActiveModelState(item.id, this.agent.state.model)) {
+      if (await this.publishActiveModelState(item.id, this.agent.state.model) &&
+          await this.canRunCurrentSubmission()) {
         await this.agent.continue();
         await this.agent.waitForIdle();
       }
@@ -3449,15 +3498,16 @@ export class Thread {
       // pointer for the LLM so a replayed turn re-prompts what fits the window,
       // not the oversized text — matching what entriesToAgentMessages renders.
       const spillPath = existingUserEntry.metadata?.[SPILLED_INPUT_PATH_KEY];
+      const restoredText =
+        typeof spillPath === "string"
+          ? buildSpilledInputMarker({
+              path: spillPath,
+              tokens: estimateTokens(existingUserEntry.content),
+              chars: existingUserEntry.content.length,
+            })
+          : text;
       return {
-        text:
-          typeof spillPath === "string"
-            ? buildSpilledInputMarker({
-                path: spillPath,
-                tokens: estimateTokens(existingUserEntry.content),
-                chars: existingUserEntry.content.length,
-              })
-            : text,
+        text: renderReplyContext(restoredText, existingUserEntry.metadata),
         attachments: existingUserEntry.attachments,
       };
     }
@@ -3497,6 +3547,8 @@ export class Thread {
     const metadata = spilledInputPath
       ? { ...(baseMetadata ?? {}), [SPILLED_INPUT_PATH_KEY]: spilledInputPath }
       : baseMetadata;
+
+    text = renderReplyContext(text, metadata);
 
     const userEntry: MessageEntry = {
       id: entryId,
@@ -3609,6 +3661,7 @@ export class Thread {
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
+    if (!(await this.canRunCurrentSubmission())) return;
 
     // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
     // start of the claimed turn, in parallel with the LLM call — never at
@@ -3644,6 +3697,11 @@ export class Thread {
       }
       await this.appendUserEntry(item);
       throw err;
+    }
+
+    if (!(await this.canRunCurrentSubmission())) {
+      this.turnApiKey = undefined;
+      return;
     }
 
     // Apply the turn model (resolved above) BEFORE the role overlay so a
@@ -3874,6 +3932,17 @@ export class Thread {
     }
   }
 
+  /** Recheck durable cancellation after asynchronous turn setup or recovery. */
+  private async canRunCurrentSubmission(): Promise<boolean> {
+    if (this.aborted) return false;
+    const running = this.runningItem;
+    if (!running) return true;
+    const item = await this.session.providers.store.getQueueItem(this.session.id, running.id);
+    return this.runningItem === running && running.abortRequestedAt === undefined &&
+      !!item && item.status === "running" &&
+      item.abortRequestedAt === undefined && !item.supersededByItemId;
+  }
+
   /**
    * Run one prompt cycle. On context-overflow error, compact and retry once.
    *
@@ -3891,6 +3960,7 @@ export class Thread {
     attachments?: MessageEntry["attachments"],
     sender?: PromptAuthor,
   ): Promise<void> {
+    if (!(await this.canRunCurrentSubmission())) return;
     const content = userContentBlocks(text, attachments, sender);
     await this.agent.prompt({
       role: "user",
@@ -3984,10 +4054,15 @@ export class Thread {
         return;
       }
       const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
-      const errBrief = (last.errorMessage ?? "provider error").slice(0, 200);
       this.emitError(
         "turn_transient_retry",
-        `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
+        formatTransientRetryMessage({
+          provider: this.agent.state.model.provider,
+          errorMessage: last.errorMessage,
+          waitMs,
+          attempt,
+          maxAttempts,
+        }),
       );
       if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
       // Drop the failed assistant message; the transcript now ends on the
@@ -4929,6 +5004,8 @@ export class Thread {
                   ? "abort"
                   : event.message.stopReason === "error"
                   ? "error"
+                  : event.message.stopReason === "toolUse"
+                  ? "tool_use"
                   : "end_turn",
             },
             { queueItemId: this.runningItem?.id },
@@ -5730,6 +5807,40 @@ export function skillInvocationsInContext(
   return facts;
 }
 
+interface ReplyMetadata {
+  messageId: string;
+  excerpt: string;
+}
+
+function replyMetadata(metadata: Record<string, unknown> | undefined): ReplyMetadata | undefined {
+  const value = metadata?.replyTo;
+  if (!value || typeof value !== "object") return undefined;
+  const ref = value as Record<string, unknown>;
+  if (typeof ref.messageId !== "string" || typeof ref.excerpt !== "string") return undefined;
+  return { messageId: ref.messageId, excerpt: ref.excerpt };
+}
+
+function escapeReplyContext(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** Adds explicit topical context without changing transcript position or branching. */
+export function renderReplyContext(
+  text: string,
+  metadata: Record<string, unknown> | undefined,
+): string {
+  const ref = replyMetadata(metadata);
+  if (!ref) return text;
+  return [
+    "<reply-context>",
+    "The user is replying to assistant message " + escapeReplyContext(ref.messageId) + ".",
+    "Immutable excerpt: " + escapeReplyContext(ref.excerpt),
+    "</reply-context>",
+    "",
+    text,
+  ].join("\n");
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -5792,14 +5903,17 @@ export function entriesToAgentMessages(
       const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
       const text =
         typeof spillPath === "string"
-          ? buildSpilledInputMarker({
-              path: spillPath,
-              tokens: estimateTokens(e.content),
-              chars: e.content.length,
-            })
+          ? renderReplyContext(
+              buildSpilledInputMarker({
+                path: spillPath,
+                tokens: estimateTokens(e.content),
+                chars: e.content.length,
+              }),
+              e.metadata,
+            )
           : e.signal
           ? renderSignalEnvelope(e.signal, e.content)
-          : e.content;
+          : renderReplyContext(e.content, e.metadata);
       const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
       const contentBlocks = userContentBlocks(text, e.attachments, sender);
       out.push({

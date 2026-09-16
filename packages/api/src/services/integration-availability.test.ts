@@ -188,6 +188,44 @@ describe("connectModeFor", () => {
     ).resolves.toBe("unconfigured");
   });
 
+  // Runtime precedence: a team run reads its own row first and only reaches
+  // the org bot when that row gives nothing. The catalog has to say the same,
+  // or a team sees "org" for a service its own token actually serves.
+  it("requires.orgCredential with both rows present and a team owner is \"manual\"", async () => {
+    const decl: CredentialDeclaration = {
+      type: "bot_token",
+      configKeys: ["accessToken"],
+      requires: { orgCredential: true },
+    };
+    const plugins = [makePlugin("slack", { credentials: [decl] })];
+    const store = await storeWithOrgCredential("slack");
+    await store.save({ type: "team", id: "team-1" }, "slack", { type: "bot_token", accessToken: "xoxb-team" });
+
+    await expect(
+      connectModeFor({
+        plugins,
+        decl,
+        service: "slack",
+        orgId: ORG,
+        credentials: store,
+        env: {},
+        owner: { type: "team", id: "team-1" },
+      }),
+    ).resolves.toBe("manual");
+    // The org bot still answers for a team that holds no row of its own.
+    await expect(
+      connectModeFor({
+        plugins,
+        decl,
+        service: "slack",
+        orgId: ORG,
+        credentials: store,
+        env: {},
+        owner: { type: "team", id: "team-2" },
+      }),
+    ).resolves.toBe("org");
+  });
+
   it("a declaration with no oauth and no requires is \"manual\"", async () => {
     const decl: CredentialDeclaration = { type: "api_key", configKeys: ["apiKey"] };
     const plugins = [makePlugin("linear", { credentials: [decl] })];

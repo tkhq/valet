@@ -9,8 +9,8 @@ import { cn } from "~/lib/cn";
 
 /**
  * The settings shell's left rail (split-settings design, "Visual direction"
- * + "Routes & navigation"; amended 2026-08-28). Two small-caps groups:
- * **You** (personal workspace) or **Team** (selected team), plus
+ * + "Routes & navigation"; amended 2026-08-28). The **You** group stays visible.
+ * A selected team adds **Team**, alongside
  * **Organization** (shown once the `useOrg()` query resolves to gate-on — hidden otherwise, never disabled, and
  * rendered with no flash since it appears only once cached data arrives
  * rather than defaulting open then collapsing). An org admin sees every
@@ -32,7 +32,7 @@ const TEAM_ITEMS = [
   { to: "/settings/policies", label: "Policies" },
 ];
 
-/** Keep the team rail and the layout's route allowlist in agreement. */
+/** Routes whose settings follow the selected team. */
 export function isTeamSettingsPath(pathname: string): boolean {
   return TEAM_ITEMS.some((item) => item.to === pathname);
 }
@@ -108,8 +108,13 @@ export function SettingsRail() {
   // plain member gets no Models link at all (see MODELS_ITEM's comment).
   const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
+  // Workspace-aware settings belong only in Team when a team is selected.
+  const personalItems = teamId === undefined
+    ? youItems
+    : youItems.filter((item) => !isTeamSettingsPath(item.to));
   const groups = [
-    { label: teamId === undefined ? "You" : "Team", items: teamId === undefined ? youItems : TEAM_ITEMS },
+    { label: "You", items: personalItems },
+    ...(teamId === undefined ? [] : [{ label: "Team", items: TEAM_ITEMS }]),
     ...(showOrganizationGroup ? [{ label: "Organization", items: organizationItems }] : []),
   ];
   const currentGroup = groups.find((group) => group.items.some((item) => item.to === pathname));

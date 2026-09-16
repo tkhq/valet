@@ -14,6 +14,7 @@ import { resultText, type ToolRenderer } from "./types";
 interface MemWriteArgs {
   path?: unknown;
   content?: unknown;
+  teamId?: unknown;
 }
 
 /** Metadata fields worth echoing for a metadata-only update. */
@@ -47,7 +48,14 @@ export const memWriteRenderer: ToolRenderer = {
   matches: "mem_write",
   category: "write",
   Icon: BookPlus,
-  formatTarget: (args) => getStr(args, "path") || undefined,
+  // A team write is the same card with a different destination, so the
+  // card must say which. Same `team:{id}/` vocabulary the reads use.
+  formatTarget: (args) => {
+    const path = getStr(args, "path");
+    if (!path) return undefined;
+    const teamId = getStr(args, "teamId");
+    return teamId ? `team:${teamId}/${path}` : path;
+  },
   formatSummary: (args, _result, status) => {
     if (status === "running") return undefined;
     const content = getStr(args, "content");

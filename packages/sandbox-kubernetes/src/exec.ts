@@ -20,10 +20,10 @@
  * a fresh pod object (same name, new uid) out from under a long-lived
  * exec-based provider (see lifecycle.ts's restartPolicy docblock).
  */
-import { PassThrough, Readable } from "node:stream";
+import { PassThrough } from "node:stream";
 import type { Readable as ReadableStream, Writable as WritableStream } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
-import { CappedOutputBuffer, type ExecOpts, type ExecResult } from "@valet/engine";
+import { CappedOutputBuffer, SandboxConnectionError, formatSandboxErrorCause, type ExecOpts, type ExecResult } from "@valet/engine";
 
 /** Directory the job-mode protocol (jobs.ts) writes its `{execId}.{out,exit,pid}`
  * files into. Exported here (rather than jobs.ts) since exec.ts's quoting
@@ -142,6 +142,42 @@ export class PodExecStatusError extends Error {
   }
 }
 
+/** Normalize client-node's WebSocket ErrorEvent before provider classification. */
+export class PodExecTransportError extends SandboxConnectionError {
+  readonly code = "sandbox_exec_transport_failed";
+
+  constructor(
+    readonly namespace: string,
+    readonly podName: string,
+    readonly containerName: string,
+    cause: unknown,
+  ) {
+    super(
+      `Kubernetes exec connection failed for ${namespace}/${podName} (${containerName}): ` +
+      `${formatExecTransportCause(cause)}. Check Kubernetes API access and the sandbox pod status before retrying.`,
+      cause,
+    );
+    this.name = "PodExecTransportError";
+  }
+}
+
+function formatExecTransportCause(cause: unknown): string {
+  // ws exposes the original Error through a prototype getter on ErrorEvent.
+  // Do not traverse event.target: it contains the socket and request headers.
+  if (cause !== null && typeof cause === "object") {
+    try {
+      const underlying: unknown = Reflect.get(cause, "error");
+      if (typeof underlying === "string" || (underlying !== null && typeof underlying === "object")) {
+        const detail = formatSandboxErrorCause(underlying);
+        if (detail.trim() && detail !== "unserializable cause" && detail !== "[object Object]") return detail;
+      }
+    } catch {
+      // Preserve readable fields on the outer rejection if its getter fails.
+    }
+  }
+  return formatSandboxErrorCause(cause);
+}
+
 // ── Narrow client interface (real k8s.Exec adapts to this; tests fake it) ──
 
 /** Just enough of the WebSocket client-node's `Exec.exec` resolves to for
@@ -251,7 +287,15 @@ export async function execInPod(
   stdout.on("data", onStdoutData);
   stderr.on("data", onStderrData);
 
-  const stdin = opts?.stdin !== undefined ? Readable.from(Buffer.from(opts.stdin, "utf8")) : null;
+  const input = opts?.stdin !== undefined ? Buffer.from(opts.stdin, "utf8") : undefined;
+  // Older exec protocols close the entire socket when stdin ends. Bound
+  // stdin inside the pod so the command receives EOF without closing the
+  // transport before it has consumed the payload and returned its status.
+  const stdin = input !== undefined ? new PassThrough() : null;
+  if (stdin && input) stdin.write(input);
+  const framedCommand = input !== undefined
+    ? `head -c ${input.length} | /bin/sh -c ${shQuote(shellCommand)}`
+    : shellCommand;
 
   let resolveStatus!: (status: ExecStatus) => void;
   const statusPromise = new Promise<ExecStatus>((resolve) => {
@@ -262,13 +306,24 @@ export async function execInPod(
     deps.namespace,
     podName,
     deps.containerName,
-    ["/bin/sh", "-c", shellCommand],
+    ["/bin/sh", "-c", framedCommand],
     stdout,
     stderr,
     stdin,
     false,
     (status) => resolveStatus(status),
-  );
+  ).catch((error: unknown) => {
+    stdin?.destroy();
+    const transportError = new PodExecTransportError(deps.namespace, podName, deps.containerName, error);
+    // Log at the transport chokepoint: every exec transport failure funnels
+    // through here, and until now these were only surfaced to the caller as a
+    // tool result (never written to stdout), so failures were invisible in the
+    // api logs and Loki. A 403 here means the api ServiceAccount lacks `create`
+    // on pods/exec — Kubernetes authorizes the exec *connect* subresource as
+    // the `create` verb regardless of the client's HTTP method.
+    console.error("k8s pods/exec transport failed:", transportError.message);
+    throw transportError;
+  });
 
   const raced: Array<Promise<{ kind: "status"; status: ExecStatus } | { kind: "timeout" } | { kind: "abort" }>> = [
     statusPromise.then((status) => ({ kind: "status" as const, status })),
@@ -301,6 +356,7 @@ export async function execInPod(
   }
 
   const winner = await Promise.race(raced);
+  stdin?.destroy();
   if (timer) clearTimeout(timer);
   if (signal && abortResolve) signal.removeEventListener("abort", abortResolve);
 

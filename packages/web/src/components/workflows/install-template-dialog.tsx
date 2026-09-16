@@ -119,7 +119,12 @@ export function InstallTemplateDialog({
   const scheduled = template.schedule !== null;
   const missing = missingServices(template.requires);
   const unconfigured = unconfiguredServices(template.requires);
-  const installable = isInstallable(template.requires, template.blockers);
+  // The service requirements AND the organization's model policy. The card
+  // disables its own button on the policy, and this dialog opens from a
+  // second button that stays live, so a check on the requirements alone
+  // offers an Install that answers 400.
+  const installable = isInstallable(template.requires, template.blockers) &&
+    template.installable !== false;
 
   async function submit() {
     setError(null);
@@ -226,6 +231,10 @@ export function InstallTemplateDialog({
             {template.blockers?.map((reason) => (
               <p key={reason} className="text-xs leading-relaxed text-muted">{reason}</p>
             ))}
+
+            {template.installBlockedReason && (
+              <p className="text-xs leading-relaxed text-muted">{template.installBlockedReason}</p>
+            )}
 
             {unconfigured.length > 0 && !template.blockers?.length && (
               <p className="text-xs leading-relaxed text-muted">{unconfiguredNote(unconfigured)}</p>

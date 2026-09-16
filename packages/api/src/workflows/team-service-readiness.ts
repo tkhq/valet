@@ -100,11 +100,23 @@ export interface UnverifiableWorkflowCall {
   reason: string;
 }
 
+/**
+ * A service that is ready, but under a condition the team should repair.
+ * A warning never blocks an install or an arm — the run resolves the
+ * credential — so it carries the corrective action and nothing else.
+ */
+export interface TeamServiceWarning {
+  service: string;
+  reason: string;
+}
+
 export interface TeamServiceReadiness {
   ready: string[];
   organizationProvided?: string[];
   blocked: BlockedTeamService[];
   unverifiable: UnverifiableWorkflowCall[];
+  /** Repairs worth reporting on a ready service. Never a refusal. */
+  warnings: TeamServiceWarning[];
 }
 
 export interface TeamReadinessRefusal {
@@ -335,7 +347,7 @@ export async function teamServiceReadiness(
       `another owner, so the call fails on every run. Reference a workflow this team owns, or remove the call.`,
   }));
   const services = [...new Set(nodes.map((node) => node.service))];
-  if (services.length === 0) return { ready: [], blocked: [], unverifiable };
+  if (services.length === 0) return { ready: [], blocked: [], unverifiable, warnings: [] };
   const credentialFree = credentialFreeServices(deps.plugins);
 
   // A team row is read through the same decorator a run resolves it with,
@@ -361,6 +373,7 @@ export async function teamServiceReadiness(
   const ready: string[] = [];
   const organizationProvided: string[] = [];
   const blocked: BlockedTeamService[] = [];
+  const warnings: TeamServiceWarning[] = [];
   for (const service of services) {
     if (credentialFree.has(service)) {
       ready.push(service);
@@ -403,6 +416,23 @@ export async function teamServiceReadiness(
         continue;
       }
       if (state.kind === "broken") {
+        // The run does not stop here when the organization provides the
+        // service: `resolveTeamCredentialRead` falls through to the org
+        // row once the team delegation breaks. Readiness gives the run's
+        // answer, or a team's workflows stay disarmed while every run of
+        // them succeeds. The broken row is still worth repairing, so it
+        // reports as a warning that blocks nothing.
+        if (orgProvided.has(service)) {
+          organizationProvided.push(service);
+          ready.push(service);
+          warnings.push({
+            service,
+            reason:
+              `${service} was shared by a member who is no longer on the team, or whose connection is gone. ` +
+              `Runs use the organization credential instead. Remove the team credential, or share it again.`,
+          });
+          continue;
+        }
         blocked.push({
           service,
           reason:
@@ -494,5 +524,5 @@ export async function teamServiceReadiness(
       reason: unpinnedReason ?? `Connect ${service} for this team.`,
     });
   }
-  return { ready, blocked, unverifiable, ...(organizationProvided.length > 0 ? { organizationProvided } : {}) };
+  return { ready, blocked, unverifiable, warnings, ...(organizationProvided.length > 0 ? { organizationProvided } : {}) };
 }

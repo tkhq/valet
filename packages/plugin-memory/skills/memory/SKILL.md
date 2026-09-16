@@ -14,11 +14,11 @@ Load this skill when the task is *about the memory store itself*: writing new me
 - Directories imply a default `type`: `preferences/` → preference, `projects/` → project-note, `workflows/` → workflow, `journal/` → journal-entry, `people/` → person; anything else → note. Paths cap at 5 levels — flatten under `projects/<name>/` rather than nesting deeper.
 - Markdown links between memory files build a derived graph — there is no stored links table; edges are read from your markdown on demand. Relative (`../people/alice.md`) and absolute (`/projects/valet/overview.md`) targets both resolve. `mem_links` shows one file's inbound and outbound edges; the memory UI renders the whole graph.
 - Pinned files load in full at orchestrator wake, alongside recent journal entries and the memory index. Pins cost context every session — keep them few and short.
-- Reads union in team memories under a virtual `team:{teamId}/` prefix. You can read those; ordinary writes only touch your own scope. Explicit copy tools transfer files between personal and team memory.
+- Reads union in team memories under a virtual `team:{teamId}/` prefix. You can read those. A write with no `teamId` touches only your own scope; pass `teamId` on `mem_write` or `mem_patch` to write a team you belong to. The virtual prefix is for reading only, and a write path may never contain a colon. Copy tools move a file that already exists between scopes without retyping it.
 
 ## Pull and push team knowledge
 
-Use explicit copies when the user asks to pull knowledge from a team or push personal memory to a team.
+Use explicit copies when the user asks to pull knowledge from a team, or to push a file that already exists into one. When the content is new and belongs to the team, write it there directly with `teamId` on `mem_write` and skip the personal original entirely.
 Knowledge here means a memory file, including notes under `artifacts/`.
 
 1. Use `mem_read` with an empty path to discover accessible team IDs.

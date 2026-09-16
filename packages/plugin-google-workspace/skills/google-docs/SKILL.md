@@ -18,7 +18,7 @@ Documents are created via `drive.create_document` (not a docs action). All tools
 
 ### Read / Get
 
-- **`docs.read_document`** — Read document content. Use `format=markdown` for human-readable output, `format=text` for plain text, or `format=json` for raw document structure (large output — prefer `find_text_index` when you only need a position).
+- **`docs.read_document`** — Read document content. Use `format=markdown` for human-readable output, `format=text` for plain text, or `format=json` for raw document structure (large output — prefer `find_text_index` when you only need a position). Omit `suggestionsViewMode` to keep the Google Docs API default. Set it to `PREVIEW_WITHOUT_SUGGESTIONS`, `PREVIEW_SUGGESTIONS_ACCEPTED`, or `SUGGESTIONS_INLINE` to select that API view for one read.
 - **`docs.list_comments`** — List all comments on a document (open or resolved).
 - **`docs.get_comment`** — Get a single comment by ID, including all replies.
 

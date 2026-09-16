@@ -105,6 +105,7 @@ import type {
   ListIdentityLinksResponse,
   ListInvitesResponse,
   ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
   CreateLlmProviderRequest,
@@ -207,7 +208,6 @@ import type {
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RedeliverEventResponse,
-  PutOnePasswordSettingsRequest,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -224,6 +224,8 @@ import type {
   TestLlmProviderRequest,
   TestLlmProviderResponse,
   UpdateWorkflowEventTriggerRequest,
+  UpdateWorkflowModelRequest,
+  UpdateWorkflowModelResponse,
   UpdateWorkflowRequest,
   UpdateWorkflowScheduleRequest,
   UsageSummaryResponse,
@@ -947,6 +949,8 @@ export const api = {
   },
   updateWorkflow: (id: string, body: UpdateWorkflowRequest) =>
     request<UpdateWorkflowResponse>("PUT", `/workflows/${encodeURIComponent(id)}`, body),
+  updateWorkflowModel: (id: string, body: UpdateWorkflowModelRequest) =>
+    request<UpdateWorkflowModelResponse>("PATCH", `/workflows/${encodeURIComponent(id)}/model`, body),
   deleteWorkflow: (id: string) =>
     request<{ ok: true }>("DELETE", `/workflows/${encodeURIComponent(id)}`),
   startWorkflowRun: (id: string, body: StartWorkflowRunRequest = {}) =>
@@ -1099,6 +1103,7 @@ export const api = {
     ),
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
+  listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
   listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
     const qs = new URLSearchParams();
     if (page?.limit) qs.set("limit", String(page.limit));
@@ -1249,7 +1254,11 @@ export const api = {
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}/api-keys/${encodeURIComponent(keyId)}`),
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
-  listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
+  listPlugins: (teamId?: string) =>
+    request<ListPluginsResponse>(
+      "GET",
+      teamId === undefined ? "/plugins" : `/plugins?teamId=${encodeURIComponent(teamId)}`,
+    ),
   listCredentials: (scope?: "user" | "org" | "team", teamId?: string) => {
     const qs = new URLSearchParams();
     if (scope === "org" || scope === "team") qs.set("scope", scope);
@@ -1289,14 +1298,11 @@ export const api = {
 
   // 1Password picker backend + settings. `scope` selects which
   // service-account token to browse with — "org" (open to any org member
-  // once the org token is connected) or "personal" (gated server-side by
-  // the org's allowPersonal toggle).
+  // once the org token is connected) or "personal" (the caller's own).
   getTeamOnePasswordStatus: (teamId: string) =>
     request<TeamOnePasswordStatusResponse>("GET", `/onepassword/team-status?teamId=${encodeURIComponent(teamId)}`),
   getOnePasswordSettings: () =>
     request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
-  putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>
-    request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
   // plugin-supplied ones with the stored ones the caller owns. Only a

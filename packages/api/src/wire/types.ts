@@ -1195,6 +1195,13 @@ export interface MessageAuthor {
   avatarUrl?: string;
 }
 
+export interface MessageReplyReference {
+  /** Stable id of the assistant entry in this message's thread. */
+  messageId: string;
+  /** Server-created immutable excerpt shown after reload and sent to the agent. */
+  excerpt: string;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -1203,6 +1210,8 @@ export interface Message {
   content: string;
   parts: MessagePart[];
   createdAt: number;
+  /** Stable store order for entries that have the same createdAt value. */
+  sequence?: number;
   /**
    * The submission (engine queue item) that produced this entry —
    * transcript↔submission linkage. Populated from the engine's
@@ -1212,6 +1221,10 @@ export interface Message {
    * `submission.settled` events to the originating user message.
    */
   queueItemId?: string;
+  /** True once an assistant message ends its turn normally (`stopReason: "end_turn"`). False for an errored or aborted message, which is not a valid reply target. */
+  completed?: boolean;
+  /** Assistant message that this user message addresses. */
+  replyTo?: MessageReplyReference;
   /**
    * Present when this entry originated from a `SignalContent` prompt (e.g.
    * a `child.settled` notification). A wire message with `signal` renders
@@ -1290,6 +1303,8 @@ export interface SendPromptRequest {
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
+  /** Stable assistant entry id to reply to. The server creates the excerpt. */
+  replyToMessageId?: string;
   /** Image attachments for the message. */
   attachments?: PromptImageAttachment[];
   /** File attachment refs (from POST /sessions/:id/files). Single-use. */
@@ -1442,7 +1457,7 @@ export type WireEvent =
       type: "message_end";
       threadId: string;
       messageId: string;
-      reason: "end_turn" | "error" | "abort";
+      reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | {
       seq: number;
@@ -1938,6 +1953,18 @@ export interface UpdateWorkflowRequest {
   definition?: unknown;
 }
 
+/** Focused model update. Omit nodeIds to update every llm and session node. */
+export interface UpdateWorkflowModelRequest {
+  model: string;
+  nodeIds?: string[];
+}
+
+export interface UpdateWorkflowModelResponse {
+  workflowId: string;
+  model: string;
+  nodeIds: string[];
+}
+
 export interface ListWorkflowsResponse {
   workflows: WorkflowDefinitionSummary[];
 }
@@ -2047,6 +2074,8 @@ export interface WorkflowRunCheckpoint {
 /** One pending approval gate on a parked workflow run. */
 export interface WorkflowPendingGate {
   nodeId: string;
+  /** When this gate first parked. Used for the waiting duration. */
+  waitingSince?: number;
   kind: "approval" | "policy_gate";
   iteration?: number;
   /** Approval nodes: the human-readable prompt from the definition. */
@@ -2438,6 +2467,19 @@ export interface WorkflowTemplateSummary {
    * parked run, a batch-size cap. Shown in the install dialog.
    */
   caveats: string[];
+  /**
+   * False when this organization's model policy rejects the template. The
+   * install gate refuses the same template, so a card without this flag
+   * offers an Install button that always fails. The card stays in the
+   * gallery, because the reader may be the person who can clear the block.
+   *
+   * True when the policy accepts the template AND when the listing could
+   * not read the policy at all. A listing that cannot answer must not
+   * withhold a card; the install gate still answers on the install itself.
+   */
+  installable: boolean;
+  /** Why `installable` is false, and what to do about it. */
+  installBlockedReason?: string;
 }
 
 export interface ListWorkflowTemplatesResponse {
@@ -2482,6 +2524,36 @@ export interface ListAllWorkflowRunsResponse {
   runs: GlobalWorkflowRunSummary[];
   /** Absent on the last page, exactly as `ListWorkflowRunsResponse`. */
   nextCursor?: string;
+}
+
+/** One active workflow gate that the calling principal can resolve. */
+export interface WorkflowActionRequiredItem {
+  id: string;
+  runId: string;
+  workflowId: string;
+  workflowName: string;
+  runCreatedAt: number;
+  owner: { type: "user" | "team" | "org"; id: string };
+  /**
+   * The assistant this run executes as, read from the RUN's definition
+   * snapshot, not from the definition as it stands now. A run keeps the
+   * snapshot it started with, so re-pinning the workflow while a run waits
+   * for approval must not change the assistant the approval screen names.
+   *
+   * Absent when the snapshot pins none (the owner's default assistant runs
+   * it) or names one this API cannot read.
+   */
+  assistantId?: string;
+  trigger: {
+    type: "manual" | "schedule" | "webhook" | "event" | "workflow" | "unknown";
+    triggerId?: string;
+  };
+  gate: WorkflowPendingGate;
+}
+
+export interface ListWorkflowActionRequiredResponse {
+  items: WorkflowActionRequiredItem[];
+  count: number;
 }
 
 // ── Workflow triggers (spec 2026-08-15) ──────────────────────────────────
@@ -3080,6 +3152,11 @@ export interface CredentialSummary {
    * 1Password reference instead of an inline secret (1Password credential
    * provider plan, Task 3). Display-only — never secret material. */
   onepasswordRef?: string;
+  /** `metadata.onepassword.tokenScope` — which service-account token reads
+   * that reference. Only an `org` reference resolves for a team, so a share
+   * picker needs this to tell a shareable row from one the delegate route
+   * would refuse. Absent when the row holds its secret inline. */
+  onepasswordTokenScope?: "org" | "personal" | "team";
   /** Team-scope only. The member whose live user row this reference follows. */
   delegatedFrom?: string;
   /** Team-scope only. True when the delegator left the team or disconnected. */
@@ -3135,13 +3212,8 @@ export interface TeamOnePasswordStatusResponse {
 }
 
 export interface OnePasswordSettingsResponse {
-  allowPersonal: boolean;
   orgTokenConnected: boolean;
   personalTokenConnected: boolean;
-}
-
-export interface PutOnePasswordSettingsRequest {
-  allowPersonal: boolean;
 }
 
 export interface ListOpVaultsResponse {
@@ -4405,6 +4477,19 @@ export type EventSubscriptionTargetWire =
       follow?: boolean;
     };
 
+/**
+ * Who may invoke a team assistant by @-mention. `team` is the owning team's
+ * current members; `organization` is any current member of the organization.
+ * Absent means `team`.
+ *
+ * The audience decides invocation only. The rule still runs as the team's
+ * assistant, and a sender admitted by `organization` gets no access to that
+ * assistant's sessions, configuration, credentials, or team membership.
+ * Only a team assistant target carries it: every other target stays scoped
+ * to the rule's creator.
+ */
+export type EventSubscriptionAudienceWire = "team" | "organization";
+
 export interface EventSubscriptionWire {
   id: string;
   name: string;
@@ -4413,6 +4498,11 @@ export interface EventSubscriptionWire {
   eventKeys: string[];
   filters: EventSubscriptionFilterWire[];
   target: EventSubscriptionTargetWire;
+  /** Present only on a team assistant rule, the one kind that has an
+   * audience; a read fills in the resolved value there, so a caller never has
+   * to know the `team` default. Absent on every other rule, and a write that
+   * echoes it back unchanged is a no-op rather than a refusal. */
+  audience?: EventSubscriptionAudienceWire;
   enabled: boolean;
   createdBy: string;
   createdAt: number;
@@ -4483,6 +4573,10 @@ export interface CreateEventSubscriptionRequest {
   filters?: EventSubscriptionFilterWire[];
   target: EventSubscriptionTargetWire;
   enabled?: boolean;
+  /** Who may invoke a team assistant by mention. Absent means `team`. A
+   * write that CHANGES it is refused when the rule is not a team assistant
+   * rule; one that repeats what the rule already means passes. */
+  audience?: EventSubscriptionAudienceWire;
   /** Explicit opt-out of the channel requirement on a `slack.app_mention`
    * subscription (see `events/mention-scope.ts`). Ignored for other keys.
    * Not persisted: a stored mention subscription with no channel filter is
@@ -4519,6 +4613,9 @@ export interface PatchEventSubscriptionRequest {
    * so a rule that should belong elsewhere is rewritten, not patched.
    */
   assistantId?: string | null;
+  /** See `CreateEventSubscriptionRequest.audience`. Absent leaves the stored
+   * audience alone. */
+  audience?: EventSubscriptionAudienceWire;
   /** See `CreateEventSubscriptionRequest.anyChannel`. Only consulted when
    * the patch changes `filters` or `eventKeys`. */
   anyChannel?: boolean;

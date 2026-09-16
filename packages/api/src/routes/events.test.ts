@@ -5,7 +5,7 @@
  * cases seed rows under a second org id (stub auth pins the caller to
  * `local-org`, so "another org" is expressed in data, not identity).
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
@@ -13,7 +13,11 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import type { ValetPlugin } from "@valet/engine";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { createAssistant } from "../assistants/service.js";
+import { createAssistant, retireAssistant } from "../assistants/service.js";
+import * as assistantsService from "../assistants/service.js";
+import { deleteTeam } from "../services/teams.js";
+import * as teamsService from "../services/teams.js";
+import * as workflowService from "../workflows/service.js";
 import {
   eventDeliveries,
   eventDropLog,
@@ -71,6 +75,19 @@ async function postSubscription(
 ): Promise<Response> {
   return fetch(`${baseUrl}/api/event-subscriptions`, {
     method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+async function patchSubscription(
+  baseUrl: string,
+  id: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return fetch(`${baseUrl}/api/event-subscriptions/${id}`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
@@ -1207,6 +1224,99 @@ describe("event subscriptions — team ownership", () => {
     expect(body.error).not.toContain("Other");
   });
 
+  // `deleteTeam` deletes a team's own event_subscriptions rows under
+  // `lockTeamForOwnership` (services/teams.ts). An insert that already
+  // passed its membership/ownership checks before the delete's transaction
+  // commits, but writes after, lands as an orphan pointing at a team (or
+  // workflow) that no longer exists — the same race #709 closed for
+  // schedules. These two tests force that race deterministically by
+  // deleting the target from inside the pre-insert check's mock
+  // implementation, which still calls through to the real check first.
+  it("does not leave an orphaned subscription when the team is deleted between the membership check and the insert", async () => {
+    const a = await bootWithTeam();
+    const original = teamsService.isTeamMember;
+    const spy = vi.spyOn(teamsService, "isTeamMember").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await deleteTeam(a.providers.db, { teamId: "team_1" });
+      return result;
+    });
+    try {
+      const res = await postSubscription(a.baseUrl, teamBody, { "x-valet-test-user-id": "test-member" });
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not leave an orphaned subscription when its target workflow is deleted before the insert", async () => {
+    const a = await bootWithTeam();
+    const now = Date.now();
+    await a.providers.db.insert(workflowDefinitions).values({
+      id: "wf_team_race",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: "team_1",
+      name: "target",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const original = workflowService.armableDefinitionRow;
+    const spy = vi.spyOn(workflowService, "armableDefinitionRow").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await a.providers.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, "wf_team_race"));
+      return result;
+    });
+    try {
+      const res = await postSubscription(
+        a.baseUrl,
+        { ...VALID_BODY, target: { kind: "workflow", workflowId: "wf_team_race" } },
+        { "x-valet-test-user-id": "test-member" },
+      );
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not leave an orphaned subscription when its target assistant is archived before the insert", async () => {
+    const a = await bootWithTeam();
+    const assistant = await createAssistant(
+      a.providers.db,
+      "local-org",
+      { type: "team", id: "team_1" },
+      "Team assistant",
+    );
+    const original = assistantsService.checkAssistantForOwner;
+    const spy = vi
+      .spyOn(assistantsService, "checkAssistantForOwner")
+      .mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        // `deleteTeam` retires a team's assistants under the same ownership
+        // lock (services/teams.ts). This forces that race deterministically:
+        // the check above still passes on stale data, then the assistant is
+        // archived before the (fixed) in-lock recheck runs.
+        await retireAssistant(a.providers.db, assistant.id);
+        return result;
+      });
+    try {
+      const res = await postSubscription(
+        a.baseUrl,
+        {
+          ...VALID_BODY,
+          target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", assistantId: assistant.id },
+        },
+        { "x-valet-test-user-id": "test-member" },
+      );
+      expect(res.status).toBe(400);
+      expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("404s a team id that does not exist at all — same answer as one you're not on", async () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
@@ -1569,6 +1679,125 @@ describe("mention scoping (slack.app_mention)", () => {
     ]);
     const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, body.id));
     expect(rows[0].filters).toEqual(body.filters);
+  });
+
+  it("a team mention rule takes an organization audience, and an absent one reads back as team", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    const teamTarget: EventSubscriptionTargetWire = { kind: "orchestrator", orchestrator: "team", teamId: "team_1" };
+
+    const open = await postSubscription(a.baseUrl, { ...MENTION_BODY, target: teamTarget, audience: "organization" });
+    expect(open.status).toBe(201);
+    const opened = (await open.json()) as CreateEventSubscriptionResponse;
+    expect(opened.audience).toBe("organization");
+    const openRows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, opened.id));
+    expect(openRows[0].audience).toBe("organization");
+
+    const quiet = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      name: "team only",
+      filters: [{ field: "channel", op: "eq", value: "C999" }],
+      target: teamTarget,
+    });
+    expect(quiet.status).toBe(201);
+    const quieted = (await quiet.json()) as CreateEventSubscriptionResponse;
+    expect(quieted.audience).toBe("team");
+    const quietRows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, quieted.id));
+    expect(quietRows[0].audience).toBeNull();
+  });
+
+  it("patches the audience of a team mention rule in both directions", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+    });
+    const created = (await res.json()) as CreateEventSubscriptionResponse;
+
+    const opened = await patchSubscription(a.baseUrl, created.id, { audience: "organization" });
+    expect(opened.status).toBe(200);
+    expect(((await opened.json()) as PatchEventSubscriptionResponse).audience).toBe("organization");
+
+    const closed = await patchSubscription(a.baseUrl, created.id, { audience: "team" });
+    expect(closed.status).toBe(200);
+    expect(((await closed.json()) as PatchEventSubscriptionResponse).audience).toBe("team");
+    const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(rows[0].audience).toBe("team");
+  });
+
+  // A client that GETs a rule and PATCHes the object back must not be refused
+  // for echoing a field the read itself filled in.
+  it("accepts a read-modify-write patch of a rule that has no audience", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const created = (await (await postSubscription(a.baseUrl, {
+      name: "my mentions", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }],
+      target: { kind: "orchestrator", orchestrator: "user" },
+    })).json()) as CreateEventSubscriptionResponse;
+
+    const list = (await (await fetch(`${a.baseUrl}/api/event-subscriptions`)).json()) as ListEventSubscriptionsResponse;
+    const echoed = list.subscriptions.find((sub) => sub.id === created.id);
+    expect(echoed).toBeDefined();
+    // A personal target carries no audience on the wire at all.
+    expect(echoed?.audience).toBeUndefined();
+
+    const res = await patchSubscription(a.baseUrl, created.id, { ...echoed, name: "renamed" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as PatchEventSubscriptionResponse).name).toBe("renamed");
+  });
+
+  // The runtime gate treats team ownership plus an orchestrator target as a
+  // team mention rule, with no `orchestrator: "team"` on the target. The write
+  // gate must read the same rows the same way.
+  it("patches the audience of a team-owned rule whose target names no orchestrator", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    await seedSubscriptionRow(a, "sub_runtime", "local-org", {
+      ownerType: "team", ownerId: "team_1", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }],
+      target: { kind: "orchestrator" },
+    });
+
+    const res = await patchSubscription(a.baseUrl, "sub_runtime", { audience: "organization" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as PatchEventSubscriptionResponse).audience).toBe("organization");
+  });
+
+  it("names the two accepted values when the audience is malformed", async () => {
+    const a = await bootSlack();
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+      audience: "everyone",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'audience must be "team" or "organization". Choose one of those two values, or remove the audience.',
+    );
+  });
+
+  it.each<EventSubscriptionTargetWire>([
+    { kind: "workflow", workflowId: "wf_1" },
+    { kind: "orchestrator", orchestrator: "user" },
+  ])("refuses an audience on a target that is not a team assistant (%o)", async (target) => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, target, audience: "organization" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "Only a team assistant mention rule has an invocation audience. Point the rule at a team assistant, or remove the audience.",
+    );
   });
 
   it.each(["team", "organization"])("redelivery rechecks the mentioner's current %s membership", async (removed) => {

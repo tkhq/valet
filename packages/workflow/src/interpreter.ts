@@ -412,7 +412,7 @@ async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDep
   const { store, engine, clock } = deps;
   for (const wait of run.waitingOn) {
     if (wait.kind === 'submission') {
-      await engine.abort(wait.sessionId, wait.threadId);
+      await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
     }
     if (wait.kind === 'run') {
       await cancelChildRun(store, wait.runId, clock);
@@ -464,7 +464,7 @@ async function terminateSettle(
   const { store, engine, clock } = deps;
   for (const wait of waitingOn) {
     if (wait.kind === 'submission') {
-      await engine.abort(wait.sessionId, wait.threadId);
+      await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
     }
     if (wait.kind === 'run') {
       await cancelChildRun(store, wait.runId, clock);

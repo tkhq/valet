@@ -294,9 +294,14 @@ githubConnectRouter.get("/callback", async (c) => {
     console.error("github connect callback: post-save relink failed:", err);
   }
 
-  const destination =
-    verified.postAuthDestination === "integrations" ? "/integrations" : "/settings/connected-accounts";
-  return c.redirect(`${verified.returnTo ?? ""}${destination}?github=connected`, 302);
+  // The Integrations page's `useConnectResult` reads only `?connected=<service>`
+  // (the same shape the credential-connect OAuth flow emits); the Settings
+  // connected-accounts page reads `?github=connected` instead.
+  const { destination, query } =
+    verified.postAuthDestination === "integrations"
+      ? { destination: "/integrations", query: "connected=github" }
+      : { destination: "/settings/connected-accounts", query: "github=connected" };
+  return c.redirect(`${verified.returnTo ?? ""}${destination}?${query}`, 302);
 });
 
 githubConnectRouter.delete("/", async (c) => {

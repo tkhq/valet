@@ -123,11 +123,29 @@ describe('workflow node (sub-workflow call)', () => {
     expect(child?.params.parentRunId).toBe('wfrun_p1');
     expect(child?.params.parentNodeId).toBe('call');
     expect(child?.params.workflowId).toBe('wf-child');
+    expect(child?.params.origin).toBeUndefined();
     expect(child?.owner).toEqual({ ownerType: 'user', ownerId: 'u1' });
     expect(child?.wakeRequested).toBe(true);
     const input = child?.params.input as { type: string; data: Record<string, unknown> };
     expect(input.type).toBe('workflow');
     expect(input.data).toEqual({ name: 'acme' });
+  });
+
+  it('preserves the assistant conversation origin on a child run', async () => {
+    const store = new InMemoryWorkflowStore();
+    const engine = resolvingEngine();
+    const params = parentParams();
+    params.origin = { assistantSessionId: 'assistant:origin', threadId: 'th-origin' };
+    await store.createRun('wfrun_origin', params, parentDefinition(), 'v1', {
+      ownerType: 'team', ownerId: 'team-a', actorUserId: 'u1',
+    });
+
+    const park = await drive(store, engine, 'wfrun_origin');
+    const wait = park.waitingOn[0];
+    if (wait.kind !== 'run') throw new Error('expected a run wait');
+    const child = await store.getRun(wait.runId);
+    expect(child?.params.origin).toEqual(params.origin);
+    expect(child?.actorUserId).toBe('u1');
   });
 
   it('resumes with the child stop output and wakes the parent on child settle', async () => {

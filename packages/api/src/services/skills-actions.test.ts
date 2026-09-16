@@ -5,7 +5,7 @@
  * back as `success: false` instead of a throw.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PluginActionContext } from "@valet/engine";
+import type { PluginActionContext, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { eq } from "drizzle-orm";
@@ -18,11 +18,11 @@ const ORG = "org1";
 const BODY = "# Deploy\n\nRun `make deploy`.\n";
 
 /**
- * A partial `PluginActionContext`. The actions read `userId`/`orgId` and
- * nothing else, and a full `ToolContext` needs a live sandbox and credential
- * provider — the same shortcut `workflows/actions.test.ts` takes.
+ * A partial `PluginActionContext`. The actions read identity fields only.
+ * A full context needs a live sandbox and credential provider, so this uses
+ * the same shortcut as `workflows/actions.test.ts`.
  */
-function ctx(overrides?: { userId?: string; orgId?: string }): PluginActionContext {
+function ctx(overrides?: { userId?: string; orgId?: string; owner?: Principal }): PluginActionContext {
   return {
     userId: "u1",
     orgId: ORG,
@@ -256,7 +256,10 @@ describe("skillsActionPlugin", () => {
       content: BODY,
     });
 
-    const result = await actionById("skills.list_skills").execute({}, ctx());
+    const result = await actionById("skills.list_skills").execute(
+      {},
+      ctx({ owner: { type: "user", id: "u1" } }),
+    );
     expect(result.success).toBe(true);
     const { skills } = result.data as {
       skills: Array<{ skillId: string; name: string; ownerType: string }>;
@@ -264,6 +267,45 @@ describe("skillsActionPlugin", () => {
     expect(skills.map((s) => s.name)).toEqual(["mine", "ours"]);
     // The listing is a catalog, not a read: bodies stay out of the turn.
     expect(skills.every((s) => !("content" in s))).toBe(true);
+  });
+
+  it("lists only skills available to a team-owned session", async () => {
+    const team = await createTeam(db, { orgId: ORG, name: "Reviewers", creatorUserId: "u1" });
+    const otherTeam = await createTeam(db, { orgId: ORG, name: "Other", creatorUserId: "u1" });
+    await createSkill(db, { userId: "u1", orgId: ORG }, {
+      name: "personal-notes",
+      description: "Personal.",
+      content: BODY,
+    });
+    await createSkill(db, { userId: "u1", orgId: ORG }, {
+      name: "team-review",
+      description: "Current team.",
+      content: BODY,
+      teamId: team.id,
+    });
+    await createSkill(db, { userId: "u1", orgId: ORG }, {
+      name: "other-team-review",
+      description: "Another team.",
+      content: BODY,
+      teamId: otherTeam.id,
+    });
+    await createSkill(db, { userId: "u1", orgId: ORG }, {
+      ownerType: "org",
+      isOrgAdmin: true,
+      origin: "repo",
+      name: "adversarial-code-review",
+      description: "Review pull requests.",
+      content: BODY,
+    });
+
+    const result = await actionById("skills.list_skills").execute(
+      {},
+      ctx({ owner: { type: "team", id: team.id } }),
+    );
+
+    expect(result.success).toBe(true);
+    const { skills } = result.data as { skills: Array<{ name: string }> };
+    expect(skills.map((skill) => skill.name)).toEqual(["team-review", "adversarial-code-review"]);
   });
 
   it("create_skill accepts invocation and argHint and list echoes them", async () => {

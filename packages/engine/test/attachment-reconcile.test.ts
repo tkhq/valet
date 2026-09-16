@@ -359,6 +359,40 @@ describe("SandboxAttachment.reconcile", () => {
     expect(await adopted.readFile("/workspace/keep.txt")).toBe("working directory data");
   });
 
+  it("reports object prep failures to waiting callers", async () => {
+    const cause = { message: "clone denied", code: "EACCES" };
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [step("s1", "sh1", async () => { throw cause; })] });
+    const att = new SandboxAttachment(provider, {}, fake.provider());
+
+    await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toMatchObject({
+      name: "SandboxPreparationError",
+      message: "sandbox preparation failed: (EACCES) clone denied",
+      code: "sandbox_preparation_failed",
+      cause,
+    });
+    expect(att.state).toBe("error");
+    await att.destroy();
+  });
+
+  it("logs error names and stacks without inspecting retained request causes", async () => {
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [] });
+    const att = await reachReady(new RecordingProvider(), fake);
+    const failure = new TypeError("exec connection failed", { cause: { target: { url: "SECRET_COMMAND" } } });
+    fake.spec = { specHash: "h2", steps: [step("s1", "h2", async () => { throw failure; })] };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await att.reconcile();
+      expect(log).toHaveBeenCalledWith("SandboxAttachment.reconcile failed", {
+        name: "TypeError", message: "exec connection failed", stack: failure.stack,
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toContain("SECRET_COMMAND");
+    } finally {
+      log.mockRestore();
+      await att.destroy();
+    }
+  });
+
   it("a critical prep failure releases adopted compute without destroying its workspace", async () => {
     const adopted = new VirtualSandbox("sb-existing");
     const provider = new RecordingProvider({ adopt: adopted, release: true });

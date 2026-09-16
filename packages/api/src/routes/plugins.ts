@@ -38,7 +38,9 @@ import type {
 } from "../wire/types.js";
 import { connectModeFor, missingClientEnv } from "../services/integration-availability.js";
 import { isOrgAdmin } from "../services/org.js";
+import { canViewTeam, getTeamInOrg } from "../services/teams.js";
 import { pluginIconSlugs } from "../plugins/registry.gen.js";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
 
@@ -83,7 +85,18 @@ function credentialHealth(stored: StoredCredential): PluginServiceSummary["healt
 
 pluginsRouter.get("/", async (c) => {
   const { plugins, engineCredentials, actionPluginByService, dynamicToolCounts, db } = c.var.providers;
-  const owner: CredentialOwner = { type: "user", id: c.var.user.id };
+  const teamId = c.req.query("teamId");
+  let owner: CredentialOwner = { type: "user", id: c.var.user.id };
+  if (teamId) {
+    // A team catalog reports the credentials a team workflow can use. Do
+    // this authorization before reading credentials so a member cannot use
+    // this endpoint to probe another team's connection state.
+    const team = await getTeamInOrg(db, c.var.user.orgId, teamId);
+    if (!team || !(await canViewTeam(db, teamId, c.var.user.id))) {
+      return c.json({ error: "Team not found." }, 404);
+    }
+    owner = { type: "team", id: teamId };
+  }
 
   // Who may read WHY a service is unconfigured. `org_members.role` is the
   // authority (`services/org.ts`), not the global JWT role. Read once per
@@ -100,8 +113,17 @@ pluginsRouter.get("/", async (c) => {
   const health = new Map<string, PluginServiceSummary["health"]>();
   await Promise.all(
     [...connectedServices].map(async (service) => {
-      const stored = await engineCredentials.get(owner, service);
-      if (stored) health.set(service, credentialHealth(stored));
+      try {
+        const stored = await engineCredentials.get(owner, service);
+        if (stored) health.set(service, credentialHealth(stored));
+        else connectedServices.delete(service);
+      } catch (err) {
+        // A list row can be a delegated team credential whose source was
+        // removed. Treat it as disconnected without exposing the source or
+        // letting one broken row make the whole catalog unavailable.
+        if (!(err instanceof CredentialReferenceBrokenError)) throw err;
+        connectedServices.delete(service);
+      }
     }),
   );
 
@@ -161,6 +183,7 @@ pluginsRouter.get("/", async (c) => {
         orgId: c.var.user.orgId,
         credentials: engineCredentials,
         env: process.env,
+        owner,
       });
       // Two things about an unconfigured service, with two audiences.
       //
@@ -185,7 +208,10 @@ pluginsRouter.get("/", async (c) => {
         scopes: decl.scopes,
         connectLabel: decl.connectLabel,
         configKeys: decl.configKeys,
-        connected: connectedServices.has(service),
+        // `org` means an organization credential resolves for this owner.
+        // Only a team catalog treats it as connected. A personal catalog
+        // must not offer to disconnect an organization-owned credential.
+        connected: connectedServices.has(service) || (owner.type === "team" && connect === "org"),
         dynamic: dynamicServices.has(service) ? true : undefined,
         connect,
         connectBlockedBy,

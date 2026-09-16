@@ -258,6 +258,38 @@ export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
 }
 
 /**
+ * The `openrouter/*` ids this org can run BEYOND the catalog's own list.
+ *
+ * `buildOrgCatalog` exposes only the row's curated selection, because the
+ * registry's ~274 entries would flood a picker. Resolution is wider: with an
+ * enabled OpenRouter provider, `resolveModelSpec` resolves any id the
+ * registry knows, curated or not. Validation follows resolution rather than
+ * the picker, so a definition that names a registry id the row never
+ * curated keeps saving. The org's approved list still applies to every id.
+ *
+ * Returns an empty set when the org cannot reach OpenRouter at all.
+ */
+export async function openrouterRegistryIds(
+  db: AppQueryable,
+  credentials: CredentialStore,
+  orgId: string,
+): Promise<Set<string>> {
+  const rows = await listLlmProviders(db, orgId);
+  const row = rows.find((r) => r.kind === "openrouter");
+  const envKey = Boolean(getEnvApiKey("openrouter"));
+  const active = row ? row.enabled && ((await hasOrgKey(credentials, orgId, row.id)) || envKey) : envKey;
+  if (!active) return new Set();
+
+  const approvedList = await getApprovedModels(db, orgId);
+  const ids = new Set<string>();
+  for (const modelId of openrouterRegistry().keys()) {
+    const id = `openrouter/${modelId}`;
+    if (isApproved(approvedList, id)) ids.add(id);
+  }
+  return ids;
+}
+
+/**
  * Validates a default-model id against the org catalog. One definition for
  * every route that writes a default-model field (`PATCH /api/me`,
  * `PATCH /api/teams/:id`), so the accepted id set and the error wording

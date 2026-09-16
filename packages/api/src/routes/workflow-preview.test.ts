@@ -10,7 +10,7 @@
  * The `llm` node cases are the strongest of these. If the preview ever
  * executed one, the test would attempt a real completion.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   collectTemplateFields,
@@ -21,9 +21,19 @@ import type { CreateWorkflowResponse, PreviewWorkflowResponse } from "../wire/ty
 
 let api: TestApi | undefined;
 
+beforeEach(() => {
+  // `POST /api/workflows` validates a model against the org's own model
+  // set, so the subject definitions below save only while the org can
+  // reach a provider for `MODEL`. Nothing here is about credentials — the
+  // preview never runs an `llm` node — so one key stands in for the whole
+  // org catalog.
+  vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+});
+
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
 
 const MODEL = "claude-haiku-4-5";

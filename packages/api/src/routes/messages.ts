@@ -36,6 +36,7 @@ import type {
   MessagePart,
   MessageAuthor,
   MessageRole,
+  MessageReplyReference,
   MessageSkillInvocation,
   PatchThreadRequest,
   PromptFileAttachment,
@@ -105,6 +106,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       content: e.summary,
       parts: [],
       createdAt: wireCreatedAt(e.createdAt),
+      sequence: e.sequence,
       compaction: {
         summary: e.summary,
         tokensBefore: e.tokenCountBefore,
@@ -131,7 +133,10 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     content: e.content,
     parts,
     createdAt: wireCreatedAt(e.createdAt),
+    sequence: e.sequence,
     queueItemId: e.queueItemId,
+    ...(role === "assistant" ? { completed: e.stopReason === "end_turn" } : {}),
+    replyTo: replyReferenceFromMetadata(e.metadata, role),
     signal: engineSignalToWire(e.signal),
     model: e.model,
     ...(skill ? { skill } : {}),
@@ -180,6 +185,34 @@ function authorFromEntry(
  * invocation. Only user entries qualify — the stamp rides the queue item
  * onto the user entry, never onto assistant output.
  */
+const REPLY_METADATA_KEY = "replyTo";
+const REPLY_EXCERPT_CHARS = 280;
+
+function replyReferenceFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  role: MessageRole,
+): MessageReplyReference | undefined {
+  if (role !== "user") return undefined;
+  const value = metadata?.[REPLY_METADATA_KEY];
+  if (!value || typeof value !== "object") return undefined;
+  const ref = value as Record<string, unknown>;
+  if (typeof ref.messageId !== "string" || typeof ref.excerpt !== "string") return undefined;
+  return { messageId: ref.messageId, excerpt: ref.excerpt };
+}
+
+function assistantReplyExcerpt(entry: Extract<SessionEntry, { type: "message" }>): string {
+  const partText = (entry.parts ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.type === "text" ? part.text.trim() : "")
+    .filter(Boolean)
+    .join(" ");
+  const text = (partText || entry.content).replace(/\s+/g, " ").trim();
+  const codepoints = Array.from(text);
+  return codepoints.length <= REPLY_EXCERPT_CHARS
+    ? text
+    : codepoints.slice(0, REPLY_EXCERPT_CHARS - 1).join("").trimEnd() + "…";
+}
+
 function skillInvocationFromMetadata(
   metadata: Record<string, unknown> | undefined,
   role: MessageRole,
@@ -646,9 +679,11 @@ export async function submitSessionPrompt(
     promoteItemId?: string;
     /** The authenticated sender, persisted on the user entry as `MessageEntry.author`. */
     author?: PromptAuthor;
+    /** Server-validated assistant entry reference. */
+    replyTo?: MessageReplyReference;
   },
 ): Promise<SendPromptResponse | null> {
-  const { threadId, attachments, fileRefs, author } = opts ?? {};
+  const { threadId, attachments, fileRefs, author, replyTo } = opts ?? {};
   const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -672,6 +707,12 @@ export async function submitSessionPrompt(
       messageId: receipt.queueItemId || null,
       threadId: receipt.threadId,
     };
+  }
+
+  // Reject reply-plus-command before consuming single-use attachment refs.
+  const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
+  if (replyTo && outcome?.kind === "execute") {
+    throw new ValidationError("A reply must include a message. Cancel the reply before you run a slash command.");
   }
 
   // Resolve file attachment refs. Consumption is atomic for the whole
@@ -702,7 +743,6 @@ export async function submitSessionPrompt(
   //   text to the requested thread like any prompt.
   // - pass-kind (unknown "/word", e.g. "/etc/passwd is the file") → the
   //   requested thread, text unchanged.
-  const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
 
   // Build the prompt content once per text variant: plain text, or text +
   // attachments. The expand path swaps only the text; the attachment
@@ -765,10 +805,13 @@ export async function submitSessionPrompt(
             threadId: thread.id,
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
             ...(author ? { author } : {}),
+            ...(replyTo ? { metadata: { [REPLY_METADATA_KEY]: replyTo } } : {}),
           })
         : await thread.submitPrompt(withAttachments(promptText), {
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
-            ...(skillMetadata ? { metadata: skillMetadata } : {}),
+            ...((skillMetadata || replyTo)
+              ? { metadata: { ...(skillMetadata ?? {}), ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}) } }
+              : {}),
             ...(outcome?.kind === "expand" && outcome.skill
               ? { skillInvocation: { skill: outcome.skill.source, path: outcome.skill.path } }
               : {}),
@@ -842,6 +885,33 @@ messagesRouter.post("/:id/messages", async (c) => {
   }
 
   try {
+    let replyTo: MessageReplyReference | undefined;
+    if (body.replyToMessageId !== undefined) {
+      if (typeof body.replyToMessageId !== "string" || body.replyToMessageId.length === 0) {
+        return c.json({ error: "replyToMessageId must name an assistant message in this thread." }, 400);
+      }
+      const loaded = await loadEngineSession(c);
+      if ("error" in loaded) return loaded.error;
+      const targetThread = resolveThread(loaded.engineSession, body.threadId);
+      if (!targetThread) return c.json({ error: "thread not found" }, 404);
+      const entries = await targetThread.readEntries();
+      const target = entries.find(
+        (entry): entry is Extract<SessionEntry, { type: "message" }> =>
+          entry.type === "message" && entry.id === body.replyToMessageId,
+      );
+      const excerpt =
+        target?.role === "assistant" && target.stopReason === "end_turn"
+          ? assistantReplyExcerpt(target)
+          : "";
+      if (!target || target.role !== "assistant" || target.stopReason !== "end_turn" || !excerpt) {
+        return c.json(
+          { error: "Reply target not found in this thread. Reply to a completed assistant message." },
+          400,
+        );
+      }
+      replyTo = { messageId: target.id, excerpt };
+    }
+
     // Stamp the sender on the submission. The engine persists it on the
     // user entry (`MessageEntry.author`); on team-owned sessions several
     // members share one thread, and both the UI and the model need to tell
@@ -853,6 +923,7 @@ messagesRouter.post("/:id/messages", async (c) => {
       ...(body.queueMode ? { queueMode: body.queueMode } : {}),
       ...(promoteItemId ? { promoteItemId } : {}),
       author: promptAuthorFromUser(c.var.user),
+      ...(replyTo ? { replyTo } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);

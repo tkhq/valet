@@ -1040,9 +1040,16 @@ export class PgSessionStore implements SessionStore {
     });
   }
 
-  async requestAbort(sessionId: string, threadId?: string): Promise<void> {
+  async requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void> {
     const now = Date.now();
-    if (threadId) {
+    if (queueItemId) {
+      await this.db.query(
+        `UPDATE engine_queue_items SET abort_requested_at = $1, updated_at = $2
+         WHERE session_id = $3 AND id = $4 AND ($5::text IS NULL OR thread_id = $5)
+           AND status != 'settled' AND abort_requested_at IS NULL`,
+        [now, now, sessionId, queueItemId, threadId ?? null],
+      );
+    } else     if (threadId) {
       await this.db.query(
         `UPDATE engine_queue_items SET abort_requested_at = $1, updated_at = $2
          WHERE session_id = $3 AND thread_id = $4 AND status != 'settled' AND abort_requested_at IS NULL`,

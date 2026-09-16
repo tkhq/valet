@@ -15,6 +15,19 @@ const OWNERS: Principal[] = [
 ];
 
 describe("orchestratorPersona", () => {
+  // TKAI-484. The agent used to write a personal file, copy it to the team,
+  // then delete the original, because mem_write had no way to name a team.
+  it("tells the agent to write a team directly instead of copying into it", () => {
+    const persona = orchestratorPersona({ type: "user", id: "u1" });
+    expect(persona).toContain("pass \`teamId\` on mem_write or mem_patch");
+    expect(persona).toContain("Do not write a personal file and copy");
+    // The discovery vocabulary, so the agent knows where an id comes from.
+    expect(persona).toContain("team:{id}/");
+    // Both copy tools exist and the list used to omit them.
+    expect(persona).toContain("mem_copy_to_team");
+    expect(persona).toContain("mem_copy_from_team");
+  });
+
   it("carries the shared rule sections, in order, for every owner kind", () => {
     for (const owner of OWNERS) {
       const persona = orchestratorPersona(owner);
@@ -152,6 +165,11 @@ describe("orchestratorPersona", () => {
       expect(persona).toContain("valet-secrets");
       // The section has to be reachable from the router, not only defined.
       expect(persona.indexOf("## Secrets")).toBeGreaterThan(-1);
+      // A request that names only the credential is answerable: the child
+      // can search for it. Asking the user to name the vault is what happens
+      // after that search comes back empty.
+      expect(persona).toContain("valet-secrets find <name>");
+      expect(persona).toContain("delegate it and let the child look");
       expect(persona).toContain("never ask anyone to paste one");
     }
   });

@@ -13,7 +13,10 @@ import { githubOrgAppState } from "./github-org-app";
 export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
   teamId: string; canManage: boolean; orgAdmin: boolean;
 }) {
-  const plugins = usePlugins();
+  // The team catalog reports effective credentials for this team. In
+  // particular, an org-managed Slack bot is connected for team workflows
+  // even though the team has no Slack credential row of its own.
+  const plugins = usePlugins(teamId);
   const github = useGithubOrgStatus();
   const credentials = useCredentials("team", { teamId });
   const [selected, setSelected] = useState<PluginServiceSummary | null>(null);
@@ -29,6 +32,12 @@ export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
   const occupied = new Set(credentials.data?.credentials.map((c) => c.service));
   const choices = services.filter((s) => s.configKeys.length > 0 &&
     s.service !== "slack-user" && s.service !== "slack" && s.service !== "github" &&
+    // `onepassword` is a service-account TOKEN, not one service's credential.
+    // The team list skips reserved rows, so an already-connected token never
+    // reads as occupied here, and this dialog's create-only promise does not
+    // reach `mutateTeamOnePassword`, which upserts. It would replace a live
+    // team token with no 409 and no confirmation. `TeamOnePasswordToken` is
+    // the control for it, and the team Integrations page renders it.
     s.service !== "onepassword" && s.connect !== "org" && !occupied.has(s.service))
     .sort((a, b) => displayName(a.service).localeCompare(displayName(b.service)));
 

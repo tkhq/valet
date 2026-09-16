@@ -30,8 +30,13 @@ import type { ChannelOrigin, SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
-import { isTeamAssistantMention, teamMentionActor } from "./team-slack-gate.js";
-import { upsertFollowedThread } from "./followed-threads.js";
+import {
+  followBindingAuthorized,
+  isTeamAssistantMention,
+  mentionAudience,
+  teamMentionActor,
+} from "./team-slack-gate.js";
+import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -197,9 +202,15 @@ export class EventDispatcher {
         await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
       } else if (target.kind === "orchestrator") {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
+        const audience = mentionAudience(sub);
         const actorUserId = teamMention ? await teamMentionActor(db, sub, event.payload) : sub.createdBy;
         if (event.orgId !== sub.orgId || actorUserId === null) {
-          await db.update(eventDeliveries).set({ status: "dead", lastError: "Team mention denied. Check the sender's Slack identity link and team membership." })
+          // Name the membership this rule's audience actually requires, the
+          // same split the drop log makes in `team-slack-gate.ts`.
+          const lastError = teamMention && audience === "organization"
+            ? "Team mention denied. Check the sender's Slack identity link and organization membership."
+            : "Team mention denied. Check the sender's Slack identity link and team membership.";
+          await db.update(eventDeliveries).set({ status: "dead", lastError })
             .where(eq(eventDeliveries.id, deliveryId));
           return;
         }
@@ -248,15 +259,34 @@ export class EventDispatcher {
         if (target.follow && origin) {
           const parts = origin.threadKey.split(":");
           if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
-            await upsertFollowedThread(this.deps.db, {
+            const key = {
               orgId: event.orgId,
               channelType: origin.channelType,
               channelId: parts[1],
               threadTs: parts[2],
+            };
+            // A team re-mention keeps the conversation's first binding, so a
+            // second member's mention does not take the thread over. One
+            // exception: a binding that authorizes NOBODY any more. Its rule
+            // was disabled or deleted, or its actor lost the membership that
+            // rule admitted them under, and the router drops every message in
+            // the thread. This mention passed the gate, so it re-binds the
+            // thread to its own actor and rule and the conversation resumes.
+            let preserveBinding = teamMention;
+            if (preserveBinding) {
+              const bound = await findFollowedThread(db, key);
+              if (bound && !(await followBindingAuthorized(db, bound))) preserveBinding = false;
+            }
+            await upsertFollowedThread(this.deps.db, {
+              ...key,
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
               createdBy: actorUserId,
-              preserveBinding: teamMention,
+              // The follow router re-checks the actor's membership on every
+              // later message, against this rule's CURRENT audience. So the
+              // rule id is what it needs.
+              ...(teamMention ? { subscriptionId: sub.id } : {}),
+              preserveBinding,
               // Whichever assistant just answered keeps the thread, so a later
               // overheard message does not fall back to the owner's default.
               assistantId: target.assistantId,

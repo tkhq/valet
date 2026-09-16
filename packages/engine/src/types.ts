@@ -380,6 +380,8 @@ export interface BaseEntry {
   threadId: string;
   parentId: string | null;
   createdAt: number;
+  /** Store insertion order, used as the stable tie-break for equal timestamps. */
+  sequence?: number;
   metadata?: Record<string, unknown>;
   /** The submission that produced this entry — the transcript↔submission linkage. */
   queueItemId?: string;
@@ -1568,7 +1570,7 @@ export type EngineEvent =
       type: "message_end";
       threadId: string;
       messageId: string;
-      reason: "end_turn" | "error" | "abort";
+      reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
   | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
@@ -1882,7 +1884,8 @@ export interface SessionStore {
     error?: string,
   ): Promise<QueueItem>;
   /** Stamp abortRequestedAt on unsettled submissions in scope. First write wins; NOT terminal. */
-  requestAbort(sessionId: string, threadId?: string): Promise<void>;
+  /** With queueItemId, stamp only that item within the session/thread scope. */
+  requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void>;
   /** Fenced two-phase settlement for claimed turns: running|blocked→terminalizing, recording the outcome. */
   reserveSettlement(
     sessionId: string,

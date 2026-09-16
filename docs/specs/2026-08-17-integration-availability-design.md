@@ -99,6 +99,14 @@ Rules, in order:
    `slack-user` OAuth).
 6. Otherwise → `"manual"`.
 
+Rules 4 and 5 read the team row before the org row when the caller names a
+team owner. A team that holds its own row for the service acts as that row
+at run time, so the catalog reports `"manual"` for it even when the org
+credential also exists. A team row that throws
+`CredentialReferenceBrokenError` reads as an absent row, so the org
+credential behind it still resolves to `"org"`. A caller that names no
+owner, or a user owner, reads the org row alone.
+
 `unavailableServiceSet(plugins, orgId, credentials, env)` returns the
 services that resolve to `"unconfigured"`, for the two enforcement points
 that gate by set membership (session builds, workflow invocations).
@@ -272,6 +280,18 @@ change, with tests.
   alternative to the signing secret). Add when a deployment needs it.
 
 ## Deviations from prior specs
+
+`GET /api/plugins?teamId=` returns the effective team catalog after a live
+team-access check. A team catalog marks an org-provided credential connected.
+A personal catalog keeps it disconnected, so it does not offer Disconnect for
+an organization-owned credential. The response does not expose another team's
+catalog.
+
+A broken delegated team credential is disconnected with no health data. The
+catalog remains available and does not expose the delegator. The availability
+resolver treats that row as unconfigured when no organization credential
+exists. Slack identity links remain required for actions that need a person's
+identity, such as private-channel access and `slack.dm_owner`.
 
 `2026-07-20-integration-oauth-design.md` specified that an
 `authorization_code` service with unset client env reports `"manual"` so

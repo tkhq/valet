@@ -382,7 +382,14 @@ It replaces the overlapping suffix with the REST tail. If no row overlaps,
 the tail replaces the thread. The store keeps only rows marked `optimistic`
 or `streaming` after that tail. REST confirmation
 removes a client row with the same message id or queue item id. A complete
-response replaces canonical rows for the thread.
+response replaces canonical rows for the thread. The merge records the prior and
+next canonical row on each client-only row. Each anchor includes the store sequence.
+These anchors survive REST snapshots that omit a canonical row. If both anchor IDs
+are absent, the merge uses canonical `(createdAt, sequence)` order. If sequence
+metadata is absent, equal timestamps do not establish order. The merge keeps the
+client row before that equal-time window. The bounded prefix drops client rows that
+REST confirms later in the tail. The merge indexes IDs, queue items, and user
+content, then uses forward scans. Reconciliation is linear in stored and fresh rows.
 
 ## Out of scope
 
@@ -397,3 +404,5 @@ response replaces canonical rows for the thread.
 This change edits the same `makeResolveModel` seam as the spend-limits spec —
 whichever lands second rebases. The small-fixes spec (2026-08-24) defers its
 split-brain candidates 2 and 5 and its silent-downgrade fix to this document.
+
+Transient provider failures show the provider, retry delay, and attempt count. The notice suggests a model change if retries fail. A parsed request ID supports troubleshooting without showing the raw provider error.

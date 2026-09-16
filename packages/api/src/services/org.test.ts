@@ -48,13 +48,10 @@ describe("org service", () => {
   });
 
   describe("getOrgFeatures / setOrgFeatures", () => {
-    it("defaults every opt-in feature to false and personal 1Password to true", async () => {
-      // An absent key reads as false, except `allowPersonalOnePassword`
-      // (opt-out), which reads as true.
+    it("defaults every opt-in feature to false", async () => {
       expect(await getOrgFeatures(db, orgId)).toEqual({
         organizations: false,
         ssoTeamSync: false,
-        allowPersonalOnePassword: true,
       });
     });
 
@@ -63,7 +60,6 @@ describe("org service", () => {
       expect(await getOrgFeatures(db, orgId)).toEqual({
         organizations: true,
         ssoTeamSync: false,
-        allowPersonalOnePassword: true,
       });
     });
 
@@ -73,7 +69,6 @@ describe("org service", () => {
       expect(await getOrgFeatures(db, orgId)).toEqual({
         organizations: true,
         ssoTeamSync: true,
-        allowPersonalOnePassword: true,
       });
     });
 
@@ -87,15 +82,6 @@ describe("org service", () => {
 
       const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId));
       expect(rows[0]?.features).toEqual({ fromTheFile: true, organizations: true });
-    });
-
-    it("can disable personal 1Password tokens", async () => {
-      await setOrgFeatures(db, orgId, { allowPersonalOnePassword: false });
-      expect(await getOrgFeatures(db, orgId)).toEqual({
-        organizations: false,
-        ssoTeamSync: false,
-        allowPersonalOnePassword: false,
-      });
     });
   });
 

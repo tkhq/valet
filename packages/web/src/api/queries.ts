@@ -476,17 +476,20 @@ export function useSendPrompt(sessionId: string) {
   return useMutation<
     import("@valet/api/wire").SendPromptResponse,
     Error,
-    import("@valet/api/wire").SendPromptRequest
+    import("@valet/api/wire").SendPromptRequest,
+    { compactingThreadId?: string }
   >({
     mutationFn: (body) => api.sendPrompt(sessionId, body),
     onMutate: ({ text, threadId }) => {
-      if (threadId && /^\/compact(?:\s|$)/i.test(text)) {
-        useStreamStore.getState().setCompacting(sessionId, threadId, true);
-      }
+      if (!threadId || !/^\/compact(?:\s|$)/i.test(text)) return {};
+      const stream = useStreamStore.getState();
+      if (stream.bySession[sessionId]?.compactingByThread[threadId]) return {};
+      stream.setCompacting(sessionId, threadId, true);
+      return { compactingThreadId: threadId };
     },
-    onError: (_error, { text, threadId }) => {
-      if (threadId && /^\/compact(?:\s|$)/i.test(text)) {
-        useStreamStore.getState().setCompacting(sessionId, threadId, false);
+    onError: (_error, _variables, context) => {
+      if (context?.compactingThreadId) {
+        useStreamStore.getState().setCompacting(sessionId, context.compactingThreadId, false);
       }
     },
     // Invalidation is not needed for prompts — live updates flow through the

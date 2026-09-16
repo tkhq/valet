@@ -11,7 +11,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { findFollowedThread, touchFollowedThread } from "../events/followed-threads.js";
-import { isCurrentTeamActor } from "../events/team-slack-gate.js";
+import { followBindingAuthorized } from "../events/team-slack-gate.js";
 
 export interface FollowRouterDeps {
   /** Bot identity from the verified org credential. */
@@ -119,7 +119,12 @@ async function routeFollowedMessage(
     threadTs: f.threadTs,
   });
   if (!follow) return;
-  if (follow.ownerType === "team" && !(await isCurrentTeamActor(deps.db, follow, follow.createdBy))) return;
+  // Re-check the membership this follow's audience requires, live, on every
+  // message. A thread bound by an organization-audience mention runs for an
+  // actor who is on no team, so re-checking team membership here would drop
+  // every later message in that thread. A binding that authorizes nobody any
+  // more stops the thread until an authorized mention re-binds it.
+  if (!(await followBindingAuthorized(deps.db, follow))) return;
 
   const threadKey = `slack:${f.channel}:${f.threadTs}`;
   const normalized = (await deps.normalizeChannelMessage?.("slack", { userId: f.user, text: f.text })) ?? {

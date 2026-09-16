@@ -62,8 +62,7 @@ import {
 } from "../services/onepassword.js";
 import { mutateTeamOnePassword } from "../services/team-onepassword-token.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
-import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
-import { getAllowPersonalOnePassword } from "../services/org.js";
+import { mapOnePasswordError } from "./_onepassword-errors.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
 import { deleteDelegationsFrom, listDelegationsFrom } from "../services/credential-delegations.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
@@ -271,6 +270,7 @@ async function toSummary(
     identityOnly: metadata?.identityOnly === true ? true : undefined,
     refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
     onepasswordRef: onePasswordMeta(stored)?.reference,
+    onepasswordTokenScope: onePasswordMeta(stored)?.tokenScope,
     ...extra,
   };
 }
@@ -433,8 +433,8 @@ credentialsRouter.put("/:service", async (c) => {
 
   if (body.onepassword) {
     // Structural validation (reserved service name) takes precedence over
-    // the personal-toggle policy check below — a request naming the
-    // reserved service is malformed regardless of the org's toggle state.
+    // every policy check below — a request naming the reserved service is
+    // malformed whoever sends it.
     if (service === ONEPASSWORD_SERVICE) {
       return c.json({ error: "onepassword is a reserved service name" }, 400);
     }
@@ -507,10 +507,6 @@ credentialsRouter.put("/:service", async (c) => {
     }
     const { reference, tokenScope } = parsed;
     if (tokenScope === "personal") {
-      const allowed = await getAllowPersonalOnePassword(db, user.orgId);
-      if (!allowed) {
-        return c.json(PERSONAL_DISABLED, 403);
-      }
       // Delegated user references can use only org scope, so a personal
       // reference would leave each team with a
       // reference that never resolves. Refuse while shares exist: the
@@ -563,18 +559,6 @@ credentialsRouter.put("/:service", async (c) => {
     if (!ok) return c.json({ error: "Team not found." }, 404);
     await resyncTeamWorkflows(c, [owner.id]);
     return c.json({ ok: true } satisfies PutCredentialResponse);
-  }
-
-  // Plain token write to the reserved `onepassword` service — the caller's
-  // own personal service-account token. Gated by the same org toggle a
-  // `onepassword`-reference credential's `tokenScope: "personal"` is. Only
-  // reached when `body.onepassword` is absent — see the reserved-service
-  // 400 above, which takes precedence when it's present.
-  if (service === ONEPASSWORD_SERVICE && scope === "user") {
-    const allowed = await getAllowPersonalOnePassword(db, user.orgId);
-    if (!allowed) {
-      return c.json(PERSONAL_DISABLED, 403);
-    }
   }
 
   const accessToken = typeof body.accessToken === "string" && body.accessToken.length > 0 ? body.accessToken : undefined;

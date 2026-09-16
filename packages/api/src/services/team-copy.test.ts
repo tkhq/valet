@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { InMemoryCredentialStore } from "@valet/engine";
+import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 import { InMemoryWorkflowStore, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -23,7 +23,8 @@ let deps: WorkflowServiceDeps;
 beforeEach(async () => {
   const boot = await freshTestPgDb();
   db = boot.appDb; cleanup = boot.cleanup;
-  deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: runHost, credentials: new InMemoryCredentialStore() };
+  deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: runHost,
+    engineStore: new InMemorySessionStore(), credentials: new InMemoryCredentialStore() };
   await db.insert(orgMembers).values({ orgId: "org1", userId: "u1", role: "member" });
   await db.insert(teams).values({ id: "team1", orgId: "org1", name: "Team", createdAt: 1 });
   await db.insert(teamMembers).values({ teamId: "team1", userId: "u1", role: "admin" });

@@ -22,6 +22,7 @@ import type {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createSkill } from "../services/skills.js";
 import { createTeam } from "../services/teams.js";
+import { createAssistant, ensureAssistantSession } from "../assistants/service.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const USER = "local-user";
@@ -128,6 +129,72 @@ describe("stored skills on a session", () => {
     expect(session.options.skills?.map((s) => s.name)).toContain("deploy");
   });
 
+  it("gives a team assistant team and org skills, but not the actor's skill", async () => {
+    api = await bootTestApi({ plugins: [] });
+    const db = api.providers.db;
+    const team = await createTeam(db, { orgId: ORG, name: "Reviewers", creatorUserId: USER });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      name: "personal-review-notes",
+      description: "Only mine.",
+      content: "# Personal\n",
+    });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      name: "team-review-notes",
+      description: "The team's notes.",
+      content: "# Team\n",
+      teamId: team.id,
+    });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      ownerType: "org",
+      isOrgAdmin: true,
+      origin: "repo",
+      name: "adversarial-code-review",
+      description: "Attack a change and try to prove it wrong.",
+      content: "# Adversarial code review\n\nReview the pull request.\n",
+    });
+
+    const session = await defaultAssistantSessionFor(
+      api.providers,
+      { type: "team", id: team.id },
+      { actorUserId: USER, orgId: ORG },
+    );
+
+    expect(session.options.skills?.map((skill) => skill.name)).toEqual([
+      "team-review-notes",
+      "adversarial-code-review",
+    ]);
+    const tool = findSkillTool(session.options.tools);
+    const result = await tool.execute({ name: "adversarial-code-review" }, makeCtx());
+    expect(result.text).toContain("Review the pull request.");
+    expect(result.text).not.toContain("skill_not_found");
+  });
+
+  it("keeps an org skill out of a team assistant allowlist that denies it", async () => {
+    api = await bootTestApi({ plugins: [] });
+    const db = api.providers.db;
+    const team = await createTeam(db, { orgId: ORG, name: "Reviewers", creatorUserId: USER });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      ownerType: "org",
+      isOrgAdmin: true,
+      origin: "repo",
+      name: "adversarial-code-review",
+      description: "Attack a change and try to prove it wrong.",
+      content: "# Adversarial code review\n",
+    });
+    const assistant = await createAssistant(db, ORG, { type: "team", id: team.id }, "Restricted", {
+      behavior: { skills: { mode: "allowlist", names: ["team-review-notes"] } },
+    });
+
+    const { session } = await ensureAssistantSession(
+      { db, engineHost: api.providers.engineHost },
+      assistant,
+      { actorUserId: USER, orgId: ORG },
+    );
+
+    expect(session.options.skills?.some((skill) => skill.name === "adversarial-code-review") ?? false).toBe(false);
+    expect(session.options.tools?.some((tool) => tool.name === "skill") ?? false).toBe(false);
+  });
+
   it("gives a team-owned child session the team's skills, not the actor's", async () => {
     api = await bootTestApi({ plugins: [] });
     const db = api.providers.db;
@@ -159,6 +226,48 @@ describe("stored skills on a session", () => {
     });
 
     expect(child.options.skills?.map((s) => s.name)).toEqual(["shared"]);
+  });
+
+  it("gives a team-owned workflow session team and org skills only", async () => {
+    api = await bootTestApi({ plugins: [] });
+    const db = api.providers.db;
+    const team = await createTeam(db, { orgId: ORG, name: "Reviewers", creatorUserId: USER });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      name: "personal-review",
+      description: "Personal.",
+      content: "# Personal\n",
+    });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      name: "team-review",
+      description: "Current team.",
+      content: "# Team\n",
+      teamId: team.id,
+    });
+    await createSkill(db, { userId: USER, orgId: ORG }, {
+      ownerType: "org",
+      isOrgAdmin: true,
+      origin: "repo",
+      name: "adversarial-code-review",
+      description: "Attack a change and try to prove it wrong.",
+      content: "# Adversarial code review\n\nReview the pull request.\n",
+    });
+
+    const session = await api.providers.engineHost.workflowSessionFor("wf:team-run:review", {
+      actorUserId: USER,
+      orgId: ORG,
+      owner: { type: "team", id: team.id },
+      workspace: "/tmp",
+    });
+
+    expect(session.options.skills?.map((skill) => skill.name)).toEqual([
+      "team-review",
+      "adversarial-code-review",
+    ]);
+    const result = await findSkillTool(session.options.tools).execute(
+      { name: "adversarial-code-review" },
+      makeCtx(),
+    );
+    expect(result.text).toContain("Review the pull request.");
   });
 
   it("delivers a personal skill to a workflow session", async () => {

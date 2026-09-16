@@ -30,6 +30,10 @@ export interface FollowedThreadRow extends FollowedThreadKey {
    * default, which is what the rule that bound this follow also resolved to.
    * Carried so a followed thread keeps talking to the SAME assistant. */
   assistantId?: string;
+  /** The mention rule this bind came from, so the router can read that rule's
+   * current invocation audience on every later message. Absent → team-only,
+   * which is what every follow bound before the column means. */
+  subscriptionId?: string;
 }
 
 /** Bind a thread to an owner's assistant. Idempotent on `(org, channel, thread)`. */
@@ -50,6 +54,7 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       lastActivityAt: now,
       lastSeenTs: row.lastSeenTs ?? null,
       assistantId: row.assistantId ?? null,
+      subscriptionId: row.subscriptionId ?? null,
     });
   const target = [followedThreads.orgId, followedThreads.channelType,
     followedThreads.channelId, followedThreads.threadTs];
@@ -71,6 +76,10 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       ownerId: row.ownerId,
       createdBy: row.createdBy,
       assistantId: row.assistantId ?? null,
+      // `subscriptionId` follows `createdBy`: the rule that re-binds the
+      // thread decides which membership the router re-checks for the new
+      // actor.
+      subscriptionId: row.subscriptionId ?? null,
       lastActivityAt: now,
     },
   });

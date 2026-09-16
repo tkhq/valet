@@ -193,6 +193,12 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
   const calls: GithubFixtureCall[] = [];
 
   const app = new Hono();
+  // Each test owns a short-lived server on an ephemeral port. Do not leave
+  // pooled client connections available when that server shuts down.
+  app.use("*", async (c, next) => {
+    c.header("Connection", "close");
+    await next();
+  });
 
   function record(
     c: {

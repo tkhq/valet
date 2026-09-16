@@ -55,7 +55,11 @@ export type ValidationResult = { ok: true } | { ok: false; errors: string[] };
  * references the RUNTIME would reject: unknown model specs, unknown
  * tool service/action pairs, and tool params that cannot satisfy the
  * action's own parameter schema. Return values:
- *   - `isKnownModel(spec)`: false → error.
+ *   - `isKnownModel(spec)`: `true` → pass. `false` → a generic
+ *     "unknown model" error. A string → an error that ends with that
+ *     string, so a host that knows WHY the spec is not usable (an
+ *     organization allowlist, a disabled provider) can name the corrective
+ *     action itself.
  *   - `isKnownAction(service, action)`: "unknown-service" / "unknown-action"
  *     → error; "ok" or "dynamic" (MCP-style plugins whose action list only
  *     resolves at runtime) → pass.
@@ -68,7 +72,7 @@ export type ValidationResult = { ok: true } | { ok: false; errors: string[] };
  *     Undefined → params pass unchecked, exactly as without the hook.
  */
 export interface ValidateEnvironment {
-  isKnownModel?: (spec: string) => boolean;
+  isKnownModel?: (spec: string) => boolean | string;
   isKnownAction?: (service: string, action: string) => 'ok' | 'dynamic' | 'unknown-service' | 'unknown-action';
   getActionParams?: (service: string, action: string) => Record<string, unknown> | undefined;
 }
@@ -1006,11 +1010,20 @@ function checkModel(
     errors.push(`${label}: ${field} must be a non-empty string when present`);
     return;
   }
-  if (env.isKnownModel && !env.isKnownModel(model)) {
-    errors.push(
-      `${label}: unknown ${field} ${JSON.stringify(model)} — use a known model id like "claude-haiku-4-5", or "provider/model" form`,
-    );
+  if (!env.isKnownModel) return;
+  const known = env.isKnownModel(model);
+  if (known === true) return;
+  if (typeof known === 'string' && known !== '') {
+    // The host knows why the spec is not usable and says what to do next.
+    errors.push(`${label}: ${field} ${JSON.stringify(model)} is not available. ${known}`);
+    return;
   }
+  // Anything else, `false` included, is a plain rejection. Callers hand us
+  // their own hook, so a return value outside the contract must fail the
+  // model, never pass it.
+  errors.push(
+    `${label}: unknown ${field} ${JSON.stringify(model)} — use a known model id like "claude-haiku-4-5", or "provider/model" form`,
+  );
 }
 
 // ─── small shared helpers ───────────────────────────────────────────────────

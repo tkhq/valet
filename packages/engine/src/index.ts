@@ -21,6 +21,8 @@ export {
   SandboxEvictedError,
   SandboxStartupError,
   SandboxPreparationError,
+  SandboxConnectionError,
+  formatSandboxErrorCause,
 } from "./errors.js";
 export {
   REASONING_LEVELS,
@@ -120,6 +122,7 @@ export {
   PolicySandbox,
   SANDBOX_READY_TIMEOUT_MS,
   CONTAINER_DEATH_PATTERN,
+  isSandboxTransportError,
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
 export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
@@ -269,6 +272,7 @@ export {
   entriesToAgentMessages,
   skillInvocationsInContext,
   buildSpilledInputMarker,
+  formatTransientRetryMessage,
   resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";

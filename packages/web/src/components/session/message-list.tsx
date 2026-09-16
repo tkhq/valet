@@ -3,6 +3,7 @@ import { cn } from "~/lib/cn";
 import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
 import type { StreamMessage } from "~/stores/stream";
+import type { MessageReplyReference } from "@valet/api/wire";
 import { MessageItem } from "./message-item";
 import { SignalCard } from "./signal-card";
 import { CommandResult } from "./command-result";
@@ -34,6 +35,7 @@ export function MessageList({
   pendingIds,
   viewerId,
   header,
+  onReply,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -60,6 +62,7 @@ export function MessageList({
   viewerId?: string;
   /** Full-page chat controls share the transcript sticky layer. */
   header?: ReactNode;
+  onReply?: (target: MessageReplyReference) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -172,6 +175,7 @@ export function MessageList({
                   suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
                   queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
                   viewerId={viewerId}
+                  onReply={onReply}
                 />
               ),
             )}

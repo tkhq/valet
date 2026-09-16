@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordService } from "./onepassword.js";
+import { CredentialReferenceBrokenError, TeamCredentialStore } from "../plugins/team-credential-store.js";
 import {
   resolveOrgCredentialRead,
   resolveTeamCredentialRead,
@@ -660,6 +661,52 @@ describe("resolveTeamCredentialRead", () => {
         "reference-only",
       ),
     ).resolves.toMatchObject({ apiKey: "resolved" });
+  });
+
+  // A delegation whose source row is gone throws out of the store. The org
+  // bot is a different credential the team is entitled to, so a service the
+  // catalog reports as connected must still run.
+  describe("a broken delegation", () => {
+    function storeWithBrokenDelegation(): Promise<CredentialStore> {
+      const inner = fakeCredentialStore();
+      return inner
+        .save({ type: "team", id: teamId }, "slack", {
+          type: "bot_token",
+          metadata: { delegatedFrom: "departed-user" },
+        })
+        .then(() => new TeamCredentialStore(inner, { isMember: async () => false }));
+    }
+
+    it("falls back to the org row when the service is org-provided", async () => {
+      const credentials = await storeWithBrokenDelegation();
+      await credentials.save({ type: "org", id: orgId }, "slack", {
+        type: "bot_token",
+        accessToken: "org-bot",
+      });
+      const got = await resolveTeamCredentialRead(
+        { credentials },
+        { orgId, teamId },
+        "slack",
+        "org-provided",
+      );
+      expect(got?.accessToken).toBe("org-bot");
+    });
+
+    it("surfaces the typed error when no org row answers", async () => {
+      const credentials = await storeWithBrokenDelegation();
+      await expect(
+        resolveTeamCredentialRead({ credentials }, { orgId, teamId }, "slack", "org-provided"),
+      ).rejects.toBeInstanceOf(CredentialReferenceBrokenError);
+    });
+
+    // Readiness reads with "none" and reports a broken row as broken. A
+    // silent null there would arm a trigger that fails on every fire.
+    it("surfaces the typed error when the caller allows no fallback", async () => {
+      const credentials = await storeWithBrokenDelegation();
+      await expect(
+        resolveTeamCredentialRead({ credentials }, { orgId, teamId }, "slack", "none"),
+      ).rejects.toBeInstanceOf(CredentialReferenceBrokenError);
+    });
   });
 
   it("returns null for denied services", async () => {
