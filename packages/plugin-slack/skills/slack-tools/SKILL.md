@@ -20,7 +20,7 @@ Use `slack.list_channels` to find channel IDs. Use `slack.read_history` to read 
 
 `channel_name` is absent when Slack gives the conversation no name, such as a direct message. In that case describe the conversation instead of printing the ID.
 
-Channel mentions inside message text are resolved to `#name (C...)`. Use the name in what you write, and keep the ID if you must read that channel next.
+A channel mention inside message text reads as `#name (C...)` when Valet could look the name up. A mention that Valet could not look up keeps the label the message author typed, which can be an old name. Use the name in what you write, and keep the ID if you must read that channel next.
 
 ## Understanding Context Signals
 

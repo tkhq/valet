@@ -28,9 +28,11 @@ async function checkPrivateChannelAccess(
 ```
 
 The helper reads `conversations.info`, so it returns the channel name with the
-access answer. A caller that labels the channel then needs no second request.
-The name is absent for a conversation Slack gives no name, such as a direct
-message, and for a denied check. See the channel name section of
+access answer. `guardPrivateChannel` in `actions.ts` hands that name to the
+action, which returns it as `channel_name`. An action that labels the channel
+then needs no second request, and the label in a message cannot reach the
+field. The name is absent for a conversation Slack gives no name, such as a
+direct message, and for a denied check. See the channel name section of
 `2026-05-01-slack-data-enrichment-design.md`.
 
 Logic:
