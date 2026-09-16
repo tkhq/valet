@@ -13,6 +13,7 @@ import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
+import { valetSignScript } from "./commit-signing-script.js";
 import type { CredentialCommand } from "./credential-commands.js";
 
 // Increment when the prep logic changes in a way that requires re-running all
@@ -50,6 +51,21 @@ export interface ResolveSnapshot {
   repos: Array<RepoBinding & { targetDir: string }>;
   userName?: string;
   userEmail?: string;
+  /**
+   * Present when the user has set up commit signing (a Turnkey
+   * sub-organization exists for them) and the deployment is configured. The
+   * ids are hashed into the `turnkey-session-key` step; `issueSessionKey` is
+   * the I/O the step's apply calls and is not part of the spec.
+   */
+  commitSigning?: CommitSigningSnapshot;
+}
+
+export interface CommitSigningSnapshot {
+  subOrgId: string;
+  agentUserId: string;
+  apiBaseUrl: string;
+  /** Registers the sandbox-generated P-256 public key on `valet-agent` for the session. */
+  issueSessionKey(publicKey: string): Promise<{ expiresAt: number }>;
 }
 
 export interface StepSpec {
@@ -79,7 +95,10 @@ function sha256(input: string): string {
  * Steps, in order:
  * 1. `credential-scripts` — covers the generated shim scripts + PREP_VERSION.
  * 2. `git-identity` — covers userName + userEmail + PREP_VERSION.
- * 3. One `clone:<fullName>` per binding — covers configuration only, never
+ * 3. `turnkey-session-key`, only when `snap.commitSigning` is set — covers the
+ *    sub-organization and agent user ids + PREP_VERSION. The key itself is
+ *    world state (a new one per apply), so it is not in the hash.
+ * 4. One `clone:<fullName>` per binding — covers configuration only, never
  *    the head SHA (spec decision 2: world-state excluded from the spec hash).
  */
 export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
@@ -103,6 +122,8 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     // declarations has to re-run it. Hashing the generated scripts rather
     // than the config means a rename or a changed reference reinstalls.
     (snap.credentialCommands ?? []).map(commandWrapperScript).join("") +
+    // `valet-sign` is installed by the same step, so it belongs in the same hash.
+    valetSignScript() +
     String(PREP_VERSION);
   steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: true });
 
@@ -110,7 +131,15 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
   const identityInput = `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${PREP_VERSION}`;
   steps.push({ id: "git-identity", hash: sha256(identityInput), critical: true });
 
-  // Step 3: one clone step per binding
+  // Step 3: the Turnkey session key, when the user has commit signing.
+  // Not critical: a Turnkey outage must not stop a session from starting;
+  // `valet-sign` reports the missing key when a commit is signed.
+  if (snap.commitSigning) {
+    const signingInput = `${snap.commitSigning.subOrgId}|${snap.commitSigning.agentUserId}|${PREP_VERSION}`;
+    steps.push({ id: "turnkey-session-key", hash: sha256(signingInput), critical: false });
+  }
+
+  // Step 4: one clone step per binding
   for (const binding of snap.repos) {
     const { fullName, cloneUrl, ref, auth, targetDir } = binding;
     const cloneInput = `${fullName}|${cloneUrl}|${ref ?? ""}|${auth ?? ""}|${targetDir}|${PREP_VERSION}`;

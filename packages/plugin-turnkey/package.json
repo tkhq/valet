@@ -1,0 +1,73 @@
+{
+  "name": "@valet/plugin-turnkey",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "valet": {
+    "plugin": "./dist/plugin.js"
+  },
+  "exports": {
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "default": "./dist/plugin.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "default": "./dist/store.js"
+    },
+    "./turnkey-client": {
+      "types": "./dist/turnkey-client.d.ts",
+      "default": "./dist/turnkey-client.js"
+    },
+    "./github-keys": {
+      "types": "./dist/github-keys.d.ts",
+      "default": "./dist/github-keys.js"
+    },
+    "./ssh": {
+      "types": "./dist/ssh.d.ts",
+      "default": "./dist/ssh.js"
+    },
+    "./gate": {
+      "types": "./dist/gate.d.ts",
+      "default": "./dist/gate.js"
+    },
+    "./enrollment": {
+      "types": "./dist/enrollment.d.ts",
+      "default": "./dist/enrollment.js"
+    },
+    "./p256": {
+      "types": "./dist/p256.d.ts",
+      "default": "./dist/p256.js"
+    },
+    "./sandbox": {
+      "types": "./dist/sandbox.d.ts",
+      "default": "./dist/sandbox.js"
+    },
+    "./test-helpers": {
+      "types": "./dist/test-helpers/fakes.d.ts",
+      "default": "./dist/test-helpers/fakes.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@turnkey/sdk-server": "^8.4.0",
+    "@valet/engine": "workspace:*",
+    "@valet/shared": "workspace:*",
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
+  }
+}

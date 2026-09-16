@@ -62,6 +62,7 @@ import { orgReasoningRouter } from "./routes/org-reasoning.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
 import { githubConnectRouter } from "./routes/github-connect.js";
+import { commitSigningRouter, orgAllowedSignersRouter } from "./routes/commit-signing.js";
 import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
@@ -347,6 +348,9 @@ export function createApp(
   // Mounted BEFORE /api/me for the same defensive-ordering reason as
   // identityLinksRouter above.
   app.route("/api/me/github", githubConnectRouter);
+  // Mounted BEFORE /api/me for the same defensive-ordering reason.
+  app.route("/api/me/commit-signing", commitSigningRouter);
+  app.route("/api/org/allowed-signers", orgAllowedSignersRouter);
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);

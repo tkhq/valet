@@ -1,0 +1,7 @@
+name: turnkey
+version: 0.0.1
+description: Turnkey commit signing for agent sessions
+icon: "\U0001F511"
+iconSlug: turnkey
+authRequired: false
+v2: true

@@ -90,6 +90,7 @@
     "@valet/plugin-slack-user": "workspace:*",
     "@valet/plugin-stripe": "workspace:*",
     "@valet/plugin-telegram": "workspace:*",
+    "@valet/plugin-turnkey": "workspace:*",
     "@valet/plugin-typefully": "workspace:*",
     "@valet/plugin-valet": "workspace:*",
     "@valet/plugin-workflows": "workspace:*",
