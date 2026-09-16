@@ -250,6 +250,41 @@ function preparationField(cause: object, key: string): string | number | undefin
   return undefined;
 }
 
+// Unknown fields can contain diagnostics or private payloads. Keep scalar
+// diagnostics, but describe nested values without copying their contents.
+const PRIVATE_PREPARATION_FIELD = /auth|cookie|token|secret|pass(?:word|phrase)|credential|api.?key|private.?key|headers?|command|config|body|payload|request|response|stdout|stderr|environment|^env|^data$|^url$|^cmd$|^args?$|^argv$|^arguments$|^input$|^output$/i;
+
+function preparationFallback(cause: object): string {
+  try {
+    const entries: [string, string | number | boolean | null][] = [];
+    const keys = Object.getOwnPropertyNames(cause);
+    for (const key of keys.slice(0, 64)) {
+      if (PRIVATE_PREPARATION_FIELD.test(key)) continue;
+      // Do not invoke accessors or provider serialization methods.
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(cause, key);
+        if (!descriptor?.enumerable || !("value" in descriptor)) continue;
+        const value: unknown = descriptor.value;
+        let detail: string | number | boolean | null;
+        if (typeof value === "string") detail = boundPreparationDetail(value);
+        else if (typeof value === "bigint") detail = boundPreparationDetail(String(value));
+        else if (value === null || typeof value === "number" || typeof value === "boolean") detail = value;
+        else if (typeof value === "object") detail = Array.isArray(value) ? "[array]" : "[object]";
+        else continue;
+        entries.push([boundPreparationDetail(key), detail]);
+      } catch {
+        // A proxy can reject one field while other fields remain readable.
+      }
+    }
+    if (keys.length > 64) entries.push(["[truncated]", "[truncated]"]);
+    return entries.length
+      ? boundPreparationDetail(JSON.stringify(Object.fromEntries(entries)))
+      : "unserializable cause";
+  } catch {
+    return "unserializable cause";
+  }
+}
+
 function formatPreparationCause(cause: unknown): string {
   if (cause !== null && (typeof cause === "object" || typeof cause === "function")) {
     const message = preparationField(cause, "message");
@@ -268,7 +303,7 @@ function formatPreparationCause(cause: unknown): string {
     }
     return Object.keys(details).length
       ? boundPreparationDetail(JSON.stringify(details))
-      : "unserializable cause";
+      : preparationFallback(cause);
   }
   return boundPreparationDetail(String(cause));
 }

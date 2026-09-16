@@ -198,7 +198,11 @@ Enabling the setting permits new anonymous bakes. A new binding can create a mis
 
 ### Preparation failure details
 
-`SandboxPreparationError` retains the original rejection in `cause`. Its message includes the cause's string `message` and string or numeric `code`, when available. Other objects include only scalar `reason`, `status`, `statusCode`, `exitCode`, `signal`, `errno`, and `syscall` fields as JSON. The formatter excludes request headers, commands, and nested payloads. It does not call provider serialization methods. Each field read has its own guard, so a throwing getter does not hide other diagnostic fields. Objects without readable diagnostic fields report `unserializable cause`. Formatted details have a 2,048-character limit and include `[truncated]` when shortened. The formatter bounds fields before JSON serialization to limit temporary output.
+`SandboxPreparationError` retains the original rejection in `cause`. Its message includes the cause's string `message` and string or numeric `code`, when available. Other objects first use scalar `reason`, `status`, `statusCode`, `exitCode`, `signal`, `errno`, and `syscall` fields as JSON. Each field read has its own guard, so a throwing getter does not hide other diagnostic fields.
+
+If those fields are absent, the formatter copies unknown data properties into a JSON diagnostic snippet. It filters credential fields, request payloads, configuration, commands, and process output. It skips accessors and functions and never calls provider serialization methods. Nested objects and arrays report `[object]` and `[array]`, including circular references. The formatter does not copy nested payload contents. Objects without readable fields report `unserializable cause`. The fallback reads at most 64 properties and marks omitted properties with `[truncated]`. Formatted details have a 2,048-character limit. The formatter bounds strings before JSON serialization and marks shortened output with `[truncated]`.
+
+The agent loop uses this message as tool-result text. Regression tests assert the actual text in the next model request and persisted tool-call parts. Provider codes remain visible in that text. The original cause stays on the error and is not serialized into tool-result metadata.
 
 ### Resume restoration (TKAI-427)
 
