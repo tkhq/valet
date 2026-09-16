@@ -152,7 +152,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
 
   // Every reference in parallel, within the owner's ordered scopes. An
   // absent team token permits org fallback; a configured team refusal does not.
-  // A non-team scope with no token or a disabled toggle has nothing to offer and the next may
+  // A non-team scope with no token has nothing to offer and the next may
   // answer. A token that exists and is refused by 1Password is a different
   // failure, and reporting it as "nothing resolved" sent the reader to check
   // vault names that were correct.
@@ -280,8 +280,8 @@ sandboxSecretsRouter.post("/find", async (c) => {
       if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
         return c.json({ error: "Team 1Password discovery failed. Check the team token and its vault permissions." }, 502);
       }
-      // A scope with no token, a disabled toggle, or an SDK refusal has
-      // nothing to contribute to a search; the next scope may.
+      // A scope with no token, or one the SDK refused, has nothing to
+      // contribute to a search; the next scope may.
     }
   }
 

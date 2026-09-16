@@ -6,6 +6,10 @@ client: `valet serve` boots the whole product, and the other subcommands
 talk to any running instance — the one you just started or a remote
 deployment. Source lives in `packages/api/src/cli/`.
 
+`valet-secrets` is a different command. It runs inside a session sandbox, not
+on your machine, and it resolves 1Password references into one command's
+environment. See [Secrets with 1Password](./onepassword-secrets.md).
+
 ```
 valet <command> [options]
 

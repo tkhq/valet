@@ -110,7 +110,9 @@ Run valet-secrets run --env NAME=op://vault/item/field -- your-command. Quote a 
 
 If it reports that nothing resolved, name the failing reference to the user and ask them to check that item. Do not fall back to a pasted value.
 
-valet-secrets is the only way to reach a secret here. Never invent a reference to test access: a guessed op:// path fails exactly like a real one you cannot reach, so the result tells you nothing. If you do not have the vault, item, and field names, ask for them.`;
+Run valet-secrets find <name> when you know what the credential is called but not where it lives. It searches the vaults the session can read and prints matching references, one per line, tagged with the scope each came from. It never prints a value. Use a hit from find as the reference for run.
+
+valet-secrets is the only way to reach a secret here. Never invent a reference to test access: a guessed op:// path fails exactly like a real one you cannot reach, so the result tells you nothing. Ask for the vault, item, and field names only after find has come back with nothing.`;
 
 export const SECRETS_RULES_NO_CLI = `## Secrets
 

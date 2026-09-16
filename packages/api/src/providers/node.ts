@@ -55,7 +55,6 @@ import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-cred
 import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
-import { getAllowPersonalOnePassword } from "../services/org.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
@@ -417,7 +416,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // `/api/onepassword` routes.
   const onePassword = createOnePasswordService({
     credentials: engineCredentials,
-    getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
   });
 
   // Circular construction: EngineHost needs the ChildSpawner at construction

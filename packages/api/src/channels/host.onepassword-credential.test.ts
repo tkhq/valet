@@ -167,7 +167,6 @@ describe("ChannelHost.start() 1Password bot-token resolution", () => {
     await svcStore.save({ type: "org", id: orgId }, "onepassword", { type: "service_account", apiKey: "org-token" });
     const onePassword = createOnePasswordService({
       credentials: svcStore,
-      getAllowPersonal: async () => true,
       createClient: async () => ({
         secrets: { resolve: async () => "xoxb-real-bot-token" },
         vaults: { list: async () => [] },
@@ -189,7 +188,6 @@ describe("ChannelHost.start() 1Password bot-token resolution", () => {
     await svcStore.save({ type: "org", id: orgId }, "onepassword", { type: "service_account", apiKey: "org-token" });
     const onePassword = createOnePasswordService({
       credentials: svcStore,
-      getAllowPersonal: async () => true,
       createClient: async () => ({
         secrets: { resolve: async () => "xoxb-real-bot-token" },
         vaults: { list: async () => [] },

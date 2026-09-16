@@ -208,7 +208,6 @@ import type {
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RedeliverEventResponse,
-  PutOnePasswordSettingsRequest,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -1299,14 +1298,11 @@ export const api = {
 
   // 1Password picker backend + settings. `scope` selects which
   // service-account token to browse with — "org" (open to any org member
-  // once the org token is connected) or "personal" (gated server-side by
-  // the org's allowPersonal toggle).
+  // once the org token is connected) or "personal" (the caller's own).
   getTeamOnePasswordStatus: (teamId: string) =>
     request<TeamOnePasswordStatusResponse>("GET", `/onepassword/team-status?teamId=${encodeURIComponent(teamId)}`),
   getOnePasswordSettings: () =>
     request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
-  putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>
-    request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
   // plugin-supplied ones with the stored ones the caller owns. Only a

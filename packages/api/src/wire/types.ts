@@ -3137,6 +3137,11 @@ export interface CredentialSummary {
    * 1Password reference instead of an inline secret (1Password credential
    * provider plan, Task 3). Display-only — never secret material. */
   onepasswordRef?: string;
+  /** `metadata.onepassword.tokenScope` — which service-account token reads
+   * that reference. Only an `org` reference resolves for a team, so a share
+   * picker needs this to tell a shareable row from one the delegate route
+   * would refuse. Absent when the row holds its secret inline. */
+  onepasswordTokenScope?: "org" | "personal" | "team";
   /** Team-scope only. The member whose live user row this reference follows. */
   delegatedFrom?: string;
   /** Team-scope only. True when the delegator left the team or disconnected. */
@@ -3192,13 +3197,8 @@ export interface TeamOnePasswordStatusResponse {
 }
 
 export interface OnePasswordSettingsResponse {
-  allowPersonal: boolean;
   orgTokenConnected: boolean;
   personalTokenConnected: boolean;
-}
-
-export interface PutOnePasswordSettingsRequest {
-  allowPersonal: boolean;
 }
 
 export interface ListOpVaultsResponse {

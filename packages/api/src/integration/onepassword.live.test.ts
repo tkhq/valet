@@ -9,9 +9,8 @@
  * without the token still passes.
  *
  * Uses the REAL default `createClient` (no fake/stub SDK client) — only the
- * `CredentialStore` and `getAllowPersonal` deps are stubbed, mirroring the
- * unit-test pattern in `../services/onepassword.test.ts` but without the
- * `createClient` override.
+ * `CredentialStore` dep is stubbed, mirroring the unit-test pattern in
+ * `../services/onepassword.test.ts` but without the `createClient` override.
  *
  * The optional `OP_TEST_REFERENCE` (an `op://vault/item/field` string in the
  * service account's vault) additionally exercises `resolveReference`. The
@@ -51,7 +50,6 @@ describeIfToken("api integration: 1Password — live SDK", () => {
     if (!OP_SERVICE_ACCOUNT_TOKEN) throw new Error("unreachable: describeIfToken gated on OP_SERVICE_ACCOUNT_TOKEN");
     const svc = createOnePasswordService({
       credentials: tokenOnlyStore(OP_SERVICE_ACCOUNT_TOKEN),
-      getAllowPersonal: async () => true,
       // No `createClient` override — exercises the real default SDK adapter.
     });
 
@@ -70,7 +68,6 @@ describeIfToken("api integration: 1Password — live SDK", () => {
       if (!OP_TEST_REFERENCE) throw new Error("unreachable: gated on OP_TEST_REFERENCE");
       const svc = createOnePasswordService({
         credentials: tokenOnlyStore(OP_SERVICE_ACCOUNT_TOKEN),
-        getAllowPersonal: async () => true,
       });
 
       const secret = await svc.resolveReference("org", ctx, OP_TEST_REFERENCE);
