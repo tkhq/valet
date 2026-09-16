@@ -49,10 +49,16 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "patch"]
-  # client-node uses an HTTP GET WebSocket upgrade for pods/exec.
+  # Kubernetes authorizes the pods/exec *connect* subresource with the
+  # `create` verb — for BOTH the SPDY (POST) and WebSocket (GET) clients,
+  # client-node's GET upgrade included. The HTTP method does not map to the
+  # RBAC verb for connect subresources the way it does for normal resources.
+  # Granting only `get` 403s EVERY exec ("cannot create resource pods/exec"),
+  # which broke all sandbox command execution on 2026-09-15 (this comment used
+  # to claim GET-only needed `get`). `get` is retained as a harmless superset.
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["get"]
+    verbs: ["get", "create"]
   # Build status reads the BuildKit pod log tail. It does not modify logs.
   - apiGroups: [""]
     resources: ["pods/log"]

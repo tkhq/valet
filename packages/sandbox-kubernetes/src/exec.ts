@@ -314,7 +314,15 @@ export async function execInPod(
     (status) => resolveStatus(status),
   ).catch((error: unknown) => {
     stdin?.destroy();
-    throw new PodExecTransportError(deps.namespace, podName, deps.containerName, error);
+    const transportError = new PodExecTransportError(deps.namespace, podName, deps.containerName, error);
+    // Log at the transport chokepoint: every exec transport failure funnels
+    // through here, and until now these were only surfaced to the caller as a
+    // tool result (never written to stdout), so failures were invisible in the
+    // api logs and Loki. A 403 here means the api ServiceAccount lacks `create`
+    // on pods/exec — Kubernetes authorizes the exec *connect* subresource as
+    // the `create` verb regardless of the client's HTTP method.
+    console.error("k8s pods/exec transport failed:", transportError.message);
+    throw transportError;
   });
 
   const raced: Array<Promise<{ kind: "status"; status: ExecStatus } | { kind: "timeout" } | { kind: "abort" }>> = [
