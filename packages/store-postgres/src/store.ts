@@ -332,7 +332,6 @@ export class PgSessionStore implements SessionStore {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
-         active_leaf_entry_id = EXCLUDED.active_leaf_entry_id,
          queue_mode = EXCLUDED.queue_mode,
          paused = EXCLUDED.paused,
          model = EXCLUDED.model,
@@ -629,6 +628,30 @@ export class PgSessionStore implements SessionStore {
     let list = result.rows.map((r) => rowToSession(rawToSessionRow(r)));
     if (opts?.status) list = list.filter((s) => s.status === opts.status);
     return list;
+  }
+
+  async getThreadSnapshot(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return this.db.transaction(async (tx) => {
+      // Lock the thread row before reading entries. appendEntries updates this
+      // row last, so the pair is either wholly before or wholly after an append.
+      const threadResult = await tx.query(
+        "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+        [sessionId, threadId],
+      );
+      const rawThread = threadResult.rows[0];
+      if (!rawThread) return null;
+      const entryResult = await tx.query(
+        "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
+        [sessionId, threadId],
+      );
+      return {
+        thread: rowToThread(rawToThreadRow(rawThread)),
+        entries: entryResult.rows.map(rawToEntryRow).map(rowToEntry),
+      };
+    });
   }
 
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
