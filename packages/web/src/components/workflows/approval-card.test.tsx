@@ -25,6 +25,24 @@ describe("ApprovalCard", () => {
     expect(screen.getByText("Approval required: deploy")).toBeTruthy();
   });
 
+  // The prompt sat unreadable in dark mode: the card's fill was a solid step
+  // off the `accent` ramp with a `dark:` partner naming `accent-950`, a step
+  // that ramp does not define. Tailwind emitted nothing for the partner, the
+  // light fill survived, and `--ink` went near-white on top of it. An alpha
+  // wash over `--paper` needs no partner, so it cannot fall out of step.
+  it("tints with an alpha wash, not a solid ramp step that needs a dark partner", () => {
+    const { container } = render(<ApprovalCard runId="wfrun_1" nodeId="deploy" prompt="Ship it?" />);
+    const card = container.firstElementChild as HTMLElement;
+    const classes = card.className.split(/\s+/);
+    expect(classes).toContain("bg-moss-wash");
+    // Every `accent` step this card still names must exist in the ramp,
+    // which stops at 900.
+    for (const cls of classes) {
+      const shade = /^(?:dark:)?(?:bg|text|border)-accent-(\d+)$/.exec(cls)?.[1];
+      if (shade) expect(Number(shade)).toBeLessThanOrEqual(900);
+    }
+  });
+
   it("calls the mutation with approved: true on Approve", () => {
     mutate.mockClear();
     render(<ApprovalCard runId="wfrun_1" nodeId="deploy" prompt="Ship it?" />);
