@@ -38,6 +38,8 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
+      # Bound scheduling and attachment stalls so Forbid permits later runs.
+      activeDeadlineSeconds: 3600
       # Same one-hour TTL as the BuildKit Jobs (k8s-builder.ts).
       ttlSecondsAfterFinished: 3600
       template:
