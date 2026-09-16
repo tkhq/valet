@@ -6,7 +6,10 @@ name: Release Helm Chart
 # and a version-collision check against GHCR. Fails the PR if the chart
 # is edited without bumping Chart.yaml's version.
 #
-# On push to dev-v2: runs `release`, which packages and pushes the chart
+# Workflow-only edits do not release an unchanged chart. Use manual dispatch
+# to exercise publishing explicitly after CI passes.
+#
+# On chart changes pushed to dev-v2: runs `release`, which packages and pushes the chart
 # and creates a `chart/valet-v<version>` git tag.
 #
 # ONE-TIME BOOTSTRAP: after the first successful push, set the GHCR
@@ -21,12 +24,10 @@ on:
     branches: [dev-v2]
     paths:
       - "deploy/chart/valet/**"
-      - ".github/workflows/release-chart.yml"
   pull_request:
     branches: [dev-v2]
     paths:
       - "deploy/chart/valet/**"
-      - ".github/workflows/release-chart.yml"
   workflow_dispatch:
     inputs:
       force:
@@ -47,6 +48,10 @@ env:
   REGISTRY: ghcr.io/tkhq/charts
 
 jobs:
+  checks:
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/ci-checks.yml
+
   validate:
     runs-on: ubuntu-latest
     outputs:
@@ -132,7 +137,7 @@ jobs:
           done
 
   release:
-    needs: validate
+    needs: [validate, checks]
     # Only publish on push to dev-v2 or manual dispatch — never on PRs.
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest

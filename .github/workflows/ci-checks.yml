@@ -1,0 +1,170 @@
+name: CI Checks
+
+# All publishing workflows call these checks for their own source commit.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Typecheck and Test were one sequential job, so every run cost the sum of
+# both and the whole suite ran on one core. They are independent — neither
+# reads the other's output — so they run as separate jobs now, and the tests
+# split across shards.
+#
+# Sharding is what actually moves the number. Test was 5m21s of a 6m27s run,
+# because 106 of the api test files each boot a whole API and its own PGlite.
+# Until those share a fixture, the work is genuinely serial per file, and the
+# only way to finish sooner is to run fewer files per runner. Vitest shards by
+# FILE, so the split is even and needs no test changes.
+#
+# Raise SHARDS if the suite grows. Each shard re-pays checkout and install
+# (~20s), so there is a floor: past roughly 6 shards the setup cost dominates
+# and the wall clock stops improving.
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # pnpm version comes from package.json "packageManager".
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Two steps used to run here and covered the frozen V1 stack only.
+      #
+      # "Generate plugin registries" ran the worker's generator, which writes
+      # into `packages/worker/src/**` and nothing else. V2's registry
+      # (`packages/api/src/plugins/registry.gen.ts`) is committed and that
+      # script never touches it, so the step produced output no later step
+      # read. Removing it also removes the need for bun on the runner.
+      #
+      # "Typecheck client" ran `tsc` over the V1 React SPA. The root
+      # tsconfig does not reference `packages/client`, so no V2 package
+      # depends on it compiling.
+      #
+      # Run either by hand if you ever need to touch V1:
+      #   cd packages/worker && bun scripts/generate-plugin-registry.ts
+      #   cd packages/client && npx tsc --noEmit
+
+      - name: Test application release workflow
+        run: node --test scripts/release/*.test.mjs
+
+      - name: Generate release metadata for typecheck
+        run: |
+          node packages/api/scripts/generate-changelog.mjs \
+            --unreleased-sha HEAD \
+            --built-at "$(git show -s --format=%cI HEAD)" \
+            --artifact-version Unreleased \
+            --artifact-sha HEAD \
+            --metadata packages/api/src/changelog/release.json
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # The root project references omit the web app. Check the same build
+      # that Docker Images and Release CLI run before a change can merge.
+      - name: Build web SPA
+        run: pnpm --filter @valet/web build
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # One red shard must not cancel the others. A single run should report
+      # every failure it found, so a second push does not discover the next
+      # one.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The tests need this, and it is not obvious why.
+      #
+      # About fifteen workspace packages point `main`/`exports` at `dist`
+      # (`@valet/sdk`, `@valet/shared`, most `plugin-*`), while others point
+      # at `src` (`@valet/engine`, `@valet/api`, `@valet/workflow`). The ones
+      # that resolve to `dist` cannot be imported until something emits it,
+      # and `tsc --build` is that something.
+      #
+      # It used to happen by accident: Typecheck ran ahead of Test in ONE
+      # job, so the emit it performs as a side effect was already on disk.
+      # Splitting the jobs removed that, and the shards failed with
+      # `ERR_MODULE_NOT_FOUND` for `@valet/sdk/mcp`.
+      #
+      # So the dependency is stated here instead of inherited. The proper
+      # fix is to make every package resolve from source the way `engine`
+      # already does — every package here is private and none is published —
+      # which would delete this step. See the PR for why that is a change
+      # worth making on its own.
+      - name: Build workspace packages
+        run: pnpm typecheck
+
+      # No `--` before the flag. pnpm drops what follows it here, and vitest
+      # would then run the WHOLE suite in every shard — four times the work,
+      # all green, with nothing to show that sharding never happened.
+      - name: Test (shard ${{ matrix.shard }}/4)
+        run: pnpm test --shard=${{ matrix.shard }}/4
+
+  cgroup_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test cgroup delegation and user namespace preflight
+        run: |
+          bash docker/cgroup-delegation_test.sh
+          bash docker/userns-preflight_test.sh
+          id dockerd >/dev/null 2>&1 || sudo useradd -m -u 1500 dockerd
+          sudo install -d -o dockerd -g dockerd /tmp/valet-kubernetes-test
+          sudo install -o dockerd -g dockerd -m 755 docker/valet-kubernetes.mjs docker/valet-kubernetes_test.sh /tmp/valet-kubernetes-test/
+          sudo -u dockerd bash /tmp/valet-kubernetes-test/valet-kubernetes_test.sh
+
+  # The same thresholded STE lint the e2e "docs-lint" suite runs, promoted to
+  # a blocking check. The runner's system python3 is enough; no setup step.
+  docs-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: STE prose lint (maintained docs)
+        run: python3 scripts/docs/docs_lint.py
+
+      - name: Nested Kubernetes specification vectors
+        run: node scripts/docs/validate_nested_kubernetes_spec.mjs
+
+  # One required check to point branch protection at, so the shard count can
+  # change without editing the protection rule. `needs` alone is not enough:
+  # a skipped or cancelled dependency still satisfies it, so the result is
+  # asserted explicitly.
+  ci:
+    runs-on: ubuntu-latest
+    needs: [typecheck, test, cgroup_test, docs-lint]
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          echo "typecheck:         ${{ needs.typecheck.result }}"
+          echo "test:              ${{ needs.test.result }}"
+          echo "cgroup-delegation: ${{ needs.cgroup_test.result }}"
+          echo "docs-lint:         ${{ needs.docs-lint.result }}"
+          test "${{ needs.typecheck.result }}" = "success" \
+            && test "${{ needs.test.result }}" = "success" \
+            && test "${{ needs.cgroup_test.result }}" = "success" \
+            && test "${{ needs.docs-lint.result }}" = "success"
