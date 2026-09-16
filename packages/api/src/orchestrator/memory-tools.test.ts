@@ -339,7 +339,10 @@ describe("mem_* tools: real HTTP round trip", () => {
     });
 
     const writeResult = await memWriteTool.execute({ path: "notes/team.md", content: "# Team note\n" }, ctx);
-    expect(writeResult.text).toBe("wrote notes/team.md (v1)");
+    // The result names the scope the server wrote. A team-owned session has
+    // always written its team here; it just used to report a bare path, so
+    // the agent could not tell the user where the file landed.
+    expect(writeResult.text).toBe("wrote team:eng/notes/team.md (v1)");
 
     // Read back with a *user* owner who is on no teams — must not see it,
     // proving mem_write actually wrote to the team scope, not the actor's.
@@ -428,6 +431,79 @@ describe("copy-to-team tools", () => {
     await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
     expect((await memCopyToTeamTool.execute({ ...args, to: "notes/second.md" }, ctx)).text).toContain("[memory_error]");
     expect((await memReadTool.execute({ path: args.from }, ctx)).text).toContain("Exact content.");
+  });
+
+  // TKAI-484. A team member had to create a personal file, copy it across,
+  // then delete the original. `teamId` writes straight into the team.
+  it("writes into a team a plain member belongs to, and names the scope it wrote", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Mem team", creatorUserId: "local-user" });
+    await api.providers.db.insert(teamMembers).values({ teamId: team.id, userId: "test-member", role: "member" });
+    // A plain member, not the creator: the assertion would be vacuous as an admin.
+    const ctx = makeCtx({ userId: "test-member", owner: { type: "user", id: "test-member" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+
+    const wrote = await memWriteTool.execute(
+      { path: "knowledge/runbook.md", content: "# Runbook\n\nTeam knowledge.\n", teamId: team.id },
+      ctx,
+    );
+    expect(wrote.text).toBe(`wrote team:${team.id}/knowledge/runbook.md (v1)`);
+    // It landed in the TEAM, and the member's own scope is untouched.
+    expect((await memReadTool.execute({ path: `team:${team.id}/knowledge/runbook.md` }, ctx)).text).toContain("Team knowledge.");
+    expect((await memReadTool.execute({ path: "knowledge/runbook.md" }, ctx)).text).toContain("[memory_error]");
+  });
+
+  // The owner header is host-supplied from the session; the teamId is
+  // model-supplied. Only the second one can name a team, and only the route
+  // decides whether it may.
+  it("refuses a team the actor does not belong to, and stops resolving once they leave", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Closed team", creatorUserId: "local-user" });
+    const outsider = makeCtx({ userId: "test-member", owner: { type: "user", id: "test-member" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+
+    const refused = await memWriteTool.execute(
+      { path: "knowledge/x.md", content: "nope", teamId: team.id },
+      outsider,
+    );
+    expect(refused.text).toContain("[memory_error]");
+
+    // A member writes, then leaves: the next write stops resolving.
+    await api.providers.db.insert(teamMembers).values({ teamId: team.id, userId: "test-member", role: "member" });
+    expect((await memWriteTool.execute({ path: "knowledge/x.md", content: "yes", teamId: team.id }, outsider)).text)
+      .toBe(`wrote team:${team.id}/knowledge/x.md (v1)`);
+    await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
+    expect((await memWriteTool.execute({ path: "knowledge/y.md", content: "no", teamId: team.id }, outsider)).text)
+      .toContain("[memory_error]");
+  });
+
+  it("omitting teamId still writes the caller's own scope", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({ userId: "local-user", owner: { type: "user", id: "local-user" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+    const wrote = await memWriteTool.execute({ path: "notes/mine.md", content: "# Mine\n" }, ctx);
+    // No `team:` prefix: the default scope is unchanged by this feature.
+    expect(wrote.text).toBe("wrote notes/mine.md (v1)");
+  });
+
+  it("mem_patch reaches a team on the same terms as mem_write", async () => {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Patch team", creatorUserId: "local-user" });
+    await api.providers.db.insert(teamMembers).values({ teamId: team.id, userId: "test-member", role: "member" });
+    const ctx = makeCtx({ userId: "test-member", owner: { type: "user", id: "test-member" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } });
+
+    expect((await memPatchTool.execute(
+      { path: "journal/today.md", oldString: "", newString: "first line\n", teamId: team.id }, ctx)).text)
+      .toBe(`patched team:${team.id}/journal/today.md (v1)`);
+    expect((await memPatchTool.execute(
+      { path: "journal/today.md", oldString: "first line", newString: "first line\nsecond line", teamId: team.id }, ctx)).text)
+      .toBe(`patched team:${team.id}/journal/today.md (v2)`);
+
+    await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
+    expect((await memPatchTool.execute(
+      { path: "journal/today.md", oldString: "second", newString: "third", teamId: team.id }, ctx)).text)
+      .toContain("[memory_error]");
   });
 
   it("copies an artifact over HTTP and refuses a destination collision", async () => {

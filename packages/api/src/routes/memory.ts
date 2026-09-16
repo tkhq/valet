@@ -37,6 +37,7 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { ReservedPathError } from "../lib/okf.js";
+import { isTeamMember } from "../services/teams.js";
 import { memoryFiles } from "../schema/index.js";
 import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
@@ -166,6 +167,29 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
     }
     // The verified internal token is what carries the owner tuple, so the
     // `?ownerType=&ownerId=` parameters are ignored on this branch.
+    //
+    // `?teamId=` is the one thing on this branch that a MODEL chooses, so it
+    // is the one thing this branch checks. The header tuple is host-supplied
+    // by the tool from the session's own principal; a tool argument is not,
+    // and the tool must never fold one into the other. The team is named
+    // here instead, and admitted only for a live member — so an id an agent
+    // invents reaches nothing, and a team the actor left stops resolving on
+    // the next call rather than at the next restart.
+    const teamId = c.req.query("teamId");
+    if (teamId !== undefined) {
+      if (teamId.length === 0) {
+        throw new ValidationError("teamId must name a team. Omit it to use your own memory.");
+      }
+      // A `team_members` row is the whole check: it proves the team exists,
+      // that the actor is on it, and — because membership is org-scoped by
+      // construction — that the team is one the actor's org owns. Refusing
+      // as not-found matches the browser branch, so membership stays
+      // unprobeable by id.
+      if (!(await isTeamMember(c.var.providers.db, teamId, actorHeader))) {
+        throw new NotFoundError("owner");
+      }
+      return { owner: { type: "team", id: teamId }, actorUserId: actorHeader };
+    }
     return { owner, actorUserId: actorHeader };
   }
 
