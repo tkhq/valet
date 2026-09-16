@@ -359,6 +359,22 @@ describe("SandboxAttachment.reconcile", () => {
     expect(await adopted.readFile("/workspace/keep.txt")).toBe("working directory data");
   });
 
+  it("reports object prep failures to waiting callers", async () => {
+    const cause = { message: "clone denied", code: "EACCES" };
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [step("s1", "sh1", async () => { throw cause; })] });
+    const att = new SandboxAttachment(provider, {}, fake.provider());
+
+    await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toMatchObject({
+      name: "SandboxPreparationError",
+      message: "sandbox preparation failed: clone denied (EACCES)",
+      code: "sandbox_preparation_failed",
+      cause,
+    });
+    expect(att.state).toBe("error");
+    await att.destroy();
+  });
+
   it("a critical prep failure releases adopted compute without destroying its workspace", async () => {
     const adopted = new VirtualSandbox("sb-existing");
     const provider = new RecordingProvider({ adopt: adopted, release: true });

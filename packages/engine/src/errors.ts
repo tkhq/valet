@@ -225,9 +225,52 @@ export class SandboxPreparationError extends Error {
   readonly code = "sandbox_preparation_failed";
 
   constructor(public readonly cause?: unknown) {
-    super(`sandbox preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    super(`sandbox preparation failed: ${formatPreparationCause(cause)}`);
     this.name = "SandboxPreparationError";
   }
+}
+
+const MAX_PREPARATION_DETAIL_LENGTH = 2048;
+
+function boundPreparationDetail(detail: string): string {
+  const marker = " [truncated]";
+  return detail.length <= MAX_PREPARATION_DETAIL_LENGTH
+    ? detail
+    : detail.slice(0, MAX_PREPARATION_DETAIL_LENGTH - marker.length) + marker;
+}
+
+function preparationField(cause: object, key: string): string | number | undefined {
+  try {
+    const value: unknown = Reflect.get(cause, key);
+    if (typeof value === "string") return boundPreparationDetail(value);
+    if (typeof value === "number") return value;
+  } catch {
+    // Read fields independently so one throwing getter cannot hide another field.
+  }
+  return undefined;
+}
+
+function formatPreparationCause(cause: unknown): string {
+  if (cause !== null && (typeof cause === "object" || typeof cause === "function")) {
+    const message = preparationField(cause, "message");
+    const code = preparationField(cause, "code");
+    const messageText = typeof message === "string" ? message : "";
+    const codeText = code === undefined ? "" : String(code);
+    if (messageText && codeText) return boundPreparationDetail(`${messageText} (${codeText})`);
+    if (messageText || codeText) return messageText || codeText;
+
+    // Only copy scalar diagnostics. Requests, commands, and nested payloads can
+    // contain credentials. Never call a provider object's toJSON or toString.
+    const details: Record<string, string | number> = {};
+    for (const key of ["reason", "status", "statusCode", "exitCode", "signal", "errno", "syscall"]) {
+      const value = preparationField(cause, key);
+      if (value !== undefined) details[key] = value;
+    }
+    return Object.keys(details).length
+      ? boundPreparationDetail(JSON.stringify(details))
+      : "unserializable cause";
+  }
+  return boundPreparationDetail(String(cause));
 }
 
 /**
