@@ -20,7 +20,8 @@ import { buildAuthMiddleware, refuseTeamKeyOutsideScope } from "./middleware/aut
 import { filterTeamKeysFromPersonalApiKeyList } from "./lib/personal-api-key-list.js";
 import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
-import { mcpHandler } from "./auth/mcp.js";
+import { mcpHandler, validateMcpToolConfiguration, type McpAuditStore } from "./auth/mcp.js";
+import { MemoryMcpPort } from "./services/memory-mcp-port.js";
 import type { AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
 import { VALET_VERSION } from "./version.js";
@@ -85,6 +86,26 @@ import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
 
+/**
+ * Source address for MCP audit. A trusted single ingress appends its observed
+ * client as the final XFF hop. Earlier client-supplied hops are not trusted.
+ */
+function mcpSourceIp(c: import("hono").Context<AppEnv>): string {
+  if (process.env.VALET_TRUST_PROXY === "1") {
+    const hops = c.req.header("x-forwarded-for")?.split(",").map((hop) => hop.trim()).filter(Boolean);
+    const forwarded = hops?.[hops.length - 1];
+    if (forwarded) return forwarded;
+  }
+  const env: unknown = c.env;
+  if (typeof env !== "object" || env === null || !("incoming" in env)) return "unknown";
+  const incoming = (env as { incoming: unknown }).incoming;
+  if (typeof incoming !== "object" || incoming === null || !("socket" in incoming)) return "unknown";
+  const socket = (incoming as { socket: unknown }).socket;
+  if (typeof socket !== "object" || socket === null || !("remoteAddress" in socket)) return "unknown";
+  const address = (socket as { remoteAddress: unknown }).remoteAddress;
+  return typeof address === "string" ? address : "unknown";
+}
+
 export interface CreatedApp {
   app: Hono<AppEnv>;
   /**
@@ -118,6 +139,8 @@ export interface CreateAppOpts {
    * embedded callers have no boot chain).
    */
   isReady?: () => boolean;
+  /** Test seam for the required MCP audit lifecycle. Production uses the database store. */
+  mcpAuditStore?: McpAuditStore;
 }
 
 /**
@@ -145,6 +168,10 @@ export function createApp(
 ): CreatedApp {
   const app = new Hono<AppEnv>();
   const { auth, authConfig } = authWiring;
+  const mcpPortFactories = new Map([
+    ["memory", (userId: string) => new MemoryMcpPort(providers.db, userId)],
+  ]);
+  validateMcpToolConfiguration(providers.plugins, new Set(mcpPortFactories.keys()));
 
   // One server span per request (no-op unless the OTLP SDK is registered —
   // see observability/otel.ts). First in the chain so every downstream
@@ -276,12 +303,15 @@ export function createApp(
     const mcp = mcpHandler({
       auth,
       db: providers.db,
+      plugins: providers.plugins,
+      portForPlugin: (pluginName, userId) => mcpPortFactories.get(pluginName)?.(userId),
       listSessions: async (userId) => {
         const rows = await listStandaloneSessions(providers.db, userId);
         return rows.map((r) => ({ id: r.id, title: r.title, status: r.status }));
       },
+      auditStore: opts.mcpAuditStore,
     });
-    app.all("/mcp", (c) => mcp(c.req.raw));
+    app.all("/mcp", (c) => mcp(c.req.raw, mcpSourceIp(c)));
   }
 
   // Unauthenticated: drives `/login`/`/signup` control rendering.

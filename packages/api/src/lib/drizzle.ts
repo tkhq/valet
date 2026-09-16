@@ -219,6 +219,7 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "action_invocations.source_ip column", probe: { kind: "column", table: "action_invocations", column: "source_ip" }, sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "source_ip" text' },
   {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },

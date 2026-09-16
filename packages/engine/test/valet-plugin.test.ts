@@ -128,6 +128,23 @@ describe("validateValetPlugin", () => {
   });
 });
 
+describe("validateValetPlugin mcpTools", () => {
+  const valid = {
+    name: "mem_read", description: "Read memory.", inputSchema: {}, readOnly: true,
+    execute: async () => ({ text: "ok" }),
+  };
+
+  it("accepts a complete MCP tool definition", () => {
+    expect(validateValetPlugin({ ...minimalPlugin(), mcpTools: [valid] }).ok).toBe(true);
+  });
+
+  it("rejects incomplete MCP tool definitions", () => {
+    for (const tool of [{ ...valid, execute: undefined }, { ...valid, inputSchema: null }, { ...valid, readOnly: "yes" }]) {
+      expect(validateValetPlugin({ ...minimalPlugin(), mcpTools: [tool] }).ok).toBe(false);
+    }
+  });
+});
+
 describe("validateValetPlugin transports", () => {
   it("accepts a plugin without transports (unchanged behavior)", () => {
     const res = validateValetPlugin(minimalPlugin());

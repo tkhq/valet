@@ -178,6 +178,8 @@ export interface WriteFileParams {
    * unchanged. */
   expires?: number | null;
   pinned?: boolean;
+  /** Refuse an existing path and a concurrent insert. Used by append-only capture surfaces. */
+  createOnly?: boolean;
 }
 
 export interface WriteFileResult {
@@ -202,6 +204,10 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, path)))
     .limit(1);
   const existing = existingRows[0];
+
+  if (existing && params.createOnly) {
+    throw new ValidationError(`${path} already exists. Change the capture title and try again.`);
+  }
 
   if (!existing && params.content === undefined) {
     throw new ValidationError(`${path} does not exist — provide content to create it`);
@@ -265,6 +271,11 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
         .update(memoryFiles)
         .set(row)
         .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)));
+    } else if (params.createOnly) {
+      const inserted = await tx.insert(memoryFiles).values(row).onConflictDoNothing().returning({ path: memoryFiles.path });
+      if (inserted.length === 0) {
+        throw new ValidationError(`${path} already exists. Change the capture title and try again.`);
+      }
     } else {
       await tx.insert(memoryFiles).values(row);
     }

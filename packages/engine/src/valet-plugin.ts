@@ -552,6 +552,28 @@ export class ChannelLookupError extends Error {
   }
 }
 
+/** Text-only result returned by a plugin tool on the external MCP mount. */
+export interface McpToolResult {
+  text: string;
+}
+
+/** A host-bound service port. The verified request identity stays in the host. */
+export interface McpToolPort {
+  call(operation: string, args: Record<string, unknown>): Promise<McpToolResult>;
+}
+
+/** One tool a plugin contributes to the authenticated external MCP mount. */
+export interface McpToolDef {
+  name: string;
+  description: string;
+  /** Zod raw shape kept opaque so the portable engine does not depend on Zod. */
+  inputSchema: Record<string, unknown>;
+  readOnly: boolean;
+  execute(args: Record<string, unknown>, port: McpToolPort): Promise<McpToolResult>;
+  /** Remove sensitive values before the host writes invocation audit params. */
+  auditArguments?(args: Record<string, unknown>): Record<string, unknown>;
+}
+
 export interface ValetPlugin {
   /** Plugin id, e.g. "github". Unique across loaded plugins. */
   name: string;
@@ -561,6 +583,8 @@ export interface ValetPlugin {
   displayName?: string;
   description?: string;
   actions?: ActionPlugin[];
+  /** Tools contributed to the authenticated external MCP mount. */
+  mcpTools?: McpToolDef[];
   triggers?: TriggerDef[];
   skills?: SkillSource[];
   roles?: RoleSpec[];
@@ -684,6 +708,28 @@ export function validateValetPlugin(
         issues.push({ path: `${path}.actions[${i}].execute`, message: "required function" });
       }
     });
+  });
+
+  checkArray(v.mcpTools, "mcpTools", issues, (raw, path) => {
+    const tool = asRecord(raw, path, issues);
+    if (!tool) return;
+    for (const key of ["name", "description"] as const) {
+      if (typeof tool[key] !== "string" || tool[key].length === 0) {
+        issues.push({ path: `${path}.${key}`, message: "required non-empty string" });
+      }
+    }
+    if (typeof tool.inputSchema !== "object" || tool.inputSchema === null || Array.isArray(tool.inputSchema)) {
+      issues.push({ path: `${path}.inputSchema`, message: "required schema object" });
+    }
+    if (typeof tool.readOnly !== "boolean") {
+      issues.push({ path: `${path}.readOnly`, message: "required boolean" });
+    }
+    if (typeof tool.execute !== "function") {
+      issues.push({ path: `${path}.execute`, message: "required function" });
+    }
+    if (tool.auditArguments !== undefined && typeof tool.auditArguments !== "function") {
+      issues.push({ path: `${path}.auditArguments`, message: "must be a function when present" });
+    }
   });
 
   checkArray(v.triggers, "triggers", issues, (t, path) => {

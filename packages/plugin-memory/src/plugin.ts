@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
+import { memoryMcpTools } from "./mcp-tools.js";
 
 // Ships the memory-curation skill (skills/memory/SKILL.md): playbooks for
 // working on the memory store itself with the `mem_*` tools. Day-to-day
@@ -25,6 +26,7 @@ const artifactDesignMd = readFileSync(
 const plugin: ValetPlugin = {
   name: "memory",
   version: "0.1.0",
+  mcpTools: memoryMcpTools,
   skills: [
     loadSkillFromMarkdown(memoryMd, "plugin", "memory"),
     loadSkillFromMarkdown(artifactDesignMd, "plugin", "artifact-design"),
