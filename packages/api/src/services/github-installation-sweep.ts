@@ -197,7 +197,7 @@ export function selectDueOrg(candidates: SweepCandidate[], now: number, state: S
 }
 
 /**
- * Starts the sweep. Call it next to `startRotateSweep` in the api boot, and
+ * Starts the sweep. Call it during API boot, and
  * call `handle.stop()` in the shutdown path.
  *
  * The interval is `.unref()`'d, so the sweep alone never keeps the process

@@ -355,6 +355,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     onePassword,
     db,
     apiBaseUrl,
+    sandboxTokenMaster: "test-key",
     plugins,
     actionPluginByService,
     childSpawner: (req, ctx) => {

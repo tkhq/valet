@@ -8,7 +8,7 @@
  * on the `env` the provider's `create()` actually received, without needing
  * Docker.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { and, eq, isNull } from "drizzle-orm";
 import {
   VirtualSandboxProvider,
@@ -18,6 +18,7 @@ import {
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { deriveSandboxJwtSecret } from "../auth/sandbox-tokens.js";
+import * as assistants from "../assistants/service.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { sandboxTokens } from "../schema/index.js";
 
@@ -135,12 +136,66 @@ describe("EngineHost sandbox token wiring", () => {
     expect(after[0].revokedAt).not.toBeNull();
   });
 
-  it("restore mints an ADDITIONAL token, leaving the pre-rebuild one live (rebuild-safe)", async () => {
-    // Final-review fix wave: a rebuild on a cache miss must NOT revoke the
-    // token a still-running sandbox is holding, or its git credential helper
-    // 401s until pod recreation. So a rebuild mints a new token and the prior
-    // one stays live (bounded only by its natural 24h TTL); explicit
-    // revocation is reserved for `destroy()`.
+  it("rejects a cold wake that was waiting on lookup when teardown began", async () => {
+    api = await bootTestApi();
+    const { engineHost, engineStore, db } = api.providers;
+    let release = () => {};
+    let entered = () => {};
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const spy = vi.spyOn(assistants, "loadAssistantBySessionId").mockImplementationOnce(async () => {
+      entered();
+      await paused;
+      return undefined;
+    });
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp/destroy-lookup" };
+    const building = engineHost.sessionFor("destroy-lookup", meta);
+    await reached;
+    await engineHost.destroy("destroy-lookup");
+    const rejected = expect(building).rejects.toThrow("teardown");
+    release();
+    try {
+      await rejected;
+      expect(await engineStore.getSession("destroy-lookup")).toBeNull();
+      expect(await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "destroy-lookup"))).toHaveLength(0);
+      // A deliberate new request after teardown can create the same ID.
+      expect(await engineHost.sessionFor("destroy-lookup", meta)).toBeDefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("destroy waits for a pending build before revoking its token", async () => {
+    api = await bootTestApi();
+    const { engineHost, engineStore, db } = api.providers;
+    let release = () => {};
+    let entered = () => {};
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const original = engineStore.getSession.bind(engineStore);
+    const spy = vi.spyOn(engineStore, "getSession").mockImplementationOnce(async id => {
+      entered();
+      await paused;
+      return original(id);
+    });
+    const building = engineHost.sessionFor("destroy-pending", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp/destroy-pending",
+    });
+    await reached;
+    const destroying = engineHost.destroy("destroy-pending");
+    release();
+    try {
+      await Promise.all([building, destroying]);
+      const rows = await db.select().from(sandboxTokens).where(eq(sandboxTokens.sessionId, "destroy-pending"));
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every(row => row.revokedAt !== null)).toBe(true);
+      expect(await engineStore.getSession("destroy-pending")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("restore adopts the durable token without inserting another row", async () => {
     const recorder = new RecordingSandboxProvider(new VirtualSandboxProvider());
     api = await bootTestApi({ sandboxProvider: recorder });
     const { engineHost, db } = api.providers;
@@ -167,15 +222,15 @@ describe("EngineHost sandbox token wiring", () => {
     const secondToken = recorder.createCalls[1].env?.VALET_SANDBOX_TOKEN;
 
     expect(secondToken).toBeDefined();
-    expect(secondToken).not.toBe(firstToken);
+    expect(secondToken).toBe(firstToken);
 
     const rows = await db
       .select()
       .from(sandboxTokens)
       .where(eq(sandboxTokens.sessionId, "sbtok-session-3"));
-    expect(rows.length).toBe(2);
-    // Both tokens are live — the rebuild revoked nothing.
+    expect(rows.length).toBe(1);
+    // The original token remains live.
     const live = rows.filter((r) => r.revokedAt === null);
-    expect(live.length).toBe(2);
+    expect(live.length).toBe(1);
   });
 });

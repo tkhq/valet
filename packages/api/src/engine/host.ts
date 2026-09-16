@@ -116,7 +116,7 @@ import { personaPrefixText } from "../assistants/persona.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
-  mintSandboxToken,
+  getOrCreateSandboxToken,
   mintSandboxJwt,
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
@@ -244,6 +244,8 @@ export interface EngineHostOpts {
    * so dev keeps working without `BETTER_AUTH_SECRET`.
    */
   sandboxJwtMaster?: string;
+  /** Stable instance encryption key used to recover sandbox bearers. */
+  sandboxTokenMaster?: string;
   /**
    * The API's own externally-reachable base URL, injected into every
    * sandbox's env as `VALET_API_URL` (Task 8, auth-v2 plan) —
@@ -673,6 +675,16 @@ export class EngineHost {
    * same key). De-duping in-flight calls collapses the race.
    */
   private inflight = new Map<string, Promise<Session>>();
+  private teardown = new Map<string, Promise<void>>();
+  private lifecycleEpoch = new Map<string, number>();
+
+  private assertSessionBuildAllowed(sessionId: string, epoch = this.lifecycleEpoch.get(sessionId) ?? 0): number {
+    if (this.teardown.has(sessionId) || epoch !== (this.lifecycleEpoch.get(sessionId) ?? 0)) {
+      throw new Error("Session teardown interrupted this request. Start a new session and retry.");
+    }
+    return epoch;
+  }
+
   private threadCreations = new WeakMap<Session, Map<string, Promise<Thread>>>();
   /** Bumped by `evictCache`. A build captures the epoch when it starts and
    * refuses to cache (rebuilds instead) when it changed mid-build — without
@@ -706,16 +718,6 @@ export class EngineHost {
    * `latestActivityAt`, taking whichever is more recent.
    */
   private gatewayTouch = new Map<string, number>();
-
-  /**
-   * In-memory `sessionId -> Date.now()` of the last sandbox-token mint for
-   * that session (sandbox-reconciliation plan, Task 12). Stamped by
-   * `mintSandboxEnv` on every session build (create/restore). Read by
-   * `startRotateSweep` to decide whether a token is older than the rotation
-   * threshold (default 12 h). Cleared in `evictAll` alongside the rest of
-   * the session state.
-   */
-  private tokenMintedAt = new Map<string, number>();
 
   /**
    * Lazily-built, host-wide policy resolver (action-policies plan, Task 3).
@@ -876,6 +878,7 @@ export class EngineHost {
    * a new engine session and persist it via the store.
    */
   async sessionFor(sessionId: string, meta: SessionMeta): Promise<Session> {
+    const lifecycleEpoch = this.assertSessionBuildAllowed(sessionId);
     // Assistant ids must always wake through `assistantSessionFor` so they
     // get persona/memory-snapshot/mem_* tools/queueMode reconstructed from
     // configuration, never the generic `buildSession` path. Every caller of
@@ -906,6 +909,7 @@ export class EngineHost {
     // lands in the same maps under the same key.
     if (this.opts.db) {
       const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      this.assertSessionBuildAllowed(sessionId, lifecycleEpoch);
       if (assistant) {
         return this.assistantSessionFor(
           assistant.id,
@@ -1402,11 +1406,9 @@ export class EngineHost {
   }
 
   /**
-   * Mints a fresh long-lived sandbox bearer token (an ADDITIONAL token — it
-   * does NOT revoke prior live ones, so a rebuild while an earlier build's
-   * sandbox is still running never 401s that sandbox; see `mintSandboxToken`)
-   * and derives this session's JWT secret, returning the five env vars every
-   * sandbox
+   * Adopts this session's durable sandbox bearer and derives its JWT secret.
+   * The instance encryption key recovers the same bearer after API restart.
+   * Returns the five env vars every sandbox
    * gets at provision time: `VALET_SANDBOX_TOKEN`, `VALET_API_URL`,
    * `VALET_SANDBOX_JWT_SECRET` (Task 8, auth-v2 plan), plus `VALET_SESSION_ID`
    * and `VALET_SANDBOX_PROFILE` (sandbox auth gateway plan, Task 5).
@@ -1430,8 +1432,10 @@ export class EngineHost {
     profile: "headless" | "full",
   ): Promise<{ env: Record<string, string>; credsFiles: Record<string, string> } | undefined> {
     if (!this.opts.db) return undefined;
-    const { token } = await mintSandboxToken(this.opts.db, { sessionId, userId, orgId });
-    this.tokenMintedAt.set(sessionId, Date.now());
+    const { token } = await getOrCreateSandboxToken(
+      this.opts.db, { sessionId, userId, orgId },
+      this.opts.sandboxTokenMaster ?? this.resolveSandboxJwtMaster(),
+    );
     const secret = deriveSandboxJwtSecret(this.resolveSandboxJwtMaster(), sessionId);
     return {
       env: {
@@ -2390,6 +2394,7 @@ export class EngineHost {
     },
   ): Promise<Session> {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
+    this.assertSessionBuildAllowed(sessionId);
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
@@ -2702,6 +2707,20 @@ export class EngineHost {
    * exists.
    */
   async destroy(sessionId: string): Promise<void> {
+    const pending = this.teardown.get(sessionId);
+    if (pending) return pending;
+    // Invalidate cold wakes that are still doing lookups before registering a
+    // build. New requests are blocked until this teardown finishes.
+    this.lifecycleEpoch.set(sessionId, (this.lifecycleEpoch.get(sessionId) ?? 0) + 1);
+    const promise = this.destroySession(sessionId).finally(() => this.teardown.delete(sessionId));
+    this.teardown.set(sessionId, promise);
+    return promise;
+  }
+
+  private async destroySession(sessionId: string): Promise<void> {
+    // A build can still be inserting its token. Settle it before revocation,
+    // including failed builds that may have written only part of their state.
+    await this.inflight.get(sessionId)?.catch(() => undefined);
     const entry = this.cache.get(sessionId);
     if (!entry) {
       // Cold session: nothing cached in this process, but every caller of
@@ -2772,7 +2791,6 @@ export class EngineHost {
     this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
     this.cache.get(sessionId)?.session.suspendTimers();
     this.cache.delete(sessionId);
-    this.tokenMintedAt.delete(sessionId);
   }
 
   /**
@@ -2848,57 +2866,6 @@ export class EngineHost {
     } catch (err) {
       console.error(`EngineHost: markSessionUsed failed for session ${sessionId}:`, err);
     }
-  }
-
-  /**
-   * Narrow accessor for the rotate sweep (sandbox-reconciliation plan, Task
-   * 12). Returns a snapshot of every cached session whose attachment is in a
-   * state the sweep can act on (`ready` or `suspended`). Exposes only the
-   * fields the sweep needs — does NOT export raw cache entries or the
-   * attachment object itself.
-   *
-   * `mintedAt` is the wall-clock ms of the last `mintSandboxEnv` call for
-   * that session (0 when the host has no record — should not happen for a
-   * cached session, but defensive).
-   */
-  listRotatableSessions(): Array<{
-    sessionId: string;
-    sandboxId: string | undefined;
-    state: "ready" | "suspended";
-    mintedAt: number;
-    userId: string;
-    orgId: string;
-  }> {
-    const result: Array<{
-      sessionId: string;
-      sandboxId: string | undefined;
-      state: "ready" | "suspended";
-      mintedAt: number;
-      userId: string;
-      orgId: string;
-    }> = [];
-    for (const [sessionId, entry] of this.cache) {
-      const state = entry.session.attachment.state;
-      if (state !== "ready" && state !== "suspended") continue;
-      result.push({
-        sessionId,
-        sandboxId: entry.session.attachment.sandboxId,
-        state,
-        mintedAt: this.tokenMintedAt.get(sessionId) ?? 0,
-        userId: entry.session.options.userId,
-        orgId: entry.session.options.orgId,
-      });
-    }
-    return result;
-  }
-
-  /**
-   * Records a fresh mint time for a session — called by the rotate sweep
-   * after it mints and pushes a new token via `updateCreds`, so a second
-   * sweep pass within the rotation window is a no-op.
-   */
-  recordTokenMintedAt(sessionId: string, mintedAt: number): void {
-    this.tokenMintedAt.set(sessionId, mintedAt);
   }
 
   /** The cached session's org, or null when uncached — the capacity
@@ -3439,6 +3406,7 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    this.assertSessionBuildAllowed(childSessionId);
     const cached = this.cache.get(childSessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(childSessionId);
@@ -3732,6 +3700,7 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
+    this.assertSessionBuildAllowed(sessionId);
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
