@@ -23,7 +23,7 @@
 import { PassThrough } from "node:stream";
 import type { Readable as ReadableStream, Writable as WritableStream } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
-import { CappedOutputBuffer, type ExecOpts, type ExecResult } from "@valet/engine";
+import { CappedOutputBuffer, SandboxConnectionError, formatSandboxErrorCause, type ExecOpts, type ExecResult } from "@valet/engine";
 
 /** Directory the job-mode protocol (jobs.ts) writes its `{execId}.{out,exit,pid}`
  * files into. Exported here (rather than jobs.ts) since exec.ts's quoting
@@ -140,6 +140,42 @@ export class PodExecStatusError extends Error {
     super(`Kubernetes exec failed: ${[status.reason, status.message].filter(Boolean).join(": ") || "no process exit status"}. Check the sandbox pod status before retrying.`);
     this.name = "PodExecStatusError";
   }
+}
+
+/** Normalize client-node's WebSocket ErrorEvent before provider classification. */
+export class PodExecTransportError extends SandboxConnectionError {
+  readonly code = "sandbox_exec_transport_failed";
+
+  constructor(
+    readonly namespace: string,
+    readonly podName: string,
+    readonly containerName: string,
+    cause: unknown,
+  ) {
+    super(
+      `Kubernetes exec connection failed for ${namespace}/${podName} (${containerName}): ` +
+      `${formatExecTransportCause(cause)}. Check Kubernetes API access and the sandbox pod status before retrying.`,
+      cause,
+    );
+    this.name = "PodExecTransportError";
+  }
+}
+
+function formatExecTransportCause(cause: unknown): string {
+  // ws exposes the original Error through a prototype getter on ErrorEvent.
+  // Do not traverse event.target: it contains the socket and request headers.
+  if (cause !== null && typeof cause === "object") {
+    try {
+      const underlying: unknown = Reflect.get(cause, "error");
+      if (typeof underlying === "string" || (underlying !== null && typeof underlying === "object")) {
+        const detail = formatSandboxErrorCause(underlying);
+        if (detail.trim() && detail !== "unserializable cause" && detail !== "[object Object]") return detail;
+      }
+    } catch {
+      // Preserve readable fields on the outer rejection if its getter fails.
+    }
+  }
+  return formatSandboxErrorCause(cause);
 }
 
 // ── Narrow client interface (real k8s.Exec adapts to this; tests fake it) ──
@@ -278,7 +314,7 @@ export async function execInPod(
     (status) => resolveStatus(status),
   ).catch((error: unknown) => {
     stdin?.destroy();
-    throw error;
+    throw new PodExecTransportError(deps.namespace, podName, deps.containerName, error);
   });
 
   const raced: Array<Promise<{ kind: "status"; status: ExecStatus } | { kind: "timeout" } | { kind: "abort" }>> = [
