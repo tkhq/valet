@@ -117,26 +117,31 @@ function formatWarnings(warnings: unknown): string {
 }
 
 interface WriteResultBody {
-  file: { path: string; version?: number };
+  file: { path: string; version?: number; ownerType?: string; ownerId?: string };
   warnings?: unknown;
 }
 
-/** Runtime-narrows a write-response body instead of a bare `as` cast:
- * only the fields actually read (`file.path`, `file.version`) are
- * checked, per the "validated-pick, not a blind cast" convention. */
 function asWriteResultBody(body: unknown): WriteResultBody | null {
   if (!isRecord(body) || !isRecord(body.file) || typeof body.file.path !== "string") return null;
   const version = typeof body.file.version === "number" ? body.file.version : undefined;
-  return { file: { path: body.file.path, version }, warnings: body.warnings };
+  const ownerType = typeof body.file.ownerType === "string" ? body.file.ownerType : undefined;
+  const ownerId = typeof body.file.ownerId === "string" ? body.file.ownerId : undefined;
+  return { file: { path: body.file.path, version, ownerType, ownerId }, warnings: body.warnings };
 }
 
 async function relayWriteResult(res: Response, verb: string): Promise<ToolResult> {
   const rawBody = await parseJsonBody(res);
   const body = asWriteResultBody(rawBody);
   const path = body?.file.path ?? "";
+  // Name the scope the SERVER wrote, in the same `team:{id}/` vocabulary
+  // reads already use, never the one the call asked for. A write that was
+  // refused a team never reaches here, and one that was admitted should say
+  // where it landed so the agent can tell the user.
+  const scoped =
+    body?.file.ownerType === "team" && body.file.ownerId ? `team:${body.file.ownerId}/${path}` : path;
   const version = body?.file.version;
   const versionNote = version !== undefined ? ` (v${version})` : "";
-  return { text: `${verb} ${path}${versionNote}${formatWarnings(body?.warnings)}` };
+  return { text: `${verb} ${scoped}${versionNote}${formatWarnings(body?.warnings)}` };
 }
 
 // ─── mem_write ─────────────────────────────────────────────────────────
@@ -144,7 +149,7 @@ async function relayWriteResult(res: Response, verb: string): Promise<ToolResult
 export const memWriteTool = defineTool({
   name: "mem_write",
   description:
-    "Create or update a memory file. Create requires `content`; call again with `content` omitted to update metadata only (type/description/tags/etc.) without touching the body. Search with mem_search before writing to update an existing file about the same thing instead of creating a duplicate.",
+    "Create or update a memory file in your own memory, or in a team's shared memory when you pass `teamId`. Create requires `content`; call again with `content` omitted to update metadata only (type/description/tags/etc.) without touching the body. Search with mem_search before writing to update an existing file about the same thing instead of creating a duplicate.",
   parameters: Type.Object({
     path: Type.String({ description: "Memory path, e.g. 'people/alice.md' or 'projects/valet/overview.md'." }),
     content: Type.Optional(
@@ -185,12 +190,23 @@ export const memWriteTool = defineTool({
           "Pin this file so it's always loaded in full at orchestrator wake (memory snapshot). Use sparingly — only for durable, high-value facts (standing preferences, core identity notes), not routine journal entries.",
       }),
     ),
+    teamId: Type.Optional(
+      Type.String({
+        description:
+          "Write into this team's shared memory instead of your own. Omit it to write your own scope. That is the default, and the right choice for anything about one person. Take the id from the `team:{id}/` paths mem_read and mem_search return. The write is refused unless the person you are acting for is a current member of that team. Team memory is shared with every member and the team assistant loads it as context, so send only what the user asked to put there, and mem_read the destination first: writing a path that already holds a team file replaces that file's body.",
+      }),
+    ),
   }),
   execute: async (args, ctx) => {
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
+    // The owner header still carries THIS session's scope, never the team
+    // the model named. A header the host fills and an argument the model
+    // fills must not become the same value: the team rides as a parameter
+    // the route authorizes against `x-valet-actor` before it moves scope.
+    if (args.teamId !== undefined) url.searchParams.set("teamId", args.teamId);
     return memoryRequest(
       url,
       {
@@ -219,17 +235,26 @@ export const memWriteTool = defineTool({
 export const memPatchTool = defineTool({
   name: "mem_patch",
   description:
-    "Exact-string replace a memory file's body: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal).",
+    "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal).",
   parameters: Type.Object({
     path: Type.String(),
     oldString: Type.String({ description: "Exact text to find, or '' to create a new file at `path`." }),
     newString: Type.String({ description: "Replacement text (or full body, when creating)." }),
+    teamId: Type.Optional(
+      Type.String({
+        description:
+          "Patch the file in this team's shared memory instead of your own. Omit it to patch your own scope, which is the default. Refused unless the person you are acting for is a current member of that team.",
+      }),
+    ),
   }),
   execute: async (args, ctx) => {
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory/patch", cfg.apiBaseUrl);
+    // Same rule as mem_write: the header keeps this session's scope and the
+    // model-named team rides as a parameter the route authorizes.
+    if (args.teamId !== undefined) url.searchParams.set("teamId", args.teamId);
     return memoryRequest(
       url,
       {

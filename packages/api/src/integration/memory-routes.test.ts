@@ -78,6 +78,53 @@ describe("api integration: memory routes", () => {
     }
   });
 
+  // TKAI-484. `?teamId=` is the one value on the internal branch that a MODEL
+  // chooses, so it is the one value that branch checks. The owner header is
+  // host-supplied by the tool from the session's own principal and keeps its
+  // existing trust; an id an agent invents reaches nothing.
+  it("authorizes ?teamId against the actor's membership, not the owner header", async () => {
+    const api = await bootTestApi();
+    try {
+      const { db } = api.providers;
+      await db.insert(teams).values({ id: "team-mem", orgId: "local-org", name: "Mem", createdAt: Date.now() });
+      const headers = {
+        "Content-Type": "application/json",
+        "x-valet-internal": internalToken(),
+        // The header names the actor's OWN scope throughout: the team only
+        // ever arrives as the query parameter.
+        "x-valet-owner": "user:test-member",
+        "x-valet-actor": "test-member",
+      };
+      const write = (teamId?: string) =>
+        fetch(`${api.baseUrl}/api/memory${teamId ? `?teamId=${teamId}` : ""}`, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({ path: "knowledge/x.md", content: "# X\n" }),
+        });
+
+      // Not a member yet: refused, and refused as not-found so membership
+      // cannot be probed by trying ids.
+      expect((await write("team-mem")).status).toBe(404);
+      // An id that names no team at all is refused the same way.
+      expect((await write("no-such-team")).status).toBe(404);
+
+      await db.insert(teamMembers).values({ teamId: "team-mem", userId: "test-member", role: "member" });
+      const ok = await write("team-mem");
+      expect(ok.status).toBe(200);
+      const body = (await ok.json()) as { file: { ownerType: string; ownerId: string } };
+      expect(body.file).toMatchObject({ ownerType: "team", ownerId: "team-mem" });
+
+      // Leaving the team stops the next write resolving, without a restart.
+      await db.delete(teamMembers);
+      expect((await write("team-mem")).status).toBe(404);
+
+      // No parameter is still the actor's own scope, untouched by any of this.
+      expect((await write()).status).toBe(200);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
   it("internal token + owner/actor headers write and read a team scope", async () => {
     const api = await bootTestApi();
     try {
