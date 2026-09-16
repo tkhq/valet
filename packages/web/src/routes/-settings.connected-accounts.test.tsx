@@ -703,7 +703,7 @@ describe("ConnectedAccountsPage", () => {
   });
 });
 
-describe("You · 1Password", () => {
+describe("1Password row", () => {
   beforeEach(() => {
     onePasswordSettings = { orgTokenConnected: false, personalTokenConnected: false };
   });
@@ -713,14 +713,14 @@ describe("You · 1Password", () => {
   // to finish their own setup.
   it("offers Connect 1Password with no organization permission anywhere in play", () => {
     render(<ConnectedAccountsPage />);
-    const row = within(screen.getByRole("group", { name: "Personal token" }));
+    const row = within(screen.getByRole("group", { name: "1Password" }));
     expect(row.getByRole("button", { name: "Connect 1Password" })).toBeTruthy();
   });
 
   it("shows the connected state with Replace and Remove", () => {
     onePasswordSettings = { orgTokenConnected: true, personalTokenConnected: true };
     render(<ConnectedAccountsPage />);
-    const row = within(screen.getByRole("group", { name: "Personal token" }));
+    const row = within(screen.getByRole("group", { name: "1Password" }));
     expect(row.getByText("Connected")).toBeTruthy();
     expect(row.getByRole("button", { name: "Replace" })).toBeTruthy();
     expect(row.getByRole("button", { name: "Remove token" })).toBeTruthy();

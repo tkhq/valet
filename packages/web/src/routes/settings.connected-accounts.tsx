@@ -19,7 +19,6 @@ import { formatDateOr } from "~/lib/format-when";
 import { displayName } from "~/components/integrations/display-name";
 import { useOnePasswordSettings } from "~/api/onepassword";
 import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup";
-import { ServiceIcon } from "~/components/service-icon";
 
 /**
  * `/settings/connected-accounts` — You · Connected accounts. Renders one
@@ -175,9 +174,9 @@ export function ConnectedAccountsPage() {
       ))}
 
       <GithubRow />
+      <OnePasswordRow />
     </Section>
 
-    <OnePasswordSection />
     <CredentialsListSection />
     </>
   );
@@ -189,48 +188,40 @@ const REMOVE_PERSONAL_TOKEN_NOTE =
   "token here.";
 
 /**
- * You · 1Password. A personal service account token is a credential like the
- * rest of this page's, so it belongs here rather than on an Organization
- * page: setting one needs no organization permission, and a member should
- * never have to open org settings to finish their own setup (TKAI-487).
- * Organization · 1Password keeps the org-wide token and opens this same
+ * 1Password sits beside the other accounts you connect yourself. A personal
+ * service account token needs no organization permission, so a member never
+ * has to open an Organization page to set one up (TKAI-487).
+ * Organization · 1Password keeps the org-wide token and opens the same
  * setup dialog.
  */
-function OnePasswordSection() {
+function OnePasswordRow() {
   const settingsQ = useOnePasswordSettings();
 
-  return (
-    <Section
-      title="1Password"
-      description="Let an agent read a credential from your vaults instead of you pasting it."
-    >
-      <div className="flex items-start gap-3 py-4">
-        <ServiceIcon slug="1password" label="1Password" />
-        <p className="text-sm text-muted">
-          Your token reads your own vaults, for sessions you own. No one else's session reaches
-          it.
-        </p>
-      </div>
-
-      {settingsQ.isLoading && (
-        <div className="flex items-center gap-2 py-2 text-sm text-muted">
+  if (settingsQ.isLoading) {
+    return (
+      <FieldRow label="1Password">
+        <div className="flex items-center gap-2 text-sm text-muted">
           <Spinner size={14} /> Loading…
         </div>
-      )}
-      {settingsQ.error && (
-        <p className="py-2 text-sm text-danger-500">Failed to load 1Password settings.</p>
-      )}
+      </FieldRow>
+    );
+  }
+  if (settingsQ.error || !settingsQ.data) {
+    return (
+      <FieldRow label="1Password">
+        <p className="text-sm text-danger-500">Failed to load 1Password connection status.</p>
+      </FieldRow>
+    );
+  }
 
-      {settingsQ.data && (
-        <OnePasswordTokenRow
-          scope="personal"
-          connected={settingsQ.data.personalTokenConnected}
-          label="Personal token"
-          hint="Your own 1Password service account token."
-          removeNote={REMOVE_PERSONAL_TOKEN_NOTE}
-        />
-      )}
-    </Section>
+  return (
+    <OnePasswordTokenRow
+      scope="personal"
+      connected={settingsQ.data.personalTokenConnected}
+      label="1Password"
+      hint="Let an agent read a credential from your vaults instead of you pasting it. Your token reads your own vaults, for sessions you own."
+      removeNote={REMOVE_PERSONAL_TOKEN_NOTE}
+    />
   );
 }
 
