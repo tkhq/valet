@@ -20,7 +20,8 @@ service-account token. Secrets are never persisted in Valet's database.
 - `GET /api/onepassword/vaults`: the live check that a token works, and the
   route the SDK-over-HTTP regression test drives.
 - Web UI: one 1Password page at Organization · 1Password
-  (`/settings/organization/onepassword`): org token,
+  (`/settings/organization/onepassword`): org token (the personal one moved
+  to You · Connected accounts on 2026-09-15),
   personal token.
 
 **Non-goals:** sandbox-side `op://` env injection (legacy runner feature),
@@ -206,12 +207,15 @@ with the same admin/member split by owner type.
 ## Web UI
 
 1Password is a credential source, not a plugin. It has one home:
-Organization · 1Password (`/settings/organization/onepassword`), beside
-GitHub and Slack. The page holds the org token and the reader's own personal
-token, and it renders the same rows for every role (amended 2026-09-15): an
-admin gets the org token's controls, a member gets its status and a line
-naming who may change it. The personal row is always live. The Organization
-rail lists it. `/integrations` does not carry 1Password.
+two homes, split by what a token costs (amended 2026-09-15). The org-wide
+token sits on Organization · 1Password
+(`/settings/organization/onepassword`), beside GitHub and Slack: an admin
+gets its controls, a member gets its status and a line naming who may change
+it. A personal token is a personal credential, so it sits with the rest of
+them on You · Connected accounts, where setting one needs no organization
+permission. Both pages open one shared setup dialog, so the instructions and
+the links into 1Password are written once. `/integrations` does not carry
+1Password.
 
 There is no picker and no reference list. A credential an integration needs
 is found in the vaults by item title at read time (see Resolution flow), so

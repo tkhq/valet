@@ -1,27 +1,19 @@
 // @vitest-environment jsdom
 /**
- * Organization · 1Password panel. Mocks `~/api/onepassword`,
- * `~/api/integrations`, and `~/api/settings`: these tests only care what the
- * panel renders and which mutation it fires.
+ * Organization · 1Password. The page carries the org-wide token alone; a
+ * personal token is a personal credential and lives on You · Connected
+ * accounts. Mocks `~/api/onepassword`, `~/api/integrations` and
+ * `~/api/settings`: these tests only care what the panel renders and which
+ * mutation it fires.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OnePasswordSettingsResponse } from "@valet/api/wire";
-import { ApiError } from "~/api/client";
 
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
-const connectMutate = vi.fn();
 const disconnectMutate = vi.fn();
-let disconnectError: Error | null = null;
-// Clears like the real `reset()`: a stub that only counts calls cannot tell a
-// component that drops the refusal from one that does not, and the whole suite
-// would stay green over the bug.
-const disconnectReset = vi.fn(() => {
-  disconnectError = null;
-});
 
-let confirmSpy = vi.fn(() => true);
 let orgData: { callerRole: "admin" | "member" } = { callerRole: "admin" };
 let settingsData: OnePasswordSettingsResponse | undefined = {
   orgTokenConnected: false,
@@ -38,16 +30,17 @@ vi.mock("~/api/onepassword", () => ({
 
 vi.mock("~/api/integrations", () => ({
   useConnectCredential: () => ({
-    mutate: connectMutate,
+    mutate: vi.fn(),
     mutateAsync: connectMutateAsync,
     isPending: false,
     error: null,
+    reset: vi.fn(),
   }),
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
     isPending: false,
-    error: disconnectError,
-    reset: disconnectReset,
+    error: null,
+    reset: vi.fn(),
   }),
 }));
 
@@ -59,279 +52,76 @@ describe("OnePasswordPanel", () => {
     connectMutateAsync.mockResolvedValue({ ok: true });
     orgData = { callerRole: "admin" };
     settingsData = { orgTokenConnected: false, personalTokenConnected: false };
-    disconnectError = null;
-    // Answers "yes" so a reintroduced `window.confirm` fires the mutation and
-    // fails the dialog tests loudly instead of hanging.
-    confirmSpy = vi.fn(() => true);
-    vi.stubGlobal("confirm", confirmSpy);
   });
 
-  // Both rows render for every role now, so "Connect", "Replace" and
-  // "Remove token" each appear twice whenever the two rows are in the same
-  // state. The panel names each row's controls as a group; scope through
-  // these rather than matching a button name across the whole page.
-  const orgFields = () => within(screen.getByRole("group", { name: "Organization token" }));
-  const personalFields = () => within(screen.getByRole("group", { name: "Personal token" }));
-
-  it("member with no tokens sees the org row read-only and their own row live", () => {
-    orgData = { callerRole: "member" };
+  // The personal token moved to You · Connected accounts: setting one needs
+  // no organization permission, so a member never has to open this page to
+  // finish their own setup (TKAI-487).
+  it("carries the organization token alone, and points at the personal one", () => {
     render(<OnePasswordPanel />);
-    expect(screen.getByText("Not connected")).toBeTruthy();
-    expect(
-      screen.getByText("Only an organization admin can connect or remove this token."),
-    ).toBeTruthy();
-    expect(screen.queryByLabelText("Organization 1Password token")).toBeNull();
-    expect(screen.queryByRole("switch")).toBeNull();
-    expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Organization token" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Personal token" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Connected accounts" }).getAttribute("href")).toBe(
+      "/settings/connected-accounts",
+    );
   });
 
-  // TKAI-487: the state the bug report arrived in. An org token is connected
-  // and the reader is a plain member, which used to render an empty panel.
-  it("member with the org token connected sees the badge, who can change it, and no controls", () => {
-    orgData = { callerRole: "member" };
-    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
+  it("admin with no token gets the connect control", () => {
     render(<OnePasswordPanel />);
-    expect(orgFields().getByText("Connected")).toBeTruthy();
-    expect(
-      screen.getByText("Only an organization admin can connect or remove this token."),
-    ).toBeTruthy();
-    expect(orgFields().queryByRole("button", { name: "Replace" })).toBeNull();
-    expect(orgFields().queryByRole("button", { name: "Remove token" })).toBeNull();
-    expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connect 1Password" })).toBeTruthy();
   });
 
-  // The structural guard for the shared page: it fails if anyone re-hides a
-  // row from a member rather than removing its controls.
-  it("shows the same two labelled rows to an admin and to a member", () => {
-    const labels = () =>
-      ["Organization token", "Personal token"].map((name) =>
-        screen.getByRole("group", { name }),
-      ).length;
-    const asAdmin = render(<OnePasswordPanel />);
-    expect(labels()).toBe(2);
-    asAdmin.unmount();
-    orgData = { callerRole: "member" };
-    render(<OnePasswordPanel />);
-    expect(labels()).toBe(2);
-  });
-
-  it("admin sees both token inputs and no switch", () => {
-    render(<OnePasswordPanel />);
-    expect(screen.getByLabelText("Organization 1Password token")).toBeTruthy();
-    expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
-    expect(screen.queryByRole("switch")).toBeNull();
-  });
-
-  it("shows a Connected badge when the org token is already set", () => {
+  it("admin with a token connected gets the badge, Replace and Remove", () => {
     settingsData = { orgTokenConnected: true, personalTokenConnected: false };
     render(<OnePasswordPanel />);
     expect(screen.getByText("Connected")).toBeTruthy();
-    // A connected token is state, not a form. The input appears behind
-    // Replace, so two identical password boxes are never on screen at once.
-    expect(screen.queryByLabelText("Organization 1Password token")).toBeNull();
     expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove token" })).toBeTruthy();
   });
 
-  it("saving the org token fires the connect mutation with scope: org", async () => {
-    const user = userEvent.setup();
-    render(<OnePasswordPanel />);
-    await user.type(screen.getByLabelText("Organization 1Password token"), "op-token-123");
-    await user.click(orgFields().getByRole("button", { name: "Connect" }));
-
-    await waitFor(() =>
-      expect(connectMutateAsync).toHaveBeenCalledWith({
-        service: "onepassword",
-        body: { type: "service_account", apiKey: "op-token-123", scope: "org" },
-      }),
-    );
-  });
-
-  // Replacing an already-connected token leaves `orgTokenConnected` true on
-  // both sides of the save, so an effect keyed on it never re-runs. The form
-  // used to stay open over a token that had already saved, with no Connected
-  // badge, which reads as a save that did not happen.
-  it("closes the Replace form and restores the badge after a successful replace", async () => {
+  // The bug report's state: an org token is connected and the reader is a
+  // plain member. This used to render an empty panel.
+  it("member sees the status and who can change it, and no controls", () => {
+    orgData = { callerRole: "member" };
     settingsData = { orgTokenConnected: true, personalTokenConnected: false };
+    render(<OnePasswordPanel />);
+    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(
+      screen.getByText("Only an organization admin can connect or remove this token."),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove token" })).toBeNull();
+  });
+
+  it("member with no org token sees Not connected rather than an empty row", () => {
+    orgData = { callerRole: "member" };
+    render(<OnePasswordPanel />);
+    expect(screen.getByText("Not connected")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
+  });
+
+  it("connecting from this page saves at org scope", async () => {
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
-
-    await user.click(screen.getByRole("button", { name: "Replace" }));
-    await user.type(screen.getByLabelText("Organization 1Password token"), "op-token-new");
-    await user.click(orgFields().getByRole("button", { name: "Connect" }));
-
-    await waitFor(() => expect(connectMutateAsync).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.queryByLabelText("Organization 1Password token")).toBeNull();
-      expect(screen.getByText("Connected")).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Connect 1Password" }));
+    await user.type(screen.getByLabelText("Organization 1Password token"), "ops_org");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expect(connectMutateAsync).toHaveBeenCalledWith({
+      service: "onepassword",
+      body: { type: "service_account", apiKey: "ops_org", scope: "org" },
     });
   });
 
-  // A failed replace must keep the form open so the value can be corrected.
-  it("keeps the Replace form open when the save fails", async () => {
+  it("removing asks first, then disconnects at org scope", async () => {
+    const user = userEvent.setup();
     settingsData = { orgTokenConnected: true, personalTokenConnected: false };
-    connectMutateAsync.mockRejectedValueOnce(
-      new ApiError(400, "PUT /credentials/onepassword → 400", { error: "nope" }),
-    );
-    const user = userEvent.setup();
     render(<OnePasswordPanel />);
-
-    await user.click(screen.getByRole("button", { name: "Replace" }));
-    await user.type(screen.getByLabelText("Organization 1Password token"), "bad");
-    await user.click(orgFields().getByRole("button", { name: "Connect" }));
-
-    await waitFor(() => expect(screen.getByLabelText("Organization 1Password token")).toBeTruthy());
-  });
-
-  it("shows an inline error when saving the org token fails", async () => {
-    connectMutateAsync.mockRejectedValueOnce(
-      new ApiError(400, "PUT /credentials/onepassword → 400", { error: "1Password resolution failed" }),
-    );
-    const user = userEvent.setup();
-    render(<OnePasswordPanel />);
-    await user.type(screen.getByLabelText("Organization 1Password token"), "bad-token");
-    await user.click(orgFields().getByRole("button", { name: "Connect" }));
-
-    expect(await screen.findByText("1Password resolution failed")).toBeTruthy();
-  });
-
-  it("renders the personal token row for a member with no org permission at all", () => {
-    orgData = { callerRole: "member" };
-    render(<OnePasswordPanel />);
-    expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
-    expect(personalFields().getByRole("button", { name: "Connect" })).toBeTruthy();
-  });
-
-  it("saving the personal token fires the connect mutation with no scope field", async () => {
-    orgData = { callerRole: "member" };
-    settingsData = { orgTokenConnected: false, personalTokenConnected: false };
-    const user = userEvent.setup();
-    render(<OnePasswordPanel />);
-    await user.type(personalFields().getByLabelText("1Password personal token"), "op-personal-token");
-    await user.click(personalFields().getByRole("button", { name: "Connect" }));
-
-    await waitFor(() =>
-      expect(connectMutateAsync).toHaveBeenCalledWith({
-        service: "onepassword",
-        body: { type: "service_account", apiKey: "op-personal-token" },
-      }),
-    );
-  });
-  // ── Removing a token ──────────────────────────────────────────────────
-  // Both rows guarded the disconnect with `window.confirm`, which browser
-  // automation auto-accepts. The dialog is the real gate: the row button only
-  // opens it. The org row carries the full cycle below; the personal row is a
-  // separate control with its own state, so it keeps the two cases that differ
-  // from the org row's (the arguments it sends, and its own clear).
-
-  /** Admin, org token connected, personal row hidden: one Remove button. */
-  function renderConnectedOrgToken() {
-    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
-    return render(<OnePasswordPanel />);
-  }
-
-  /** Member, personal token connected, org row hidden: one Remove button. */
-  function renderConnectedPersonalToken() {
-    orgData = { callerRole: "member" };
-    settingsData = { orgTokenConnected: false, personalTokenConnected: true };
-    return render(<OnePasswordPanel />);
-  }
-
-  /** A refusal the server answers a removal with. */
-  const refusal = (status: number, message: string) =>
-    new ApiError(status, `DELETE /credentials/onepassword → ${status}`, { error: message });
-  const ORG_REFUSAL = "Only an admin can remove the organization token. Ask an admin.";
-  const PERSONAL_REFUSAL = "The token store is unavailable. Try again in a moment.";
-
-  it("org token: Remove opens the confirm dialog and disconnects nothing", async () => {
-    renderConnectedOrgToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Remove the organization 1Password token?")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Remove token" }));
     expect(disconnectMutate).not.toHaveBeenCalled();
-    expect(confirmSpy).not.toHaveBeenCalled();
-  });
-
-  it("org token: confirming disconnects with scope org", async () => {
-    renderConnectedOrgToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Remove token" }));
-
-    expect(disconnectMutate).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Remove token", hidden: false }));
     expect(disconnectMutate).toHaveBeenCalledWith(
       { service: "onepassword", scope: "org" },
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
-  });
-
-  it("org token: cancelling the dialog disconnects nothing", async () => {
-    renderConnectedOrgToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(disconnectMutate).not.toHaveBeenCalled();
-    expect(screen.getByText("Connected")).toBeTruthy();
-  });
-
-  // The refusal is set AFTER the confirm click: the server cannot answer a
-  // request the user has not sent. Setting it before the open would assert the
-  // stale-error path instead, which is the next test.
-  it("org token: the dialog shows the server's reason for a failed removal", async () => {
-    const { rerender } = renderConnectedOrgToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-    const opened = await screen.findByRole("dialog");
-    fireEvent.click(within(opened).getByRole("button", { name: "Remove token" }));
-
-    disconnectError = refusal(403, ORG_REFUSAL);
-    rerender(<OnePasswordPanel />);
-
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(ORG_REFUSAL)).toBeTruthy();
-  });
-
-  // React Query holds the refusal until the next mutate, so the opening
-  // control clears it. Radix fires no `onOpenChange(true)` on these
-  // controlled, trigger-less dialogs, so a clear placed there never runs.
-  it("org token: reopening after a refusal starts with no error", async () => {
-    disconnectError = refusal(403, ORG_REFUSAL);
-    renderConnectedOrgToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Remove the organization 1Password token?")).toBeTruthy();
-    expect(within(dialog).queryByText(ORG_REFUSAL)).toBeNull();
-  });
-
-  it("personal token: confirming disconnects with no scope field", async () => {
-    renderConnectedPersonalToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Remove token" }));
-
-    expect(disconnectMutate).toHaveBeenCalledTimes(1);
-    expect(disconnectMutate).toHaveBeenCalledWith(
-      { service: "onepassword" },
-      expect.objectContaining({ onSuccess: expect.any(Function) }),
-    );
-  });
-
-  // The personal row carries its own copy of the clear, on its own Remove
-  // control, so covering only the org row would let a regression ship in half
-  // the panel with the suite green.
-  it("personal token: reopening after a refusal starts with no error", async () => {
-    disconnectError = refusal(503, PERSONAL_REFUSAL);
-    renderConnectedPersonalToken();
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Remove your personal 1Password token?")).toBeTruthy();
-    expect(within(dialog).queryByText(PERSONAL_REFUSAL)).toBeNull();
-    // The open alone sends nothing, and never reaches `window.confirm`.
-    expect(disconnectMutate).not.toHaveBeenCalled();
-    expect(confirmSpy).not.toHaveBeenCalled();
   });
 });

@@ -17,6 +17,9 @@ import { Badge, Button, ConfirmDialog, Spinner, Switch } from "~/components/prim
 import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { displayName } from "~/components/integrations/display-name";
+import { useOnePasswordSettings } from "~/api/onepassword";
+import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup";
+import { ServiceIcon } from "~/components/service-icon";
 
 /**
  * `/settings/connected-accounts` — You · Connected accounts. Renders one
@@ -174,8 +177,60 @@ export function ConnectedAccountsPage() {
       <GithubRow />
     </Section>
 
+    <OnePasswordSection />
     <CredentialsListSection />
     </>
+  );
+}
+
+const REMOVE_PERSONAL_TOKEN_NOTE =
+  "This token is yours alone. Credentials that read their secret through it stop resolving for " +
+  "you, and other members and the organization token are not affected. You can connect a new " +
+  "token here.";
+
+/**
+ * You · 1Password. A personal service account token is a credential like the
+ * rest of this page's, so it belongs here rather than on an Organization
+ * page: setting one needs no organization permission, and a member should
+ * never have to open org settings to finish their own setup (TKAI-487).
+ * Organization · 1Password keeps the org-wide token and opens this same
+ * setup dialog.
+ */
+function OnePasswordSection() {
+  const settingsQ = useOnePasswordSettings();
+
+  return (
+    <Section
+      title="1Password"
+      description="Let an agent read a credential from your vaults instead of you pasting it."
+    >
+      <div className="flex items-start gap-3 py-4">
+        <ServiceIcon slug="1password" label="1Password" />
+        <p className="text-sm text-muted">
+          Your token reads your own vaults, for sessions you own. No one else's session reaches
+          it.
+        </p>
+      </div>
+
+      {settingsQ.isLoading && (
+        <div className="flex items-center gap-2 py-2 text-sm text-muted">
+          <Spinner size={14} /> Loading…
+        </div>
+      )}
+      {settingsQ.error && (
+        <p className="py-2 text-sm text-danger-500">Failed to load 1Password settings.</p>
+      )}
+
+      {settingsQ.data && (
+        <OnePasswordTokenRow
+          scope="personal"
+          connected={settingsQ.data.personalTokenConnected}
+          label="Personal token"
+          hint="Your own 1Password service account token."
+          removeNote={REMOVE_PERSONAL_TOKEN_NOTE}
+        />
+      )}
+    </Section>
   );
 }
 
@@ -356,10 +411,10 @@ function CredentialsListSection() {
   // which a boolean would open for every row at once.
   const [confirmRevoke, setConfirmRevoke] = useState<CredentialSummary | null>(null);
 
-  // `github` gets its own richer row above; `onepassword` (the reserved
-  // service holding the personal service-account token itself) is surfaced
-  // by `PersonalTokenRow` instead — this list is every OTHER credential,
-  // including 1Password reference-backed ones (badge below).
+  // `github` gets its own richer row above, and `onepassword` (the reserved
+  // service holding the personal service-account token itself) gets the
+  // 1Password section above. This list is every OTHER credential, including
+  // the 1Password reference-backed ones (badge below).
   const others = (credentialsQ.data?.credentials ?? []).filter(
     (c) => c.service !== "github" && c.service !== "onepassword",
   );

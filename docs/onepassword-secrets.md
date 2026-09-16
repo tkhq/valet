@@ -39,17 +39,20 @@ In 1Password:
    [Get started with 1Password Service Accounts](https://www.1password.dev/service-accounts/get-started/).
 4. Copy the token. 1Password shows it once.
 
-In Valet, open **Settings → Organization → 1Password**
-(`/settings/organization/onepassword`). The page has three areas.
+In Valet, a token lives on the page that owns it.
 
-| Area | Who can change it | What it covers |
-| --- | --- | --- |
-| Personal token | You, always | Your own vaults, for sessions you own |
-| Organization token | An org admin | Vaults the whole org shares |
-| Team token | A team admin, on the team's settings page | Vaults one team shares |
+| Token | Where it lives | Who can change it | What it covers |
+| --- | --- | --- | --- |
+| Personal | Settings → You → Connected accounts | You, always | Your own vaults, for sessions you own |
+| Organization | Settings → Organization → 1Password | An org admin | Vaults the whole org shares |
+| Team | Settings → Organization → Teams | A team admin | Vaults one team shares |
+
+Each page has a **Connect 1Password** button. It opens the same dialog: the
+setup steps, the links into 1Password, and the field for the token.
 
 Every org member can set, replace, and remove a **personal** token. No admin
-has to allow it first.
+has to allow it first, and you never need to open Organization settings to do
+it.
 
 Only an org admin can set, replace, or remove the **organization** token. The
 page shows you whether that token is connected, and names the role that can
