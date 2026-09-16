@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { Exec, KubeConfig } from "@kubernetes/client-node";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PolicySandbox, SandboxAttachment, SandboxPreparationError, SandboxUnavailableError, VirtualSandbox } from "@valet/engine";
 import { execInPod, podExecApiAdapter, PodExecTransportError } from "../src/exec.js";
 
@@ -46,6 +46,10 @@ describe("Kubernetes exec transport errors", () => {
       response.end("Forbidden");
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    // Exec transport failures must land in the api logs (stdout → Loki), not
+    // only surface to the caller as a tool result — regression guard for the
+    // 2026-09-15 exec-403 outage that was invisible in logs.
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("Expected a local TCP listener");
@@ -67,7 +71,12 @@ describe("Kubernetes exec transport errors", () => {
       expect(failure.message).not.toContain("secret");
       expect(failure.cause).not.toBeInstanceOf(Error);
       expect(failure.cause).toMatchObject({ message: "Unexpected server response: 403", error: expect.any(Error) });
+      // The failure was logged with its diagnostic message — and without the
+      // command/stdin payload leaking into the log.
+      expect(errorLog).toHaveBeenCalledWith("k8s pods/exec transport failed:", failure.message);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain("secret");
     } finally {
+      errorLog.mockRestore();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });

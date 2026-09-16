@@ -130,9 +130,10 @@ Namespace.
 8. Set `sandbox.createNamespace=false` in the Helm values.
 
 Helm owns the api resources, sandbox Role, and sandbox RoleBinding. The Role
-uses only namespaced permissions. The client-node exec client opens an HTTP
-GET WebSocket upgrade on `pods/exec`. The Role grants `get` for that
-subresource. It does not grant the SPDY `create` path.
+uses only namespaced permissions. Kubernetes authorizes the `pods/exec`
+connect subresource with the `create` verb for both the SPDY (POST) and the
+client-node WebSocket (GET) path, so the Role grants `create` (and `get`) on
+`pods/exec`. Granting `get` alone rejects every exec with HTTP 403.
 
 A restricted Helm reconciler does not need Namespace access or RBAC
 `escalate` and `bind`. Kubernetes requires the reconciler to hold each
