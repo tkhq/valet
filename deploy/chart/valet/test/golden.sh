@@ -303,6 +303,37 @@ grep -q '^kind: CronJob$' "$TMP_DIR/bundled.yaml" || fail "bundled render: no re
 grep -q 'REGISTRY_STORAGE_DELETE_ENABLED' "$TMP_DIR/bundled.yaml" || fail "bundled render: registry missing REGISTRY_STORAGE_DELETE_ENABLED=true (required for retention's manifest DELETE)"
 pass "bundled render: registry StatefulSet/Service/GC-CronJob present"
 
+# Required affinity must select the registry pod, including release overrides.
+for release in valet gc-custom; do
+  overrides=(--kube-version 1.30.0)
+  if [ "$release" = gc-custom ]; then
+    overrides+=(--set nameOverride=gc-chart,sandbox.namespace=gc-sandboxes)
+  fi
+  helm template "$release" "$CHART_DIR" \
+    "${overrides[@]}" \
+    --show-only templates/registry-statefulset.yaml > "$TMP_DIR/registry.yaml"
+  helm template "$release" "$CHART_DIR" \
+    "${overrides[@]}" \
+    --show-only templates/registry-gc-cronjob.yaml > "$TMP_DIR/registry-gc.yaml"
+  # Extract the pod labels and the required affinity selector at their YAML depths.
+  awk '/^      labels:$/ { labels=1; next }
+       labels && /^        [^ ]/ { sub(/^        /, ""); print; next }
+       labels { exit }' "$TMP_DIR/registry.yaml" | sort > "$TMP_DIR/pod-labels"
+  awk '/^                    matchLabels:$/ { labels=1; next }
+       labels && /^                      [^ ]/ { sub(/^                      /, ""); print; next }
+       labels { exit }' "$TMP_DIR/registry-gc.yaml" | sort > "$TMP_DIR/gc-selector"
+  [ -s "$TMP_DIR/gc-selector" ] || fail "registry GC affinity selector is missing"
+  diff -u "$TMP_DIR/pod-labels" "$TMP_DIR/gc-selector" \
+    || fail "registry GC affinity selector differs from registry pod labels"
+  grep -q '^              requiredDuringSchedulingIgnoredDuringExecution:$' "$TMP_DIR/registry-gc.yaml" \
+    || fail "registry GC affinity must be required"
+  grep -q '^                  topologyKey: kubernetes.io/hostname$' "$TMP_DIR/registry-gc.yaml" \
+    || fail "registry GC affinity must use the node hostname"
+  grep -q '^      activeDeadlineSeconds: 3600$' "$TMP_DIR/registry-gc.yaml" \
+    || fail "registry GC Job must stop after one hour so later schedules can run"
+done
+pass "registry GC required affinity matches pod labels and Job runtime is bounded"
+
 # The registry Service must be NodePort (kubelet pulls prebuilt images via
 # localhost:<nodePort> — a ClusterIP-only Service name is unresolvable by the
 # node). Assert on the registry Service block specifically.
