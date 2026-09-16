@@ -198,7 +198,17 @@ describe("team API keys", () => {
 
     const refused = await createTeamKey(baseUrl, memberCookie, teamId);
     expect(refused.status).toBe(403);
-    expect(((await refused.json()) as { error: string }).error).toBe(TEAM_KEY_ADMIN_REQUIRED);
+    const refusal = (await refused.json()) as { error: string; code?: string; teamId?: string };
+    // The contract, not the wiring: the text names the two admin roles, the
+    // ask, and the personal route. Comparing it with the constant the route
+    // returns would pass for any copy at all.
+    expect(refusal.error).toContain("team admin");
+    expect(refusal.error).toContain("organization admin");
+    expect(refusal.error).toContain("Ask an admin");
+    expect(refusal.error).toContain("Personal");
+    // The same discriminator the delete path on this resource sends.
+    expect(refusal.code).toBe("team_admin_required");
+    expect(refusal.teamId).toBe(teamId);
     expect(await db.select().from(apikey).where(eq(apikey.teamId, teamId))).toEqual([]);
 
     // The same member creates a personal key without an admin. That is the
@@ -418,7 +428,12 @@ describe("team API keys", () => {
       const expected = { "team deleted": 404, "admin demoted": 403, "key missing": 500, "pin throws": 500 };
       expect(response.status).toBe(expected[interleaving]);
       if (interleaving === "admin demoted") {
-        expect(((await response.clone().json()) as { error: string }).error).toBe(TEAM_KEY_ADMIN_REQUIRED);
+        // The lock re-check answers with the body the first check sends.
+        expect(await response.clone().json()).toMatchObject({
+          error: TEAM_KEY_ADMIN_REQUIRED,
+          code: "team_admin_required",
+          teamId,
+        });
       }
       expect(await response.text()).not.toContain(mintedKey);
       expect(mintedId).not.toBe("");

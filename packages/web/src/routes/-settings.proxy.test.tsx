@@ -201,7 +201,7 @@ describe("shared personal and team onboarding", () => {
     teamRole = "member";
     orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
     const { rerender } = render(<SettingsProxyPage />);
-    expect(screen.getByRole("button", { name: "Create proxy key" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Create proxy key" }).getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
     expect(teamCreate).not.toHaveBeenCalled();
     expect(personalKeyHook).not.toHaveBeenCalled();
@@ -209,7 +209,7 @@ describe("shared personal and team onboarding", () => {
     expect(screen.queryByRole("switch")).toBeNull();
     orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
     rerender(<SettingsProxyPage />);
-    expect(screen.getByRole("button", { name: "Create proxy key" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Create proxy key" }).getAttribute("aria-disabled")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
   });
 
@@ -262,7 +262,7 @@ describe("shared personal and team onboarding", () => {
     act(() => success({ name: "proxy-key", key: "vlt_late" }));
     expect(container.textContent).not.toContain("vlt_secret");
     expect(container.textContent).not.toContain("vlt_late");
-    if (failure === "role") expect(screen.getByRole("button", { name: "Create proxy key" })).toHaveProperty("disabled", true);
+    if (failure === "role") expect(screen.getByRole("button", { name: "Create proxy key" }).getAttribute("aria-disabled")).toBe("true");
     else expect(screen.getByRole("alert").textContent).toContain("Reload");
     teamRole = "admin";
     keysError = null;
@@ -339,7 +339,12 @@ describe("who may create a proxy key", () => {
     teamRole = "member";
     render(<SettingsProxyPage />);
     const button = screen.getByRole("button", { name: "Create proxy key" });
-    expect(button).toHaveProperty("disabled", true);
+    // Inert, not disabled: a disabled button leaves the tab order, so a
+    // keyboard reader never lands on it and never hears the explanation.
+    expect(button).toHaveProperty("disabled", false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(button);
+    expect(teamCreate).not.toHaveBeenCalled();
     const helpId = button.getAttribute("aria-describedby");
     expect(helpId).toBeTruthy();
     const help = document.getElementById(helpId ?? "");
@@ -349,5 +354,18 @@ describe("who may create a proxy key", () => {
     expect(help?.textContent).toContain("Ask an admin of this team to create the key.");
     expect(help?.textContent).toContain("set the workspace switcher to Personal");
     expect(screen.getByRole("link", { name: "Settings → API keys" }).getAttribute("href")).toBe("/settings/api-keys");
+  });
+
+  it("tells a blocked member that pass-through mode needs their own provider key", () => {
+    teamId = "team-1";
+    teamRole = "member";
+    settingsResult = { data: { enabled: true, mode: "passthrough" }, isLoading: false };
+    render(<SettingsProxyPage />);
+    const helpId = screen
+      .getByRole("button", { name: "Create proxy key" })
+      .getAttribute("aria-describedby");
+    const help = document.getElementById(helpId ?? "");
+    expect(help?.textContent).toContain("pass-through mode");
+    expect(help?.textContent).toContain("you must also supply your own provider key");
   });
 });

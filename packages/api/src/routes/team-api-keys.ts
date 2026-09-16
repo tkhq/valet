@@ -17,6 +17,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { apikey } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember, lockTeamForOwnership } from "../services/teams.js";
+import { TEAM_ADMIN_REQUIRED_CODE } from "../services/team-deletion-access.js";
 import { isOrgAdmin } from "../services/org.js";
 import { parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import type { CreateTeamApiKeyResponse, ListTeamApiKeysResponse, TeamApiKeySummary } from "../wire/types.js";
@@ -36,6 +37,16 @@ export const TEAM_KEY_ADMIN_REQUIRED =
   "Only a team admin or an organization admin can create a key for this team. " +
   "Ask an admin of this team to create the key. " +
   "To create your own key, set the workspace switcher to Personal.";
+
+/**
+ * The refusal body for that member. It carries the shared
+ * `team_admin_required` code, the same discriminator the delete path on this
+ * resource sends, so one client branch answers both. It carries no
+ * `requestId`: a deletion request has no create counterpart.
+ */
+function adminRequiredBody(teamId: string) {
+  return { error: TEAM_KEY_ADMIN_REQUIRED, code: TEAM_ADMIN_REQUIRED_CODE, teamId };
+}
 
 /** What the caller may do with team keys on this team. */
 type TeamKeyCreateAccess = "allowed" | "member-only" | "hidden";
@@ -131,7 +142,7 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   const teamId = c.req.param("id");
   const access = await teamKeyCreateAccess(db, user.orgId, teamId, user.id);
   if (access === "hidden") return c.json({ error: "team not found" }, 404);
-  if (access === "member-only") return c.json({ error: TEAM_KEY_ADMIN_REQUIRED }, 403);
+  if (access === "member-only") return c.json(adminRequiredBody(teamId), 403);
 
   let raw: unknown;
   try {
@@ -186,7 +197,7 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
     }
   }
   if (pinResult === "not-found") return c.json({ error: "team not found" }, 404);
-  if (pinResult === "forbidden") return c.json({ error: TEAM_KEY_ADMIN_REQUIRED }, 403);
+  if (pinResult === "forbidden") return c.json(adminRequiredBody(teamId), 403);
   if (pinResult === "failed") {
     return c.json({ error: "Couldn't pin the API key to this team. Retry the create." }, 500);
   }

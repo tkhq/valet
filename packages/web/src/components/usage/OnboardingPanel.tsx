@@ -10,7 +10,7 @@
  *   3. Configure your tool
  *   4. Run it
  */
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { errorText } from "~/lib/error-text";
 import { useCreateApiKey, type CreatedApiKey } from "~/api/api-keys";
@@ -294,10 +294,6 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: Ke
   );
 }
 
-/** Ties the disabled create button to the paragraphs that name who can
- * create the key and what the reader does next. */
-const BLOCKED_HELP_ID = "proxy-key-create-blocked";
-
 export interface OnboardingPanelProps {
   settingsQuery: {
     data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined;
@@ -337,6 +333,13 @@ function PersonalOnboardingFlow(props: OnboardingPanelProps) {
 
 function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = false, creation }: OnboardingPanelProps & { creation: NonNullable<OnboardingPanelProps["creation"]> }) {
   const [createdKey, setCreatedKey] = useState<Pick<CreatedApiKey, "key"> | null>(null);
+  // Ties the blocked create button to the paragraphs that name who can create
+  // the key and what the reader does next. Two panels on one page must not
+  // share the id, so it comes from the hook, not a module constant.
+  const blockedHelpId = useId();
+  // The blocked copy speaks only about a team. A caller that blocks creation
+  // in another scope gets no team instructions.
+  const blocked = team && !creation.canCreate;
 
   if (createdKey) {
     return (
@@ -374,10 +377,14 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
               ? "Create a shared team key for Claude Code or Codex. Requests and spend belong to this team."
               : "Create a key to route your Claude Code or Codex requests through the recording proxy. Usage is tracked per key."}
           </p>
-          {!creation.canCreate && (
-            <div id={BLOCKED_HELP_ID} className="mb-4 space-y-2 text-sm text-muted">
+          {blocked && (
+            <div id={blockedHelpId} className="mb-4 space-y-2 text-sm text-muted">
               <p>Only a team admin or an organization admin can create a shared key for this team. Ask an admin of this team to create the key.</p>
-              <p>To create your own key, set the workspace switcher to Personal. This page then makes a personal proxy key.</p>
+              {settingsQuery.data?.mode === "passthrough" ? (
+                <p>This gateway runs in pass-through mode. To create your own key, set the workspace switcher to Personal. This page then makes a personal proxy key, and you must also supply your own provider key with it.</p>
+              ) : (
+                <p>To create your own key, set the workspace switcher to Personal. This page then makes a personal proxy key.</p>
+              )}
               <p>Team key names are in <Link to="/settings/api-keys" className="underline">Settings → API keys</Link>. A stored secret cannot be read again.</p>
             </div>
           )}
@@ -389,9 +396,17 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
             onClick={() => {
               if (creation.canCreate && !creation.isPending) creation.create(setCreatedKey);
             }}
-            disabled={!creation.canCreate || creation.isPending}
-            aria-describedby={creation.canCreate ? undefined : BLOCKED_HELP_ID}
-            className="rounded px-4 py-2 text-sm bg-moss text-white hover:bg-moss/90 disabled:opacity-50"
+            // A blocked member must still reach this control with the
+            // keyboard, or the explanation above it is never announced on
+            // focus. `disabled` removes a button from the tab order, so the
+            // permission refusal is inert, not disabled. The click guard
+            // above refuses the click. A pending create keeps the hard
+            // `disabled`: that state is short and it must not queue a second
+            // create.
+            aria-disabled={!creation.canCreate || undefined}
+            disabled={creation.isPending}
+            aria-describedby={blocked ? blockedHelpId : undefined}
+            className={`rounded px-4 py-2 text-sm bg-moss text-white disabled:opacity-50 ${creation.canCreate ? "hover:bg-moss/90" : "opacity-50"}`}
           >
             {creation.isPending ? "Creating…" : "Create proxy key"}
           </button>

@@ -367,4 +367,8 @@ The blocked state on `/settings/proxy` states three things:
 2. Ask an admin of this team to create the key.
 3. To create your own key, set the workspace switcher to Personal.
 
-The disabled button points at that explanation with `aria-describedby`, so a screen reader reads the rule with the control.
+In pass-through mode the third statement adds that the member must also supply a provider key, because a personal proxy key alone forwards no credential.
+
+The copy speaks about a team, so the panel shows it only in a team workspace. A caller that blocks creation in another scope gets no team instructions.
+
+The blocked button is inert, not disabled: it carries `aria-disabled` and points at the explanation with `aria-describedby`. A `disabled` button leaves the tab order, so a keyboard reader never lands on it and never hears the reason. The click handler refuses the click. A pending create still uses `disabled`, because that state is short and a second create must not queue.
