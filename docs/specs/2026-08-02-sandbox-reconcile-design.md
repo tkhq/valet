@@ -196,6 +196,10 @@ Disabling the setting preserves existing sources, images, and session bindings. 
 Enabling the setting permits new anonymous bakes. A new binding can create a missing source.
 
 
+### Preparation failure details
+
+`SandboxPreparationError` retains the original rejection in `cause`. Its message includes the cause's string `message` and string or numeric `code`, when available. Other objects use JSON serialization. If serialization fails, safe string conversion provides a fallback without replacing the preparation error.
+
 ### Resume restoration (TKAI-427)
 
 `PrepStep.afterResume(sandbox)` restores container state before the attachment becomes ready. The attachment awaits callbacks in prep-step order after provider resume and credential-secret refresh. Each callback runs on every wake, even when the provider retained `applied.json`. `critical` applies to both cold preparation and resume restoration. Required initialization cannot become optional across container epochs.

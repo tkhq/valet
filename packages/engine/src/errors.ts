@@ -225,8 +225,33 @@ export class SandboxPreparationError extends Error {
   readonly code = "sandbox_preparation_failed";
 
   constructor(public readonly cause?: unknown) {
-    super(`sandbox preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    super(`sandbox preparation failed: ${formatPreparationCause(cause)}`);
     this.name = "SandboxPreparationError";
+  }
+}
+
+function formatPreparationCause(cause: unknown): string {
+  if (cause !== null && typeof cause === "object") {
+    try {
+      const message = "message" in cause && typeof cause.message === "string" ? cause.message : "";
+      const code = "code" in cause && (typeof cause.code === "string" || typeof cause.code === "number")
+        ? String(cause.code) : "";
+      if (message && code) return `${message} (${code})`;
+      if (message || code) return message || code;
+    } catch {
+      // Provider objects can expose getters that throw. Try JSON next.
+    }
+    try {
+      const json = JSON.stringify(cause);
+      if (json !== undefined) return json;
+    } catch {
+      // Circular objects and custom serializers must not hide the prep failure.
+    }
+  }
+  try {
+    return String(cause);
+  } catch {
+    return "unserializable cause";
   }
 }
 
