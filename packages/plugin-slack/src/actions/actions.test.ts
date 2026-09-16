@@ -10,6 +10,7 @@ import type {
   ToolContext,
 } from '@valet/engine';
 import { slackPlugin } from './actions.js';
+import { clearChannelNameCache } from './channel-names.js';
 import { SLACK_TEXT_LIMIT } from '../message-chunking.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
@@ -65,7 +66,10 @@ function jsonResponse(status: number, body: unknown): Response {
  *  before the action's own fetch mocks are consumed. */
 function mockGuardAllowsPublicChannel(fetchMock: ReturnType<typeof vi.fn>): void {
   fetchMock.mockResolvedValueOnce(
-    jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }),
+    jsonResponse(200, {
+      ok: true,
+      channel: { id: 'C1', name: 'general', is_private: false, is_im: false, is_mpim: false },
+    }),
   );
 }
 
@@ -73,6 +77,8 @@ describe('slack actions', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // The name cache lives at module level, so one case must not answer another.
+    clearChannelNameCache();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
@@ -396,6 +402,99 @@ describe('slack actions', () => {
     expect(url).toContain('https://slack.com/api/conversations.replies');
     expect(url).toContain('ts=1.1');
     expect(result).toMatchObject({ success: true, data: { has_more: false, total: 1 } });
+  });
+
+  it('read_history names the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    // The messages carry no user id, so nothing else reads the Slack API and
+    // the request count stays exact.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // The access guard already read conversations.info, so the name needs no
+    // second request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 1 },
+    });
+  });
+
+  it('read_thread names the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'reply', ts: '1.2' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 1 },
+    });
+  });
+
+  it('read_history returns the messages when Slack gives the channel no name', async () => {
+    // conversations.info answers the guard but carries no name, as it does for
+    // a direct message. The read must still return the messages.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // An unnamed conversation is not looked up again.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ success: true, data: { channel: 'C1', total: 1 } });
+    expect(result).not.toHaveProperty('data.channel_name');
+  });
+
+  it('read_thread returns the replies when a name lookup fails', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.2' }], has_more: false }),
+      )
+      // The mentioned channel cannot be read, so its name stays unresolved.
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
+
+    const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        channel: 'C1',
+        channel_name: 'general',
+        total: 1,
+        messages: [{ text: 'moved to #C2' }],
+      },
+    });
+  });
+
+  it('read_history resolves a channel mention in message text', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.1' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C2', name: 'random' } }));
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    const [mentionUrl] = fetchMock.mock.calls[2] as [string, RequestInit];
+    expect(mentionUrl).toContain('https://slack.com/api/conversations.info');
+    expect(mentionUrl).toContain('channel=C2');
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel_name: 'general', messages: [{ text: 'moved to #random (C2)' }] },
+    });
   });
 
   it('list_users lists non-bot, non-deleted members', async () => {

@@ -24,8 +24,14 @@ async function checkPrivateChannelAccess(
   token: string,
   channelId: string,
   ownerSlackUserId: string | undefined,
-): Promise<{ allowed: boolean; isPrivate: boolean; error?: string }>
+): Promise<{ allowed: boolean; isPrivate: boolean; name?: string; error?: string }>
 ```
+
+The helper reads `conversations.info`, so it returns the channel name with the
+access answer. A caller that labels the channel then needs no second request.
+The name is absent for a conversation Slack gives no name, such as a direct
+message, and for a denied check. See the channel name section of
+`2026-05-01-slack-data-enrichment-design.md`.
 
 Logic:
 1. Call `conversations.info` to get channel metadata

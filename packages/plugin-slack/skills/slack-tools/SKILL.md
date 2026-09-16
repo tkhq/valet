@@ -14,6 +14,14 @@ Use `slack.list_channels` to find channel IDs. Use `slack.read_history` to read 
 - **`oldest` / `latest`** -- narrow to a time window instead of paging through everything
 - System messages (joins, topic changes) are filtered out by default. Pass `include_subtypes: true` if you need them.
 
+## Channel Names
+
+`read_history`, `read_thread`, and `get_pins` return the channel ID in `channel` and the readable name in `channel_name`. Name the channel by `channel_name` when you write to a person, for example `#alerts`. Keep the ID for tool arguments and for a follow-up read. Never show a raw `C...` ID as the name of a channel.
+
+`channel_name` is absent when Slack gives the conversation no name, such as a direct message. In that case describe the conversation instead of printing the ID.
+
+Channel mentions inside message text are resolved to `#name (C...)`. Use the name in what you write, and keep the ID if you must read that channel next.
+
 ## Understanding Context Signals
 
 Messages include **reactions** (name + count) that signal consensus and attention. A message with 5 thumbsup is important; one with no reactions may not be. Use reactions to prioritize what to read deeper.
