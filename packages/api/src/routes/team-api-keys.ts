@@ -11,8 +11,9 @@ import { deleteTeamApiKey } from "../services/team-resource-deletion.js";
  * longer owns.
  */
 import { Hono } from "hono";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
+import type { AppQueryable } from "../lib/drizzle.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { apikey } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember, lockTeamForOwnership } from "../services/teams.js";
@@ -24,6 +25,36 @@ export const teamApiKeysRouter = new Hono<AppEnv>();
 
 const TEAM_KEY_AUTH_REQUIRED =
   "Team API keys need a signed-in session. Sign in and open the team workspace.";
+
+/**
+ * Refusal copy for a team member who is not an admin. The member already
+ * knows the team exists, so the answer names the rule and the two actions
+ * that get them a key. A caller who cannot see the team at all keeps the
+ * 404 that hides it.
+ */
+export const TEAM_KEY_ADMIN_REQUIRED =
+  "Only a team admin or an organization admin can create a key for this team. " +
+  "Ask an admin of this team to create the key. " +
+  "To create your own key, set the workspace switcher to Personal.";
+
+/** What the caller may do with team keys on this team. */
+type TeamKeyCreateAccess = "allowed" | "member-only" | "hidden";
+
+/**
+ * One definition of the create gate, used by the first check and by the
+ * re-check inside the ownership lock, so the two cannot drift.
+ */
+async function teamKeyCreateAccess(
+  db: AppQueryable,
+  orgId: string,
+  teamId: string,
+  userId: string,
+): Promise<TeamKeyCreateAccess> {
+  const team = await getTeamInOrg(db, orgId, teamId);
+  if (!team) return "hidden";
+  if (await canAdministerTeam(db, teamId, userId)) return "allowed";
+  return (await isTeamMember(db, teamId, userId)) ? "member-only" : "hidden";
+}
 
 async function canViewTeamKeys(
   db: AppEnv["Variables"]["providers"]["db"],
@@ -98,10 +129,9 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   }
   const { db } = c.var.providers;
   const teamId = c.req.param("id");
-  const team = await getTeamInOrg(db, user.orgId, teamId);
-  if (!team || !(await canAdministerTeam(db, teamId, user.id))) {
-    return c.json({ error: "team not found" }, 404);
-  }
+  const access = await teamKeyCreateAccess(db, user.orgId, teamId, user.id);
+  if (access === "hidden") return c.json({ error: "team not found" }, 404);
+  if (access === "member-only") return c.json({ error: TEAM_KEY_ADMIN_REQUIRED }, 403);
 
   let raw: unknown;
   try {
@@ -124,16 +154,17 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   if (!created?.key) {
     return c.json({ error: "Couldn't create the API key. Sign in again and retry." }, 500);
   }
-  let pinResult: "pinned" | "not-found" | "failed" = "failed";
+  let pinResult: "pinned" | "not-found" | "forbidden" | "failed" = "failed";
   try {
     pinResult = await db.transaction(async (tx) => {
       // Serialize the final pin with deleteTeam. All reads use tx: an outer
       // database call here would deadlock PGlite's single writer.
       await lockTeamForOwnership(tx, teamId);
-      const currentTeam = await getTeamInOrg(tx, user.orgId, teamId);
-      if (!currentTeam || !(await canAdministerTeam(tx, teamId, user.id))) {
-        return "not-found";
-      }
+      // A demotion that lands between the first check and the lock gets the
+      // same answer the first check gives, so the caller reads one rule.
+      const current = await teamKeyCreateAccess(tx, user.orgId, teamId, user.id);
+      if (current === "hidden") return "not-found";
+      if (current === "member-only") return "forbidden";
 
       const pin = JSON.stringify({ teamId, createdBy: user.id });
       await tx.update(apikey).set({ metadata: pin, teamId }).where(eq(apikey.id, created.id));
@@ -155,6 +186,7 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
     }
   }
   if (pinResult === "not-found") return c.json({ error: "team not found" }, 404);
+  if (pinResult === "forbidden") return c.json({ error: TEAM_KEY_ADMIN_REQUIRED }, 403);
   if (pinResult === "failed") {
     return c.json({ error: "Couldn't pin the API key to this team. Retry the create." }, 500);
   }

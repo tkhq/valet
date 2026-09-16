@@ -294,6 +294,10 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: Ke
   );
 }
 
+/** Ties the disabled create button to the paragraphs that name who can
+ * create the key and what the reader does next. */
+const BLOCKED_HELP_ID = "proxy-key-create-blocked";
+
 export interface OnboardingPanelProps {
   settingsQuery: {
     data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined;
@@ -371,7 +375,11 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
               : "Create a key to route your Claude Code or Codex requests through the recording proxy. Usage is tracked per key."}
           </p>
           {!creation.canCreate && (
-            <p className="mb-4 text-sm text-muted">A team or organization admin must create a shared key for you. Manage key names in <Link to="/settings/api-keys" className="underline">Settings → API keys</Link>. Existing secrets cannot be retrieved.</p>
+            <div id={BLOCKED_HELP_ID} className="mb-4 space-y-2 text-sm text-muted">
+              <p>Only a team admin or an organization admin can create a shared key for this team. Ask an admin of this team to create the key.</p>
+              <p>To create your own key, set the workspace switcher to Personal. This page then makes a personal proxy key.</p>
+              <p>Team key names are in <Link to="/settings/api-keys" className="underline">Settings → API keys</Link>. A stored secret cannot be read again.</p>
+            </div>
           )}
           {creation.error && (
             <p role="alert" className="mb-3 text-sm text-danger-600">{errorText(creation.error)}</p>
@@ -382,6 +390,7 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
               if (creation.canCreate && !creation.isPending) creation.create(setCreatedKey);
             }}
             disabled={!creation.canCreate || creation.isPending}
+            aria-describedby={creation.canCreate ? undefined : BLOCKED_HELP_ID}
             className="rounded px-4 py-2 text-sm bg-moss text-white hover:bg-moss/90 disabled:opacity-50"
           >
             {creation.isPending ? "Creating…" : "Create proxy key"}

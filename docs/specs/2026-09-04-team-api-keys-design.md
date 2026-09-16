@@ -107,3 +107,18 @@ The team key form states its mutation authority and lifetime before creation. Th
 TKAI-430 narrows workflow-definition deletion to human administrators. Team-key copy names this restriction; session deletion and other allowed workflow operations remain available.
 
 Team key controls discard drafts and revealed secrets after access errors or loss of admin rights. Late creation responses cannot reveal secrets after those transitions. The notice distinguishes visible key names from secrets, which are shown only once at creation.
+
+
+### Create refusal copy (TKAI-483)
+
+`POST /api/teams/:id/api-keys` answered every rejected caller with a 404 and the text "team not found". That answer is correct for a caller who cannot see the team. It is wrong for a member of the team, who already sees the team, its key names, and the workspace switcher entry. The member reads it as a broken route.
+
+The create path now sorts the caller into three cases through one helper:
+
+- A team admin or an organization admin creates the key.
+- A member of the team who is not an admin gets a 403 that names the rule and two actions: ask an admin of this team, or switch to the personal workspace and create a personal key.
+- Everyone else keeps the 404 that hides the team.
+
+The same helper runs again inside the team ownership lock, so a demotion that lands during the create gets the same answer as a demotion that lands before it. The minted key is still deleted on every refusal, and no secret is returned.
+
+This changes no permission. A member could not create a team key before, and cannot now.
