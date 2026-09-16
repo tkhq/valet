@@ -18,7 +18,7 @@ import {
   SandboxStartupError,
   SandboxUnavailableError,
   WorkspaceProvisioningError,
-  formatSandboxErrorCause,
+  formatSandboxErrorLog,
 } from "../errors.js";
 import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
 import { nestedKubernetesDecision, NESTED_KUBERNETES_UNSUPPORTED } from "./nested-kubernetes.js";
@@ -587,7 +587,7 @@ export class SandboxAttachment {
       this.observation = this.observationFromApplied(landed, epoch);
     } catch (err) {
       // reconcile never throws — the existing failure paths own degradation.
-      console.error("SandboxAttachment.reconcile failed", formatSandboxErrorCause(err));
+      console.error("SandboxAttachment.reconcile failed", formatSandboxErrorLog(err));
     }
   }
 

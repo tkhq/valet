@@ -7,7 +7,7 @@ import type {
   Sandbox,
   WorkspaceGrowth,
 } from "../types.js";
-import { SandboxEvictedError, SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
+import { SandboxConnectionError, SandboxEvictedError, SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
 import { attrTruncate, withSpan } from "../tracing.js";
 import { recordSandboxExec, recordSandboxWorkspaceGrow } from "../metrics.js";
 import type { SandboxAttachment } from "./attachment.js";
@@ -26,8 +26,16 @@ const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
  */
 export const CONTAINER_DEATH_PATTERN = /No such container|is not running|Connection refused|socket hang up/i;
 
-/** Classify original causes independently of bounded, user-facing messages. */
+/** Inspect original causes only for failures identified at a connection boundary. */
 export function isSandboxTransportError(err: unknown): boolean {
+  try {
+    if (!(err instanceof SandboxConnectionError)) {
+      // Preserve existing classification for ordinary provider errors.
+      return err instanceof Error && CONTAINER_DEATH_PATTERN.test(err.message);
+    }
+  } catch {
+    return false;
+  }
   const pending: unknown[] = [err];
   const seen = new Set<object>();
   for (let visited = 0; pending.length && visited < 16; visited++) {

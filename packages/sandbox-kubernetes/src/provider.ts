@@ -67,7 +67,7 @@ import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { isSandboxTransportError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
+import { formatSandboxErrorCause, isSandboxTransportError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -82,7 +82,7 @@ import type {
   SandboxStatus,
   WorkspaceGrowth,
 } from "@valet/engine";
-import { execInPod, PodExecTransportError, type ExecDeps, type PodExecApi } from "./exec.js";
+import { execInPod, type ExecDeps, type PodExecApi } from "./exec.js";
 import {
   mkdirInPod,
   PodFileOpError,
@@ -531,9 +531,7 @@ export class KubernetesSandbox implements Sandbox {
    * for a missing file).
    */
   private async translateDeath(podName: string, dispatchUid: string | null, err: unknown): Promise<never> {
-    const error = err instanceof Error ? err : new PodExecTransportError(
-      this.deps.cfg.namespace, podName, SANDBOX_CONTAINER_NAME, err,
-    );
+    const error = err instanceof Error ? err : new Error(formatSandboxErrorCause(err), { cause: err });
     if (error instanceof SandboxEvictedError) throw error;
     await this.checkEviction(podName, dispatchUid);
     if (isSandboxTransportError(error)) throw error;

@@ -1,8 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { SandboxPreparationError } from "../src/errors.js";
+import { formatSandboxErrorLog, SandboxPreparationError } from "../src/errors.js";
+
+describe("sandbox error logs", () => {
+  it("retains call frames when the error message exceeds the display limit", () => {
+    const cause = new TypeError("x".repeat(3000));
+    const logged = formatSandboxErrorLog(cause);
+    expect(logged.message.length).toBeLessThanOrEqual(2048);
+    expect(logged.stack).toBe(cause.stack);
+    expect(logged.stack).toContain("\n    at ");
+  });
+
+  it("retains readable diagnostics when the stack getter throws", () => {
+    const cause = new TypeError("reconcile failed");
+    Object.defineProperty(cause, "stack", { get() { throw new Error("unreadable stack"); } });
+    expect(formatSandboxErrorLog(cause)).toEqual({ name: "TypeError", message: "reconcile failed" });
+  });
+
+  it("tolerates a revoked proxy instead of failing the reconcile logger", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    expect(formatSandboxErrorLog(proxy)).toEqual({ message: "unserializable cause" });
+  });
+});
 
 describe("SandboxPreparationError", () => {
-  it("reports an unknown rejection shape as JSON", () => {
+  it.each(["href", "uri", "endpoint", "address", "jwt", "bearer", "signature", "sshKey", "unrecognizedField"])(
+    "does not copy arbitrary scalar fields such as %s into diagnostics", (field) => {
+      const cause = { failure: "mount denied", [field]: "PRIVATE_PROVIDER_DATA" };
+      expect(new SandboxPreparationError(cause).message).toBe(
+        'sandbox preparation failed: {"failure":"mount denied"}',
+      );
+    },
+  );
+
+  it("does not report truncated diagnostics when only private fields exist", () => {
+    const cause = Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`token${index}`, "secret"]));
+    expect(new SandboxPreparationError(cause).message).toBe("sandbox preparation failed: unserializable cause");
+  });
+
+  it("reports allowlisted fallback diagnostics as JSON", () => {
     const cause = { failure: "mount denied", retryable: false, attempts: 3 };
     expect(new SandboxPreparationError(cause).message).toBe(
       'sandbox preparation failed: {"failure":"mount denied","retryable":false,"attempts":3}',
@@ -20,15 +56,15 @@ describe("SandboxPreparationError", () => {
       variables: [{ name: "API_TOKEN", value: "secret" }],
     };
     expect(new SandboxPreparationError(cause).message).toBe(
-      'sandbox preparation failed: {"failure":"mount denied","metadata":"[object]","variables":"[array]"}',
+      'sandbox preparation failed: {"failure":"mount denied"}',
     );
   });
 
-  it("describes nested values and bigint without losing sibling diagnostics", () => {
-    const cause: Record<string, unknown> = { failure: "mount denied", count: 1n };
-    cause.self = cause;
+  it("describes nested diagnostic values and bigint without copying their contents", () => {
+    const cause: Record<string, unknown> = { attempts: 1n };
+    cause.failure = cause;
     expect(new SandboxPreparationError(cause).message).toContain(
-      '{"failure":"mount denied","count":"1","self":"[object]"}',
+      '{"failure":"[object]","attempts":"1"}',
     );
   });
 
@@ -36,7 +72,7 @@ describe("SandboxPreparationError", () => {
     let calls = 0;
     const cause = {
       failure: "mount denied",
-      get extra(): string { calls++; throw new Error("getter must not run"); },
+      get retryable(): string { calls++; throw new Error("getter must not run"); },
       toJSON() { calls++; throw new Error("serializer must not run"); },
       toString() { calls++; throw new Error("conversion must not run"); },
     };
@@ -46,7 +82,7 @@ describe("SandboxPreparationError", () => {
     expect(calls).toBe(0);
   });
 
-  it("bounds unknown fields before rendering the fallback", () => {
+  it("bounds diagnostic fields before rendering the fallback", () => {
     const error = new SandboxPreparationError({ failure: "x".repeat(100_000) });
     expect(error.message.length).toBeLessThanOrEqual("sandbox preparation failed: ".length + 2048);
     expect(error.message).toContain("[truncated]");
@@ -64,12 +100,11 @@ describe("SandboxPreparationError", () => {
     expect(new SandboxPreparationError(proxy).message).toContain("unserializable cause");
   });
 
-  it("limits the number of copied fields", () => {
+  it("finds known diagnostics without enumerating unknown fields", () => {
     const cause = Object.fromEntries(Array.from({ length: 1000 }, (_, index) => [`f${index}`, index]));
-    const error = new SandboxPreparationError(cause);
-    expect(error.message).toContain('"f63":63');
-    expect(error.message).not.toContain('"f64":64');
-    expect(error.message).toContain("[truncated]");
+    cause.failure = "mount denied";
+    const proxy = new Proxy(cause, { ownKeys() { throw new Error("must not enumerate"); } });
+    expect(new SandboxPreparationError(proxy).message).toBe('sandbox preparation failed: {"failure":"mount denied"}');
   });
 
   it("does not enumerate nested payloads", () => {
@@ -80,9 +115,9 @@ describe("SandboxPreparationError", () => {
   });
 
   it("retains diagnostics when a proxy rejects one property descriptor", () => {
-    const cause = new Proxy({ failure: "mount denied", inaccessible: "secret" }, {
+    const cause = new Proxy({ failure: "mount denied", retryable: false }, {
       getOwnPropertyDescriptor(target, key) {
-        if (key === "inaccessible") throw new Error("descriptor failed");
+        if (key === "retryable") throw new Error("descriptor failed");
         return Reflect.getOwnPropertyDescriptor(target, key);
       },
     });

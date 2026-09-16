@@ -23,7 +23,7 @@
 import { PassThrough } from "node:stream";
 import type { Readable as ReadableStream, Writable as WritableStream } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
-import { CappedOutputBuffer, formatSandboxErrorCause, type ExecOpts, type ExecResult } from "@valet/engine";
+import { CappedOutputBuffer, SandboxConnectionError, formatSandboxErrorCause, type ExecOpts, type ExecResult } from "@valet/engine";
 
 /** Directory the job-mode protocol (jobs.ts) writes its `{execId}.{out,exit,pid}`
  * files into. Exported here (rather than jobs.ts) since exec.ts's quoting
@@ -143,18 +143,19 @@ export class PodExecStatusError extends Error {
 }
 
 /** Normalize client-node's WebSocket ErrorEvent before provider classification. */
-export class PodExecTransportError extends Error {
+export class PodExecTransportError extends SandboxConnectionError {
   readonly code = "sandbox_exec_transport_failed";
 
   constructor(
     readonly namespace: string,
     readonly podName: string,
     readonly containerName: string,
-    readonly cause: unknown,
+    cause: unknown,
   ) {
     super(
       `Kubernetes exec connection failed for ${namespace}/${podName} (${containerName}): ` +
       `${formatExecTransportCause(cause)}. Check Kubernetes API access and the sandbox pod status before retrying.`,
+      cause,
     );
     this.name = "PodExecTransportError";
   }

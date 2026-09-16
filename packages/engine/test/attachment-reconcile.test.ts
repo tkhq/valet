@@ -375,15 +375,18 @@ describe("SandboxAttachment.reconcile", () => {
     await att.destroy();
   });
 
-  it("logs in-place prep diagnostics without inspecting retained request causes", async () => {
+  it("logs error names and stacks without inspecting retained request causes", async () => {
     const fake = new FakeSpecProvider({ specHash: "h1", steps: [] });
     const att = await reachReady(new RecordingProvider(), fake);
-    const failure = new Error("exec connection failed", { cause: { target: { url: "SECRET_COMMAND" } } });
+    const failure = new TypeError("exec connection failed", { cause: { target: { url: "SECRET_COMMAND" } } });
     fake.spec = { specHash: "h2", steps: [step("s1", "h2", async () => { throw failure; })] };
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await att.reconcile();
-      expect(log).toHaveBeenCalledWith("SandboxAttachment.reconcile failed", "exec connection failed");
+      expect(log).toHaveBeenCalledWith("SandboxAttachment.reconcile failed", {
+        name: "TypeError", message: "exec connection failed", stack: failure.stack,
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toContain("SECRET_COMMAND");
     } finally {
       log.mockRestore();
       await att.destroy();

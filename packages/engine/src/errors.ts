@@ -250,39 +250,23 @@ function preparationField(cause: object, key: string): string | number | undefin
   return undefined;
 }
 
-// Unknown fields can contain diagnostics or private payloads. Keep scalar
-// diagnostics, but describe nested values without copying their contents.
-const PRIVATE_PREPARATION_FIELD = /auth|cookie|token|secret|pass(?:word|phrase)|^pass$|credential|api.?key|private.?key|keydata|^key$|headers?|command|config|body|payload|request|response|std(?:in|out|err)|environment|^env|^data$|^url$|^cmd$|^args?$|^argv$|^arguments$|^input$|^output$/i;
-
 function preparationFallback(cause: object): string {
-  try {
-    const entries: [string, string | number | boolean | null][] = [];
-    const keys = Object.getOwnPropertyNames(cause);
-    for (const key of keys.slice(0, 64)) {
-      if (PRIVATE_PREPARATION_FIELD.test(key.replace(/[^a-z0-9]/gi, ""))) continue;
-      // Do not invoke accessors or provider serialization methods.
-      try {
-        const descriptor = Object.getOwnPropertyDescriptor(cause, key);
-        if (!descriptor?.enumerable || !("value" in descriptor)) continue;
-        const value: unknown = descriptor.value;
-        let detail: string | number | boolean | null;
-        if (typeof value === "string") detail = boundPreparationDetail(value);
-        else if (typeof value === "bigint") detail = boundPreparationDetail(String(value));
-        else if (value === null || typeof value === "number" || typeof value === "boolean") detail = value;
-        else if (typeof value === "object") detail = Array.isArray(value) ? "[array]" : "[object]";
-        else continue;
-        entries.push([boundPreparationDetail(key), detail]);
-      } catch {
-        // A proxy can reject one field while other fields remain readable.
-      }
+  const details: Record<string, string | number | boolean | null> = {};
+  // Read only known diagnostic fields. Unknown scalar fields can hold secrets.
+  for (const key of ["failure", "retryable", "attempts"]) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(cause, key);
+      if (!descriptor?.enumerable || !("value" in descriptor)) continue;
+      const value: unknown = descriptor.value;
+      if (typeof value === "string") details[key] = boundPreparationDetail(value);
+      else if (typeof value === "bigint") details[key] = boundPreparationDetail(String(value));
+      else if (value === null || typeof value === "number" || typeof value === "boolean") details[key] = value;
+      else if (typeof value === "object") details[key] = Array.isArray(value) ? "[array]" : "[object]";
+    } catch {
+      // A proxy can reject one field while other fields remain readable.
     }
-    if (keys.length > 64) entries.push(["[truncated]", "[truncated]"]);
-    return entries.length
-      ? boundPreparationDetail(JSON.stringify(Object.fromEntries(entries)))
-      : "unserializable cause";
-  } catch {
-    return "unserializable cause";
   }
+  return Object.keys(details).length ? boundPreparationDetail(JSON.stringify(details)) : "unserializable cause";
 }
 
 /** Bounded sandbox diagnostics. Excludes private payloads and serialization hooks. */
@@ -311,6 +295,31 @@ export function formatSandboxErrorCause(cause: unknown): string {
       : preparationFallback(cause);
   }
   return boundPreparationDetail(String(cause));
+}
+
+/** Keep first-party stack traces without inspecting retained request causes. */
+export function formatSandboxErrorLog(cause: unknown): { message: string; name?: string; stack?: string } {
+  const details: { message: string; name?: string; stack?: string } = { message: formatSandboxErrorCause(cause) };
+  try {
+    if (cause instanceof Error) {
+      const name = preparationField(cause, "name");
+      if (typeof name === "string") details.name = name;
+      // A long message must not displace every frame from the logged stack.
+      const stack: unknown = Reflect.get(cause, "stack");
+      if (typeof stack === "string") details.stack = stack;
+    }
+  } catch {
+    // Revoked proxies and throwing stack getters must not fail logging.
+  }
+  return details;
+}
+
+/** Provider connection failure. Retains the cause for transport classification. */
+export class SandboxConnectionError extends Error {
+  constructor(message: string, public readonly cause: unknown) {
+    super(message);
+    this.name = "SandboxConnectionError";
+  }
 }
 
 /**

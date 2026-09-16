@@ -21,6 +21,7 @@ export {
   SandboxEvictedError,
   SandboxStartupError,
   SandboxPreparationError,
+  SandboxConnectionError,
   formatSandboxErrorCause,
 } from "./errors.js";
 export {
