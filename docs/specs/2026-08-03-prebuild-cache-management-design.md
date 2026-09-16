@@ -60,7 +60,7 @@ Three distinct things accumulate:
 - Build-cache prune helper — a small pure `buildCachePruneArgs(capGb)` → argv, plus the wiring: docker `ImageBuilder` calls it after a bake; `make` targets call `docker builder prune` post-build. `VALET_PREBUILD_BUILD_CACHE_GB` config.
 - `SourceService.enforceCacheCeiling(orgId)` — after a push: sum `size_bytes`, evict oldest non-current/non-live bakes until under `VALET_PREBUILD_CACHE_BUDGET_GB`; log when blocked by protected bakes. Backend-agnostic (delegates image delete to the existing `RetentionFn`).
 - Bake push path — record `size_bytes` on the pushed transition (docker inspect / registry manifest), then run `applyRetention` (floor) then `enforceCacheCeiling` (ceiling).
-- Registry GC — fix the CronJob command/manifest in the chart.
+- Registry GC: fix the CronJob command/manifest in the chart. Required pod affinity places GC on the registry node so both pods can mount the RWO PVC. The selector matches the release labels and the `registry` component in the same namespace. Neither pod currently sets tolerations; keep their tolerations aligned if registry scheduling changes. Affinity does not resolve the GC/write race. Before concurrent writes increase, add a read-only configuration switch or a maintenance window.
 - `deploy/README.md` note.
 
 ### Testing

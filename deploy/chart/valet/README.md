@@ -83,7 +83,7 @@ Namespace.
    release_namespace=valet
    sandbox_namespace=valet-sandboxes
    chart_ref=oci://ghcr.io/tkhq/charts/valet
-   chart_version=0.10.11
+   chart_version=0.10.12
    ```
 
 2. Add the keep annotation to the live Namespace.
