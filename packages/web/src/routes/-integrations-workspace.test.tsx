@@ -148,7 +148,13 @@ describe("Integrations workspace isolation", () => {
     expect(screen.queryByText("Linear")).toBeNull();
     await act(async () => rejectRead(new Error("Forbidden")));
     expect(await screen.findByText("Could not load credentials. Reload the page.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Disconnect|Stop sharing/ })).toBeNull();
+    // Credential-row controls name their service and their team, so this
+    // matches every one of them and no other resource's. The team 1Password
+    // token has its own query and its own failure state, so it is not part
+    // of what a failed credential read must hide.
+    expect(
+      screen.queryByRole("button", { name: /(Disconnect|Stop sharing) .+ (from|with) / }),
+    ).toBeNull();
     expect(screen.queryByRole("button", { name: "Share with a team" })).toBeNull();
   });
 
@@ -167,6 +173,18 @@ describe("Integrations workspace isolation", () => {
     expect(
       screen.getByRole("button", { name: "Share one of your connections with Team A" }),
     ).toBeTruthy();
+  });
+
+  // The generic create-only dialog cannot host a service-account token: the
+  // team list skips reserved rows so a live token never reads as occupied,
+  // and the team write upserts, so the dialog would replace it with no 409.
+  it("keeps 1Password out of the connect picker and offers the team token control instead", async () => {
+    teamId = "a";
+    teams = [team("a", "Team A", "admin")];
+    orgRole = "admin";
+    mount();
+    expect(await screen.findByRole("region", { name: "1Password for Team A" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
   });
 
   it("lets an org admin manage a team they are not on and reports delete errors", async () => {

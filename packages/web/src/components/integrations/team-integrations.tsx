@@ -4,6 +4,7 @@ import { Section } from "~/components/settings/section";
 import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
 import { PullFromPersonal } from "./pull-from-personal";
+import { TeamOnePasswordToken } from "~/components/settings/team-onepassword-token";
 
 /** Team summaries come from the member-visible endpoint, never the personal catalog. */
 export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: string }) {
@@ -45,6 +46,12 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   canMutate={canMutate}
                 />
                 <TeamConnectionSetup teamId={teamId} canManage={canMutate} orgAdmin={meQ.data?.orgRole === "admin"} />
+
+                {/* The team's own 1Password service account. It is what makes
+                    every op:// reference and valet-secrets work for this
+                    team's sessions, so it belongs on the page a person opens
+                    when they want the team to have 1Password. */}
+                <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />
 
                 <div className="flex flex-wrap items-center gap-3">
                   <PullFromPersonal teamId={teamId} teamName={team.name} />

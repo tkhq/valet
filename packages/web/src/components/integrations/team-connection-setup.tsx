@@ -32,7 +32,13 @@ export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
   const occupied = new Set(credentials.data?.credentials.map((c) => c.service));
   const choices = services.filter((s) => s.configKeys.length > 0 &&
     s.service !== "slack-user" && s.service !== "slack" && s.service !== "github" &&
-    s.connect !== "org" && !occupied.has(s.service))
+    // `onepassword` is a service-account TOKEN, not one service's credential.
+    // The team list skips reserved rows, so an already-connected token never
+    // reads as occupied here, and this dialog's create-only promise does not
+    // reach `mutateTeamOnePassword`, which upserts. It would replace a live
+    // team token with no 409 and no confirmation. `TeamOnePasswordToken` is
+    // the control for it, and the team Integrations page renders it.
+    s.service !== "onepassword" && s.connect !== "org" && !occupied.has(s.service))
     .sort((a, b) => displayName(a.service).localeCompare(displayName(b.service)));
 
   const available = choices.filter((s) => displayName(s.service).toLowerCase().includes(query.toLowerCase()));

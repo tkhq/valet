@@ -206,8 +206,8 @@ with the same admin/member split by owner type.
 
 ## Web UI
 
-1Password is a credential source, not a plugin. It has one home:
-two homes, split by what a token costs (amended 2026-09-15). The org-wide
+1Password is a credential source, not a plugin. It has two homes, split by
+what a token costs (amended 2026-09-15). The org-wide
 token sits on Organization · 1Password
 (`/settings/organization/onepassword`), beside GitHub and Slack: an admin
 gets its controls, a member gets its status and a line naming who may change
@@ -427,9 +427,9 @@ code as of the implementing commits:
 - **SDK failures never leak `err.message` or the secret reference to the
   client.** `wrapSdkError` logs the original rejection server-side and
   throws `OnePasswordAuthError` with the fixed text
-  `"1Password request failed"`. Known typed cases (missing token, personal
-  keep their hint. Routes map unknown rejections to 502 with
-  the same fixed text.
+  `"1Password request failed"`. A known typed case, such as a missing token,
+  keeps its hint. Routes map unknown rejections to 502 with the same fixed
+  text.
 - **Production OpenAI path uses `resolveUserCredentialRead` after the
   LLM-provider key probe.** When `db` is wired, `resolveOpenAiCredential`
   no longer does a raw `credentials.get` for the stored `"openai"` row, so

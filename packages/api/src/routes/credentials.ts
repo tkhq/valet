@@ -433,8 +433,8 @@ credentialsRouter.put("/:service", async (c) => {
 
   if (body.onepassword) {
     // Structural validation (reserved service name) takes precedence over
-    // the personal-toggle policy check below — a request naming the
-    // reserved service is malformed regardless of the org's toggle state.
+    // every policy check below — a request naming the reserved service is
+    // malformed whoever sends it.
     if (service === ONEPASSWORD_SERVICE) {
       return c.json({ error: "onepassword is a reserved service name" }, 400);
     }
