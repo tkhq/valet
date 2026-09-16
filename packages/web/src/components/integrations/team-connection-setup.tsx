@@ -32,7 +32,7 @@ export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
   const occupied = new Set(credentials.data?.credentials.map((c) => c.service));
   const choices = services.filter((s) => s.configKeys.length > 0 &&
     s.service !== "slack-user" && s.service !== "slack" && s.service !== "github" &&
-    s.service !== "onepassword" && s.connect !== "org" && !occupied.has(s.service))
+    s.connect !== "org" && !occupied.has(s.service))
     .sort((a, b) => displayName(a.service).localeCompare(displayName(b.service)));
 
   const available = choices.filter((s) => displayName(s.service).toLowerCase().includes(query.toLowerCase()));

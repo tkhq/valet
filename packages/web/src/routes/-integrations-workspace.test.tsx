@@ -161,8 +161,12 @@ describe("Integrations workspace isolation", () => {
     expect(screen.queryByRole("button", { name: /Disconnect|Stop sharing/ })).toBeNull();
     act(() => view.client.setQueryData<ListCredentialsResponse>(qkIntegrations.credentials("team", "a"), { credentials: [] }));
     expect(await screen.findByText(/No connections added to this team yet/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Switch to Personal" }));
-    expect(setKey).toHaveBeenCalledWith("user");
+    // A plain member may not remove a team connection, but sharing one of
+    // their OWN is the same write the personal page already allows, so the
+    // team page offers it here rather than sending them elsewhere.
+    expect(
+      screen.getByRole("button", { name: "Share one of your connections with Team A" }),
+    ).toBeTruthy();
   });
 
   it("lets an org admin manage a team they are not on and reports delete errors", async () => {

@@ -270,6 +270,7 @@ async function toSummary(
     identityOnly: metadata?.identityOnly === true ? true : undefined,
     refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
     onepasswordRef: onePasswordMeta(stored)?.reference,
+    onepasswordTokenScope: onePasswordMeta(stored)?.tokenScope,
     ...extra,
   };
 }

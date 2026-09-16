@@ -1,16 +1,15 @@
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
-import { Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
 import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
+import { PullFromPersonal } from "./pull-from-personal";
 
 /** Team summaries come from the member-visible endpoint, never the personal catalog. */
 export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: string }) {
   const teamsQ = useTeams();
   const meQ = useMe();
   const directoryQ = useOrgDirectory();
-  const { setKey } = useWorkspaceScope();
   const team = teamsQ.data?.teams.find((row) => row.id === teamId);
   const loading = teamsQ.isLoading || meQ.isLoading;
   const failed = teamsQ.error || meQ.error;
@@ -47,10 +46,13 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                 />
                 <TeamConnectionSetup teamId={teamId} canManage={canMutate} orgAdmin={meQ.data?.orgRole === "admin"} />
 
-                <p className="text-sm text-muted">
-                  Need to share a personal connection? Switch to Personal to share it explicitly.
-                </p>
-                <Button variant="secondary" onClick={() => setKey(PERSONAL)}>Switch to Personal</Button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <PullFromPersonal teamId={teamId} teamName={team.name} />
+                  <p className="text-sm text-muted">
+                    Shares one of your own connections with this team. You can also do it from
+                    Personal.
+                  </p>
+                </div>
               </div>
             </Section>
           )}
