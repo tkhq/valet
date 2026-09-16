@@ -101,7 +101,7 @@ export interface OnePasswordCtx {
  * the token worked and THIS reference did not resolve: a typo, or an item the
  * service account cannot read. The two are different corrective actions, so
  * a caller must not report one as the other. */
-export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope" | "reference" | "ambiguous";
+export type OnePasswordErrorKind = "no_token" | "sdk" | "scope" | "reference" | "ambiguous";
 
 export class OnePasswordAuthError extends Error {
   constructor(message: string, readonly kind: OnePasswordErrorKind = "sdk") {
@@ -111,7 +111,6 @@ export class OnePasswordAuthError extends Error {
 
 export interface OnePasswordDeps {
   credentials: CredentialStore;
-  getAllowPersonal: (orgId: string) => Promise<boolean>;
   /** Default: real SDK (lazy import), adapted into `OpClient`. */
   createClient?: (token: string) => Promise<OpClient>;
   /** Default: `Date.now`. Injectable for cache-TTL tests. */
@@ -319,15 +318,6 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     scope: OnePasswordScope,
     ctx: OnePasswordCtx,
   ): Promise<{ client: OpClient; token: string }> {
-    if (scope === "personal") {
-      const allowed = await deps.getAllowPersonal(ctx.orgId);
-      if (!allowed) {
-        throw new OnePasswordAuthError(
-          "Personal 1Password tokens are disabled by your organization.",
-          "disabled",
-        );
-      }
-    }
     const token = await requireToken(scope, ctx);
     let pending = clientCache.get(token);
     if (!pending) {

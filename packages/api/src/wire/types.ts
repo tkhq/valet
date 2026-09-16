@@ -3192,13 +3192,8 @@ export interface TeamOnePasswordStatusResponse {
 }
 
 export interface OnePasswordSettingsResponse {
-  allowPersonal: boolean;
   orgTokenConnected: boolean;
   personalTokenConnected: boolean;
-}
-
-export interface PutOnePasswordSettingsRequest {
-  allowPersonal: boolean;
 }
 
 export interface ListOpVaultsResponse {

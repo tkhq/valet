@@ -286,6 +286,81 @@ describe("buildActionInvoker", () => {
     expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org"] });
   });
 
+  // TKAI-487 / R3. The personal 1Password scope belongs to exactly one owner
+  // type. A team- or org-owned run is prompted and read by people other than
+  // the actor frozen onto it, so its reads must never reach that actor's own
+  // vault — the run's OWNER picks the scopes, never the actor.
+  describe("the personal 1Password scope follows the run owner, not the actor", () => {
+    /** Records every scope the vault lookup is asked for. */
+    function scopeRecordingOnePassword(): { onePassword: OnePasswordService; scopes: () => string[] } {
+      const seen: string[] = [];
+      const unused = () => {
+        throw new Error("not exercised by this suite");
+      };
+      return {
+        scopes: () => seen,
+        onePassword: {
+          tokenConnected: unused,
+          listVaults: unused,
+          resolveReference: unused,
+          findCandidates: async () => [],
+          resolveCredential: unused,
+          findCredentialForService: async (scope) => {
+            seen.push(scope);
+            return null;
+          },
+        },
+      };
+    }
+
+    async function invokeWith(owner: ActionInvocationContext, onePassword: OnePasswordService) {
+      const db = await makeDb();
+      await db.insert(orgs).values({ id: "org1", name: "Org", createdAt: 1 });
+      if (owner.owner.type === "team") {
+        await db.insert(teams).values({ id: owner.owner.id, orgId: "org1", name: "Team", createdAt: 1 });
+      }
+      const fixture = countingAction();
+      const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+      const invoke = buildActionInvoker({
+        db,
+        credentials: new FakeCredentialStore(),
+        actionPluginByService,
+        onePassword,
+      });
+      return invoke(
+        { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+        owner,
+      );
+    }
+
+    it("a user-owned run consults the personal vault", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(userOwner, onePassword);
+      expect(scopes()).toContain("personal");
+    });
+
+    // The acting member here is a real person with a real user id, which is
+    // the whole hazard: it is inert only because the owner picks the scopes.
+    it("a team-owned run reads the team vault and never the acting member's personal one", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(
+        { userId: "member-who-clicked", orgId: "org1", owner: { type: "team", id: "t1" } },
+        onePassword,
+      );
+      expect(scopes()).toContain("team");
+      expect(scopes()).not.toContain("personal");
+    });
+
+    it("an org-owned run never reads the acting member's personal vault", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(
+        { userId: "member-who-clicked", orgId: "org1", owner: { type: "org", id: "org1" } },
+        onePassword,
+      );
+      expect(scopes()).not.toContain("personal");
+    });
+  });
+
   it("team-owned run propagates its principal into a workflows tool action", async () => {
     const db = await makeDb();
     await db.insert(orgs).values({ id: "org1", name: "Org", createdAt: 1 });

@@ -1,12 +1,27 @@
 import { useEffect, useState } from "react";
 import { errorText } from "~/lib/error-text";
 import { useConnectCredential, useDisconnectCredential } from "~/api/integrations";
-import { useOnePasswordSettings, usePutOnePasswordSettings } from "~/api/onepassword";
+import { useOnePasswordSettings } from "~/api/onepassword";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, ConfirmDialog, Input, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Spinner } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
+
+/**
+ * Setup links. `www.1password.dev` is the current developer-docs host —
+ * `developer.1password.com` answers every path with a 301 to it. Creating a
+ * vault is an end-user task with no developer-docs page, so that one points
+ * at the support site.
+ */
+const OP_CREATE_VAULT_URL = "https://support.1password.com/create-share-vaults-teams/";
+const OP_SERVICE_ACCOUNT_URL = "https://www.1password.dev/service-accounts/get-started/";
+const OP_SECRET_REFERENCE_URL = "https://www.1password.dev/cli/secret-reference-syntax/";
+const VALET_SECRETS_GUIDE_URL =
+  "https://github.com/tkhq/valet/blob/dev-v2/docs/onepassword-secrets.md";
+
+/** Inline external link, the treatment the other setup pages already use. */
+const LINK = "text-moss underline";
 
 /**
  * The two removals differ in blast radius, so they get separate copy. A
@@ -25,10 +40,13 @@ const REMOVE_PERSONAL_TOKEN_NOTE =
   "token here.";
 
 /**
- * Organization · 1Password: the org service-account token (admin), the
- * allow-personal toggle (admin), and the personal token (when allowed).
- * Reference credentials are resolved from the vaults by item title, so
- * there is nothing to list here.
+ * Organization · 1Password: the org service-account token and the reader's
+ * own personal token, on one page for every role. An admin sets the org
+ * token; a member sees the same row with the status in place of the
+ * controls. A personal token is the member's own credential and needs no
+ * organization permission, so its row is always live. Reference credentials
+ * are resolved from the vaults by item title, so there is nothing to list
+ * here.
  */
 export function OnePasswordPanel() {
   const orgQ = useOrg();
@@ -42,10 +60,40 @@ export function OnePasswordPanel() {
     >
       <div className="flex items-start gap-3 py-4">
         <ServiceIcon slug="1password" label="1Password" />
-        <p className="text-sm text-muted">
-          Connect a service-account token, then attach an item to Linear or any other
-          service. The secret stays in 1Password.
-        </p>
+        <div className="space-y-2 text-sm text-muted">
+          <p>
+            Connect a service-account token, then attach an item to Linear or any other
+            service. The secret stays in 1Password, and an agent reads it at the moment it
+            runs.
+          </p>
+          <ol className="list-decimal space-y-1 pl-5">
+            <li>
+              <a className={LINK} href={OP_CREATE_VAULT_URL} target="_blank" rel="noreferrer">
+                Create a vault
+              </a>{" "}
+              and put the items an agent needs into it.
+            </li>
+            <li>
+              <a className={LINK} href={OP_SERVICE_ACCOUNT_URL} target="_blank" rel="noreferrer">
+                Create a service account
+              </a>{" "}
+              with read access to that vault. 1Password shows the token once, so copy it
+              before you leave the screen.
+            </li>
+            <li>Paste the token into a row below. Valet encrypts it and never shows it again.</li>
+          </ol>
+          <p>
+            An item is addressed by a{" "}
+            <a className={LINK} href={OP_SECRET_REFERENCE_URL} target="_blank" rel="noreferrer">
+              secret reference
+            </a>
+            , written <span className="font-mono">op://Vault/Item/field</span>. The{" "}
+            <a className={LINK} href={VALET_SECRETS_GUIDE_URL} target="_blank" rel="noreferrer">
+              secrets guide
+            </a>{" "}
+            shows how an agent uses one.
+          </p>
+        </div>
       </div>
 
       {settingsQ.isLoading && (
@@ -59,46 +107,43 @@ export function OnePasswordPanel() {
 
       {settingsQ.data && (
         <>
-          {isAdmin && (
-            <>
-              <OrgTokenRow connected={settingsQ.data.orgTokenConnected} />
-              <FieldRow
-                label="Allow personal tokens"
-                hint="Let members connect their own 1Password service account token."
-              >
-                <AllowPersonalSwitch checked={settingsQ.data.allowPersonal} />
-              </FieldRow>
-            </>
+          {isAdmin ? (
+            <OrgTokenRow connected={settingsQ.data.orgTokenConnected} />
+          ) : (
+            <OrgTokenStatus connected={settingsQ.data.orgTokenConnected} />
           )}
-          {settingsQ.data.allowPersonal && (
-            <PersonalTokenRow connected={settingsQ.data.personalTokenConnected} />
-          )}
-          {!isAdmin && !settingsQ.data.allowPersonal && !settingsQ.data.orgTokenConnected && (
-            <p className="py-2 text-sm text-muted">
-              An admin can connect an organization 1Password token on this page.
-            </p>
-          )}
+          <PersonalTokenRow connected={settingsQ.data.personalTokenConnected} />
         </>
       )}
     </Section>
   );
 }
 
-function AllowPersonalSwitch({ checked }: { checked: boolean }) {
-  const putSettings = usePutOnePasswordSettings();
+/**
+ * The org token as a plain member sees it: the same labelled row an admin
+ * gets, with the status where the controls are and a line naming who can
+ * change it. Read-only rather than hidden — a member who cannot find the row
+ * cannot tell a missing org token from a page that is not showing it, and
+ * both readings end in a support question. Same shape as the non-editable
+ * branch of `ProxyGovernance`.
+ */
+function OrgTokenStatus({ connected }: { connected: boolean }) {
   return (
-    <>
-      <Switch
-        checked={checked}
-        onCheckedChange={(next) => putSettings.mutate({ allowPersonal: next })}
-        aria-label="Allow personal tokens"
-      />
-      {putSettings.error && (
-        <p className="mt-1 text-xs text-danger-500">
-          {errorText(putSettings.error, "Couldn't save the setting.")}
+    <FieldRow
+      label="Organization token"
+      hint="A 1Password service account token shared across the organization."
+    >
+      <div className="space-y-1" role="group" aria-label="Organization token">
+        {connected ? (
+          <Badge variant="success">Connected</Badge>
+        ) : (
+          <p className="text-sm text-ink">Not connected</p>
+        )}
+        <p className="text-xs text-muted">
+          Only an organization admin can connect or remove this token.
         </p>
-      )}
-    </>
+      </div>
+    </FieldRow>
   );
 }
 
@@ -133,6 +178,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
         hint="A 1Password service account token shared across the organization."
       >
         <TokenFields
+          groupLabel="Organization token"
           connected={connected}
           token={token}
           onTokenChange={setToken}
@@ -198,10 +244,11 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
   return (
     <>
       <FieldRow
-        label="1Password personal token"
-        hint="Lets you reference items from your own 1Password vaults."
+        label="Personal token"
+        hint="Your own service account token. It reads items from your own vaults, for work you own."
       >
         <TokenFields
+          groupLabel="Personal token"
           connected={connected}
           token={token}
           onTokenChange={setToken}
@@ -241,6 +288,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
 }
 
 function TokenFields({
+  groupLabel,
   connected,
   token,
   onTokenChange,
@@ -253,6 +301,11 @@ function TokenFields({
   removeLabel,
   savedTick,
 }: {
+  /** Names this row's controls as a group. Both rows are on screen for every
+   *  role now, so "Connect", "Replace" and "Remove token" each appear twice
+   *  whenever the two rows are in the same state. Never equal to
+   *  `inputLabel`: both reach the accessibility tree as labels. */
+  groupLabel: string;
   connected: boolean;
   token: string;
   onTokenChange: (value: string) => void;
@@ -286,7 +339,7 @@ function TokenFields({
 
   if (connected && !entering) {
     return (
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label={groupLabel}>
         <Badge variant="success">Connected</Badge>
         <Button type="button" variant="ghost" size="sm" onClick={() => setEntering(true)}>
           Replace
@@ -299,7 +352,7 @@ function TokenFields({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" role="group" aria-label={groupLabel}>
       <div className="flex gap-2">
         <Input
           type="password"

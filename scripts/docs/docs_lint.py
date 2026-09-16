@@ -30,6 +30,7 @@ THRESHOLDS = {
     "deploy/README.md": 4.0,
     "deploy/chart/valet/README.md": 4.5,
     "docs/cli.md": 4.0,
+    "docs/onepassword-secrets.md": 2.5,
     "docs/architecture.md": 4.5,
     "docs/kubernetes.md": 4.5,
     "docs/security-model.md": 5.0,

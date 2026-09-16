@@ -4,7 +4,7 @@
  * read, and mutations that update the key they affect.
  */
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
-import type { OnePasswordSettingsResponse, PutOnePasswordSettingsRequest } from "@valet/api/wire";
+import type { OnePasswordSettingsResponse } from "@valet/api/wire";
 import { api } from "./client";
 
 export const onePasswordKeys = {
@@ -19,16 +19,6 @@ export function useOnePasswordSettings(
     queryKey: onePasswordKeys.settings(),
     queryFn: () => api.getOnePasswordSettings(),
     ...opts,
-  });
-}
-
-export function usePutOnePasswordSettings() {
-  const qc = useQueryClient();
-  return useMutation<OnePasswordSettingsResponse, Error, PutOnePasswordSettingsRequest>({
-    mutationFn: (body) => api.putOnePasswordSettings(body),
-    onSuccess: (data) => {
-      qc.setQueryData(onePasswordKeys.settings(), data);
-    },
   });
 }
 

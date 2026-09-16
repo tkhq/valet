@@ -10,7 +10,6 @@ import userEvent from "@testing-library/user-event";
 import type { OnePasswordSettingsResponse } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 
-const putSettingsMutate = vi.fn();
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const connectMutate = vi.fn();
 const disconnectMutate = vi.fn();
@@ -25,7 +24,6 @@ const disconnectReset = vi.fn(() => {
 let confirmSpy = vi.fn(() => true);
 let orgData: { callerRole: "admin" | "member" } = { callerRole: "admin" };
 let settingsData: OnePasswordSettingsResponse | undefined = {
-  allowPersonal: false,
   orgTokenConnected: false,
   personalTokenConnected: false,
 };
@@ -36,7 +34,6 @@ vi.mock("~/api/settings", () => ({
 
 vi.mock("~/api/onepassword", () => ({
   useOnePasswordSettings: () => ({ data: settingsData, isLoading: false, error: null }),
-  usePutOnePasswordSettings: () => ({ mutate: putSettingsMutate, isPending: false, error: null }),
 }));
 
 vi.mock("~/api/integrations", () => ({
@@ -61,7 +58,7 @@ describe("OnePasswordPanel", () => {
     vi.clearAllMocks();
     connectMutateAsync.mockResolvedValue({ ok: true });
     orgData = { callerRole: "admin" };
-    settingsData = { allowPersonal: false, orgTokenConnected: false, personalTokenConnected: false };
+    settingsData = { orgTokenConnected: false, personalTokenConnected: false };
     disconnectError = null;
     // Answers "yes" so a reintroduced `window.confirm` fires the mutation and
     // fails the dialog tests loudly instead of hanging.
@@ -69,25 +66,64 @@ describe("OnePasswordPanel", () => {
     vi.stubGlobal("confirm", confirmSpy);
   });
 
-  it("member with no tokens sees the empty copy, not the org token card or toggle", () => {
+  // Both rows render for every role now, so "Connect", "Replace" and
+  // "Remove token" each appear twice whenever the two rows are in the same
+  // state. The panel names each row's controls as a group; scope through
+  // these rather than matching a button name across the whole page.
+  const orgFields = () => within(screen.getByRole("group", { name: "Organization token" }));
+  const personalFields = () => within(screen.getByRole("group", { name: "Personal token" }));
+
+  it("member with no tokens sees the org row read-only and their own row live", () => {
     orgData = { callerRole: "member" };
     render(<OnePasswordPanel />);
+    expect(screen.getByText("Not connected")).toBeTruthy();
     expect(
-      screen.getByText("An admin can connect an organization 1Password token on this page."),
+      screen.getByText("Only an organization admin can connect or remove this token."),
     ).toBeTruthy();
     expect(screen.queryByLabelText("Organization 1Password token")).toBeNull();
-    expect(screen.queryByLabelText("Allow personal tokens")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Add from 1Password" })).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
   });
 
-  it("admin sees the token field and the allow-personal toggle", () => {
+  // TKAI-487: the state the bug report arrived in. An org token is connected
+  // and the reader is a plain member, which used to render an empty panel.
+  it("member with the org token connected sees the badge, who can change it, and no controls", () => {
+    orgData = { callerRole: "member" };
+    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
+    render(<OnePasswordPanel />);
+    expect(orgFields().getByText("Connected")).toBeTruthy();
+    expect(
+      screen.getByText("Only an organization admin can connect or remove this token."),
+    ).toBeTruthy();
+    expect(orgFields().queryByRole("button", { name: "Replace" })).toBeNull();
+    expect(orgFields().queryByRole("button", { name: "Remove token" })).toBeNull();
+    expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
+  });
+
+  // The structural guard for the shared page: it fails if anyone re-hides a
+  // row from a member rather than removing its controls.
+  it("shows the same two labelled rows to an admin and to a member", () => {
+    const labels = () =>
+      ["Organization token", "Personal token"].map((name) =>
+        screen.getByRole("group", { name }),
+      ).length;
+    const asAdmin = render(<OnePasswordPanel />);
+    expect(labels()).toBe(2);
+    asAdmin.unmount();
+    orgData = { callerRole: "member" };
+    render(<OnePasswordPanel />);
+    expect(labels()).toBe(2);
+  });
+
+  it("admin sees both token inputs and no switch", () => {
     render(<OnePasswordPanel />);
     expect(screen.getByLabelText("Organization 1Password token")).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "Allow personal tokens" })).toBeTruthy();
+    expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
+    expect(screen.queryByRole("switch")).toBeNull();
   });
 
   it("shows a Connected badge when the org token is already set", () => {
-    settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
+    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
     render(<OnePasswordPanel />);
     expect(screen.getByText("Connected")).toBeTruthy();
     // A connected token is state, not a form. The input appears behind
@@ -100,7 +136,7 @@ describe("OnePasswordPanel", () => {
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
     await user.type(screen.getByLabelText("Organization 1Password token"), "op-token-123");
-    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await user.click(orgFields().getByRole("button", { name: "Connect" }));
 
     await waitFor(() =>
       expect(connectMutateAsync).toHaveBeenCalledWith({
@@ -115,13 +151,13 @@ describe("OnePasswordPanel", () => {
   // used to stay open over a token that had already saved, with no Connected
   // badge, which reads as a save that did not happen.
   it("closes the Replace form and restores the badge after a successful replace", async () => {
-    settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
+    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
 
     await user.click(screen.getByRole("button", { name: "Replace" }));
     await user.type(screen.getByLabelText("Organization 1Password token"), "op-token-new");
-    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await user.click(orgFields().getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(connectMutateAsync).toHaveBeenCalled());
     await waitFor(() => {
@@ -133,7 +169,7 @@ describe("OnePasswordPanel", () => {
 
   // A failed replace must keep the form open so the value can be corrected.
   it("keeps the Replace form open when the save fails", async () => {
-    settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
+    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
     connectMutateAsync.mockRejectedValueOnce(
       new ApiError(400, "PUT /credentials/onepassword → 400", { error: "nope" }),
     );
@@ -142,7 +178,7 @@ describe("OnePasswordPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "Replace" }));
     await user.type(screen.getByLabelText("Organization 1Password token"), "bad");
-    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await user.click(orgFields().getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(screen.getByLabelText("Organization 1Password token")).toBeTruthy());
   });
@@ -154,35 +190,25 @@ describe("OnePasswordPanel", () => {
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
     await user.type(screen.getByLabelText("Organization 1Password token"), "bad-token");
-    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await user.click(orgFields().getByRole("button", { name: "Connect" }));
 
     expect(await screen.findByText("1Password resolution failed")).toBeTruthy();
   });
 
-  it("toggling allow-personal fires the PUT mutation", () => {
-    render(<OnePasswordPanel />);
-    fireEvent.click(screen.getByRole("switch", { name: "Allow personal tokens" }));
-    expect(putSettingsMutate).toHaveBeenCalledWith({ allowPersonal: true });
-  });
-
-  it("hides the personal token card when allowPersonal is false", () => {
-    render(<OnePasswordPanel />);
-    expect(screen.queryByLabelText("1Password personal token")).toBeNull();
-  });
-
-  it("shows the personal token card when allowPersonal is true", () => {
-    settingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: false };
+  it("renders the personal token row for a member with no org permission at all", () => {
+    orgData = { callerRole: "member" };
     render(<OnePasswordPanel />);
     expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
+    expect(personalFields().getByRole("button", { name: "Connect" })).toBeTruthy();
   });
 
   it("saving the personal token fires the connect mutation with no scope field", async () => {
     orgData = { callerRole: "member" };
-    settingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: false };
+    settingsData = { orgTokenConnected: false, personalTokenConnected: false };
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
-    await user.type(screen.getByLabelText("1Password personal token"), "op-personal-token");
-    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await user.type(personalFields().getByLabelText("1Password personal token"), "op-personal-token");
+    await user.click(personalFields().getByRole("button", { name: "Connect" }));
 
     await waitFor(() =>
       expect(connectMutateAsync).toHaveBeenCalledWith({
@@ -200,14 +226,14 @@ describe("OnePasswordPanel", () => {
 
   /** Admin, org token connected, personal row hidden: one Remove button. */
   function renderConnectedOrgToken() {
-    settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
+    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
     return render(<OnePasswordPanel />);
   }
 
   /** Member, personal token connected, org row hidden: one Remove button. */
   function renderConnectedPersonalToken() {
     orgData = { callerRole: "member" };
-    settingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: true };
+    settingsData = { orgTokenConnected: false, personalTokenConnected: true };
     return render(<OnePasswordPanel />);
   }
 

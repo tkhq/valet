@@ -20,7 +20,7 @@ service-account token. Secrets are never persisted in Valet's database.
 - `GET /api/onepassword/vaults`: the live check that a token works, and the
   route the SDK-over-HTTP regression test drives.
 - Web UI: one 1Password page at Organization · 1Password
-  (`/settings/organization/onepassword`): org token, allow-personal toggle,
+  (`/settings/organization/onepassword`): org token,
   personal token.
 
 **Non-goals:** sandbox-side `op://` env injection (legacy runner feature),
@@ -38,9 +38,11 @@ tokens only), syncing/mirroring 1Password items.
    vault → item → field via listing endpoints; the composed reference is stored.
 4. **Permissions:** org token CRUD and org-scoped credential creation are
    **org-admin-only**. Personal tokens and personal credentials are
-   member-accessible, gated by an org toggle.
-5. **Personal-token org toggle defaults to ENABLED** (single-user mode must work
-   with zero org configuration).
+   member-accessible.
+5. **No org toggle over personal tokens** (amended 2026-09-15, TKAI-487). A
+   personal token is the member's own credential and needs no organization
+   permission. The `allowPersonalOnePassword` key stays in `orgs.features`,
+   unread, so no migration runs.
 
 ## Data model
 
@@ -76,7 +78,7 @@ secret material:
   **reserved service name `onepassword`** (`type: "service_account"`,
   `apiKey: <token>`): org-owned for the org token, user-owned for personal.
   The reserved name is rejected as a target service for reference credentials.
-- The org toggle `allowPersonalOnePassword` lives on `/integrations`
+- The org toggle `allowPersonalOnePassword` is retired (2026-09-15); it lived on `/integrations`
   (default `true`). An admin flips it there.
 
 ## Resolution flow
@@ -102,7 +104,7 @@ serving the previous token's values for the rest of the TTL, and a freshly
 rotated key read as invalid at the far end while the panel showed the new
 one connected. Keying by a digest of the token means a replacement misses
 every cache on its first read, without shortening the TTL for the steady
-state. Deletion and the personal toggle already bit immediately, because
+state. Deletion already bit immediately, because
 both are checked before any cache is consulted.
 
 **Failure semantics:** typed `OnePasswordAuthError` with an actionable hint
@@ -191,8 +193,7 @@ the org service-account token is meant to give every member access to
 whatever vaults the service account itself can read, so browsing with it
 carries no additional privilege beyond what resolving a reference already
 grants at session-run time. `scope=personal` requires the caller's own token
-to exist and the org toggle to be on. Listing responses never include secret
-values.
+to exist. Listing responses never include secret values.
 
 Credential CRUD rides the **existing credentials routes**, extended to accept
 `metadata.onepassword` on create. **Save-time validation** performs one live
@@ -206,9 +207,11 @@ with the same admin/member split by owner type.
 
 1Password is a credential source, not a plugin. It has one home:
 Organization · 1Password (`/settings/organization/onepassword`), beside
-GitHub and Slack. The page holds the org token (admin), the allow-personal
-toggle (admin), and the personal token (when the toggle is on). The
-Organization rail lists it. `/integrations` does not carry 1Password.
+GitHub and Slack. The page holds the org token and the reader's own personal
+token, and it renders the same rows for every role (amended 2026-09-15): an
+admin gets the org token's controls, a member gets its status and a line
+naming who may change it. The personal row is always live. The Organization
+rail lists it. `/integrations` does not carry 1Password.
 
 There is no picker and no reference list. A credential an integration needs
 is found in the vaults by item title at read time (see Resolution flow), so
@@ -231,7 +234,7 @@ there is nothing to map by hand. You → Connected accounts still shows a
   `type`, cache TTL behavior, failure → typed error, byte-identical passthrough
   for non-1Password rows.
 - Route permission matrix: admin/member × org/personal for listing routes,
-  token CRUD, and credential creation (incl. toggle-off personal denial).
+  token CRUD, and credential creation.
 - Save-time validation (bad reference → 4xx with hint; no row persisted).
 - Live-gated e2e behind `OP_SERVICE_ACCOUNT_TOKEN` exercising the real SDK
   (skip-clean without the env var, matching existing key-gated suites).
@@ -262,12 +265,12 @@ code as of the implementing commits:
   path and skip the save-time `resolveReference` validation and reserved
   service-name checks below, since the resolver seam (`onePasswordMeta`) reads
   `metadata.onepassword` directly off whatever is stored.
-- **Ordering: reserved-service 400 precedes the personal-toggle 403.** When
-  `body.onepassword` is present and `service === ONEPASSWORD_SERVICE`, the
-  route 400s ("onepassword is a reserved service name") before it evaluates
-  `tokenScope === "personal"` against the org's `allowPersonalOnePassword`
-  toggle — a structurally malformed request (naming the reserved service as
-  the credential target) is rejected independent of policy state.
+- **Ordering: the reserved-service 400 precedes every other check.** Naming
+  `onepassword` as the service of a reference credential is structurally
+  malformed, so it is refused before anything about the caller is read.
+  (Amended 2026-09-15: the personal toggle it used to precede is retired.)
+
+
 - **Web: `apiErrorMessage` helper.** Error-message extraction for 1Password
   UI surfaces was pulled into a shared `apiErrorMessage(err, fallback)` helper
   in `packages/web/src/api/client.ts` (exported alongside `ApiError`) rather
@@ -353,7 +356,7 @@ code as of the implementing commits:
   `scope=org` through for any authed member once the token is connected
   (`OnePasswordAuthError`'s 400 "no organization 1Password service account
   token" still applies when it isn't). `PUT /settings` (connecting/rotating
-  the org token, flipping the personal-toggle) and creating an org-**owned**
+  the org token) and creating an org-**owned**
   credential row are unaffected — those stay admin-only.
 - **`github` rejects `body.onepassword` unconditionally.**
   `packages/api/src/routes/credentials.ts`'s `PUT /api/credentials/github`
@@ -421,7 +424,7 @@ code as of the implementing commits:
   client.** `wrapSdkError` logs the original rejection server-side and
   throws `OnePasswordAuthError` with the fixed text
   `"1Password request failed"`. Known typed cases (missing token, personal
-  toggle off) keep their hint. Routes map unknown rejections to 502 with
+  keep their hint. Routes map unknown rejections to 502 with
   the same fixed text.
 - **Production OpenAI path uses `resolveUserCredentialRead` after the
   LLM-provider key probe.** When `db` is wired, `resolveOpenAiCredential`
