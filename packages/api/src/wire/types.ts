@@ -4465,16 +4465,20 @@ export type EventSubscriptionTargetWire =
        * every delivery it makes. Absent means the assistant reads the event
        * with no added instruction, which is what every rule written before
        * this field did.
+       *
+       * This field takes `{{event.key}}` and `{{refs.<name>}}` only. The
+       * other variables carry text that the sender of the event wrote, and
+       * an instruction must not carry that text.
        */
       systemPrompt?: string;
       /**
        * The event message this rule delivers, in place of the default body.
        * Absent keeps the default body.
        *
-       * Both fields are templates over one documented variable set:
-       * `{{event.key}}`, `{{event.summary}}`, `{{event.body}}`,
-       * `{{refs.<name>}}`, and `{{payload.<field>}}` for a filter field the
-       * rule's events declare. A write that names anything else is refused.
+       * This field takes the full variable set: `{{event.key}}`,
+       * `{{event.summary}}`, `{{event.body}}`, `{{refs.<name>}}`, and
+       * `{{payload.<field>}}` for a filter field the rule's events declare. A
+       * write that names anything else is refused.
        */
       userPromptTemplate?: string;
     };

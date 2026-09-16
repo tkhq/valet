@@ -2,7 +2,7 @@
  * Prompt-template unit tests: the variable set, the write-time validator,
  * and the delivery-time renderer. Pure functions, no database.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { EventCatalogEntry } from "@valet/engine";
 import {
   buildPromptValues,
@@ -79,9 +79,36 @@ describe("validatePromptTemplate", () => {
     expect(validatePromptTemplate("Look at {{event.summary", "systemPrompt", CATALOG)).toContain(
       "unclosed",
     );
+  });
+
+  it("refuses one placeholder nested in another, and says which brace to remove", () => {
     expect(validatePromptTemplate("Look at {{ {{event.key}} }}", "systemPrompt", CATALOG)).toContain(
-      "unclosed",
+      "nests",
     );
+  });
+
+  it("accepts a brace pair that closes no placeholder, so a JSON shape is writable", () => {
+    for (const ok of [
+      'Reply with JSON like {"summary": {"text": "x"}}',
+      "Use the shape {{event.summary}} and end with }}",
+      "A literal }} on its own.",
+    ]) {
+      expect(validatePromptTemplate(ok, "userPromptTemplate", CATALOG)).toBeNull();
+    }
+  });
+
+  it("refuses event text in the instruction field, and names the field that takes it", () => {
+    for (const name of ["event.summary", "event.body", "payload.sender"]) {
+      const error = validatePromptTemplate(`Follow this: {{${name}}}`, "systemPrompt", CATALOG);
+      expect(error).toContain(`{{${name}}}`);
+      expect(error).toContain("userPromptTemplate");
+    }
+  });
+
+  it("accepts the two names an instruction may use", () => {
+    expect(
+      validatePromptTemplate("Triage {{refs.repo}} on {{event.key}}.", "systemPrompt", CATALOG),
+    ).toBeNull();
   });
 
   it("refuses a variable outside the documented set", () => {
@@ -148,6 +175,29 @@ describe("renderEventPrompt", () => {
       payload: { repository: { full_name: "{{payload.sender}}" }, sender: { login: "octocat" } },
     });
     expect(renderEventPrompt({ userPromptTemplate: "{{payload.repo}}" }, hostile)).toBe("{{payload.sender}}");
+  });
+
+  it("renders no event text inside the instruction block", () => {
+    // The write gate refuses these names in `systemPrompt`. The renderer
+    // holds the same line, so a row stored another way cannot put the
+    // sender's words under the instructions heading.
+    const body = renderEventPrompt(
+      { systemPrompt: "Follow this: {{payload.sender}} {{event.summary}} {{event.body}}" },
+      values,
+    );
+    expect(body).toBe(`Instructions for this subscription:\nFollow this:   \n\n---\n\n${EVENT.body}`);
+  });
+
+  it("delivers the default body when the user template renders to nothing", () => {
+    const sparse = buildPromptValues({ ...EVENT, refs: {}, payload: {} });
+    const onEmptyRender = vi.fn();
+    const body = renderEventPrompt(
+      { userPromptTemplate: "{{payload.sender}}" },
+      sparse,
+      onEmptyRender,
+    );
+    expect(body).toBe(EVENT.body);
+    expect(onEmptyRender).toHaveBeenCalledTimes(1);
   });
 
   it("caps the rendered body", () => {

@@ -8,6 +8,11 @@
  * message, which is what every rule written before these fields does. The
  * server validates the variables against the events the rule selects and
  * answers a named refusal, so this form does not repeat that check.
+ *
+ * The helper text below states the two limits a reader cannot see from the
+ * fields: the instruction takes the narrower variable set, and a ref name is
+ * never checked. `followsThread` adds the third one, for a rule that keeps
+ * following a Slack thread.
  */
 import { Label, Textarea } from "~/components/primitives";
 
@@ -44,11 +49,15 @@ export function PromptFields({
   idPrefix,
   value,
   onChange,
+  followsThread = false,
 }: {
   /** Prefix for the field ids, so two forms on one page stay distinct. */
   idPrefix: string;
   value: PromptFieldsValue;
   onChange: (next: PromptFieldsValue) => void;
+  /** True when the rule keeps following the thread it answers. Both fields
+   * then apply to the mention only, so the form says so. */
+  followsThread?: boolean;
 }) {
   return (
     <div className="space-y-2 pt-2">
@@ -73,11 +82,20 @@ export function PromptFields({
         />
       </div>
       <p className="text-xs text-muted">
-        Leave both empty to send the default event message. In either field you can use{" "}
+        Leave both empty to send the default event message. The event message can use{" "}
         <code>{"{{event.key}}"}</code>, <code>{"{{event.summary}}"}</code>,{" "}
         <code>{"{{event.body}}"}</code>, <code>{"{{refs.name}}"}</code>, and{" "}
-        <code>{"{{payload.field}}"}</code> for a filter field your events declare.
+        <code>{"{{payload.field}}"}</code> for a filter field your events declare. The
+        instructions take <code>{"{{event.key}}"}</code> and <code>{"{{refs.name}}"}</code>{" "}
+        only, because text from the event must not become an instruction. A ref name is
+        not checked when you save. A name that no event carries renders as nothing.
       </p>
+      {followsThread && (
+        <p className="text-xs text-muted">
+          Both fields apply to the mention that starts a thread. While the rule follows that
+          thread, later messages reach the assistant as they are written.
+        </p>
+      )}
     </div>
   );
 }

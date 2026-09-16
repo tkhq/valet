@@ -34,6 +34,19 @@
  * on. An undeclared field is not addressable, so a template cannot read an
  * unreviewed corner of a provider payload. No variable reaches session,
  * thread, or any other subscription's data.
+ *
+ * `systemPrompt` takes a narrower set: `event.key` and `refs.<name>` only.
+ * A rendered instruction stands under a heading that presents it to the
+ * assistant as the rule's own standing instruction. The summary, the default
+ * body, and every payload field carry text that the sender of the event
+ * wrote, and that text must not gain the authority of the heading. The write
+ * gate refuses the wider names in that field, and `instructionValues` holds
+ * the same line at render time.
+ *
+ * A `refs.<name>` is the one name nothing checks. Refs arrive on the
+ * normalized event at runtime and no catalog entry declares them, so a
+ * misspelled ref passes the write gate and renders as an empty string. The
+ * spec and the form both say so.
  */
 import type { EventCatalogEntry } from "@valet/engine";
 import { resolvePath } from "./match.js";
@@ -46,6 +59,9 @@ export const MAX_RENDERED_PROMPT_CHARS = 8_000;
 /** The heading above the rendered `systemPrompt` in the delivered body. */
 const INSTRUCTIONS_HEADING = "Instructions for this subscription:";
 
+/** The two template fields. Each one takes its own variable set. */
+export type PromptField = "systemPrompt" | "userPromptTemplate";
+
 /** The two optional template fields of an orchestrator subscription target. */
 export interface EventPromptConfig {
   systemPrompt?: string;
@@ -57,16 +73,23 @@ export function hasPromptConfig(config: EventPromptConfig): boolean {
   return config.systemPrompt !== undefined || config.userPromptTemplate !== undefined;
 }
 
-/** One `{{ name }}` placeholder. `[^{}]` keeps a nested brace out of a match,
- * so `{{ {{x}} }}` fails the balance check below rather than rendering. */
+/** One `{{ name }}` placeholder, for the render pass. `scanPlaceholders`
+ * refuses at write time every brace pair this expression cannot read back,
+ * so an accepted template renders exactly the placeholders the gate saw. */
 const PLACEHOLDER_RE = /\{\{([^{}]*)\}\}/g;
 
-/** The names a template may use. Anything else is refused at write time. */
+/** The names `userPromptTemplate` may use. Anything else is refused. */
 const VARIABLE_RE = /^(event\.(key|summary|body)|refs\.[A-Za-z0-9_-]+|payload\.[A-Za-z0-9_-]+)$/;
 
-/** The fixed part of the variable set, for an error message that teaches. */
-const VARIABLE_HELP =
-  "Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.";
+/** The names `systemPrompt` may use: the two that carry no event text. */
+const INSTRUCTION_VARIABLE_RE = /^(event\.key|refs\.[A-Za-z0-9_-]+)$/;
+
+/** The variable set of each field, for an error message that teaches. */
+const VARIABLE_HELP: Record<PromptField, string> = {
+  systemPrompt: "Use event.key or refs.<name>.",
+  userPromptTemplate:
+    "Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.",
+};
 
 /** The payload fields the events selected by this rule declare. */
 function declaredPayloadFields(entries: EventCatalogEntry[]): string[] {
@@ -78,6 +101,32 @@ function declaredPayloadFields(entries: EventCatalogEntry[]): string[] {
 }
 
 /**
+ * The placeholder names in a template, or the refusal for one this module
+ * cannot read. The scan runs left to right: `{{` opens a placeholder and the
+ * next `}}` closes it. A `}}` with no open placeholder in front of it is
+ * literal text, so a template may show the assistant a JSON shape such as
+ * `{"a": {"b": 1}}` or quote the `{{ }}` syntax itself.
+ */
+function scanPlaceholders(value: string, field: PromptField): { names: string[] } | { error: string } {
+  const names: string[] = [];
+  let from = 0;
+  for (;;) {
+    const open = value.indexOf("{{", from);
+    if (open === -1) return { names };
+    const close = value.indexOf("}}", open + 2);
+    if (close === -1) {
+      return { error: `${field} has an unclosed {{ placeholder. Close it with }}.` };
+    }
+    const nextOpen = value.indexOf("{{", open + 2);
+    if (nextOpen !== -1 && nextOpen < close) {
+      return { error: `${field} nests one {{ }} placeholder in another. Remove the inner {{ }}.` };
+    }
+    names.push(value.slice(open + 2, close).trim());
+    from = close + 2;
+  }
+}
+
+/**
  * The refusal for one template field, or `null` when it is safe to store.
  * `entries` are the catalog entries the rule's `eventKeys` select, the same
  * set the filter validator checks a filter field against, so a template and a
@@ -85,7 +134,7 @@ function declaredPayloadFields(entries: EventCatalogEntry[]): string[] {
  */
 export function validatePromptTemplate(
   value: unknown,
-  field: string,
+  field: PromptField,
   entries: EventCatalogEntry[],
 ): string | null {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -95,19 +144,19 @@ export function validatePromptTemplate(
     return `${field} is too long (max ${MAX_PROMPT_TEMPLATE_CHARS} characters). Shorten it.`;
   }
 
-  const names: string[] = [];
-  const remainder = value.replace(PLACEHOLDER_RE, (_match, name: string) => {
-    names.push(name.trim());
-    return "";
-  });
-  if (remainder.includes("{{") || remainder.includes("}}")) {
-    return `${field} has an unclosed {{ }} placeholder. Close every placeholder.`;
-  }
+  const scanned = scanPlaceholders(value, field);
+  if ("error" in scanned) return scanned.error;
 
   const declared = declaredPayloadFields(entries);
-  for (const name of names) {
+  for (const name of scanned.names) {
     if (!VARIABLE_RE.test(name)) {
-      return `${field} uses an unknown variable: {{${name}}}. ${VARIABLE_HELP}`;
+      return `${field} uses an unknown variable: {{${name}}}. ${VARIABLE_HELP[field]}`;
+    }
+    if (field === "systemPrompt" && !INSTRUCTION_VARIABLE_RE.test(name)) {
+      return (
+        `${field} cannot use {{${name}}}. An instruction must not carry text from the event. ` +
+        `${VARIABLE_HELP.systemPrompt} Move the variable to userPromptTemplate.`
+      );
     }
     if (name.startsWith("payload.")) {
       const payloadField = name.slice("payload.".length);
@@ -161,6 +210,20 @@ function render(template: string, values: Record<string, string>): string {
 }
 
 /**
+ * The values an instruction renders over. Every name that carries text from
+ * the sender of the event is dropped, so an instruction cannot be written by
+ * the person who sent the event. The write gate refuses those names too;
+ * this keeps the property when a row reaches the renderer another way.
+ */
+function instructionValues(values: Record<string, string>): Record<string, string> {
+  const kept: Record<string, string> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (INSTRUCTION_VARIABLE_RE.test(name)) kept[name] = value;
+  }
+  return kept;
+}
+
+/**
  * The body this delivery submits. With no template configured it is
  * `values["event.body"]`, the exact string the dispatcher built, so the
  * default delivery path is untouched. A `userPromptTemplate` replaces that
@@ -170,15 +233,29 @@ function render(template: string, values: Record<string, string>): string {
 export function renderEventPrompt(
   config: EventPromptConfig,
   values: Record<string, string>,
+  /**
+   * Called when the user template renders to nothing and the default body
+   * stands in. The dispatcher logs the substitution, so a rule that names a
+   * field its events do not carry is visible.
+   */
+  onEmptyRender?: () => void,
 ): string {
   const defaultBody = values["event.body"] ?? "";
   if (!hasPromptConfig(config)) return defaultBody;
 
-  const body =
-    config.userPromptTemplate !== undefined ? render(config.userPromptTemplate, values) : defaultBody;
+  let body = defaultBody;
+  if (config.userPromptTemplate !== undefined) {
+    // A template can render empty even though the write gate accepted it: a
+    // field one selected event declares is absent from another. An empty
+    // body costs the assistant a turn and tells it nothing, so the default
+    // body stands in and the caller reports it.
+    const rendered = render(config.userPromptTemplate, values);
+    if (rendered.trim().length === 0) onEmptyRender?.();
+    else body = rendered;
+  }
   const composed =
     config.systemPrompt !== undefined
-      ? `${INSTRUCTIONS_HEADING}\n${render(config.systemPrompt, values)}\n\n---\n\n${body}`
+      ? `${INSTRUCTIONS_HEADING}\n${render(config.systemPrompt, instructionValues(values))}\n\n---\n\n${body}`
       : body;
   return composed.slice(0, MAX_RENDERED_PROMPT_CHARS);
 }

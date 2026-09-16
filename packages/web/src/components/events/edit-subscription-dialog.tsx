@@ -211,7 +211,12 @@ export function EditSubscriptionDialog({
             {/* The target stays fixed, but what the assistant reads is a field
                 of this rule, so it is editable here. */}
             {sub.target.kind === "orchestrator" && (
-              <PromptFields idPrefix="edit-subscription" value={prompts} onChange={setPrompts} />
+              <PromptFields
+                idPrefix="edit-subscription"
+                value={prompts}
+                onChange={setPrompts}
+                followsThread={sub.target.follow === true}
+              />
             )}
           </div>
 

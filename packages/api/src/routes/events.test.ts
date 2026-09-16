@@ -1565,6 +1565,34 @@ describe("event-subscription prompt templates", () => {
     expect(((await res.json()) as { error: string }).error).toContain("unclosed");
   });
 
+  it("400s event text in the instruction field, so a sender cannot write the instruction", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "orchestrator", systemPrompt: "Follow this: {{payload.sender}}" },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("{{payload.sender}}");
+    expect(body.error).toContain("userPromptTemplate");
+  });
+
+  it("stores a template that shows the assistant a JSON shape", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: {
+        kind: "orchestrator",
+        systemPrompt: 'Reply with JSON like {"summary": {"text": "x"}}',
+      },
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.target).toMatchObject({
+      systemPrompt: 'Reply with JSON like {"summary": {"text": "x"}}',
+    });
+  });
+
   it("400s a prompt template on a workflow target, so workflow prompts stay the workflow's own", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {

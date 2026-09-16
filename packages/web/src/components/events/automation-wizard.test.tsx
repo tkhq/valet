@@ -443,6 +443,33 @@ describe("AutomationWizard", () => {
     });
   });
 
+  it("reply outcome posts the prompt templates it collected on the mention target", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    clickNext(); // What. The reply outcome is the default.
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+    fireEvent.change(screen.getByLabelText(/Instructions for the assistant/), {
+      target: { value: "Answer in one sentence." },
+    });
+    fireEvent.change(screen.getByLabelText(/Event message/), {
+      target: { value: "Mention: {{event.body}}" },
+    });
+    clickNext(); // Reply
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Slack replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({
+      kind: "orchestrator",
+      orchestrator: "user",
+      follow: true,
+      systemPrompt: "Answer in one sentence.",
+      userPromptTemplate: "Mention: {{event.body}}",
+    });
+  });
+
   it("notify outcome posts the prompt templates it collected on the assistant target", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
 

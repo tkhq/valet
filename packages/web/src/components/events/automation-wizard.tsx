@@ -6,11 +6,12 @@
  * primitive to build. The outcome then picks the steps and the store:
  *
  *  - Reply to Slack mentions → a required multi-channel picker (or the
- *    explicit "Any channel" opt-out), which assistant answers, and a "Keep
- *    following the thread" toggle. POSTs an event subscription on
- *    `slack.app_mention` with an orchestrator target that carries `follow`.
- *    The server scopes personal rules to the creator's linked Slack user
- *    (TKAI-299, `events/mention-scope.ts`), so the step says so up front.
+ *    explicit "Any channel" opt-out), which assistant answers, a "Keep
+ *    following the thread" toggle, and the optional prompt templates. POSTs
+ *    an event subscription on `slack.app_mention` with an orchestrator target
+ *    that carries `follow`. The server scopes personal rules to the creator's
+ *    linked Slack user (TKAI-299, `events/mention-scope.ts`), so the step says
+ *    so up front.
  *  - Run a workflow on an event → the event picker, then a workflow target.
  *  - Send a notification → the event picker, then an orchestrator target.
  *  - Advanced / custom trigger → the raw event + filter + target flow.
@@ -394,7 +395,10 @@ export function AutomationWizard({
           name: name.trim(),
           eventKeys: [SLACK_APP_MENTION],
           filters: channelFilters,
-          target: { ...mentionTarget, follow },
+          // The reply step collects the same optional templates the Then step
+          // collects for the other assistant outcomes. Empty fields are left
+          // off, so the rule posts the target it always did.
+          target: { ...mentionTarget, follow, ...promptFieldsToTarget(promptTemplates) },
           // Only a team assistant has an audience; the server refuses one
           // on any other target.
           ...(mentionTarget.orchestrator === "team" ? { audience } : {}),
@@ -518,6 +522,8 @@ export function AutomationWizard({
               onAudienceChange={setAudience}
               follow={follow}
               onFollowChange={setFollow}
+              promptTemplates={promptTemplates}
+              onPromptTemplatesChange={setPromptTemplates}
             />
           )}
 
@@ -704,9 +710,10 @@ function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Ou
 
 /**
  * The reply outcome's one config step: the channels to reply in (required,
- * unless "Any channel" is chosen), which assistant answers, and the follow
- * toggle. No raw event key is shown — the event is always
- * `slack.app_mention`. Personal rules need the creator's linked Slack user.
+ * unless "Any channel" is chosen), which assistant answers, the follow
+ * toggle, and the optional prompt templates. No raw event key is shown. The
+ * event is always `slack.app_mention`. Personal rules need the creator's
+ * linked Slack user.
  *
  * Team assistant rules accept mentions from linked, current team members.
  */
@@ -723,6 +730,8 @@ function ReplyStep({
   onAudienceChange,
   follow,
   onFollowChange,
+  promptTemplates,
+  onPromptTemplatesChange,
 }: {
   fixedTeam?: boolean;
   channels: SelectedChannel[];
@@ -736,6 +745,8 @@ function ReplyStep({
   onAudienceChange: (v: EventSubscriptionAudienceWire) => void;
   follow: boolean;
   onFollowChange: (v: boolean) => void;
+  promptTemplates: PromptFieldsValue;
+  onPromptTemplatesChange: (v: PromptFieldsValue) => void;
 }) {
   // The server refuses a mention rule from a creator with no linked Slack
   // account, so warn here instead of at the failed create.
@@ -880,6 +891,13 @@ function ReplyStep({
           </span>
         </span>
       </label>
+
+      <PromptFields
+        idPrefix="automation-reply"
+        value={promptTemplates}
+        onChange={onPromptTemplatesChange}
+        followsThread={follow}
+      />
     </div>
   );
 }

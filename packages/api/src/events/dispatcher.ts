@@ -266,6 +266,14 @@ export class EventDispatcher {
               payload: event.payload,
               catalog: allCatalogEntries(this.deps.plugins ?? []),
             }),
+            // The rule names a field this event does not carry, so the
+            // template rendered to nothing. The default body goes out in its
+            // place. Report it: a rule that selects several events, and a
+            // field only some of them declare, is silent otherwise.
+            () =>
+              console.warn(
+                `[events] subscription ${sub.id}: userPromptTemplate rendered empty for ${event.eventKey}. Delivered the default body.`,
+              ),
           );
         }
         await this.deps.deliverToOrchestrator({

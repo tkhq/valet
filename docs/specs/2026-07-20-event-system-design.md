@@ -130,7 +130,7 @@ A retention job (default 30 days) is a deferred follow-up; nothing prunes
 | `name` | display name |
 | `event_keys` | `text[]`; supports trailing-wildcard patterns (`github.pull_request.*`) |
 | `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields; a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest) |
-| `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }` — `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions. An orchestrator target may also carry `systemPrompt` and `userPromptTemplate` (see "Orchestrator prompt templates") |
+| `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }`. `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions. An orchestrator target may also carry `systemPrompt` and `userPromptTemplate` (see "Orchestrator prompt templates") |
 | `enabled` | bool |
 | `created_by`, timestamps | |
 
@@ -391,13 +391,13 @@ workflow keeps its prompt configuration on its own llm and session nodes.
 Both fields are templates over one closed set of variables, drawn from the
 normalized event:
 
-| Variable | Value |
-|---|---|
-| `{{event.key}}` | the normalized event key |
-| `{{event.summary}}` | the one-line summary the source plugin wrote |
-| `{{event.body}}` | the body the rule delivers with no user template |
-| `{{refs.<name>}}` | one scope ref (`repo`, `installation_id`, `channel`, …) |
-| `{{payload.<field>}}` | one catalog-declared filter field of the raw payload |
+| Variable | Value | `systemPrompt` | `userPromptTemplate` |
+|---|---|---|---|
+| `{{event.key}}` | the normalized event key | yes | yes |
+| `{{event.summary}}` | the one-line summary the source plugin wrote | no | yes |
+| `{{event.body}}` | the body the rule delivers with no user template | no | yes |
+| `{{refs.<name>}}` | one scope ref (`repo`, `installation_id`, `channel`, …) | yes | yes |
+| `{{payload.<field>}}` | one catalog-declared filter field of the raw payload | no | yes |
 
 `{{event.body}}` keeps a channel rule usable: a Slack mention's default body
 is the sender's cleaned message text, so a template can add instructions
@@ -408,6 +408,15 @@ the event's own key, over the same `field` → `path` map the filters match on.
 An undeclared field is not addressable, so no template reads an unreviewed
 corner of a provider payload. No variable reaches a session, a thread, or
 another subscription.
+
+`{{payload.<field>}}` is declared per event key. A rule that selects several
+events, and names a field only some of them declare, renders an empty value
+on the others. The write gate accepts it, because one selected event does
+declare the field.
+
+A `{{refs.<name>}}` name is not checked at write time. Refs arrive on the
+normalized event at runtime and no catalog entry declares them, so a
+misspelled ref is stored and renders as an empty string. The form says so.
 
 ### Rendering and safety
 
@@ -420,13 +429,25 @@ inside the dispatcher, before the existing assistant delivery path
 (`events/assistant-delivery.ts`) takes the signal.
 
 The write gate (`events/subscription-write.ts`) is what keeps the renderer
-total. It refuses an empty field, a field over 4000 characters, an unclosed
-`{{ }}` placeholder, a name outside the set above, and a `payload.<field>`
-that no event selected by `eventKeys` declares. A patch re-validates the
-stored templates against the patched `eventKeys`, so narrowing a rule to
-events that declare fewer fields fails the write instead of rendering empty
-values later. At delivery an absent value renders as an empty string, and the
-rendered body is capped at 8000 characters.
+total. It refuses an empty field, a field over 4000 characters, a malformed
+placeholder, a name outside the set above, a `payload.<field>` that no event
+selected by `eventKeys` declares, and, in `systemPrompt`, a name outside that
+field's narrower column. A patch re-validates the stored templates against
+the patched `eventKeys`, so narrowing a rule to events that declare fewer
+fields fails the write instead of rendering empty values later. At delivery
+an absent value renders as an empty string, and the rendered body is capped
+at 8000 characters.
+
+The placeholder check reads the template left to right: `{{` opens a
+placeholder and the next `}}` closes it. The scan makes two refusals: an
+unclosed `{{`, and a `{{` inside another `{{ }}`. A `}}` with no open
+placeholder in front of it is literal text, so a template may show the
+assistant a JSON shape such as `{"a": {"b": 1}}`.
+
+A `userPromptTemplate` that renders to nothing delivers the default body
+instead, and the dispatcher logs the substitution. An empty signal body costs
+the assistant a turn and tells it nothing, and the usual cause is the
+per-event declaration above.
 
 A rendered `systemPrompt` is delivered as the first block of the signal body,
 under the heading `Instructions for this subscription:`, with the event under
@@ -434,6 +455,16 @@ it. The assistant session is shared by every rule that names it, so a per
 delivery change of the session system prompt would leak one rule's
 instruction into another rule's turn. The block is per delivery and holds
 only this rule's text.
+
+The heading is why `systemPrompt` takes the narrower variable set. The
+summary, the default body, and every payload field carry text that the sender
+of the event wrote. A rule such as `Follow the direction: {{payload.text}}`
+would put that sender's words under a heading that presents them as the
+rule's own instruction. The write gate refuses those names in that field, and
+the renderer builds the instruction over `event.key` and `refs.<name>` alone,
+so a row that reaches the renderer another way keeps the same property. The
+sender's text still reaches the assistant, below the separator, where it
+reads as the event.
 
 Prompt configuration does not change what a rule matches, so a write that
 only changes a template runs no collision gate.
@@ -445,9 +476,10 @@ only changes a template runs no collision gate.
   `userPromptTemplate` at the top level, like `assistantId`. `null` clears a
   field and returns the rule to the default body. They are the only other
   part of `target` a patch may rewrite.
-- The creation wizard collects both on its Then step, for the outcomes that
-  notify an assistant. The edit dialog shows them for every assistant-target
-  rule, which is how a Slack reply rule gets them after it is created.
+- The creation wizard collects both on the config step of every outcome that
+  notifies an assistant: the Then step for the event and notify outcomes, and
+  the Reply step for the Slack reply outcome. The edit dialog shows them for
+  every assistant-target rule.
 
 ### Limits
 
@@ -455,4 +487,5 @@ A followed thread is not a match of the rule that bound it. Later messages in
 that thread reach the assistant through the follow router
 (`channels/follow-router.ts`), which carries the message itself, so they keep
 the default body. Only the deliveries the subscription matches render its
-templates.
+templates. The form states this where a rule follows a thread, so a reader
+does not expect an instruction to hold for the whole conversation.
