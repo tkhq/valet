@@ -198,7 +198,7 @@ Enabling the setting permits new anonymous bakes. A new binding can create a mis
 
 ### Preparation failure details
 
-`SandboxPreparationError` retains the original rejection in `cause`. Its message includes the cause's string `message` and string or numeric `code`, when available. Other objects use JSON serialization. If serialization fails, safe string conversion provides a fallback without replacing the preparation error.
+`SandboxPreparationError` retains the original rejection in `cause`. Its message includes the cause's string `message` and string or numeric `code`, when available. Other objects include only scalar `reason`, `status`, `statusCode`, `exitCode`, `signal`, `errno`, and `syscall` fields as JSON. The formatter excludes request headers, commands, and nested payloads. It does not call provider serialization methods. Each field read has its own guard, so a throwing getter does not hide other diagnostic fields. Objects without readable diagnostic fields report `unserializable cause`. Formatted details have a 2,048-character limit and include `[truncated]` when shortened. The formatter bounds fields before JSON serialization to limit temporary output.
 
 ### Resume restoration (TKAI-427)
 

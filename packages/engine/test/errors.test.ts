@@ -49,4 +49,48 @@ describe("SandboxPreparationError", () => {
     expect(error.message).toBe("sandbox preparation failed: unserializable cause");
     expect(error.cause).toBe(cause);
   });
+
+  it("omits request credentials, commands, and nested payloads", () => {
+    const cause = {
+      reason: "clone denied", status: 403,
+      headers: { Authorization: "Bearer secret-header" },
+      command: "git clone https://user:secret-token@example.com/repo",
+      config: { password: "secret-password" },
+      body: "secret-body", stderr: "secret-stderr",
+    };
+    const error = new SandboxPreparationError(cause);
+    expect(error.message).toBe('sandbox preparation failed: {"reason":"clone denied","status":403}');
+    expect(error.cause).toBe(cause);
+  });
+
+  it("does not serialize nested diagnostic fields or call custom serializers", () => {
+    const cause = {
+      reason: { Authorization: "secret" }, status: 403,
+      toJSON() { throw new Error("must not run"); },
+    };
+    expect(new SandboxPreparationError(cause).message).toBe('sandbox preparation failed: {"status":403}');
+  });
+
+  it.each([
+    "x".repeat(100_000), new Error("x".repeat(100_000)),
+    { message: "x".repeat(100_000), code: "EACCES" },
+    { reason: "x".repeat(100_000), body: "y".repeat(1_000_000) },
+  ])("bounds formatted details and marks truncation", (cause) => {
+    const error = new SandboxPreparationError(cause);
+    expect(error.message.length).toBeLessThanOrEqual("sandbox preparation failed: ".length + 2048);
+    expect(error.message).toContain("[truncated]");
+    expect(error.cause).toBe(cause);
+  });
+
+  it("retains diagnostic fields beside an enumerable throwing getter", () => {
+    const cause = { get message(): string { throw new Error("getter failed"); }, reason: "clone denied", status: 403 };
+    expect(new SandboxPreparationError(cause).message).toBe('sandbox preparation failed: {"reason":"clone denied","status":403}');
+  });
+
+  it("preserves a proxy cause when property reads throw", () => {
+    const cause = new Proxy({}, { get() { throw new Error("read failed"); } });
+    const error = new SandboxPreparationError(cause);
+    expect(error.message).toBe("sandbox preparation failed: unserializable cause");
+    expect(error.cause).toBe(cause);
+  });
 });
