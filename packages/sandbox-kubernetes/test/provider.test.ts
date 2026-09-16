@@ -4,7 +4,8 @@
  * lifecycle wired through KubernetesSandboxProvider.
  */
 import { describe, expect, it, vi } from "vitest";
-import { SandboxAttachment, SandboxStartupError } from "@valet/engine";
+import { Engine, InMemoryEventStream, InMemorySessionStore, SandboxAttachment, SandboxStartupError, VirtualSandboxProvider } from "@valet/engine";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
@@ -97,6 +98,81 @@ const providerCfg: K8sProviderConfig = {
   defaultImage: "valet-sandbox:latest",
   apiVersion: SANDBOX_CR_API_VERSION,
 };
+
+describe("preparation transport diagnostics", () => {
+  it("preserves a WebSocket rejection through provider and preparation wrapping", async () => {
+    const underlying = Object.assign(new Error("Unexpected server response: 403"), { code: "EACCES" });
+    // client-node rejects with the WebSocket ErrorEvent. Its diagnostics are
+    // getters, and the event itself is not an Error.
+    const event = {
+      get message() { return underlying.message; },
+      get error() { return underlying; },
+      target: { headers: { Authorization: "secret" } },
+    };
+    const sandbox = new KubernetesSandbox({
+      objectsApi: new FakeObjectsApi(),
+      podsApi: { listNamespacedPod: async () => ({ items: [
+        { name: "prep-pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] },
+      ] }) },
+      execApi: { exec: async () => { throw event; } },
+      livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
+    }, "sandbox");
+    const provider = new VirtualSandboxProvider();
+    const specProvider = async () => ({ specHash: "prep", steps: [
+      { id: "credential-scripts", hash: "prep", critical: true,
+        apply: async () => { await sandbox.writeFile("/tmp/helper", "secret script"); } },
+    ] });
+    const attachment = new SandboxAttachment(provider, {}, specProvider);
+    try {
+      const failure = await attachment.ensureReady({ timeoutMs: 1000 }).catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        name: "SandboxPreparationError",
+        message: expect.stringContaining("Unexpected server response: 403 (EACCES)"),
+        cause: {
+          name: "PodExecTransportError", namespace: "valet-sandboxes", podName: "prep-pod",
+          cause: event,
+        },
+      });
+      if (!(failure instanceof Error)) throw new Error("Expected preparation error");
+      expect(failure.message).toContain("prep-pod");
+      expect(failure.message).not.toContain("[object Object]");
+      expect(failure.message).not.toContain("secret");
+    } finally {
+      await attachment.destroy();
+    }
+
+    const faux = registerFauxProvider({ provider: "kubernetes-prep-failure" });
+    let modelResult: unknown;
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("read", { path: "/workspace/file" })], { stopReason: "toolUse" }),
+      async (context) => {
+        modelResult = context.messages.find((message) => message.role === "toolResult");
+        return fauxAssistantMessage("Preparation failed.");
+      },
+    ]);
+    const engine = new Engine({ providers: {
+      store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: provider,
+    } });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/workspace", sandbox: {}, model: faux.getModel(), specProvider,
+    });
+    try {
+      const receipt = await session.prompt("Read the file.");
+      await session.thread().awaitResult(receipt.queueItemId, { timeoutMs: 2000 });
+      expect(modelResult).toMatchObject({ isError: true, content: [{
+        type: "text", text: expect.stringContaining("Unexpected server response: 403 (EACCES)"),
+      }] });
+      const entries = await session.readEntries("web:default");
+      const parts = entries.flatMap((entry) => entry.type === "message" ? entry.parts ?? [] : []);
+      expect(parts.find((part) => part.type === "tool_call")).toMatchObject({
+        status: "error", result: { text: expect.stringContaining("Unexpected server response: 403 (EACCES)") },
+      });
+    } finally {
+      await session.destroy();
+      faux.unregister();
+    }
+  });
+});
 
 /** Minimal fake SandboxSecretsApi that records all calls in order. */
 class FakeSecretsApi implements SandboxSecretsApi {

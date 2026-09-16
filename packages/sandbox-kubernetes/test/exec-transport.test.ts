@@ -1,0 +1,54 @@
+import { createServer } from "node:http";
+import { Exec, KubeConfig } from "@kubernetes/client-node";
+import { describe, expect, it } from "vitest";
+import { execInPod, podExecApiAdapter, PodExecTransportError } from "../src/exec.js";
+
+describe("Kubernetes exec transport errors", () => {
+  it("captures the real client-node WebSocket rejection on HTTP 403", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(403);
+      response.end("Forbidden");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected a local TCP listener");
+      const config = new KubeConfig();
+      config.loadFromOptions({
+        // The test server uses HTTP on loopback, without cluster credentials.
+        clusters: [{ name: "test", server: `http://127.0.0.1:${address.port}`, skipTLSVerify: true }],
+        users: [{ name: "test" }],
+        contexts: [{ name: "test", cluster: "test", user: "test" }],
+        currentContext: "test",
+      });
+      const failure = await execInPod({
+        api: podExecApiAdapter(new Exec(config)), namespace: "sandboxes", containerName: "sandbox",
+      }, "prep-pod", "secret command", { stdin: "secret input" }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(PodExecTransportError);
+      if (!(failure instanceof PodExecTransportError)) throw new Error("Expected typed exec failure");
+      expect(failure.message).toContain("Unexpected server response: 403");
+      expect(failure.message).toContain("sandboxes/prep-pod (sandbox)");
+      expect(failure.message).not.toContain("secret");
+      expect(failure.cause).not.toBeInstanceOf(Error);
+      expect(failure.cause).toMatchObject({ message: "Unexpected server response: 403", error: expect.any(Error) });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it.each([
+    { cause: { failure: "mount denied" }, detail: '{"failure":"mount denied"}' },
+    { cause: Object.assign(new Error("connect failed"), { code: "ECONNREFUSED" }), detail: "connect failed (ECONNREFUSED)" },
+    { cause: { get error(): never { throw new Error("getter failed"); }, message: "handshake failed" }, detail: "handshake failed" },
+  ])("preserves $detail and its original cause", async ({ cause, detail }) => {
+    const failure = await execInPod({
+      api: { exec: async () => { throw cause; } }, namespace: "sandboxes", containerName: "sandbox",
+    }, "prep-pod", "secret command").catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: "PodExecTransportError", code: "sandbox_exec_transport_failed", message: expect.stringContaining(detail),
+    });
+    if (!(failure instanceof PodExecTransportError)) throw new Error("Expected typed exec failure");
+    expect(failure.cause).toBe(cause);
+    expect(failure.message).not.toContain("secret");
+  });
+});

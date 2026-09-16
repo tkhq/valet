@@ -202,6 +202,8 @@ Enabling the setting permits new anonymous bakes. A new binding can create a mis
 
 If those fields are absent, the formatter copies unknown data properties into a JSON diagnostic snippet. It filters credential fields, request payloads, configuration, commands, and process output. It skips accessors and functions and never calls provider serialization methods. Nested objects and arrays report `[object]` and `[array]`, including circular references. The formatter does not copy nested payload contents. Objects without readable fields report `unserializable cause`. The fallback reads at most 64 properties and marks omitted properties with `[truncated]`. Formatted details have a 2,048-character limit. The formatter bounds strings before JSON serialization and marks shortened output with `[truncated]`.
 
+Kubernetes exec failures are normalized at the transport boundary before preparation catches them. `PodExecTransportError.cause` retains the original client rejection. This prevents provider classification from discarding a WebSocket error event through `String(event)`.
+
 The agent loop uses this message as tool-result text. Regression tests assert the actual text in the next model request and persisted tool-call parts. Provider codes remain visible in that text. The original cause stays on the error and is not serialized into tool-result metadata.
 
 ### Resume restoration (TKAI-427)

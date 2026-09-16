@@ -21,6 +21,7 @@ export {
   SandboxEvictedError,
   SandboxStartupError,
   SandboxPreparationError,
+  formatSandboxErrorCause,
 } from "./errors.js";
 export {
   REASONING_LEVELS,

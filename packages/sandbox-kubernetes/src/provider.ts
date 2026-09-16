@@ -82,7 +82,7 @@ import type {
   SandboxStatus,
   WorkspaceGrowth,
 } from "@valet/engine";
-import { execInPod, type ExecDeps, type PodExecApi } from "./exec.js";
+import { execInPod, PodExecTransportError, type ExecDeps, type PodExecApi } from "./exec.js";
 import {
   mkdirInPod,
   PodFileOpError,
@@ -531,7 +531,9 @@ export class KubernetesSandbox implements Sandbox {
    * for a missing file).
    */
   private async translateDeath(podName: string, dispatchUid: string | null, err: unknown): Promise<never> {
-    const error = err instanceof Error ? err : new Error(String(err));
+    const error = err instanceof Error ? err : new PodExecTransportError(
+      this.deps.cfg.namespace, podName, SANDBOX_CONTAINER_NAME, err,
+    );
     if (error instanceof SandboxEvictedError) throw error;
     await this.checkEviction(podName, dispatchUid);
     if (CONTAINER_DEATH_PATTERN.test(error.message)) throw error;

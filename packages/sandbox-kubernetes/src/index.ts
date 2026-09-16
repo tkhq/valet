@@ -97,6 +97,7 @@ export {
   execInPod,
   exitCodeFromStatus,
   podExecApiAdapter,
+  PodExecTransportError,
   shQuote,
   wrapAsWorkloadUser,
   type ExecDeps,

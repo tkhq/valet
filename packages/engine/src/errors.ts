@@ -225,7 +225,7 @@ export class SandboxPreparationError extends Error {
   readonly code = "sandbox_preparation_failed";
 
   constructor(public readonly cause?: unknown) {
-    super(`sandbox preparation failed: ${formatPreparationCause(cause)}`);
+    super(`sandbox preparation failed: ${formatSandboxErrorCause(cause)}`);
     this.name = "SandboxPreparationError";
   }
 }
@@ -285,7 +285,8 @@ function preparationFallback(cause: object): string {
   }
 }
 
-function formatPreparationCause(cause: unknown): string {
+/** Bounded sandbox diagnostics. Excludes private payloads and serialization hooks. */
+export function formatSandboxErrorCause(cause: unknown): string {
   if (cause !== null && (typeof cause === "object" || typeof cause === "function")) {
     const message = preparationField(cause, "message");
     const code = preparationField(cause, "code");
