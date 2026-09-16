@@ -443,6 +443,50 @@ describe("AutomationWizard", () => {
     });
   });
 
+  it("notify outcome posts the prompt templates it collected on the assistant target", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Send a notification/);
+    clickNext(); // What
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext(); // Match
+
+    // Step 3, Then: your assistant, plus what it should read.
+    fireEvent.change(screen.getByLabelText(/Instructions for the assistant/), {
+      target: { value: "Triage it. Answer in one sentence." },
+    });
+    fireEvent.change(screen.getByLabelText(/Event message/), {
+      target: { value: "{{event.summary}} on {{refs.repo}}" },
+    });
+    clickNext();
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "PR triage" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({
+      kind: "orchestrator",
+      orchestrator: "user",
+      follow: false,
+      systemPrompt: "Triage it. Answer in one sentence.",
+      userPromptTemplate: "{{event.summary}} on {{refs.repo}}",
+    });
+  });
+
+  it("offers no prompt template on a workflow target, whose prompts live on its nodes", () => {
+    workflowsData = { workflows: [{ id: "wf-1", name: "Deploy" }] };
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Run a workflow on an event/);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext();
+
+    expect(screen.queryByLabelText(/Instructions for the assistant/)).toBeNull();
+    expect(screen.queryByLabelText(/Event message/)).toBeNull();
+  });
+
   it("schedule outcome posts a schedule with a cron and an orchestrator prompt", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
 

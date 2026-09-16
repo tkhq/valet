@@ -130,7 +130,7 @@ A retention job (default 30 days) is a deferred follow-up; nothing prunes
 | `name` | display name |
 | `event_keys` | `text[]`; supports trailing-wildcard patterns (`github.pull_request.*`) |
 | `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields; a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest) |
-| `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }` — `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions |
+| `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }` — `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions. An orchestrator target may also carry `systemPrompt` and `userPromptTemplate` (see "Orchestrator prompt templates") |
 | `enabled` | bool |
 | `created_by`, timestamps | |
 
@@ -228,7 +228,9 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     has no sender session); its second-layer defense is replicated in
     `orchestrator-target.ts` instead — the resolved session's durable org is
     asserted against the event's org, mismatches drop-log
-    (`event_target_mismatch`) and throw.
+    (`event_target_mismatch`) and throw. A rule that carries prompt templates
+    renders the body first (see "Orchestrator prompt templates" below); one
+    that carries none delivers the body described here unchanged.
   - **signal** — insert into `workflow_signals` for runs waiting on
     `event:{key}` conditions. Dispatcher support exists but the CRUD validator
     rejects the target kind until a `waitForEvent`-style node parks on that
@@ -362,3 +364,95 @@ job.
 Team assistant subscriptions use the organization Slack bot and authorize the linked sender against current team membership.
 Ingress and redelivery share this check before creating deliveries. The dispatcher checks again and attributes delivery to the mentioner.
 Personal and workflow mention rules remain creator-scoped. See `2026-09-04-team-slack-mention-subscriptions-design.md`.
+
+
+## Orchestrator prompt templates (2026-09-16)
+
+A workflow states what its nodes send to a model. A subscription that routes
+to an assistant had no such control: every matching event arrived as the
+generic `SignalContent` body above. A team could not give one rule its own
+standing instruction, or shape the message the assistant reads.
+
+An orchestrator target now carries two optional strings:
+
+| Field | Meaning |
+|---|---|
+| `systemPrompt` | A standing instruction for this rule. It renders above the event in every delivery the rule makes. |
+| `userPromptTemplate` | The event message, in place of the default body. |
+
+Both are optional and both are absent by default. A rule that sets neither
+delivers the same body it delivered before this feature, byte for byte: the
+dispatcher only calls the renderer when the target carries a field
+(`events/dispatcher.ts`). Workflow targets refuse both fields, because a
+workflow keeps its prompt configuration on its own llm and session nodes.
+
+### The variable set
+
+Both fields are templates over one closed set of variables, drawn from the
+normalized event:
+
+| Variable | Value |
+|---|---|
+| `{{event.key}}` | the normalized event key |
+| `{{event.summary}}` | the one-line summary the source plugin wrote |
+| `{{event.body}}` | the body the rule delivers with no user template |
+| `{{refs.<name>}}` | one scope ref (`repo`, `installation_id`, `channel`, …) |
+| `{{payload.<field>}}` | one catalog-declared filter field of the raw payload |
+
+`{{event.body}}` keeps a channel rule usable: a Slack mention's default body
+is the sender's cleaned message text, so a template can add instructions
+around the message instead of replacing it.
+
+`{{payload.<field>}}` reaches the payload only through the catalog entry for
+the event's own key, over the same `field` → `path` map the filters match on.
+An undeclared field is not addressable, so no template reads an unreviewed
+corner of a provider payload. No variable reaches a session, a thread, or
+another subscription.
+
+### Rendering and safety
+
+The language is substitution and nothing else (`events/prompt-template.ts`).
+There is no expression syntax, no path walk, no function call, and no
+recursion: one pass of `{{ name }}` replacement, so a rendered value that
+itself contains `{{ ... }}` stays literal and payload text cannot smuggle in
+a variable. Rendering is deterministic, and it happens at delivery time,
+inside the dispatcher, before the existing assistant delivery path
+(`events/assistant-delivery.ts`) takes the signal.
+
+The write gate (`events/subscription-write.ts`) is what keeps the renderer
+total. It refuses an empty field, a field over 4000 characters, an unclosed
+`{{ }}` placeholder, a name outside the set above, and a `payload.<field>`
+that no event selected by `eventKeys` declares. A patch re-validates the
+stored templates against the patched `eventKeys`, so narrowing a rule to
+events that declare fewer fields fails the write instead of rendering empty
+values later. At delivery an absent value renders as an empty string, and the
+rendered body is capped at 8000 characters.
+
+A rendered `systemPrompt` is delivered as the first block of the signal body,
+under the heading `Instructions for this subscription:`, with the event under
+it. The assistant session is shared by every rule that names it, so a per
+delivery change of the session system prompt would leak one rule's
+instruction into another rule's turn. The block is per delivery and holds
+only this rule's text.
+
+Prompt configuration does not change what a rule matches, so a write that
+only changes a template runs no collision gate.
+
+### Surfaces
+
+- `POST /api/event-subscriptions` takes both fields inside `target`.
+- `PATCH /api/event-subscriptions/:id` takes `systemPrompt` and
+  `userPromptTemplate` at the top level, like `assistantId`. `null` clears a
+  field and returns the rule to the default body. They are the only other
+  part of `target` a patch may rewrite.
+- The creation wizard collects both on its Then step, for the outcomes that
+  notify an assistant. The edit dialog shows them for every assistant-target
+  rule, which is how a Slack reply rule gets them after it is created.
+
+### Limits
+
+A followed thread is not a match of the rule that bound it. Later messages in
+that thread reach the assistant through the follow router
+(`channels/follow-router.ts`), which carries the message itself, so they keep
+the default body. Only the deliveries the subscription matches render its
+templates.

@@ -35,6 +35,7 @@ import type {
   EventSubscriptionCollisionErrorWire,
   EventSubscriptionFilterWire,
   EventSubscriptionTargetWire,
+  EventSubscriptionWire,
   GetEventCatalogResponse,
   GetEventResponse,
   ListEventDropsResponse,
@@ -1501,6 +1502,123 @@ describe("event-subscription assistant target", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("only valid on an orchestrator target");
+  });
+});
+
+/**
+ * Prompt templates on an orchestrator target (TKAI-491). The write gate is
+ * what makes the delivery-time renderer total, so every refusal it owes is
+ * asserted here; the rendering itself is `events/prompt-template.test.ts`.
+ */
+describe("event-subscription prompt templates", () => {
+  const PROMPT_BODY = {
+    name: "triage",
+    eventKeys: ["github.pull_request.opened"],
+    target: {
+      kind: "orchestrator",
+      systemPrompt: "Triage this pull request. Answer in one sentence.",
+      userPromptTemplate: "{{payload.sender}} opened {{payload.repo}}: {{event.summary}}",
+    },
+  };
+
+  it("stores both templates on the target and reads them back", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, PROMPT_BODY);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.target).toMatchObject({
+      kind: "orchestrator",
+      systemPrompt: PROMPT_BODY.target.systemPrompt,
+      userPromptTemplate: PROMPT_BODY.target.userPromptTemplate,
+    });
+  });
+
+  it("400s a template variable outside the documented set, naming the fix", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "orchestrator", userPromptTemplate: "{{session.history}}" },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("unknown variable");
+    expect(body.error).toContain("event.summary");
+  });
+
+  it("400s a payload field the selected events do not declare", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "orchestrator", userPromptTemplate: "{{payload.comment_body}}" },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("payload.comment_body");
+  });
+
+  it("400s a malformed template", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "orchestrator", systemPrompt: "Watch {{refs.repo" },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("unclosed");
+  });
+
+  it("400s a prompt template on a workflow target, so workflow prompts stay the workflow's own", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...PROMPT_BODY,
+      target: { kind: "workflow", workflowId: "wf-1", systemPrompt: "Do it" },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "systemPrompt is only valid on an orchestrator target",
+    );
+  });
+
+  it("patches a template, and null clears it back to the default delivery", async () => {
+    const a = await boot();
+    const created = (await (await postSubscription(a.baseUrl, PROMPT_BODY)).json()) as EventSubscriptionWire;
+
+    const patched = (await (
+      await patchSubscription(a.baseUrl, created.id, { systemPrompt: "Summarize it instead." })
+    ).json()) as PatchEventSubscriptionResponse;
+    expect(patched.target).toMatchObject({
+      systemPrompt: "Summarize it instead.",
+      userPromptTemplate: PROMPT_BODY.target.userPromptTemplate,
+    });
+
+    const cleared = (await (
+      await patchSubscription(a.baseUrl, created.id, { systemPrompt: null, userPromptTemplate: null })
+    ).json()) as PatchEventSubscriptionResponse;
+    expect(cleared.target).toEqual({ kind: "orchestrator" });
+  });
+
+  it("400s a patched template that names a variable the rule's events do not declare", async () => {
+    const a = await boot();
+    const created = (await (await postSubscription(a.baseUrl, PROMPT_BODY)).json()) as EventSubscriptionWire;
+    const res = await patchSubscription(a.baseUrl, created.id, {
+      userPromptTemplate: "{{payload.comment_body}}",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("payload.comment_body");
+  });
+
+  it("re-validates a stored template against narrowed eventKeys", async () => {
+    const a = await boot();
+    const created = (await (
+      await postSubscription(a.baseUrl, {
+        name: "pr numbers",
+        eventKeys: ["github.pull_request.opened"],
+        target: { kind: "orchestrator", userPromptTemplate: "PR {{payload.pr_number}}" },
+      })
+    ).json()) as EventSubscriptionWire;
+
+    // `pr_number` is a pull_request field; an issues-only rule cannot render it.
+    const res = await patchSubscription(a.baseUrl, created.id, { eventKeys: ["github.issues.opened"] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("payload.pr_number");
   });
 });
 

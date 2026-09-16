@@ -161,4 +161,52 @@ describe("buildSubscriptionPatch", () => {
     });
     expect(patch).toEqual({ filters: [CHANNEL_EQ] });
   });
+
+  describe("prompt templates", () => {
+    const withPrompts = sub({
+      target: { kind: "orchestrator", systemPrompt: "Triage it.", userPromptTemplate: "{{event.summary}}" },
+    });
+
+    it("sends nothing when the templates are untouched", () => {
+      const patch = buildSubscriptionPatch(withPrompts, {
+        ...unchangedForm(withPrompts),
+        prompts: { systemPrompt: "Triage it.", userPromptTemplate: "{{event.summary}}" },
+      });
+      expect(patch).toBeNull();
+    });
+
+    it("sends only the changed template", () => {
+      const patch = buildSubscriptionPatch(withPrompts, {
+        ...unchangedForm(withPrompts),
+        prompts: { systemPrompt: "Summarize it.", userPromptTemplate: "{{event.summary}}" },
+      });
+      expect(patch).toEqual({ systemPrompt: "Summarize it." });
+    });
+
+    it("sends null for an emptied template, which clears it on the row", () => {
+      const patch = buildSubscriptionPatch(withPrompts, {
+        ...unchangedForm(withPrompts),
+        prompts: { systemPrompt: "   ", userPromptTemplate: "" },
+      });
+      expect(patch).toEqual({ systemPrompt: null, userPromptTemplate: null });
+    });
+
+    it("adds a template to a rule that had none", () => {
+      const s = sub();
+      const patch = buildSubscriptionPatch(s, {
+        ...unchangedForm(s),
+        prompts: { systemPrompt: "", userPromptTemplate: "{{event.body}}" },
+      });
+      expect(patch).toEqual({ userPromptTemplate: "{{event.body}}" });
+    });
+
+    it("sends no template for a workflow target, which renders none", () => {
+      const s = sub({ target: { kind: "workflow", workflowId: "wf-1" } });
+      const patch = buildSubscriptionPatch(s, {
+        ...unchangedForm(s),
+        prompts: { systemPrompt: "Triage it.", userPromptTemplate: "" },
+      });
+      expect(patch).toBeNull();
+    });
+  });
 });

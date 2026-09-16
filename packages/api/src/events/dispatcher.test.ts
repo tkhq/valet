@@ -6,6 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { eq } from "drizzle-orm";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
@@ -293,6 +294,101 @@ describe("EventDispatcher", () => {
 
     const row = await getDelivery(deliveryId);
     expect(row.status).toBe("delivered");
+  });
+
+  /**
+   * Prompt templates on an orchestrator target (TKAI-491). The rendering is
+   * the pure part (`prompt-template.test.ts`); these cover the wiring: which
+   * event fields reach the renderer, and that a rule with no template
+   * delivers the same body it always did.
+   */
+  describe("orchestrator prompt templates", () => {
+    const PAYLOAD = {
+      action: "opened",
+      issue: { number: 7 },
+      repository: { full_name: "acme/site" },
+      sender: { login: "octocat" },
+    };
+
+    function dispatcherWith(deliver: OrchestratorDeliverFn): EventDispatcher {
+      return new EventDispatcher({
+        db: tdb.appDb,
+        workflowRunHost: fakeRunHost(),
+        workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToOrchestrator: deliver,
+        plugins: [githubPlugin],
+      });
+    }
+
+    it("renders the user prompt template in place of the default body", async () => {
+      await seedDelivery({
+        target: {
+          kind: "orchestrator",
+          userPromptTemplate: "{{payload.sender}} opened {{payload.repo}} ({{refs.installation_id}}): {{event.key}}",
+        },
+        payload: PAYLOAD,
+      });
+      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      await dispatcherWith(deliver).pollOnce();
+
+      expect(deliver.mock.calls[0][0].signal.body).toBe(
+        "octocat opened acme/site (42): github.issues.opened",
+      );
+    });
+
+    it("renders the system prompt above the body the rule would have delivered", async () => {
+      await seedDelivery({
+        target: { kind: "orchestrator", systemPrompt: "Triage {{refs.repo}}. Answer in one sentence." },
+        payload: PAYLOAD,
+      });
+      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      await dispatcherWith(deliver).pollOnce();
+
+      const body = deliver.mock.calls[0][0].signal.body;
+      expect(body).toContain("Triage acme/site. Answer in one sentence.");
+      // The default body still follows the instructions, excerpt and all.
+      expect(body).toContain("Issue #7 opened: broken build");
+      expect(body).toContain('"full_name":"acme/site"');
+    });
+
+    it("keeps a channel message readable through {{event.body}}", async () => {
+      await seedMentionMember("team-y");
+      await seedDelivery({
+        target: { kind: "orchestrator", userPromptTemplate: "In #deploys: {{event.body}}" },
+        ownerType: "team",
+        ownerId: "team-y",
+        service: "slack",
+        eventKey: "slack.app_mention",
+        eventKeys: ["slack.app_mention"],
+        refs: { channel: "C1", user: "U9" },
+        summary: "Mention in #deploys",
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "who are you", ts: "1.2" },
+        actor: { externalId: "U9" },
+      });
+      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      const dispatcher = new EventDispatcher({
+        db: tdb.appDb,
+        workflowRunHost: fakeRunHost(),
+        workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToOrchestrator: deliver,
+        resolveChannelOrigin: (service) =>
+          service === "slack" ? { channelType: "slack", threadKey: "slack:C1:1.2" } : null,
+        plugins: [githubPlugin],
+      });
+      await dispatcher.pollOnce();
+
+      expect(deliver.mock.calls[0][0].signal.body).toBe("In #deploys: who are you");
+    });
+
+    it("delivers the default body untouched when the rule configures no template", async () => {
+      await seedDelivery({ target: { kind: "orchestrator" }, payload: PAYLOAD });
+      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      await dispatcherWith(deliver).pollOnce();
+
+      const [summary, excerpt] = deliver.mock.calls[0][0].signal.body.split("\n\n");
+      expect(summary).toBe("Issue #7 opened: broken build");
+      expect(JSON.parse(excerpt)).toEqual(PAYLOAD);
+    });
   });
 
   it("records a followed thread for a follow-enabled channel mention; none when follow is off", async () => {

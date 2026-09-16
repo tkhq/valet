@@ -766,6 +766,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     deliverToOrchestrator,
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
+    // The catalog a subscription's `{{payload.<field>}}` variable resolves
+    // through. It is the same merged catalog the write validator uses.
+    plugins,
   });
 
   // Repository content sync. `readerFor` gives each source the GitHub

@@ -558,6 +558,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     }),
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
+    plugins,
   });
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });

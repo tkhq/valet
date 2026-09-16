@@ -26,8 +26,10 @@
  */
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
-import type { ChannelOrigin, SignalContent } from "@valet/engine";
+import type { ChannelOrigin, SignalContent, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
+import { allCatalogEntries } from "./ingest.js";
+import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
 import {
@@ -90,6 +92,13 @@ export interface EventDispatcherDeps {
     service: string,
     msg: { userId?: string; text: string },
   ) => Promise<{ senderName?: string; text: string }>;
+  /**
+   * The loaded plugins, for the trigger catalog a `{{payload.<field>}}`
+   * variable resolves through (`events/prompt-template.ts`). Only a rule
+   * that configures a prompt template reads it; a dispatcher built without
+   * plugins delivers every default body unchanged.
+   */
+  plugins?: ValetPlugin[];
 }
 
 /** The message text on a channel event payload (`text`), when present. */
@@ -110,6 +119,10 @@ interface SubscriptionTarget {
   /** When true, an orchestrator channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
+  /** Standing instruction rendered above the event. Absent → no instruction. */
+  systemPrompt?: string;
+  /** The event message, in place of the default body. Absent → the default. */
+  userPromptTemplate?: string;
 }
 
 export class EventDispatcher {
@@ -237,6 +250,23 @@ export class EventDispatcher {
           if (sender) attributes.sender = sender;
         } else {
           body = `${event.summary}\n\n${JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS)}`;
+        }
+        // A rule that configures no template never reaches the renderer, so
+        // the body above is the one every rule written before this feature
+        // delivers. A configured rule renders deterministically over the
+        // event's own fields (`events/prompt-template.ts`).
+        if (hasPromptConfig(target)) {
+          body = renderEventPrompt(
+            target,
+            buildPromptValues({
+              eventKey: event.eventKey,
+              summary: event.summary,
+              body,
+              refs,
+              payload: event.payload,
+              catalog: allCatalogEntries(this.deps.plugins ?? []),
+            }),
+          );
         }
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,

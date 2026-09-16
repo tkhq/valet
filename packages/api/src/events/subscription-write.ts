@@ -13,9 +13,12 @@ import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries } from "./ingest.js";
 import { validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
+import { validatePromptTemplate } from "./prompt-template.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
+/** The optional prompt templates an orchestrator target may carry. */
+const PROMPT_FIELDS = ["systemPrompt", "userPromptTemplate"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
 // no workflow node parks on the `event:{key}` signal shape the dispatcher
 // would emit, so a signal-target subscription would validate and then
@@ -132,9 +135,25 @@ export function validateSubscription(
     if (target.assistantId !== undefined && (typeof target.assistantId !== "string" || target.assistantId.length === 0)) {
       return "assistantId must be a non-empty string";
     }
+    // Both prompt templates are validated against the SELECTED catalog
+    // entries, the same set a filter field is held to: a template addresses
+    // exactly the payload fields this rule's events declare.
+    for (const field of PROMPT_FIELDS) {
+      const value = target[field];
+      if (value === undefined) continue;
+      const error = validatePromptTemplate(value, field, selectedEntries);
+      if (error) return error;
+    }
   }
-  if (target.kind === "workflow" && target.assistantId !== undefined) {
-    return "assistantId is only valid on an orchestrator target";
+  if (target.kind === "workflow") {
+    if (target.assistantId !== undefined) {
+      return "assistantId is only valid on an orchestrator target";
+    }
+    // A workflow keeps its own prompt configuration on its llm and session
+    // nodes. A prompt field here would name a prompt nothing renders.
+    for (const field of PROMPT_FIELDS) {
+      if (target[field] !== undefined) return `${field} is only valid on an orchestrator target`;
+    }
   }
   return null;
 }

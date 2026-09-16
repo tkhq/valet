@@ -47,6 +47,11 @@ import type {
 } from "@valet/api/wire";
 import { CollisionNotice, collisionsFromError } from "~/components/events/collision-notice";
 import {
+  PromptFields,
+  promptFieldsToTarget,
+  type PromptFieldsValue,
+} from "~/components/events/prompt-fields";
+import {
   FilterEditor,
   incompleteFilterRow,
   pruneFilterRows,
@@ -206,6 +211,12 @@ export function AutomationWizard({
   const [cron, setCron] = useState("");
   const [timezone, setTimezone] = useState(defaultTimezone());
   const [prompt, setPrompt] = useState("");
+  // The assistant target's optional prompt templates. Empty by default, so a
+  // reader who never opens the fields creates the rule the wizard always did.
+  const [promptTemplates, setPromptTemplates] = useState<PromptFieldsValue>({
+    systemPrompt: "",
+    userPromptTemplate: "",
+  });
   // Seeded from the active workspace at mount, then resynced when the
   // workspace changes (below) unless the reader already picked a target.
   const [target, setTarget] = useState<TargetChoice>(() => initialTarget(scopedTeamId));
@@ -411,10 +422,16 @@ export function AutomationWizard({
         return;
       }
       // The notify outcome speaks to an assistant, never follows a thread.
+      // An assistant target carries the prompt templates; a workflow target
+      // has its own prompt configuration on its nodes, and the server refuses
+      // these fields there.
+      const templates = promptFieldsToTarget(promptTemplates);
       const eventTarget: EventSubscriptionTarget =
         outcome === "notify"
-          ? { ...orchestratorTargetFrom(target), follow: false }
-          : target;
+          ? { ...orchestratorTargetFrom(target), follow: false, ...templates }
+          : target.kind === "orchestrator"
+            ? { ...target, ...templates }
+            : target;
       createSubscription.mutate(
         {
           name: name.trim(),
@@ -540,6 +557,8 @@ export function AutomationWizard({
               allowOrchestrator={outcome !== "workflow"}
               prompt={prompt}
               onPromptChange={setPrompt}
+              promptTemplates={promptTemplates}
+              onPromptTemplatesChange={setPromptTemplates}
             />
           )}
 
@@ -615,8 +634,14 @@ export function AutomationWizard({
 }
 
 /** The subscription target the event branch posts. A workflow target has no
- * follow flag; an orchestrator target may. */
-type EventSubscriptionTarget = TargetChoice | (OrchestratorChoice & { follow: boolean });
+ * follow flag and no prompt templates; an orchestrator target may have both. */
+type EventSubscriptionTarget =
+  | { kind: "workflow"; workflowId: string }
+  | (OrchestratorChoice & {
+      follow?: boolean;
+      systemPrompt?: string;
+      userPromptTemplate?: string;
+    });
 
 function StepHeader({ step, plan }: { step: Step; plan: { labels: string[]; count: Step } }) {
   return (
@@ -1192,6 +1217,8 @@ function ThenStep({
   allowOrchestrator,
   prompt,
   onPromptChange,
+  promptTemplates,
+  onPromptTemplatesChange,
 }: {
   target: TargetChoice;
   onTargetChange: (t: TargetChoice) => void;
@@ -1202,6 +1229,8 @@ function ThenStep({
   allowOrchestrator: boolean;
   prompt: string;
   onPromptChange: (v: string) => void;
+  promptTemplates: PromptFieldsValue;
+  onPromptTemplatesChange: (v: PromptFieldsValue) => void;
 }) {
   return (
     <div className="space-y-1.5">
@@ -1315,6 +1344,17 @@ function ThenStep({
             placeholder="Summarize overnight changes"
           />
         </div>
+      )}
+
+      {/* An event rule that notifies an assistant may shape what the assistant
+          reads. A schedule carries its own prompt above, and a workflow target
+          keeps its prompts on its nodes. */}
+      {!isSchedule && allowOrchestrator && target.kind === "orchestrator" && (
+        <PromptFields
+          idPrefix="automation"
+          value={promptTemplates}
+          onChange={onPromptTemplatesChange}
+        />
       )}
     </div>
   );
