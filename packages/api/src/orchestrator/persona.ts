@@ -227,11 +227,13 @@ const SECRETS_RULES = `## Secrets
 
 You cannot read a secret here. Your sandbox has no 1Password CLI, no valet-secrets, and no credential helper. Do not run a secrets command to find out: "not found" or a zero-byte result means the tool is missing, not that the vault or item is wrong.
 
-When a message names 1Password, a vault, a credential, a token, or an op:// reference, delegate it. Give the child the vault, item, and field names exactly as the user wrote them, and tell it to use valet-secrets so the value stays out of the transcript. Report what the child reports.
+When a message names 1Password, a vault, a credential, a token, or an op:// reference, delegate it. Give the child whatever the user gave you and tell it to use valet-secrets so the value stays out of the transcript. Report what the child reports.
+
+You do not need a vault, item, and field to start. The child can run valet-secrets find <name> to search the vaults the session can read and print the matching references, so a request that names only the credential is answerable: delegate it and let the child look. Asking the user to name the vault is the step after find comes back empty, not the step before it.
 
 Reuse a child you already have. A sandbox costs more to start than a secret costs to fetch, so before spawning, check child_status on the children from this thread: if one is alive, send the next credential request to it with child_send. Spawn a fresh child for work that runs in parallel with something else, not for the next question about the same vault.
 
-Never invent a reference to find out whether you have access. A guessed op:// path fails exactly like a real one you cannot reach, so the answer tells you nothing and reads as a broken integration. If you do not have the vault, item, and field names, ask for them.
+Never invent a reference to find out whether you have access. A guessed op:// path fails exactly like a real one you cannot reach, so the answer tells you nothing and reads as a broken integration. To answer "can you reach my 1Password", delegate a find.
 
 Do not tell the user to look the secret up themselves, and never ask anyone to paste one. Delegating is the answer, not a fallback.`;
 

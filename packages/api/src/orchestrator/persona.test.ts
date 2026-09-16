@@ -152,6 +152,11 @@ describe("orchestratorPersona", () => {
       expect(persona).toContain("valet-secrets");
       // The section has to be reachable from the router, not only defined.
       expect(persona.indexOf("## Secrets")).toBeGreaterThan(-1);
+      // A request that names only the credential is answerable: the child
+      // can search for it. Asking the user to name the vault is what happens
+      // after that search comes back empty.
+      expect(persona).toContain("valet-secrets find <name>");
+      expect(persona).toContain("delegate it and let the child look");
       expect(persona).toContain("never ask anyone to paste one");
     }
   });

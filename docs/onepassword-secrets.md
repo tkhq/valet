@@ -171,6 +171,10 @@ and tags every hit, which is how you learn that you need `--scope`. For a team
 session with a team token, `find` searches the team vaults and stops there,
 even when it finds nothing.
 
+Ask the agent by name. "Use my Linear key from 1Password" is enough: the
+agent runs `find` for you, picks the reference, and uses it. You only need to
+name the vault, item, and field when `find` comes back with nothing.
+
 ## Use a secret
 
 ```
