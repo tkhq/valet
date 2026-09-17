@@ -25,7 +25,7 @@ rmdir "$FAKE_SCOPE"
 # Exercise production identity, topology, launcher, and startup paths with fake kernel files.
 cat > "$TMP/kernel-test.mjs" <<'NODE'
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 const helper = await import(process.argv[2]);
@@ -81,6 +81,96 @@ if (!/^\d+\n$/.test(readFileSync(join(leaf, "cgroup.procs"), "utf8"))) throw new
 if (helper.startupKernel({ leader: "exited", deadlineExpired: false }) !== "server_exited") throw new Error("leader exit did not fail fast");
 if (helper.startupKernel({ leader: "owned", deadlineExpired: true }) !== "startup_timeout") throw new Error("live deadline did not time out");
 if (helper.startupKernel({ leader: "foreign", deadlineExpired: false }) !== "ownership_failure") throw new Error("foreign leader was not rejected");
+if (helper.LEAF_CONTROLLERS.join(" ") !== "cpuset cpu memory pids") throw new Error("required leaf controllers drifted");
+
+const pollProc = join(tmp, "poll-proc");
+const pollLeaf = join(tmp, "poll-leaf");
+mkdirSync(join(pollProc, String(pid)), { recursive: true });
+const pollRecord = { pid };
+const pollOp = { id: "poll", deadline: 1000, owner: {} };
+let pollCalls = 0; let readinessCalls = 0;
+const pollConverge = (leafPath, evacPath, controllers, options) => {
+  pollCalls += 1;
+  if (evacPath !== join(leafPath, "k3s_evac") || controllers.join(" ") !== "cpuset cpu memory pids" || options.protectedPid !== pid) throw new Error("startup convergence arguments drifted");
+  return true;
+};
+const pollIo = {
+  readOperation: () => ({ ...pollOp, cancelRequested: false }),
+  ownerValid: () => true,
+  readRecord: () => pollRecord,
+  leaderState: () => "owned",
+  now: () => 0,
+  readiness: () => { readinessCalls += 1; return false; },
+  convergeStartupLeaf: (input) => helper.convergeStartupLeaf({ ...input, leaf: pollLeaf, converge: pollConverge }),
+};
+writeFileSync(join(pollProc, String(pid), "cgroup"), "0::/init/valet-kubernetes/leaf\n");
+let poll = helper.startupPollIteration({ op: pollOp, launchExited: false, leafControllersConverged: false, procRoot: pollProc }, pollIo);
+if (poll.action !== "continue" || poll.delayMs !== 10 || poll.leafControllersConverged || pollCalls !== 0 || readinessCalls !== 0) throw new Error("startup poll did not wait for RootlessKit evacuation");
+writeFileSync(join(pollProc, String(pid), "cgroup"), "0::/init/valet-kubernetes/leaf/k3s_evac\n");
+poll = helper.startupPollIteration({ op: pollOp, launchExited: false, leafControllersConverged: false, procRoot: pollProc }, pollIo);
+if (poll.action !== "continue" || !poll.leafControllersConverged || pollCalls !== 1 || readinessCalls !== 1) throw new Error("startup poll did not converge after RootlessKit evacuation");
+
+const required = helper.LEAF_CONTROLLERS;
+function fakeCgroup(name, leafPids, evacPids = [], injectRace = false, dying = new Set()) {
+  const fakeLeaf = join(tmp, name, "leaf");
+  const fakeEvac = join(fakeLeaf, "k3s_evac");
+  mkdirSync(fakeLeaf, { recursive: true });
+  writeFileSync(join(fakeLeaf, "cgroup.procs"), leafPids.map(String).join("\n") + (leafPids.length ? "\n" : ""));
+  writeFileSync(join(fakeLeaf, "cgroup.subtree_control"), "cpu\n");
+  if (evacPids.length) {
+    mkdirSync(fakeEvac);
+    writeFileSync(join(fakeEvac, "cgroup.procs"), evacPids.map(String).join("\n") + "\n");
+  }
+  const writes = []; let enableCalls = 0;
+  const io = {
+    read: (path) => readFileSync(path, "utf8"),
+    exists: existsSync,
+    mkdir: (path) => { writes.push(path); mkdirSync(path); writeFileSync(join(path, "cgroup.procs"), ""); },
+    movePid: (source, target, movedPid) => {
+      writes.push(target);
+      const left = readFileSync(source, "utf8").trim().split(/\s+/).filter((value) => value && value !== movedPid);
+      writeFileSync(source, left.join("\n") + (left.length ? "\n" : ""));
+      if (dying.has(movedPid)) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      appendFileSync(target, `${movedPid}\n`);
+    },
+    enable: (path, controllers) => {
+      writes.push(path); enableCalls += 1;
+      if (injectRace && enableCalls === 1) appendFileSync(join(fakeLeaf, "cgroup.procs"), "1159\n");
+      if (readFileSync(join(fakeLeaf, "cgroup.procs"), "utf8").trim()) {
+        throw Object.assign(new Error("busy"), { code: "EBUSY" });
+      }
+      writeFileSync(path, `${controllers.join(" ")}\n`);
+    },
+    sleep: (ms) => { if (ms !== 100) throw new Error("invalid convergence retry delay"); },
+  };
+  return { fakeLeaf, fakeEvac, io, writes, enableCalls: () => enableCalls };
+}
+
+const missingEvac = fakeCgroup("missing-evac", [1144]);
+if (!helper.convergeLeaf(missingEvac.fakeLeaf, missingEvac.fakeEvac, required, missingEvac.io)) throw new Error("missing evacuation cgroup did not converge");
+if (readFileSync(join(missingEvac.fakeLeaf, "cgroup.procs"), "utf8") !== "") throw new Error("leaf straggler was retained");
+if (readFileSync(join(missingEvac.fakeEvac, "cgroup.procs"), "utf8") !== "1144\n") throw new Error("leaf straggler was not evacuated");
+if (!required.every((controller) => readFileSync(join(missingEvac.fakeLeaf, "cgroup.subtree_control"), "utf8").split(/\s+/).includes(controller))) throw new Error("leaf controllers did not converge");
+
+const raced = fakeCgroup("existing-evac", [1144], [1015], true);
+if (!helper.convergeLeaf(raced.fakeLeaf, raced.fakeEvac, required, raced.io)) throw new Error("concurrent straggler did not converge");
+if (raced.enableCalls() !== 2) throw new Error("convergence retry path was not exercised");
+const residents = readFileSync(join(raced.fakeEvac, "cgroup.procs"), "utf8").trim().split(/\s+/);
+if (residents.join(" ") !== "1015 1144 1159") throw new Error("existing evacuation residents changed");
+
+const protectedLeader = fakeCgroup("protected-leader", [1015, 1144], [1015]);
+protectedLeader.io.protectedPid = 1015;
+if (helper.convergeLeaf(protectedLeader.fakeLeaf, protectedLeader.fakeEvac, required, protectedLeader.io)) throw new Error("protected leader did not block controller enablement");
+if (protectedLeader.enableCalls() !== 0) throw new Error("controller enablement ran with internal processes");
+if (readFileSync(join(protectedLeader.fakeEvac, "cgroup.procs"), "utf8").trim().split(/\s+/).join(" ") !== "1015 1144") throw new Error("convergence moved the protected leader");
+
+const dying = fakeCgroup("dying-pid", [999], [], false, new Set(["999"]));
+if (!helper.convergeLeaf(dying.fakeLeaf, dying.fakeEvac, required, dying.io)) throw new Error("ESRCH race was not tolerated");
+for (const path of [...missingEvac.writes, ...raced.writes, ...protectedLeader.writes, ...dying.writes]) {
+  const owner = path.includes("missing-evac") ? missingEvac.fakeLeaf : path.includes("existing-evac") ? raced.fakeLeaf : path.includes("protected-leader") ? protectedLeader.fakeLeaf : dying.fakeLeaf;
+  if (path !== join(owner, "cgroup.subtree_control") && path !== join(owner, "k3s_evac") && path !== join(owner, "k3s_evac", "cgroup.procs")) throw new Error(`convergence escaped leaf: ${path}`);
+}
+if (helper.convergeLeaf(raced.fakeLeaf, join(tmp, "foreign", "k3s_evac"), required, raced.io)) throw new Error("foreign evacuation path was accepted");
 NODE
 VALET_SANDBOX_EPOCH=test node "$TMP/kernel-test.mjs" "$HELPER" "$TMP"
 

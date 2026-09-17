@@ -14,6 +14,8 @@ export const SCOPE = "/sys/fs/cgroup/init/valet-kubernetes";
 export const LEAF = `${SCOPE}/leaf`;
 export const KUBECONFIG = `${ROOT}/kubeconfig.yaml`;
 export const MINIMUM_FREE_BYTES = 2147483648;
+export const LEAF_CONTROLLERS = ["cpuset", "cpu", "memory", "pids"];
+export const LEAF_CONVERGENCE = { attempts: 10, delayMs: 100 };
 export const K3S_ENV = {
   HOME: "/home/dockerd", USER: "dockerd", PATH: "/usr/local/bin:/usr/bin:/bin",
   XDG_RUNTIME_DIR: `${ROOT}/run`, XDG_CONFIG_HOME: `${ROOT}/config`, K3S_DATA_DIR: `${ROOT}/data`,
@@ -146,6 +148,74 @@ export function startupKernel({ leader, deadlineExpired }) {
   if (leader === "exited") return "server_exited";
   if (leader === "foreign") return "ownership_failure";
   return deadlineExpired ? "startup_timeout" : "continue";
+}
+export function leafConvergenceKernel({ leaderLocation, leafProcs, enabled, required }) {
+  if (leaderLocation !== "evac") return "none";
+  if (required.every((controller) => enabled.includes(controller))) return "done";
+  return leafProcs.length > 0 ? "evacuate" : "enable";
+}
+export function convergeLeaf(leaf, evac, controllers = LEAF_CONTROLLERS, io = {}) {
+  const leafPath = `${leaf}/`;
+  if (dirname(evac) !== leaf || evac !== join(leaf, "k3s_evac")) return false;
+  const read = io.read ?? ((path) => readFileSync(path, "utf8"));
+  const exists = io.exists ?? existsSync;
+  const mkdir = io.mkdir ?? ((path) => mkdirSync(path, { mode: 0o700 }));
+  const movePid = io.movePid ?? ((_source, target, pid) => writeFileSync(target, `${pid}\n`));
+  const enable = io.enable ?? ((path, required) => writeFileSync(path, `${required.map((value) => `+${value}`).join(" ")}\n`));
+  const wait = io.sleep ?? sleep;
+  const procsPath = join(leaf, "cgroup.procs");
+  const controlPath = join(leaf, "cgroup.subtree_control");
+  if (!procsPath.startsWith(leafPath) || !controlPath.startsWith(leafPath)) return false;
+  for (let attempt = 0; attempt < LEAF_CONVERGENCE.attempts; attempt += 1) {
+    try {
+      const leafProcs = read(procsPath).trim().split(/\s+/).filter((pid) => pid && pid !== String(io.protectedPid ?? ""));
+      const enabled = read(controlPath).trim().split(/\s+/).filter(Boolean);
+      const action = leafConvergenceKernel({ leaderLocation: "evac", leafProcs, enabled, required: controllers });
+      if (action === "done") return true;
+      if (action === "evacuate") {
+        if (!exists(evac)) {
+          // Pinned RootlessKit uses os.MkdirAll, so it accepts this existing directory.
+          try { mkdir(evac); } catch (error) { if (error?.code !== "EEXIST") throw error; }
+        }
+        const target = join(evac, "cgroup.procs");
+        for (const pid of leafProcs) {
+          try { movePid(procsPath, target, pid); } catch (error) {
+            if (error?.code !== "ESRCH" && error?.code !== "ENOENT") throw error;
+          }
+        }
+      }
+      const remaining = read(procsPath).trim().split(/\s+/).filter(Boolean);
+      if (remaining.length === 0) enable(controlPath, controllers);
+      const verified = read(controlPath).trim().split(/\s+/).filter(Boolean);
+      if (controllers.every((controller) => verified.includes(controller))) return true;
+    } catch {}
+    if (attempt + 1 < LEAF_CONVERGENCE.attempts) wait(LEAF_CONVERGENCE.delayMs);
+  }
+  return false;
+}
+export function convergeStartupLeaf({ leader, record, procRoot = "/proc", leaf = LEAF, controllers = LEAF_CONTROLLERS, converge = convergeLeaf }) {
+  if (leader !== "owned" || !record) return null;
+  const evacMembership = "0::/init/valet-kubernetes/leaf/k3s_evac";
+  try {
+    const leaderInEvac = readFileSync(`${procRoot}/${record.pid}/cgroup`, "utf8").split("\n")
+      .some((line) => line === evacMembership || line.startsWith(`${evacMembership}/`));
+    return leaderInEvac ? converge(leaf, join(leaf, "k3s_evac"), controllers, { protectedPid: record.pid }) : null;
+  } catch { return null; }
+}
+
+export function startupPollIteration({ op, launchExited, leafControllersConverged, procRoot = "/proc" }, io = {}) {
+  const current = (io.readOperation ?? (() => readJson(OP_PATH, null)))();
+  const validOwner = io.ownerValid ?? ownerValid;
+  if (!current || current.id !== op.id || current.cancelRequested || !validOwner(current.owner)) {
+    return { action: "abandon", leafControllersConverged };
+  }
+  const record = (io.readRecord ?? (() => readJson(PID_PATH, null)))();
+  const leader = launchExited ? "exited" : (io.leaderState ?? ((value) => leaderState(value, procRoot)))(record);
+  const startupFailure = startupKernel({ leader, deadlineExpired: (io.now ?? Date.now)() >= op.deadline });
+  if (startupFailure !== "continue") return { action: "failure", leafControllersConverged, startupFailure };
+  const convergence = leafControllersConverged || (io.convergeStartupLeaf ?? convergeStartupLeaf)({ leader, record, procRoot });
+  if (convergence === null) return { action: "continue", delayMs: 10, leafControllersConverged: false };
+  return { action: (io.readiness ?? readiness)() ? "ready" : "continue", leafControllersConverged: convergence };
 }
 export function identityValid(record, procRoot = "/proc") {
   try {
@@ -299,7 +369,7 @@ export function startRecoveryKernel(record, procRoot = "/proc") {
 function start() {
   const bad = Object.values(checks()).find((value) => !value.ok);
   if (bad) return fail(`${bad.action} Run valet-kubernetes diagnose for details.`, 20);
-  let op = null; let join = false; let alreadyRunning = false; let staleImportId = null;
+  let op = null; let joinExisting = false; let alreadyRunning = false; let staleImportId = null;
   withLock(false, () => {
     prepareRoot();
     const current = readJson(OP_PATH, null);
@@ -309,7 +379,7 @@ function start() {
     const recovery = startRecoveryKernel(pid);
     if (recovery === "refuse-foreign") throw Object.assign(new Error("The server identity is not owned. Recreate the sandbox before cleanup."), { exitCode: 21 });
     if (current && ownerValid(current.owner)) {
-      if (current.type === "start") { op = current; join = true; return; }
+      if (current.type === "start") { op = current; joinExisting = true; return; }
       throw Object.assign(new Error("Another Kubernetes operation is active. Retry after it finishes."), { exitCode: 24 });
     }
     if (stored.state === "stopping") throw Object.assign(new Error("Kubernetes is stopping. Retry after stop finishes."), { exitCode: 4 });
@@ -330,7 +400,7 @@ function start() {
     return emit(stateReport("ready"));
   }
   if (!op) return fail("The start Operation is missing. Retry the command.", 1);
-  if (join) {
+  if (joinExisting) {
     while (Date.now() < op.deadline) {
       const snapshot = withLock(true, () => stateSnapshot());
       const report = stateReport(snapshot.stored.state === "ready" && readiness() ? "ready" : "unknown", snapshot);
@@ -342,7 +412,7 @@ function start() {
   }
   if (existsSync(SCOPE) && !cleanupOwned()) throw Object.assign(new Error("The prior Kubernetes cgroup is unsafe or populated. Recreate the sandbox before retrying."), { exitCode: 21 });
   let launchExited = false;
-  if (!join) {
+  if (!joinExisting) {
     const leaf = createScope();
     const log = openSync(LOG_PATH, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY, 0o600); chmodSync(LOG_PATH, 0o600);
     const env = { ...K3S_ENV, KUBECONFIG, VALET_SANDBOX_KUBERNETES: "1" };
@@ -357,14 +427,13 @@ function start() {
       sleep(10);
     }
   }
-  let startupFailure;
+  let startupFailure; let leafControllersConverged = false;
   for (;;) {
-    const current = readJson(OP_PATH, null);
-    if (!current || current.id !== op.id || current.cancelRequested || !ownerValid(current.owner)) return 4;
-    const leader = launchExited ? "exited" : leaderState(readJson(PID_PATH, null));
-    startupFailure = startupKernel({ leader, deadlineExpired: Date.now() >= op.deadline });
-    if (startupFailure !== "continue") break;
-    if (readiness()) {
+    const poll = startupPollIteration({ op, launchExited, leafControllersConverged });
+    leafControllersConverged = poll.leafControllersConverged;
+    if (poll.action === "abandon") return 4;
+    if (poll.action === "failure") { startupFailure = poll.startupFailure; break; }
+    if (poll.action === "ready") {
       if (!normalizeKubeconfig()) return fail("The kubeconfig context is invalid. Stop the cluster, then retry.", 22);
       let committed = false;
       withLock(false, () => {
@@ -374,7 +443,7 @@ function start() {
       });
       return committed ? emit(stateReport("ready")) : 4;
     }
-    sleep(1000);
+    sleep(poll.delayMs ?? 1000);
   }
   const settled = settleStartupFailure(startupFailure, op);
   if (!settled.committed) return 4;
