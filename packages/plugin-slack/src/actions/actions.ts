@@ -9,6 +9,7 @@ import type {
 } from "@valet/engine";
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
+import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
@@ -95,13 +96,27 @@ function ownerSlackUserId(cred: Credential | null): string | undefined {
   return typeof raw === "string" ? raw : undefined;
 }
 
-/** Guard that checks private channel membership. Returns an error PluginActionResult if denied, or null if allowed. */
-async function guardPrivateChannel(token: string, channelId: string, ownerId: string | undefined): Promise<PluginActionResult | null> {
+/** The answer of the private-channel guard. */
+interface ChannelGuard {
+  /** The error result the action must return. Absent when access is allowed. */
+  denied?: PluginActionResult;
+  /** The channel name from `conversations.info`. Absent for a conversation
+   *  Slack gives no name, such as a direct message, and for a denied check. */
+  name?: string;
+}
+
+/** Guard that checks private channel membership. */
+async function guardPrivateChannel(token: string, channelId: string, ownerId: string | undefined): Promise<ChannelGuard> {
   const result = await checkPrivateChannelAccess(token, channelId, ownerId);
   if (!result.allowed) {
-    return { success: false, error: result.error || 'Access denied' };
+    return { denied: { success: false, error: result.error || 'Access denied' } };
   }
-  return null;
+  // The check read conversations.info, so an action that labels the channel
+  // needs no second request. The name goes to the cache as well, because
+  // message text can mention the channel that is read. The guard runs on each
+  // read, so a rename reaches the cache on the next read.
+  rememberChannelName(token, channelId, result.name ?? null);
+  return { name: result.name };
 }
 
 const NOISE_SUBTYPES = new Set([
@@ -114,9 +129,10 @@ const NOISE_SUBTYPES = new Set([
 const SLACK_USER_MENTION_RE = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g;
 const SLACK_CHANNEL_MENTION_RE = /<#([C][A-Z0-9]+)(?:\|([^>]*))?>/g;
 
-/** Module-level caches — survive across requests within a worker isolate. */
+/** Module-level caches. They survive across requests within a worker isolate.
+ *  Channel names have their own bounded cache in channel-names.ts, which the
+ *  private-channel guard also fills. */
 const userCache = new Map<string, string>();
-const channelCache = new Map<string, string>();
 const botCache = new Map<string, string>();
 
 function formatUserDisplay(uid: string, user: Record<string, unknown>): string {
@@ -143,12 +159,11 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
     if (typeof msg.text === 'string') {
       for (const m of msg.text.matchAll(SLACK_USER_MENTION_RE)) userIds.add(m[1]);
       for (const m of msg.text.matchAll(SLACK_CHANNEL_MENTION_RE)) {
-        // If the label is already present (e.g. <#C123|general>), cache it directly
-        if (m[2]) {
-          channelCache.set(m[1], `#${m[2]}`);
-        } else {
-          channelIds.add(m[1]);
-        }
+        // A mention can carry a label (<#C123|general>). Slack keeps that label
+        // as the author wrote it at post time, so it can name the channel
+        // wrongly, and a sender chooses it. Look up an ID that carries no
+        // label; a label stays a fallback for the text of this one message.
+        if (!m[2]) channelIds.add(m[1]);
       }
     }
   }
@@ -168,14 +183,9 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
   }
 
   for (const cid of channelIds) {
-    if (channelCache.has(cid)) continue;
-    fetches.push(
-      slackGet('conversations.info', token, { channel: cid }).then(async (res) => {
-        if (!res.ok) return;
-        const data = (await res.json()) as { ok: boolean; channel?: Record<string, unknown> };
-        if (data.ok && data.channel) channelCache.set(cid, `#${data.channel.name} (${cid})`);
-      }).catch(() => {}),
-    );
+    // resolveChannelName answers from the cache when it can, and it never
+    // throws: an unresolved mention keeps its raw ID.
+    fetches.push(resolveChannelName(token, cid).then(() => {}));
   }
 
   for (const bid of botIds) {
@@ -211,7 +221,9 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
         return userCache.get(uid) || `@${uid}`;
       });
       text = text.replace(SLACK_CHANNEL_MENTION_RE, (_match, cid: string, label?: string) => {
-        return channelCache.get(cid) || (label ? `#${label}` : `#${cid}`);
+        const name = cachedChannelName(token, cid);
+        if (name) return `#${name} (${cid})`;
+        return label ? `#${label}` : `#${cid}`;
       });
       enriched.text = text;
     }
@@ -371,8 +383,8 @@ const addReaction = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
     const res = await slackFetch('reactions.add', token, {
       channel: p.channel,
       timestamp: p.timestamp,
@@ -470,15 +482,15 @@ const readHistory = action(Type.Object({
   }))({
   id: 'slack.read_history',
   name: 'Read History',
-  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
+  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
     const query: Record<string, unknown> = {
       channel: p.channel,
       limit: p.limit || 100,
@@ -512,8 +524,22 @@ const readHistory = action(Type.Object({
 
     const next_cursor = data.response_metadata?.next_cursor || undefined;
     const filtered = p.filter || p.threads_only;
+    // The guard read conversations.info for this channel. Message text cannot
+    // reach this name.
+    const channelName = guard.name;
     // Put pagination metadata first — large message arrays may be truncated by tool output limits
-    return { success: true, data: { has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
+    return {
+      success: true,
+      data: {
+        channel: p.channel,
+        ...(channelName ? { channel_name: channelName } : {}),
+        has_more: data.has_more,
+        next_cursor,
+        ...(filtered ? { fetched } : {}),
+        total: messages.length,
+        messages,
+      },
+    };
   },
 });
 
@@ -525,15 +551,15 @@ const readThread = action(Type.Object({
   }))({
   id: 'slack.read_thread',
   name: 'Read Thread',
-  description: 'Read replies in a Slack thread. Bot must be a member of the channel.',
+  description: 'Read replies in a Slack thread. Bot must be a member of the channel. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
     const query: Record<string, unknown> = {
       channel: p.channel,
       ts: p.thread_ts,
@@ -551,7 +577,20 @@ const readThread = action(Type.Object({
     );
 
     const next_cursor = data.response_metadata?.next_cursor || undefined;
-    return { success: true, data: { has_more: data.has_more, next_cursor, total: messages.length, messages } };
+    // The guard read conversations.info for this channel. Message text cannot
+    // reach this name.
+    const channelName = guard.name;
+    return {
+      success: true,
+      data: {
+        channel: p.channel,
+        ...(channelName ? { channel_name: channelName } : {}),
+        has_more: data.has_more,
+        next_cursor,
+        total: messages.length,
+        messages,
+      },
+    };
   },
 });
 
@@ -663,15 +702,15 @@ const getPins = action(Type.Object({
   }))({
   id: 'slack.get_pins',
   name: 'Get Pins',
-  description: 'Get pinned messages in a channel. Returns messages in the same format as read_history. Useful for understanding what a channel considers important.',
+  description: 'Get pinned messages in a channel. Returns messages in the same format as read_history. Useful for understanding what a channel considers important. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
 
     const res = await slackGet('pins.list', token, { channel: p.channel });
     if (!res.ok) return slackError(res);
@@ -699,7 +738,19 @@ const getPins = action(Type.Object({
         return { type: 'file', name: f.name, mimetype: f.mimetype || undefined, size: f.size, url: f.url_private };
       });
 
-    return { success: true, data: { total: pins.length + fileItems.length, pins, ...(fileItems.length > 0 ? { files: fileItems } : {}) } };
+    // The guard read conversations.info for this channel. Message text cannot
+    // reach this name.
+    const channelName = guard.name;
+    return {
+      success: true,
+      data: {
+        channel: p.channel,
+        ...(channelName ? { channel_name: channelName } : {}),
+        total: pins.length + fileItems.length,
+        pins,
+        ...(fileItems.length > 0 ? { files: fileItems } : {}),
+      },
+    };
   },
 });
 
@@ -715,8 +766,8 @@ const getChannelInfo = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
 
     const res = await slackGet('conversations.info', token, { channel: p.channel, include_num_members: true });
     if (!res.ok) return slackError(res);
@@ -789,8 +840,8 @@ const getReactions = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
 
     const res = await slackGet('reactions.get', token, {
       channel: p.channel,
@@ -886,8 +937,8 @@ const sendMessage = action(Type.Object({
       if (!found) return { success: false, error: `Channel "${p.channel}" not found or bot is not a member. Use list_channels to find available channels.` };
     }
 
-    const denied = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
 
     const formattedText = markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true });
     const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
@@ -1073,8 +1124,8 @@ const updateMessage = action(Type.Object({
     const token = cred?.accessToken;
     if (!token) return { success: false, error: 'Missing bot_token' };
 
-    const denied = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
 
     // chat.update defaults to parse:'client' (unlike chat.postMessage's 'none'),
     // which would mangle <url|label> markup on every edit — pin 'none'. It also
@@ -1125,8 +1176,8 @@ const deleteMessage = action(Type.Object({
     const token = cred?.accessToken;
     if (!token) return { success: false, error: 'Missing bot_token' };
 
-    const denied = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
+    if (guard.denied) return guard.denied;
 
     const res = await slackFetch('chat.delete', token, { channel: args.channel, ts: args.ts });
     if (!res.ok) return slackError(res);
