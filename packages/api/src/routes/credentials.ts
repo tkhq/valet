@@ -51,6 +51,7 @@ import { and, eq } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
 import { credentialSecret, type CredentialOwner, type StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
@@ -812,4 +813,223 @@ credentialsRouter.delete("/:service", async (c) => {
 
   const resp: DeleteCredentialResponse = { ok: true };
   return c.json(resp);
+});
+
+// ── Google Drive folder scope ──────────────────────────────────────
+//
+// The folders a person is willing to let Valet see in Drive. The scope is
+// stored on their own Drive credential, because the OAuth grant it narrows
+// is theirs, and it is enforced inside the google-workspace plugin
+// (`actions/folder-scope.ts`). See
+// `docs/specs/2026-09-17-drive-folder-scope-design.md`.
+//
+// These handlers write `metadata.driveFolderScope` with a targeted column
+// update rather than a read-modify-save through `CredentialStore.save`,
+// which would round-trip the encrypted secret columns for a change that
+// touches none of them.
+
+/** The plugin's credential service id, as `plugin-google-workspace` declares it. */
+const GOOGLE_WORKSPACE_SERVICE = "google_workspace";
+/** Drive ids are URL-safe base64-ish. Anything else is rejected on write. */
+const DRIVE_FOLDER_ID = /^[A-Za-z0-9_-]+$/;
+const MAX_SCOPE_FOLDERS = 50;
+
+function driveScopeGuard(service: string): Response | null {
+  if (service === GOOGLE_WORKSPACE_SERVICE) return null;
+  return new Response(
+    JSON.stringify({
+      error: `Folder scope applies to ${GOOGLE_WORKSPACE_SERVICE} only.`,
+      corrective: `Call this route with the ${GOOGLE_WORKSPACE_SERVICE} service.`,
+    }),
+    { status: 400, headers: { "content-type": "application/json" } },
+  );
+}
+
+async function readFolderScope(
+  db: AppDb,
+  userId: string,
+): Promise<{ folderIds: string[] } | null> {
+  const [row] = await db
+    .select({ metadata: credentials.metadata })
+    .from(credentials)
+    .where(
+      and(
+        eq(credentials.ownerType, "user"),
+        eq(credentials.ownerId, userId),
+        eq(credentials.service, GOOGLE_WORKSPACE_SERVICE),
+      ),
+    );
+  if (!row) return null;
+  const metadata = fromJsonbColumn<Record<string, unknown>>(row.metadata);
+  const raw = metadata?.["driveFolderScope"];
+  if (raw === undefined || raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const ids = (raw as Record<string, unknown>)["folderIds"];
+  return {
+    folderIds: Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [],
+  };
+}
+
+async function writeFolderScope(
+  db: AppDb,
+  userId: string,
+  scope: { folderIds: string[] } | null,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ metadata: credentials.metadata })
+    .from(credentials)
+    .where(
+      and(
+        eq(credentials.ownerType, "user"),
+        eq(credentials.ownerId, userId),
+        eq(credentials.service, GOOGLE_WORKSPACE_SERVICE),
+      ),
+    );
+  if (!row) return false;
+  const metadata = { ...(fromJsonbColumn<Record<string, unknown>>(row.metadata) ?? {}) };
+  if (scope === null) delete metadata["driveFolderScope"];
+  else metadata["driveFolderScope"] = { folderIds: scope.folderIds };
+  await db
+    .update(credentials)
+    .set({ metadata, updatedAt: Date.now() })
+    .where(
+      and(
+        eq(credentials.ownerType, "user"),
+        eq(credentials.ownerId, userId),
+        eq(credentials.service, GOOGLE_WORKSPACE_SERVICE),
+      ),
+    );
+  return true;
+}
+
+const NOT_CONNECTED = {
+  error:
+    "Google Workspace is not connected. Connect Google Workspace in Settings → Integrations, then set the folders.",
+  corrective: "Connect Google Workspace in Settings → Integrations, then set the folders.",
+} as const;
+
+credentialsRouter.get("/:service/folder-scope", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+  const scope = await readFolderScope(c.var.providers.db, c.var.user.id);
+  // `folderIds: null` is the unrestricted case, which is not the same as an
+  // empty list. An empty list denies every file.
+  return c.json({ folderIds: scope ? scope.folderIds : null });
+});
+
+credentialsRouter.put("/:service/folder-scope", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+
+  let body: { folderIds?: unknown };
+  try {
+    body = (await c.req.json()) as { folderIds?: unknown };
+  } catch {
+    return c.json(
+      { error: 'Body must be JSON. Send {"folderIds": ["<id>"]}.', corrective: 'Send {"folderIds": ["<id>"]}.' },
+      400,
+    );
+  }
+  if (!Array.isArray(body.folderIds)) {
+    return c.json(
+      {
+        error: 'folderIds must be an array. Send {"folderIds": ["<id>"]}.',
+        corrective: 'Send {"folderIds": ["<id>"]}.',
+      },
+      400,
+    );
+  }
+  if (body.folderIds.length > MAX_SCOPE_FOLDERS) {
+    return c.json(
+      {
+        error:
+          `A folder scope holds at most ${MAX_SCOPE_FOLDERS} folders. ` +
+          "Pick fewer folders, or pick a parent folder that contains them.",
+        corrective: "Pick fewer folders, or pick a parent folder that contains them.",
+      },
+      400,
+    );
+  }
+  const folderIds: string[] = [];
+  for (const id of body.folderIds) {
+    if (typeof id !== "string" || !DRIVE_FOLDER_ID.test(id)) {
+      return c.json(
+        {
+          error:
+            `"${String(id)}" is not a Drive folder id. ` +
+            "Copy the id from the folder's URL, after /folders/.",
+          corrective: "Copy the id from the folder's URL, after /folders/.",
+        },
+        400,
+      );
+    }
+    if (!folderIds.includes(id)) folderIds.push(id);
+  }
+
+  const wrote = await writeFolderScope(c.var.providers.db, c.var.user.id, { folderIds });
+  if (!wrote) return c.json(NOT_CONNECTED, 404);
+  return c.json({ folderIds });
+});
+
+credentialsRouter.delete("/:service/folder-scope", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+  const wrote = await writeFolderScope(c.var.providers.db, c.var.user.id, null);
+  if (!wrote) return c.json(NOT_CONNECTED, 404);
+  // Back to as wide as the OAuth grant itself.
+  return c.json({ folderIds: null });
+});
+
+/**
+ * Browse the caller's Drive folders so the settings UI can offer a picker.
+ *
+ * `parentId` defaults to the Drive root. The listing is folders only: a
+ * scope names folders, and showing files would imply they can be picked.
+ */
+credentialsRouter.get("/:service/drive-folders", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+  const { engineCredentials } = c.var.providers;
+  const stored = await engineCredentials.get({ type: "user", id: c.var.user.id }, GOOGLE_WORKSPACE_SERVICE);
+  const token = stored ? credentialSecret(stored) : null;
+  if (!token) return c.json(NOT_CONNECTED, 404);
+
+  const parentId = c.req.query("parentId") || "root";
+  if (parentId !== "root" && !DRIVE_FOLDER_ID.test(parentId)) {
+    return c.json(
+      {
+        error: "parentId is not a Drive folder id. Omit it to list the top level.",
+        corrective: "Omit it to list the top level.",
+      },
+      400,
+    );
+  }
+  const qs = new URLSearchParams({
+    q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: "files(id,name)",
+    pageSize: "100",
+    orderBy: "name",
+    supportsAllDrives: "true",
+    includeItemsFromAllDrives: "true",
+  });
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const corrective =
+      res.status === 401
+        ? "Reconnect Google Workspace in Settings → Integrations."
+        : "Try again in a moment.";
+    return c.json(
+      {
+        error: `Google Drive answered ${res.status} while listing folders. ${corrective}`,
+        corrective,
+      },
+      502,
+    );
+  }
+  const data = (await res.json()) as { files?: Array<{ id?: unknown; name?: unknown }> };
+  const folders = (data.files ?? [])
+    .filter((f): f is { id: string; name: string } => typeof f.id === "string" && typeof f.name === "string")
+    .map((f) => ({ id: f.id, name: f.name }));
+  return c.json({ parentId, folders });
 });

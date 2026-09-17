@@ -38,6 +38,7 @@ import { errorText } from "~/lib/error-text";
 import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
+import { DriveFolderScope } from "./drive-folder-scope";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
 import { GithubOrgAppLine } from "./github-org-app-line";
@@ -269,16 +270,26 @@ function ServiceBlock({
   const shareControl =
     service.connected && !orgProvided ? <ShareWithTeam service={service.service} title={title} /> : null;
 
+  // Drive is the one credential whose reach a person can narrow after
+  // connecting, so the control sits on its tile rather than in a generic
+  // per-integration settings screen that does not exist yet.
+  const folderScopeControl =
+    service.connected && service.service === "google_workspace" ? (
+      <DriveFolderScope service={service.service} title={title} />
+    ) : null;
+
   const controls = !service.connected ? (
     unconfigured || orgProvided ? null : connectControl
   ) : repair && !unconfigured && !orgProvided ? (
     <span className="flex flex-wrap items-center gap-3">
+      {folderScopeControl}
       {shareControl}
       {disconnectControl}
       {connectControl}
     </span>
   ) : (
     <span className="flex flex-wrap items-center gap-3">
+      {folderScopeControl}
       {shareControl}
       {disconnectControl}
     </span>

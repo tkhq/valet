@@ -1,4 +1,5 @@
 import { Type } from 'typebox';
+import { FolderContainment } from './folder-scope.js';
 import type { Static, TSchema } from 'typebox';
 import type {
   PluginAction,
@@ -292,7 +293,9 @@ const searchFiles = action(
   name: 'Search Files',
   description:
     'Searches across all file types in Google Drive by name or content. ' +
-    'Supports filtering by MIME type, scoping to a folder subtree, and pagination.',
+    'Supports filtering by MIME type, scoping to a folder and everything under it, and pagination. ' +
+    'A folder-scoped page can come back shorter than maxResults, because the folder filter is ' +
+    'applied to the results: keep following nextPageToken.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -313,7 +316,7 @@ const searchFiles = action(
       }
 
       if (p.mimeType) queryParts.push(`mimeType='${escapeDriveQuery(resolveMimeType(p.mimeType))}'`);
-      if (p.folderId) queryParts.push(`'${escapeDriveQuery(p.folderId)}' in ancestors`);
+
       if (p.modifiedAfter) {
         const cutoff = new Date(p.modifiedAfter).toISOString();
         queryParts.push(`modifiedTime > '${escapeDriveQuery(cutoff)}'`);
@@ -349,9 +352,17 @@ const searchFiles = action(
         owner: f.owners?.[0]?.displayName || null,
         url: f.webViewLink,
       }));
+      // `folderId` means the folder and everything under it, which Drive v3
+      // cannot express: it dropped v2's `in ancestors` and keeps `in parents`
+      // for direct children only. So the page is filtered by walking each
+      // result's parents, the same containment check the folder scope uses.
+      const scoped = p.folderId
+        ? await new FolderContainment(token, new Set([p.folderId])).filterIds(files)
+        : files;
+
       return {
         success: true,
-        data: { files, total: files.length, nextPageToken: data.nextPageToken, hasMore: !!data.nextPageToken },
+        data: { files: scoped, total: scoped.length, nextPageToken: data.nextPageToken, hasMore: !!data.nextPageToken },
       };
     } catch (error) {
       return { success: false, error: String(error) };

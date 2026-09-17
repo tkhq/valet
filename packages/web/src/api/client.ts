@@ -48,6 +48,8 @@ import type {
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowScheduleRequest,
   DeleteCredentialResponse,
+  DriveFolderScopeResponse,
+  DriveFoldersResponse,
   DeleteGrantRequest,
   DeleteGrantResponse,
   DeleteOrgPolicyResponse,
@@ -1282,6 +1284,31 @@ export const api = {
     return request<DeleteCredentialResponse>(
       "DELETE",
       `/credentials/${encodeURIComponent(service)}${tail}`,
+    );
+  },
+  // Google Drive folder scope. `folderIds: null` means unrestricted, which
+  // is not the same as [] — an empty list denies every file.
+  getDriveFolderScope: (service: string) =>
+    request<DriveFolderScopeResponse>(
+      "GET",
+      `/credentials/${encodeURIComponent(service)}/folder-scope`,
+    ),
+  putDriveFolderScope: (service: string, folderIds: string[]) =>
+    request<DriveFolderScopeResponse>(
+      "PUT",
+      `/credentials/${encodeURIComponent(service)}/folder-scope`,
+      { folderIds },
+    ),
+  clearDriveFolderScope: (service: string) =>
+    request<DriveFolderScopeResponse>(
+      "DELETE",
+      `/credentials/${encodeURIComponent(service)}/folder-scope`,
+    ),
+  listDriveFolders: (service: string, parentId?: string) => {
+    const qs = parentId ? `?parentId=${encodeURIComponent(parentId)}` : "";
+    return request<DriveFoldersResponse>(
+      "GET",
+      `/credentials/${encodeURIComponent(service)}/drive-folders${qs}`,
     );
   },
   delegateCredential: (service: string, body: DelegateCredentialRequest) =>
