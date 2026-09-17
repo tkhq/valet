@@ -157,6 +157,7 @@ export {
   type PluginActionContext,
   type PluginActionResult,
   type PluginCatalog,
+  type PluginCatalogAvailabilityOptions,
   type PluginCatalogOptions,
   type ServiceAvailability,
   type ServiceAvailabilityState,

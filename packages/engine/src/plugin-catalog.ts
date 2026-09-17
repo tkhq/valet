@@ -180,16 +180,19 @@ export interface ServiceAvailability {
   fix?: string;
 }
 
-export interface PluginCatalogOptions {
-  plugins: ActionPlugin[];
-  /** Native tools are outside this integration-action catalog. */
-  nativeToolNames?: readonly string[];
+export interface PluginCatalogAvailabilityOptions {
   /** Build-time snapshot used only for the compact tool description. */
   serviceAvailability?: readonly ServiceAvailability[];
-  /** Live inventory read on every list_tools call. */
+  /** Live inventory read before listing or invoking an action. */
   resolveServiceAvailability?: () =>
     | readonly ServiceAvailability[]
     | Promise<readonly ServiceAvailability[]>;
+}
+
+export interface PluginCatalogOptions extends PluginCatalogAvailabilityOptions {
+  plugins: ActionPlugin[];
+  /** Native tools are outside this integration-action catalog. */
+  nativeToolNames?: readonly string[];
   /** Clock used for the dynamic-action-resolution TTL cache. Default: Date.now. */
   clock?: () => number;
   /**
@@ -308,8 +311,9 @@ export type PluginCatalog = Catalog;
 export function buildPluginCatalog(
   plugins: ActionPlugin[],
   clock?: () => number,
+  availability: PluginCatalogAvailabilityOptions = {},
 ): PluginCatalog {
-  return buildCatalog(plugins, clock ?? Date.now);
+  return buildCatalog(plugins, clock ?? Date.now, availability);
 }
 
 /**
@@ -321,7 +325,7 @@ export function buildPluginCatalog(
  */
 export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
   const now = opts.clock ?? Date.now;
-  const catalog = buildCatalog(opts.plugins, now);
+  const catalog = buildCatalog(opts.plugins, now, opts);
   const pinned = resolvePins(catalog, opts);
   return [makeListTool(catalog, pinned.nameByActionId, opts), makeCallTool(catalog), ...pinned.tools];
 }
@@ -340,6 +344,13 @@ export type InvokeActionResult =
   | { kind: "expired-approval" }
   | { kind: "pending-approval" }
   | { kind: "missing-credential"; service: string }
+  | {
+      kind: "service-unavailable";
+      service: string;
+      state: ServiceAvailabilityState;
+      reason: string;
+      fix?: string;
+    }
   | { kind: "error"; message: string }
   | { kind: "resolve-failed"; service: string; message: string };
 
@@ -449,27 +460,37 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
+  let availabilityCheckedService: string | undefined;
+  const dotIdx = actionId.indexOf(".");
+  if (dotIdx > 0) {
+    const prefix = actionId.slice(0, dotIdx);
+    const unavailable = await unavailableService(catalog, prefix);
+    if (unavailable) return serviceUnavailableOutcome(unavailable);
+    availabilityCheckedService = prefix;
+  }
+
   let entry = catalog.byId.get(actionId);
-  if (!entry) {
-    const dotIdx = actionId.indexOf(".");
-    if (dotIdx > 0) {
-      const prefix = actionId.slice(0, dotIdx);
-      const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
-      if (plugin) {
-        try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
-          entry = resolvedDyn.byId.get(actionId);
-        } catch (err) {
-          return {
-            kind: "resolve-failed",
-            service: prefix,
-            message: err instanceof Error ? err.message : String(err),
-          };
-        }
+  if (!entry && availabilityCheckedService) {
+    const plugin = catalog.dynamicPlugins.find((p) => p.service === availabilityCheckedService);
+    if (plugin) {
+      try {
+        const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+        entry = resolvedDyn.byId.get(actionId);
+      } catch (err) {
+        return {
+          kind: "resolve-failed",
+          service: availabilityCheckedService,
+          message: err instanceof Error ? err.message : String(err),
+        };
       }
     }
   }
   if (!entry) return { kind: "unknown", toolId: actionId };
+
+  if (availabilityCheckedService !== entry.service) {
+    const unavailable = await unavailableService(catalog, entry.service);
+    if (unavailable) return serviceUnavailableOutcome(unavailable);
+  }
 
   const resolver = ctx.policyResolver;
   // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
@@ -680,6 +701,8 @@ interface Catalog {
   dynamicPlugins: ActionPlugin[];
   /** TTL cache of resolved dynamic actions, keyed by plugin service. */
   resolved: Map<string, ResolvedDynamic>;
+  serviceAvailability: readonly ServiceAvailability[];
+  resolveServiceAvailability?: PluginCatalogAvailabilityOptions["resolveServiceAvailability"];
   now: () => number;
 }
 
@@ -701,7 +724,11 @@ function buildEntries(
   return { entries, byId };
 }
 
-function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
+function buildCatalog(
+  plugins: ActionPlugin[],
+  now: () => number,
+  availability: PluginCatalogAvailabilityOptions = {},
+): Catalog {
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
   const dynamicPlugins: ActionPlugin[] = [];
@@ -716,7 +743,37 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     }
     if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId, dynamicPlugins, resolved: new Map(), now };
+  return {
+    entries,
+    byId,
+    dynamicPlugins,
+    resolved: new Map(),
+    serviceAvailability: availability.serviceAvailability ?? [],
+    resolveServiceAvailability: availability.resolveServiceAvailability,
+    now,
+  };
+}
+
+async function unavailableService(
+  catalog: Catalog,
+  service: string,
+): Promise<ServiceAvailability | undefined> {
+  const availability = catalog.resolveServiceAvailability
+    ? await catalog.resolveServiceAvailability()
+    : catalog.serviceAvailability;
+  return availability.find((item) => item.service === service && item.state !== "available");
+}
+
+function serviceUnavailableOutcome(
+  availability: ServiceAvailability,
+): InvokeActionResult {
+  return {
+    kind: "service-unavailable",
+    service: availability.service,
+    state: availability.state,
+    reason: availability.reason,
+    ...(availability.fix ? { fix: availability.fix } : {}),
+  };
 }
 
 /**
@@ -848,9 +905,9 @@ function makeListTool(
         state?: ServiceAvailabilityState;
         fix?: string;
       }> = [];
-      const availability = opts.resolveServiceAvailability
-        ? await opts.resolveServiceAvailability()
-        : (opts.serviceAvailability ?? []);
+      const availability = catalog.resolveServiceAvailability
+        ? await catalog.resolveServiceAvailability()
+        : catalog.serviceAvailability;
       const unavailable = availability.filter((item) => item.state !== "available");
       for (const item of unavailable) {
         warnings.push({
@@ -951,7 +1008,7 @@ function makeListTool(
 
       const total = entries.length;
       const nativeMatches = nativeToolMatches(a.query, opts.nativeToolNames ?? []);
-      if (nativeMatches.length > 0 || total === 0) {
+      if (total === 0) {
         const matched = nativeMatches.length > 0 ? ` (matched: ${nativeMatches.join(", ")})` : "";
         warnings.push({
           service: "catalog",
@@ -975,12 +1032,12 @@ function nativeToolMatches(query: string | undefined, names: readonly string[]):
     (query ?? "")
       .toLowerCase()
       .match(/[a-z0-9_*.-]+/g)
-      ?.filter((term) => term !== "or" && !term.startsWith("-")) ?? [];
+      ?.filter((term) => term !== "or" && !term.startsWith("-"))
+      .map((term) => term.replaceAll("*", ""))
+      .filter((term) => term.length > 0) ?? [];
   if (terms.length === 0) return [];
   return [...new Set(names)]
-    .filter((name) =>
-      terms.some((term) => name.toLowerCase().includes(term.replaceAll("*", ""))),
-    )
+    .filter((name) => terms.some((term) => name.toLowerCase().includes(term)))
     .sort();
 }
 
@@ -1065,6 +1122,10 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     case "missing-credential":
       return {
         text: `${toolId} failed: credential ${outcome.service} not connected — connect it in Settings`,
+      };
+    case "service-unavailable":
+      return {
+        text: `${toolId} unavailable: ${outcome.reason}${outcome.fix ? ` ${outcome.fix}` : ""}`,
       };
     case "error":
       return { text: `error: ${outcome.message}` };

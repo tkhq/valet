@@ -424,6 +424,41 @@ describe("Session.prompt plugin command execution", () => {
     });
   });
 
+  it("blocks unavailable services through the slash-command path", async () => {
+    const faux = registerFauxProvider({ provider: "s-plugin-unavailable" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const fx = echoFixture();
+    const execute = vi.spyOn(fx.actionPlugins[0].actions[0], "execute");
+    const catalog = buildPluginCatalog(fx.actionPlugins, undefined, {
+      resolveServiceAvailability: () => [{
+        service: "testplug",
+        state: "disabled_by_org",
+        reason: "the organization disabled this plugin",
+        fix: "Ask an org admin to enable the plugin.",
+      }],
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      pluginCommands: fx.commands,
+      pluginCatalog: catalog,
+    });
+    const threadId = session.thread().id;
+
+    await session.prompt("/testplug:echo hello");
+
+    const last = lastEntry(await store.getEntries(session.id, threadId));
+    expect(last?.type === "command_result" && last.ok).toBe(false);
+    const output = last?.type === "command_result" ? last.output : "";
+    expect(output).toContain("the organization disabled this plugin");
+    expect(output).toContain("Ask an org admin to enable the plugin.");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("missing credentials produce a corrective error", async () => {
     const faux = registerFauxProvider({ provider: "s-plugin-cred" });
     cleanups.push(() => faux.unregister());

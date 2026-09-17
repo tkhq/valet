@@ -35,7 +35,6 @@ import type { ValetPlugin } from "@valet/engine";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { pluginStore } from "../services/plugin-store.js";
 import {
-  buildPluginCatalog,
   loadRoleFromMarkdown,
   type ActionPlugin,
   type CommandContext,
@@ -1092,6 +1091,7 @@ export class EngineHost {
       sessionId,
       () => builtSession,
       specProvider !== undefined,
+      extras.pluginCatalog,
     );
     // Repo AGENTS.md instructions (agents-md spec, decision 5): same lazy
     // `builtSession` accessor as the command options above.
@@ -2161,6 +2161,7 @@ export class EngineHost {
     sessionId: string,
     getSession: () => Session | undefined,
     hasPrep: boolean,
+    pluginCatalog: PluginCatalog,
     behavior: AssistantBehavior | null = null,
     pinnedActionIds: ReadonlySet<string> = new Set(),
   ): Promise<
@@ -2203,8 +2204,6 @@ export class EngineHost {
     const pluginCommands = plugins.flatMap((p) =>
       (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
     );
-    const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
-    const pluginCatalog = buildPluginCatalog(actionPlugins);
 
     return {
       ...(workspaceSkillsProvider ? { workspaceSkillsProvider } : {}),
@@ -2618,6 +2617,7 @@ export class EngineHost {
       sessionId,
       () => builtSession,
       false,
+      extras.pluginCatalog,
       behavior,
       pinnedIds,
     );

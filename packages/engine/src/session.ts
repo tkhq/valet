@@ -154,6 +154,11 @@ function formatPluginOutcome(
         ok: false,
         output: `Connect the ${outcome.service} integration in Settings.`,
       };
+    case "service-unavailable":
+      return {
+        ok: false,
+        output: `${outcome.service} is unavailable. ${outcome.reason}${outcome.fix ? ` ${outcome.fix}` : ""}`,
+      };
     case "error":
       return { ok: false, output: `Action failed. ${outcome.message}` };
   }

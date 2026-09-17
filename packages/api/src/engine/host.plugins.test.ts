@@ -7,7 +7,7 @@
  * `packages/engine/src/session.ts`), so tests assert against it directly
  * instead of casting private state.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { Type } from "typebox";
 import type {
   ActionPlugin,
@@ -181,10 +181,18 @@ describe("EngineHost + plugin extras", () => {
   it("refreshes an unconfigured service in the same session after the org credential is stored", async () => {
     // The action schema stays private while the org credential is absent.
     // The live inventory rechecks the credential on each list_tools call.
+    const ping = makeAction("gated.ping");
+    const execute = vi.spyOn(ping, "execute");
     const gatedPlugin: ValetPlugin = {
       name: "gated",
       version: "0.0.1",
-      actions: [{ service: "gated", actions: [makeAction("gated.ping")] } satisfies ActionPlugin],
+      actions: [{ service: "gated", actions: [ping] } satisfies ActionPlugin],
+      commands: [{
+        name: "ping",
+        description: "Ping the service.",
+        action: "gated.ping",
+        mapArgs: () => ({}),
+      }],
       credentials: [
         { type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } },
       ],
@@ -201,6 +209,15 @@ describe("EngineHost + plugin extras", () => {
     const unavailable = await listTools(before);
     expect(unavailable).toContain("deployment_unconfigured");
     expect(unavailable).not.toContain("gated.ping");
+
+    await before.prompt("/gated:ping");
+    const entries = await api.providers.engineStore.getEntries(before.id, before.thread().id);
+    const commandResult = entries.at(-1);
+    expect(commandResult?.type === "command_result" && commandResult.ok).toBe(false);
+    expect(commandResult?.type === "command_result" ? commandResult.output : "").toContain(
+      "Ask an admin to configure the org credential in Settings.",
+    );
+    expect(execute).not.toHaveBeenCalled();
 
     await engineCredentials.save({ type: "org", id: "local-org" }, "gated", {
       type: "bot_token",

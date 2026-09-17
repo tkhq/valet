@@ -5,6 +5,8 @@ import type { TObject } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   pluginCatalogTools,
+  buildPluginCatalog,
+  invokeAction,
   pinnedToolName,
   prepareActionArgs,
   MAX_PINNED_ACTIONS,
@@ -483,6 +485,44 @@ describe("pluginCatalogTools: capability boundaries", () => {
     expect(payload.warnings.at(-1)?.reason).toContain("list_threads, thread_read");
   });
 
+  it("does not claim no integration match when a query also matches a native tool", async () => {
+    const action: PluginAction = {
+      id: "gmail.read_message",
+      name: "Read message",
+      description: "Read a Gmail message.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true }),
+    };
+    const [listTool] = pluginCatalogTools({
+      plugins: [{ service: "gmail", actions: [action] }],
+      nativeToolNames: ["thread_read", "read"],
+    });
+
+    const result = await listTool.execute({ query: "read message" }, makeCtx());
+    const payload = decode(result.text) as {
+      tools: Array<{ tool_id: string }>;
+      warnings?: Array<{ reason: string }>;
+    };
+    expect(payload.tools.map((tool) => tool.tool_id)).toEqual(["gmail.read_message"]);
+    expect(payload.warnings?.map((warning) => warning.reason).join(" ") ?? "").not.toContain(
+      "no integration action matched",
+    );
+  });
+
+  it("does not treat a wildcard as a match for every native tool", async () => {
+    const [listTool] = pluginCatalogTools({
+      plugins: [],
+      nativeToolNames: ["thread_read", "list_threads", "bash"],
+    });
+
+    const result = await listTool.execute({ query: "*" }, makeCtx());
+    expect(result.text).toContain("no integration action matched");
+    expect(result.text).not.toContain("thread_read");
+    expect(result.text).not.toContain("list_threads");
+    expect(result.text).not.toContain("bash");
+  });
+
   it("hides unavailable services without exposing action ids", async () => {
     const { plugin } = makeMockPlugin();
     const unavailable = [{
@@ -512,6 +552,73 @@ describe("pluginCatalogTools: capability boundaries", () => {
 });
 
 describe("pluginCatalogTools: call_tool", () => {
+  it("blocks unavailable static and dynamic services before execution or resolution", async () => {
+    let executed = 0;
+    let resolved = 0;
+    const unavailable = [{
+      service: "github",
+      state: "deployment_unconfigured" as const,
+      reason: "the deployment credential is not configured",
+      fix: "Configure GitHub in Settings.",
+    }];
+    const staticPlugin: ActionPlugin = {
+      service: "github",
+      actions: [{
+        id: "github.read",
+        name: "Read",
+        description: "Read data.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async () => {
+          executed += 1;
+          return { success: true };
+        },
+      }],
+    };
+    const dynamicPlugin = makeDynamicPlugin("github", async () => {
+      resolved += 1;
+      return [];
+    });
+
+    for (const plugin of [staticPlugin, dynamicPlugin]) {
+      const [, callTool] = pluginCatalogTools({
+        plugins: [plugin],
+        resolveServiceAvailability: () => unavailable,
+      });
+      const result = await callTool.execute(
+        { tool_id: "github.read", params: {}, summary: "Read data" },
+        makeCtx(),
+      );
+      expect(result.text).toContain("the deployment credential is not configured");
+      expect(result.text).toContain("Configure GitHub in Settings.");
+    }
+    expect(executed).toBe(0);
+    expect(resolved).toBe(0);
+
+    const catalog = buildPluginCatalog([staticPlugin], undefined, {
+      resolveServiceAvailability: () => unavailable,
+    });
+    await expect(invokeAction(catalog, "github.read", {}, makeCtx(), "Read data")).resolves.toEqual({
+      kind: "service-unavailable",
+      service: "github",
+      state: "deployment_unconfigured",
+      reason: "the deployment credential is not configured",
+      fix: "Configure GitHub in Settings.",
+    });
+    expect(executed).toBe(0);
+
+    const filteredCatalog = buildPluginCatalog([], undefined, {
+      resolveServiceAvailability: () => unavailable,
+    });
+    await expect(
+      invokeAction(filteredCatalog, "github.read", {}, makeCtx(), "Read data"),
+    ).resolves.toMatchObject({
+      kind: "service-unavailable",
+      service: "github",
+      state: "deployment_unconfigured",
+    });
+  });
+
   it("adds the Settings fix to missing-credential errors", async () => {
     const plugin: ActionPlugin = {
       service: "github",

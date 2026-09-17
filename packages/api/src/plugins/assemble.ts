@@ -29,10 +29,16 @@
  *     happened instead of dropping them in silence.
  */
 import { createHash } from "node:crypto";
-import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
+import {
+  buildPluginCatalog,
+  pluginCatalogTools,
+  type ActionPlugin,
+  type ValetPlugin,
+} from "@valet/engine";
 import type {
   PinnedActionSpec,
   PluginCatalogOptions,
+  PluginCatalog,
   RoleSpec,
   SkillSource,
   ToolDef,
@@ -103,6 +109,8 @@ export interface PluginSessionExtras {
   tools: ToolDef[];
   skills: SkillSource[];
   roles: RoleSpec[];
+  /** Catalog for action-backed slash commands, with the same availability rules as call_tool. */
+  pluginCatalog: PluginCatalog;
   /** The `extraSkills` entries a name already in the set kept out. Empty for
    * a plugin-only call. `/api/skills` reports these rows as shadowed, so a
    * person can see why a skill they wrote never reaches a session. */
@@ -189,6 +197,10 @@ export function pluginSessionExtras(
     reservedToolNames: [SKILL_TOOL_NAME],
     onPinRejected: warnPinRejected,
   });
+  const pluginCatalog = buildPluginCatalog(actionPlugins, catalogOptions.clock, {
+    serviceAvailability: catalogOptions.serviceAvailability,
+    resolveServiceAvailability: catalogOptions.resolveServiceAvailability,
+  });
   const { skills, shadowed } = mergedSkillSources(plugins, extraSkills);
   const roles = plugins.flatMap((p) => p.roles ?? []);
 
@@ -198,7 +210,7 @@ export function pluginSessionExtras(
   const skillTool = buildSkillTool(skills);
   if (skillTool) tools.push(skillTool);
 
-  return { tools, skills, roles, shadowedSkills: shadowed };
+  return { tools, skills, roles, pluginCatalog, shadowedSkills: shadowed };
 }
 
 /**
