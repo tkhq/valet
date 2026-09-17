@@ -194,6 +194,18 @@ A repeated ready start MUST recheck readiness without replacing the Cluster. [K7
 An exited owned leader MUST fail immediately with `server_exited`, exit 22, and a fixed reference to `server.log`. [K158]
 `startup_timeout` MUST apply only when the deadline expires with a live owned leader. [K159]
 A live recorded leader outside Scope MUST cause exit 21 without a signal. [K160]
+A zombie recorded leader MUST classify as exited before cmdline and ownership checks. [K161]
+An ownership failure MUST persist `ownership_failure` under the Operation commit guard before exit 21. [K162]
+A server exit MUST clean Scope before it persists `server_exited`. [K163]
+Start recovery MUST classify a zombie recorded leader as exited and clean it before restart. [K164]
+After failed identity validation, the Helper MUST recheck exit state against the recorded PID and start time. [K165]
+The Helper MUST wait for the owned leader to enter `leaf/k3s_evac` before Leaf convergence. [K166]
+Leaf convergence MUST NOT move the recorded leader PID. [K167]
+The Helper MUST move each remaining Leaf process into `k3s_evac` before controller enablement. [K168]
+Each Leaf convergence call MUST use at most ten attempts. [K169]
+Leaf convergence MUST wait 100 ms between attempts. [K170]
+Leaf convergence MUST write only to Leaf and its direct `k3s_evac` child. [K171]
+Leaf convergence MUST enable exactly `cpuset cpu memory pids`. [K172]
 
 ## 06. Commands, locks, and state kernels
 
@@ -266,7 +278,7 @@ Subordinate files MUST grant UID 1500 outer interval `65536:65535` for both UID 
 | Provider grant expansion | INV-1, INV-3 | Manifest golden for K23 to K32 plus live A2 |
 | Map truncation or alias | INV-3, INV-5 | Executed K103 to K109 vectors plus A5 |
 | PID reuse | INV-1 | K59 to K61 identity vectors plus A9 |
-| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K160 tests plus A6 and A10 |
+| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K172 tests plus A6 and A10 |
 | Lifecycle race | INV-3, INV-6 | K78 to K90 race vectors plus A8 and A12 |
 | Supply substitution | INV-2, INV-3 | K39 to K44 digest and image tests |
 | Ambient import | INV-2 | K64 to K72 argv vector plus A7 tracing |
