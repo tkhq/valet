@@ -19,6 +19,7 @@ const manifest: ChangelogManifest = {
           title: "Open the changelog",
           description: "Users can read release notes inside Valet.",
           category: "feature",
+          authoredAt: "2026-09-09T11:00:00Z",
           sources: { commitSha: "abc", pullRequest: 1 },
           followUp: false,
         },

@@ -88,6 +88,7 @@ export function entryFromCommit(change) {
     title,
     description,
     category,
+    authoredAt: change.authoredAt,
     sources: {
       commitSha: change.commitSha,
       ...(pr ? { pullRequest: Number(pr) } : {}),

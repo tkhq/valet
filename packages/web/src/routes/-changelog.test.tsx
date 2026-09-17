@@ -31,7 +31,7 @@ function makeData(): GetChangelogResponse {
         },
       ],
     },
-    artifact: { version: "1.0.0", sha: "abc", checkpointId: "1.0.0@abc", status: "exact" },
+    artifact: { version: "1.0.0", sha: "abc123456789", checkpointId: "1.0.0@abc", status: "exact" },
   };
 }
 
@@ -95,6 +95,20 @@ describe("ChangelogPage", () => {
       q: undefined,
       page: undefined,
     });
+  });
+
+  it("shows and copies the running commit from the artifact metadata", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<ChangelogPage />);
+
+    const runningCommit = screen.getByRole("link", { name: "Running commit abc123456789" });
+    expect(runningCommit.textContent).toBe("abc123456");
+    expect(runningCommit.getAttribute("href")).toContain("/commit/abc123456789");
+    expect(runningCommit.getAttribute("title")).toBe("abc123456789");
+    fireEvent.click(screen.getByRole("button", { name: "Copy running commit" }));
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith("abc123456789");
   });
 
   it("groups features first, keeps source links, and marks the release read", async () => {
