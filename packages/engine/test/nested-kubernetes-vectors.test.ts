@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,8 +10,10 @@ import {
   cgroupMembershipKernel,
   K3S_ARGV,
   K3S_ENV,
+  leaderState,
   lifecycleKernel,
   mapKernel,
+  SCOPE,
   startupKernel,
   statusKernel,
   readImportResult,
@@ -23,6 +26,7 @@ interface Vectors {
   mapVectors: Vector<number[][], boolean>[];
   cgroupVectors: Vector<string, boolean>[];
   startupVectors: Vector<{ leader: string; deadlineExpired: boolean }, string>[];
+  leaderStateVectors: Vector<{ state: string; cmdline: "empty" | "k3s"; cgroup: "owned" | "foreign" }, string>[];
   lifecycleVectors: Vector<Record<string, unknown>, Record<string, unknown>>[];
   statusVectors: Vector<Record<string, unknown>, { exit: number; persistedAfter: string; stdout: string }>[];
   acceptanceVectors: { id: string; mode: string; step: string; check: string; expected: string; covers: string[] }[];
@@ -51,6 +55,19 @@ describe("nested Kubernetes normative vectors", () => {
   it.each(vectors.startupVectors)("executes $id", ({ input, expected }) => {
     expect(startupKernel(input)).toBe(expected);
   });
+  it.each(vectors.leaderStateVectors)("executes $id at the proc seam", ({ input, expected }) => {
+    const proc = mkdtempSync(join(tmpdir(), "valet-kubernetes-proc-"));
+    const pid = 4242;
+    mkdirSync(join(proc, String(pid)), { recursive: true });
+    mkdirSync(join(proc, "sys/kernel/random"), { recursive: true });
+    writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) ${input.state} ${Array(18).fill("0").join(" ")} 123 0\n`);
+    writeFileSync(join(proc, String(pid), "status"), `Name:\tk3s\nState:\t${input.state}\nUid:\t1500\t1500\t1500\t1500\n`);
+    writeFileSync(join(proc, "sys/kernel/random/boot_id"), "boot-test\n");
+    writeFileSync(join(proc, String(pid), "cmdline"), input.cmdline === "k3s" ? Buffer.from(`${K3S_ARGV.join("\0")}\0`) : "");
+    writeFileSync(join(proc, String(pid), "cgroup"), input.cgroup === "owned" ? "0::/init/valet-kubernetes/leaf\n" : "0::/init/foreign\n");
+    const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };
+    expect(leaderState(record, proc)).toBe(expected);
+  });
   it.each(vectors.lifecycleVectors)("executes $id", ({ input, expected }) => {
     expect(lifecycleKernel(input)).toEqual(expected);
   });
@@ -68,7 +85,7 @@ describe("nested Kubernetes normative vectors", () => {
   });
 
   it("requires unique, non-vacuous safety kernel vectors", () => {
-    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.startupVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
+    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.startupVectors, vectors.leaderStateVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
     const all = groups.flat();
     expect(new Set(all.map(({ id }) => id)).size).toBe(all.length);
     for (const vector of all) {

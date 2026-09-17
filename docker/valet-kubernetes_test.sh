@@ -47,6 +47,17 @@ writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes/leaf
 if (!helper.identityValid(record, proc)) throw new Error("evacuated leader identity was rejected");
 writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes-foreign/leaf\n");
 if (helper.identityValid(record, proc)) throw new Error("foreign sibling identity was accepted");
+if (helper.leaderState(record, proc) !== "foreign") throw new Error("live foreign leader was not classified as foreign");
+writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tZ\nUid:\t1500\t1500\t1500\t1500\n");
+writeFileSync(join(proc, String(pid), "cmdline"), "");
+if (helper.leaderState(record, proc) !== "exited") throw new Error("zombie leader was not classified as exited");
+
+const events = [];
+let settled = helper.settleStartupFailure("ownership_failure", {}, () => { events.push("cleanup"); return true; }, (_op, error) => { events.push(`commit:${error}`); return true; });
+if (!settled.committed || settled.cleaned !== null || events.join(",") !== "commit:ownership_failure") throw new Error("ownership failure signaled or did not persist");
+events.length = 0;
+settled = helper.settleStartupFailure("server_exited", {}, () => { events.push("cleanup"); return true; }, (_op, error) => { events.push(`commit:${error}`); return true; });
+if (!settled.committed || !settled.cleaned || events.join(",") !== "cleanup,commit:server_exited") throw new Error("server exit did not clean and persist");
 
 const scope = join(tmp, "scope");
 const leaf = helper.createScope(scope);

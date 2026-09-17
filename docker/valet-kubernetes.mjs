@@ -133,9 +133,9 @@ function procIdentity(pid, procRoot = "/proc") {
     uid: Number(readFileSync(`${procRoot}/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1]), epoch: EPOCH,
   };
 }
-function recordLive(record) {
+function recordLive(record, procRoot = "/proc") {
   try {
-    const now = procIdentity(record.pid);
+    const now = procIdentity(record.pid, procRoot);
     return now.startTime === record.startTime && now.bootId === record.bootId;
   } catch { return false; }
 }
@@ -279,9 +279,9 @@ export function createScope(scope = SCOPE) {
 export function launcherScript(leaf = LEAF) {
   return `printf '%s\n' $$ > ${leaf}/cgroup.procs && exec "$@"`;
 }
-function leaderState(record) {
-  if (!record || !recordLive(record)) return "exited";
-  return identityValid(record) ? "owned" : "foreign";
+export function leaderState(record, procRoot = "/proc") {
+  if (!record || !recordLive(record, procRoot) || processGone(record.pid, procRoot)) return "exited";
+  return identityValid(record, procRoot) ? "owned" : "foreign";
 }
 function start() {
   const bad = Object.values(checks()).find((value) => !value.ok);
@@ -362,24 +362,32 @@ function start() {
     }
     sleep(1000);
   }
+  const settled = settleStartupFailure(startupFailure, op);
+  if (!settled.committed) return 4;
   if (startupFailure === "ownership_failure") {
     return fail("The server identity is not owned. Recreate the sandbox before cleanup.", 21);
   }
-  const cleaned = cleanupOwned();
-  let committed = false;
-  withLock(false, () => {
-    const claim = readJson(OP_PATH, null);
-    if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
-    atomicJson(STATUS_PATH, { state: "error", error: cleaned ? startupFailure : "startup_failed", epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
-  });
-  if (!committed) return 4;
-  if (!cleaned) return fail("Kubernetes startup cleanup did not drain its cgroup. Recreate the sandbox before retrying.", 21);
+  if (!settled.cleaned) return fail("Kubernetes startup cleanup did not drain its cgroup. Recreate the sandbox before retrying.", 21);
   return startupFailure === "server_exited"
     ? fail("Kubernetes server exited during startup. Inspect server.log.", 22)
     : fail("Kubernetes startup timed out. Inspect server.log and run valet-kubernetes diagnose.", 22);
 }
-function processGone(pid) {
-  try { return readFileSync(`/proc/${pid}/status`, "utf8").match(/^State:\s+(.)/m)?.[1] === "Z"; } catch { return true; }
+function commitStartupError(op, error) {
+  let committed = false;
+  withLock(false, () => {
+    const claim = readJson(OP_PATH, null);
+    if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
+    atomicJson(STATUS_PATH, { state: "error", error, epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
+  });
+  return committed;
+}
+export function settleStartupFailure(startupFailure, op, cleanup = cleanupOwned, commit = commitStartupError) {
+  const cleaned = startupFailure === "ownership_failure" ? null : cleanup();
+  const error = cleaned === false ? "startup_failed" : startupFailure;
+  return { cleaned, committed: commit(op, error) };
+}
+function processGone(pid, procRoot = "/proc") {
+  try { return readFileSync(`${procRoot}/${pid}/status`, "utf8").match(/^State:\s+(.)/m)?.[1] === "Z"; } catch { return true; }
 }
 function terminate(pid) {
   try { process.kill(-pid, "SIGTERM"); } catch {}
