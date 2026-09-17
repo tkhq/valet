@@ -28,8 +28,9 @@ import {
 } from "../../../docker/valet-kubernetes.mjs";
 
 interface Vector<TInput, TExpected> { id: string; mode?: string; input: TInput; expected: TExpected; covers?: string[] }
-type CmdlineInput = "exact" | "rewritten" | "empty" | "foreign" | "prefix";
-interface LeaderInput { state: "S" | "Z" | "S->Z" | "missing"; cmdline: "empty" | "k3s" | "rewritten"; cgroup: "owned" | "foreign" }
+interface CmdlineInput { bytes: string }
+type CmdlineVectorId = `cmdline-${string}`;
+interface LeaderInput { state: "S" | "Z" | "S->Z" | "missing"; cmdline: CmdlineVectorId; cgroup: "owned" | "foreign" }
 interface Vectors {
   capabilityVectors: Vector<{ requested: boolean; provider: false | "v1" }, string>[];
   mapVectors: Vector<number[][], boolean>[];
@@ -59,11 +60,13 @@ const vectors = JSON.parse(
 ) as Vectors;
 
 function cmdlineFixture(input: CmdlineInput): Buffer {
-  if (input === "exact") return Buffer.from(`${K3S_ARGV.join("\0")}\0`);
-  if (input === "rewritten") return Buffer.concat([Buffer.from(`${K3S_ARGV[0]}\0server\0`), Buffer.alloc(280)]);
-  if (input === "foreign") return Buffer.from("/usr/bin/sleep\0" + "100\0");
-  if (input === "prefix") return Buffer.from("/usr/local/bin/k3s-evil\0server\0");
-  return Buffer.alloc(0);
+  return Buffer.from(input.bytes, "latin1");
+}
+
+function namedCmdline(id: CmdlineVectorId): Buffer {
+  const vector = vectors.cmdlineIdentityVectors.find((candidate) => candidate.id === id);
+  if (!vector) throw new Error(`missing cmdline vector ${id}`);
+  return cmdlineFixture(vector.input);
 }
 
 function leaderFixture(input: LeaderInput) {
@@ -76,8 +79,7 @@ function leaderFixture(input: LeaderInput) {
     mkdirSync(join(proc, String(pid)), { recursive: true });
     writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) ${initialState} ${Array(18).fill("0").join(" ")} 123 0\n`);
     writeFileSync(join(proc, String(pid), "status"), `Name:\tk3s\nState:\t${initialState}\nUid:\t1500\t1500\t1500\t1500\n`);
-    const cmdline = input.cmdline === "k3s" ? "exact" : input.cmdline;
-    writeFileSync(join(proc, String(pid), "cmdline"), cmdlineFixture(cmdline));
+    writeFileSync(join(proc, String(pid), "cmdline"), namedCmdline(input.cmdline));
     writeFileSync(join(proc, String(pid), "cgroup"), input.cgroup === "owned" ? "0::/init/valet-kubernetes/leaf\n" : "0::/init/foreign\n");
   }
   const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: process.env.VALET_SANDBOX_EPOCH ?? "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };

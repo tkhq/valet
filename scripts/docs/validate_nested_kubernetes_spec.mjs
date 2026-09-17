@@ -12,13 +12,9 @@ const canonical = (value) => value === null || typeof value !== "object" ? JSON.
     : `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
 const equal = (a, b) => canonical(a) === canonical(b);
 const fail = (message) => { throw new Error(message); };
-const cmdlineInput = (input, argv = K3S_ARGV) => {
-  if (input === "exact") return Buffer.from(`${argv.join("\0")}\0`);
-  if (input === "rewritten") return Buffer.concat([Buffer.from(`${argv[0]}\0server\0`), Buffer.alloc(280)]);
-  if (input === "foreign") return Buffer.from("/usr/bin/sleep\0" + "100\0");
-  if (input === "prefix") return Buffer.from("/usr/local/bin/k3s-evil\0server\0");
-  if (input === "empty") return Buffer.alloc(0);
-  fail(`invalid cmdline input ${input}`);
+const cmdlineInput = (input) => {
+  if (!input || typeof input.bytes !== "string") fail("invalid cmdline input");
+  return Buffer.from(input.bytes, "latin1");
 };
 
 function expandCover(cover) {
@@ -98,10 +94,16 @@ function validate(spec, data) {
   for (const vector of data.mapVectors) if (!equal(mapKernel(vector.input), vector.expected)) fail(`map vector ${vector.id}`);
   for (const vector of data.cgroupVectors) if (!equal(cgroupMembershipKernel(vector.input), vector.expected)) fail(`cgroup vector ${vector.id}`);
   for (const vector of data.cmdlineIdentityVectors) if (!equal(cmdlineIdentityKernel(cmdlineInput(vector.input), data.k3sArgv), vector.expected)) fail(`cmdline identity vector ${vector.id}`);
+  const exactCmdline = data.cmdlineIdentityVectors.find(({ id }) => id === "cmdline-exact-argv");
+  if (exactCmdline?.expected !== true || !cmdlineInput(exactCmdline.input).equals(Buffer.from(`${data.k3sArgv.join("\0")}\0`))) fail("invalid exact argv cmdline vector");
+  const observedTitle = data.cmdlineIdentityVectors.find(({ id }) => id === "cmdline-space-form-title");
+  const observedBytes = cmdlineInput(observedTitle?.input);
+  const observedSeparator = observedBytes.indexOf(0);
+  if (observedTitle?.expected !== true || observedSeparator !== 25 || observedBytes.subarray(0, observedSeparator).toString() !== "/usr/local/bin/k3s server" || observedBytes.length <= observedSeparator + 1 || !observedBytes.subarray(observedSeparator).every((byte) => byte === 0)) fail("invalid observed space-form title vector");
   for (const vector of data.startupVectors) if (!equal(startupKernel(vector.input), vector.expected)) fail(`startup vector ${vector.id}`);
   for (const vector of data.leafConvergenceVectors) if (!equal(leafConvergenceKernel(vector.input), vector.expected)) fail(`leaf convergence vector ${vector.id}`);
   const zombie = data.leaderStateVectors.find(({ id }) => id === "leader-zombie");
-  if (!equal(zombie?.input, { state: "Z", cmdline: "empty", cgroup: "owned" }) || zombie.expected !== "exited") fail("invalid zombie leader vector");
+  if (!equal(zombie?.input, { state: "Z", cmdline: "cmdline-empty", cgroup: "owned" }) || zombie.expected !== "exited") fail("invalid zombie leader vector");
   const recovery = data.startRecoveryVectors.find(({ id }) => id === "start-recovery-zombie");
   if (!equal(recovery?.input, zombie.input) || recovery.expected !== "clean-restart") fail("invalid zombie start recovery vector");
   if (data.startRecoveryVectors.find(({ id }) => id === "start-recovery-live-owned")?.expected !== "reuse-owned") fail("invalid owned start recovery vector");
@@ -117,13 +119,22 @@ if (source.cgroupVectors.every((vector) => (vector.input === "0::/init/valet-kub
   fail("exact cgroup-match mutation was accepted");
 }
 const cmdlineMutations = [
-  ["byte-exact cmdline", (cmdline, argv) => cmdline.equals(Buffer.from(`${argv.join("\0")}\0`))],
-  ["prefix cmdline", (cmdline) => {
+  ["byte-exact cmdline", "cmdline-bare-title", (cmdline, argv) => cmdline.equals(Buffer.from(`${argv.join("\0")}\0`))],
+  ["whole-first-segment cmdline", "cmdline-space-form-title", (cmdline, argv) => {
+    if (cmdline.equals(Buffer.from(`${argv.join("\0")}\0`))) return true;
     const separator = cmdline.indexOf(0);
-    return separator >= 0 && cmdline.subarray(0, separator).toString().startsWith("/usr/local/bin/k3s");
+    return separator >= 0 && cmdline.subarray(0, separator).equals(Buffer.from("/usr/local/bin/k3s"));
+  }],
+  ["prefix cmdline", "cmdline-prefix-evil", (cmdline, argv) => {
+    if (cmdline.equals(Buffer.from(`${argv.join("\0")}\0`))) return true;
+    const separator = cmdline.indexOf(0);
+    const title = separator >= 0 ? cmdline.subarray(0, separator) : cmdline;
+    return title.toString().startsWith("/usr/local/bin/k3s");
   }],
 ];
-for (const [name, kernel] of cmdlineMutations) {
+for (const [name, requiredFailureId, kernel] of cmdlineMutations) {
+  const requiredFailure = source.cmdlineIdentityVectors.find(({ id }) => id === requiredFailureId);
+  if (!requiredFailure || kernel(cmdlineInput(requiredFailure.input), source.k3sArgv) === requiredFailure.expected) fail(`${name} mutation did not fail ${requiredFailureId}`);
   if (source.cmdlineIdentityVectors.every((vector) => kernel(cmdlineInput(vector.input), source.k3sArgv) === vector.expected)) fail(`${name} mutation was accepted`);
 }
 const mutations = [

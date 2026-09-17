@@ -49,7 +49,9 @@ if (helper.leaderState(record, proc) !== "owned") throw new Error("healthy leade
 if (helper.startRecoveryKernel(record, proc) !== "reuse-owned") throw new Error("start recovery did not reuse a healthy leader");
 if (helper.stopGuardKernel(record, proc) !== "allow-cleanup") throw new Error("stop refused a healthy owned leader");
 if (helper.epochRecoveryKernel(record, proc) !== "refuse-live") throw new Error("epoch recovery deleted a live owned leader");
-const rewritten = Buffer.concat([Buffer.from(`${helper.K3S_ARGV[0]}\0server\0`), Buffer.alloc(280)]);
+// Live PID 992 exposed this exact title prefix: one space-form segment, then zero-fill.
+const rewritten = Buffer.concat([Buffer.from("/usr/local/bin/k3s server"), Buffer.alloc(280)]);
+if (rewritten.indexOf(0) !== 25 || !rewritten.subarray(25).every((byte) => byte === 0)) throw new Error("observed cmdline bytes drifted");
 writeFileSync(join(proc, String(pid), "cmdline"), rewritten);
 if (!helper.cmdlineIdentityKernel(rewritten, helper.K3S_ARGV)) throw new Error("rewritten k3s title was rejected");
 if (!helper.identityValid(record, proc)) throw new Error("rewritten leader identity was rejected");
@@ -64,9 +66,17 @@ writeFileSync(pidPath, JSON.stringify(record));
 const snapshot = helper.stateSnapshot(proc, { status: statePath, pid: pidPath });
 const ready = helper.statusKernel({ persisted: snapshot.stored.state, identity: snapshot.identity, readiness: "ready", errorReason: snapshot.stored.error });
 if (ready.exit !== 0 || JSON.parse(ready.stdout).state !== "ready") throw new Error("rewritten leader status was not ready");
-if (helper.cmdlineIdentityKernel(Buffer.alloc(0), helper.K3S_ARGV)) throw new Error("empty cmdline was accepted");
-if (helper.cmdlineIdentityKernel(Buffer.from("/usr/bin/sleep\0"), helper.K3S_ARGV)) throw new Error("foreign cmdline was accepted");
-if (helper.cmdlineIdentityKernel(Buffer.from("/usr/local/bin/k3s-evil\0server\0"), helper.K3S_ARGV)) throw new Error("cmdline prefix trick was accepted");
+for (const cmdline of [Buffer.from("/usr/local/bin/k3s\0"), Buffer.from("/usr/local/bin/k3s server")]) {
+  if (!helper.cmdlineIdentityKernel(cmdline, helper.K3S_ARGV)) throw new Error(`valid cmdline was rejected: ${cmdline.toString()}`);
+}
+for (const cmdline of [
+  Buffer.alloc(0), Buffer.alloc(4), Buffer.from("/usr/local/bin/k3s-evil server\0"),
+  Buffer.from("/usr/local/bin/k3s2 server\0"), Buffer.from("/usr/bin/k3s server\0"),
+  Buffer.from(" /usr/local/bin/k3s server\0"), Buffer.from("\0/usr/local/bin/k3s server"),
+  Buffer.from("k3s server\0"), Buffer.from("/usr/bin/sleep 100"),
+]) {
+  if (helper.cmdlineIdentityKernel(cmdline, helper.K3S_ARGV)) throw new Error(`invalid cmdline was accepted: ${cmdline.toString()}`);
+}
 writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes-foreign/leaf\n");
 if (helper.identityValid(record, proc)) throw new Error("foreign sibling identity was accepted");
 if (helper.leaderState(record, proc) !== "foreign") throw new Error("live foreign leader was not classified as foreign");
