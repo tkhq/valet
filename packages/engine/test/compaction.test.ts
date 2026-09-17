@@ -1303,3 +1303,126 @@ describe("compaction: proactive trigger rehydration (restart)", () => {
     faux.unregister();
   });
 });
+
+describe("compaction: summarizer input covers the head", () => {
+  // usable = contextWindow - min(reserveCap, maxTokens) = 50 - 5 = 45. The
+  // tail budget floors at minPreserveRecentTokens (2_000). The summarizer
+  // input budget is min(max(45, 8_000), 64_000) = 8_000 tokens, so a single
+  // ~40k-char assistant entry (~10k tokens) cannot fit in the window.
+  const OVERSIZED_STEP = "x".repeat(40_000);
+
+  it("summarizes the enclosing turn when the head ends inside an assistant run", async () => {
+    const summarizerInputs: string[] = [];
+    const faux = registerFauxProvider({
+      provider: "compact-coverage-head",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      (ctx: { messages: unknown[] }) => {
+        summarizerInputs.push(JSON.stringify(ctx.messages));
+        return fauxAssistantMessage(SUMMARY_RESPONSE);
+      },
+    ]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { autoContinue: false },
+    });
+    const thread = session.thread();
+    // One long agentic turn: a single user message, then an assistant run
+    // that outgrows the summarizer input budget. The cut splits the turn, so
+    // the head ends on an assistant entry and the tail carries no user entry.
+    await store.appendEntries(session.id, thread.id, [
+      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "marker-e-1 start the long turn", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: `marker-e-2 ${OVERSIZED_STEP}`, createdAt: 2 },
+      { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "e-2", type: "message", role: "assistant", content: "marker-e-3 latest step", createdAt: 3 },
+    ]);
+
+    const outcome = await thread.compactThread({ mode: "manual" });
+    expect(outcome).toBe("compacted");
+
+    const entries = await store.getEntries(session.id, thread.id);
+    const compaction = entries.find((e): e is CompactionEntry => e.type === "compaction");
+    expect(compaction).toBeDefined();
+    expect(compaction!.coveredEntryIds).toEqual(["e-1", "e-2"]);
+    expect(summarizerInputs).toHaveLength(1);
+    // Every covered entry must reach the summarizer. Without this the
+    // checkpoint claims coverage of entries the summary never saw.
+    for (const id of compaction!.coveredEntryIds) {
+      expect(summarizerInputs[0]).toContain(`marker-${id}`);
+    }
+    faux.unregister();
+  });
+
+  it("reports 'insufficient' when the summarizer window holds no head entry", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-coverage-gap",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    // Queued but never consumed: the coverage check runs before the
+    // summarizer call, so a pass that cannot cover the head costs nothing.
+    faux.setResponses([fauxAssistantMessage(SUMMARY_RESPONSE)]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    // head = [e-1, e-2] with an oversized e-2; tail = [e-3, e-4]. The window
+    // fits the tail and stops before e-2, so the selection is user-first and
+    // non-empty but holds zero head entries.
+    await store.appendEntries(session.id, thread.id, [
+      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "marker-e-1 first prompt", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: `marker-e-2 ${OVERSIZED_STEP}`, createdAt: 2 },
+      { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "e-2", type: "message", role: "user", content: "marker-e-3 second prompt", createdAt: 3 },
+      { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "marker-e-4 second response", createdAt: 4 },
+    ]);
+
+    const outcome = await thread.compactThread({ mode: "manual" });
+    expect(outcome).toBe("insufficient");
+
+    const entries = await store.getEntries(session.id, thread.id);
+    expect(entries.filter((e) => e.type === "compaction")).toHaveLength(0);
+    expect(
+      events.filter(
+        (e) => e.event.type === "error" && e.event.code === "compaction_coverage_gap",
+      ),
+    ).toHaveLength(1);
+    expect(faux.getPendingResponseCount()).toBe(1);
+    faux.unregister();
+  });
+
+  it("summarize accepts an assistant-first input", async () => {
+    const roles: string[] = [];
+    const faux = registerFauxProvider({
+      provider: "compact-assistant-first",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      (ctx: { messages: Array<{ role: string }> }) => {
+        roles.push(...ctx.messages.map((m) => m.role));
+        return fauxAssistantMessage(SUMMARY_RESPONSE);
+      },
+    ]);
+
+    const result = await summarize({
+      headEntries: [
+        { id: "a-1", sessionId: "s", threadId: "t", parentId: null, type: "message", role: "assistant", content: "mid-turn step", createdAt: 1 },
+      ],
+      model: faux.getModel("tiny")!,
+    });
+
+    expect(result.summary).toBe(SUMMARY_RESPONSE);
+    // Providers reject a transcript that opens on an assistant message.
+    expect(roles[0]).toBe("user");
+    faux.unregister();
+  });
+});

@@ -4412,14 +4412,45 @@ export class Thread {
         effectiveEntries.slice(cut.cutIndex),
         SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS,
       );
+      // Tail evidence is optional; head coverage is not. The selection always
+      // keeps the newest entry and extends backward to its turn's start, so
+      // one oversized newest turn returns far more than the tail budget.
+      // Spending the summarizer input budget on that leaves no room for a
+      // head entry, and the pass reports a coverage gap instead of
+      // compacting. Drop the evidence in that case. The tail stays verbatim
+      // in live context either way, so nothing is lost.
+      const tailEvidence =
+        estimateTotalTokens(checkpointTail) <= SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS
+          ? checkpointTail
+          : [];
       const summaryInputBudget = Math.min(
         Math.max(usableTokens(model), SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS),
         SUMMARY_INPUT_MAX_TOKENS,
       );
       let headForSummary = selectSummaryCheckpointTail(
-        [...head, ...checkpointTail],
+        [...head, ...tailEvidence],
         summaryInputBudget,
       );
+      // Invariant: the checkpoint records the full head as covered, and
+      // `entriesToAgentMessages` then drops every covered entry from the
+      // model context. A selection that carries no head entry would erase
+      // that head behind a summary written from tail evidence alone. Alert
+      // instead of repairing: widening the window would defeat the input
+      // budget, and narrowing the coverage would leave uncovered head
+      // entries in live context. Check here first so a pass that cannot
+      // cover the head costs no summarizer call.
+      const headIds = new Set(head.map((e) => e.id));
+      const coversHead = (selection: readonly SessionEntry[]): boolean =>
+        selection.some((entry) => headIds.has(entry.id));
+      if (!coversHead(headForSummary)) {
+        this.emitError(
+          "compaction_coverage_gap",
+          `Compaction found no entry it could summarize. The oldest entry it must replace is larger than ` +
+            `the ${summaryInputBudget}-token summarizer input budget. Start a new thread, or split that ` +
+            `message across shorter turns.`,
+        );
+        return "insufficient";
+      }
       for (let attempt = 0; ; attempt++) {
         try {
           summaryResult = await summarize({
@@ -4440,20 +4471,13 @@ export class Thread {
           break;
         } catch (err) {
           if (!(err instanceof SummarizeOverflowError)) throw err;
-          // Align the cut to a user-message boundary: a summarizer input
-          // starting on an assistant message is rejected by providers that
-          // require a user-first transcript, and that 400 is not an
-          // overflow, so it would abort the whole retry loop.
-          const half = Math.floor(headForSummary.length / 2);
-          let start = -1;
-          for (let i = half; i < headForSummary.length; i++) {
-            const e = headForSummary[i];
-            if (e.type === "message" && e.role === "user") {
-              start = i;
-              break;
-            }
-          }
-          const truncated = start >= 0 ? headForSummary.slice(start) : headForSummary.slice(half);
+          // Drop the oldest half. No user-message alignment: `summarize`
+          // prepends its own preface, so an assistant-first slice is a legal
+          // payload. Aligning forward to the next user entry instead threw
+          // away context the budget could still hold, and a slice with no
+          // user entry at all left an input that providers rejected with a
+          // plain 400 that aborted this loop (TKAI-461).
+          const truncated = headForSummary.slice(Math.floor(headForSummary.length / 2));
           if (
             attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES ||
             truncated.length === headForSummary.length
@@ -4462,6 +4486,18 @@ export class Thread {
           }
           headForSummary = truncated;
         }
+      }
+
+      // The retry loop can truncate the head entries out of the input. The
+      // same invariant holds: never persist a checkpoint that claims
+      // coverage the summarizer never read.
+      if (!coversHead(headForSummary)) {
+        this.emitError(
+          "compaction_coverage_gap",
+          `Compaction dropped every entry it must replace while it shrank an oversized summarizer input. ` +
+            `Start a new thread, or split the oldest message across shorter turns.`,
+        );
+        return "insufficient";
       }
 
       // Step 4: persist CompactionEntry.

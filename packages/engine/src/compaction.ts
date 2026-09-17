@@ -269,7 +269,21 @@ export function walkTranscriptDag(
   return [...legacyPrefix, ...path];
 }
 
-/** Keep a bounded, user-first suffix for checkpoint evidence. */
+/**
+ * Keep a bounded suffix for checkpoint evidence, aligned to a turn boundary.
+ *
+ * The budgeted window can open in the middle of a turn. When it does, prefer
+ * the next user entry inside the window, because a summary that starts at a
+ * turn boundary reads better. When the window holds no later user entry, the
+ * window sits inside one long assistant run: extend BACKWARD to the entry
+ * that started that turn instead. The result can then exceed `maxTokens`, and
+ * the caller's SummarizeOverflowError retry shrinks it.
+ *
+ * Never return an empty selection for a non-empty input (TKAI-461). Callers
+ * feed the result to the summarizer and record coverage separately, so an
+ * empty selection summarized nothing while the checkpoint still claimed the
+ * whole head, and the covered entries left the model context for good.
+ */
 export function selectSummaryCheckpointTail(
   entries: readonly SessionEntry[],
   maxTokens: number,
@@ -292,7 +306,14 @@ export function selectSummaryCheckpointTail(
     (entry, index) =>
       index > firstMessage && entry.type === "message" && entry.role === "user",
   );
-  return nextUser < 0 ? [] : suffix.slice(nextUser);
+  if (nextUser >= 0) return suffix.slice(nextUser);
+  for (let index = start - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type === "message" && entry.role === "user") return entries.slice(index);
+  }
+  // No user entry anywhere before the window. `summarize` prepends its own
+  // preface, so an assistant-first selection is still a legal payload.
+  return suffix;
 }
 
 // ── Turn segmentation ──────────────────────────────────────────────
@@ -724,11 +745,29 @@ export function stripAnalysisScratchpad(text: string): string {
     .trim();
 }
 
+/**
+ * Prepended when the summarizer input opens on an assistant message. Several
+ * providers reject a transcript whose first message is not from the user, and
+ * that rejection is a plain 400, not an overflow, so it aborts the overflow
+ * retry loop. The preface makes any budgeted window a legal payload and
+ * frees the selection from a user-first constraint (TKAI-461).
+ */
+const SUMMARY_MIDTURN_PREFACE =
+  "The conversation history below starts in the middle of a turn. The user message that started that turn is not included.";
+
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
   const messages = entriesToSummaryMessages(opts.headEntries, {
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
     attributeAuthors: opts.attributeAuthors ?? false,
   });
+  const firstMessage = messages[0];
+  if (firstMessage?.role === "assistant") {
+    messages.unshift({
+      role: "user",
+      content: [{ type: "text", text: SUMMARY_MIDTURN_PREFACE }],
+      timestamp: firstMessage.timestamp,
+    });
+  }
   const anchor = opts.previousSummary
     ? [
         "Update the anchored summary below using the conversation history above.",

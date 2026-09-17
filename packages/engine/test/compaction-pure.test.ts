@@ -255,6 +255,29 @@ describe("compaction: summary checkpoint tail", () => {
     const latest = user("large-latest", "x".repeat(20_000));
     expect(selectSummaryCheckpointTail([latest], 100)).toEqual([latest]);
   });
+
+  it("extends backward to the enclosing turn when the window holds no later user entry", () => {
+    // One user message followed by an assistant run larger than the budget.
+    // The window opens mid-run, so there is no later user entry to align on.
+    // Returning nothing here hands the summarizer an empty transcript while
+    // the caller still marks the whole head covered (TKAI-461).
+    const opener = user("turn-opener", "start the long turn");
+    const bulk = assistant("assistant-bulk", "x".repeat(40_000));
+    const latest = assistant("assistant-latest", "latest step");
+
+    const selected = selectSummaryCheckpointTail([opener, bulk, latest], 8_000);
+
+    expect(selected.map((entry) => entry.id)).toEqual([opener.id, bulk.id, latest.id]);
+  });
+
+  it("keeps an assistant-only window when no user entry precedes it", () => {
+    const bulk = assistant("assistant-only-bulk", "x".repeat(40_000));
+    const latest = assistant("assistant-only-latest", "latest step");
+
+    const selected = selectSummaryCheckpointTail([bulk, latest], 8_000);
+
+    expect(selected.map((entry) => entry.id)).toEqual([latest.id]);
+  });
 });
 
 describe("compaction: turns", () => {
