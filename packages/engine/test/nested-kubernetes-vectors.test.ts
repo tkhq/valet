@@ -6,10 +6,12 @@ import { NESTED_KUBERNETES_IDENTITY } from "../src/index.js";
 import {
   archiveKind,
   capabilityKernel,
+  cgroupMembershipKernel,
   K3S_ARGV,
   K3S_ENV,
   lifecycleKernel,
   mapKernel,
+  startupKernel,
   statusKernel,
   readImportResult,
   validateArchive,
@@ -19,6 +21,8 @@ interface Vector<TInput, TExpected> { id: string; mode?: string; input: TInput; 
 interface Vectors {
   capabilityVectors: Vector<{ requested: boolean; provider: false | "v1" }, string>[];
   mapVectors: Vector<number[][], boolean>[];
+  cgroupVectors: Vector<string, boolean>[];
+  startupVectors: Vector<{ leader: string; deadlineExpired: boolean }, string>[];
   lifecycleVectors: Vector<Record<string, unknown>, Record<string, unknown>>[];
   statusVectors: Vector<Record<string, unknown>, { exit: number; persistedAfter: string; stdout: string }>[];
   acceptanceVectors: { id: string; mode: string; step: string; check: string; expected: string; covers: string[] }[];
@@ -41,6 +45,12 @@ describe("nested Kubernetes normative vectors", () => {
   it.each(vectors.mapVectors)("executes $id", ({ input, expected }) => {
     expect(mapKernel(input)).toBe(expected);
   });
+  it.each(vectors.cgroupVectors)("executes $id", ({ input, expected }) => {
+    expect(cgroupMembershipKernel(input)).toBe(expected);
+  });
+  it.each(vectors.startupVectors)("executes $id", ({ input, expected }) => {
+    expect(startupKernel(input)).toBe(expected);
+  });
   it.each(vectors.lifecycleVectors)("executes $id", ({ input, expected }) => {
     expect(lifecycleKernel(input)).toEqual(expected);
   });
@@ -58,7 +68,7 @@ describe("nested Kubernetes normative vectors", () => {
   });
 
   it("requires unique, non-vacuous safety kernel vectors", () => {
-    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
+    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.startupVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
     const all = groups.flat();
     expect(new Set(all.map(({ id }) => id)).size).toBe(all.length);
     for (const vector of all) {

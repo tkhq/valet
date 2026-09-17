@@ -72,6 +72,12 @@ establish_cgroup_topology "$tree" "$USER_NAME" "cpu cpuset memory pids"
 contains "$enable_log" '+cpu +cpuset +memory +pids'
 ! grep -qw io "$tree/init/cgroup.subtree_control" || fail "the requested controller path enabled io"
 
+# The allowlist checks direct Manager children only. Scope descendants remain private to the Helper.
+tree=$TMP/owned-descendants; make_tree "$tree"
+mkdir -p "$tree/init/valet-kubernetes/leaf/k3s_evac"
+install_fake_cgroup "$tree"
+establish_cgroup_topology "$tree" "$USER_NAME" "cpu cpuset memory pids"
+
 # A bounded second pass handles one arrival. Persistent arrivals fail closed.
 tree=$TMP/race; make_tree "$tree"; echo 1 > "$tree/init/cgroup.procs"; install_fake_cgroup "$tree"
 arrival=0; cgroup_move_pid() {

@@ -45,6 +45,7 @@ Each normative sentence has one unique requirement tag. The validator enforces t
 **Manager**: the delegated cgroup `/init`.
 **Services**: the persistent child cgroup `/init/services`.
 **Scope**: the Helper-owned child cgroup `/init/valet-kubernetes`, which is a sibling of Services.
+**Leaf**: the declared launcher cgroup `/init/valet-kubernetes/leaf`.
 **Operation**: one persisted start, stop, or import claim with an immutable random ID.
 
 | Level | Name | Required proof |
@@ -159,12 +160,17 @@ A13 MUST prove that pod replacement removes old Cluster data and keeps unrelated
 Stop MUST remove owned Root contents, Root, and Scope while the adjacent exclusive lock remains held. [K58]
 The lock file is outside Root. Stop releases it only after deletion and preserves every other PVC path.
 
-`server.pid.json` records PID, proc start time, boot ID, UID, cgroup, argv digest, epoch, and Operation ID.
-A valid identity MUST match every field, UID 1500, the current epoch, Scope, and K47. [K59]
+`server.pid.json` records PID, proc start time, boot ID, UID, cgroup ownership boundary, argv digest, epoch, and Operation ID.
+A valid identity MUST match every field, UID 1500, the current epoch, the Scope ownership boundary, and K47. [K59]
 A live mismatch MUST never receive a signal or authorize state deletion. [K60]
 A dead or reboot-stale identity MUST authorize cleanup only inside Root and Scope. [K61]
 The Helper MUST create Scope as a Manager child and Services sibling. [K62]
-It MUST move only its detached launcher into Scope before exec. [K63]
+It MUST move only its detached launcher before exec. [K63]
+The leader cgroup line MUST equal Scope or start with Scope followed by `/`. [K154]
+Identity validation MUST reject a cgroup line for a sibling whose name starts with the Scope name. [K155]
+Scope MUST stay empty with `cpuset`, `cpu`, `memory`, and `pids` enabled for its children. [K156]
+The Helper MUST create Leaf and move the detached launcher into it before exec. [K157]
+RootlessKit-created leader descendants below Leaf remain inside the Scope ownership boundary.
 
 ## 05. Import and readiness
 
@@ -185,6 +191,9 @@ Ready requires valid identity, a responding API, all nodes Ready, and completed 
 Start readiness MUST use one Operation deadline of 10 minutes. [K73]
 A readiness timeout MUST retain logs, clean owned processes and Scope, persist error, and exit 22. [K74]
 A repeated ready start MUST recheck readiness without replacing the Cluster. [K75]
+An exited owned leader MUST fail immediately with `server_exited`, exit 22, and a fixed reference to `server.log`. [K158]
+`startup_timeout` MUST apply only when the deadline expires with a live owned leader. [K159]
+A live recorded leader outside Scope MUST cause exit 21 without a signal. [K160]
 
 ## 06. Commands, locks, and state kernels
 
@@ -257,7 +266,7 @@ Subordinate files MUST grant UID 1500 outer interval `65536:65535` for both UID 
 | Provider grant expansion | INV-1, INV-3 | Manifest golden for K23 to K32 plus live A2 |
 | Map truncation or alias | INV-3, INV-5 | Executed K103 to K109 vectors plus A5 |
 | PID reuse | INV-1 | K59 to K61 identity vectors plus A9 |
-| Cgroup service damage | INV-1 | K62, K63, K99 to K101 tests plus A6 and A10 |
+| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K160 tests plus A6 and A10 |
 | Lifecycle race | INV-3, INV-6 | K78 to K90 race vectors plus A8 and A12 |
 | Supply substitution | INV-2, INV-3 | K39 to K44 digest and image tests |
 | Ambient import | INV-2 | K64 to K72 argv vector plus A7 tracing |
