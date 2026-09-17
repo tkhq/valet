@@ -38,6 +38,7 @@ interface Instruments {
   sandboxCapacityWait: Histogram;
   sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
+  compactionCoverageGaps: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -108,6 +109,10 @@ function inst(): Instruments {
       description:
         "Prompt-cache breaks between consecutive turns, by cause (model_changed, system_prompt_changed, tools_changed, ttl_or_content). A sustained rate on one cause means something rewrites the request prefix every turn — investigate that source, do not ignore (TKAI-320).",
     }),
+    compactionCoverageGaps: meter.createCounter("valet.compaction.coverage_gap", {
+      description:
+        "Compaction passes that refused to write a checkpoint because the summarizer input carried none of the history the checkpoint would replace. This is an invariant violation, not a workload property: any sustained rate means threads stop compacting (TKAI-461).",
+    }),
   };
   return instruments;
 }
@@ -145,6 +150,12 @@ export function recordToolExecution(tool: string, durationMs: number, ok: boolea
 
 export function recordCacheBreak(cause: string, model?: string): void {
   inst().cacheBreaks.add(1, { cause, ...(model ? { model } : {}) });
+}
+
+/** A compaction pass that could not cover its head. Alert on any rate: the
+ * thread keeps its history, but it also stops compacting. */
+export function recordCompactionCoverageGap(mode: string): void {
+  inst().compactionCoverageGaps.add(1, { mode });
 }
 
 export function recordSandboxExec(durationMs: number, job: boolean): void {

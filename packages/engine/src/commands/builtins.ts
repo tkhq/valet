@@ -197,6 +197,16 @@ async function compactCommand(args: string[], thread: Thread): Promise<BuiltinRe
         "Could not compact: the newest turn alone is larger than the model's usable context, and compaction keeps the newest turn verbatim. Shorten the last message, split it across turns, or attach it as a file.",
     };
   }
+  // A separate cause needs a separate action. The message above blames the
+  // newest turn, and shortening it cannot help a head that holds no text the
+  // summarizer can read.
+  if (outcome === "coverage_gap") {
+    return {
+      ok: true,
+      output:
+        "Could not compact: the older turns hold no text the summarizer can read, so a summary would replace them with nothing. They stay in context. Run /new-thread to continue with a fresh context.",
+    };
+  }
   return {
     ok: true,
     output: instructions

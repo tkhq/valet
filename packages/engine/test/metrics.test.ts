@@ -21,7 +21,10 @@ vi.mock("@opentelemetry/api", () => ({
   },
 }));
 
-import { recordSandboxWorkspaceGrow } from "../src/metrics.js";
+import {
+  recordCompactionCoverageGap,
+  recordSandboxWorkspaceGrow,
+} from "../src/metrics.js";
 
 describe("workspace grow metrics", () => {
   it("uses pending for a requested resize that has not landed", () => {
@@ -34,6 +37,21 @@ describe("workspace grow metrics", () => {
       name: "valet.sandbox.workspace_grow",
       value: 1,
       attributes: { outcome: "pending" },
+    });
+  });
+});
+
+describe("compaction coverage metrics", () => {
+  it("counts a pass that could not cover its head at all, by mode", () => {
+    recordCompactionCoverageGap("reactive");
+
+    expect(metricState.descriptions.get("valet.compaction.coverage_gap")).toContain(
+      "invariant violation",
+    );
+    expect(metricState.points).toContainEqual({
+      name: "valet.compaction.coverage_gap",
+      value: 1,
+      attributes: { mode: "reactive" },
     });
   });
 });
