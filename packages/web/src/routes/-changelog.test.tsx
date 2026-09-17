@@ -122,9 +122,12 @@ describe("ChangelogPage", () => {
       "/commit/abc123456789",
     );
     await waitFor(() => {
-      expect(window.localStorage.getItem("valet:changelog-seen:user-1")).toBe("1.0.0@abc");
+      expect(JSON.parse(window.localStorage.getItem("valet:changelog-seen:user-1") ?? "")).toEqual({
+        checkpointId: "1.0.0@abc",
+        unreleasedEntryCommitShas: [],
+      });
     });
-    expect(await screen.findByText("New")).toBeTruthy();
+    expect(await screen.findAllByText("New")).toHaveLength(3);
   });
 
   it("restores filters and search from a shared URL", () => {
@@ -185,6 +188,46 @@ describe("ChangelogPage", () => {
     view.rerender(<ChangelogPage />);
     await waitFor(() => expect(lastNavigationSearch()).toMatchObject({ page: 2 }));
     expect(screen.getByRole("heading", { level: 2, name: "1.0.0" })).toBeTruthy();
+  });
+
+  it("highlights only newly added unreleased entries until the next visit", async () => {
+    data.manifest.checkpoints.unshift({
+      kind: "unreleased",
+      id: "unreleased@def123456789",
+      buildSha: "def123456789",
+      builtAt: "2026-09-10T12:00:00Z",
+      previousSha: "abc",
+      entries: [change("Added after visit", "feature", "new123456789"), change("Already seen", "feature", "old123456789")],
+    });
+    window.localStorage.setItem(
+      "valet:changelog-seen:user-1",
+      JSON.stringify({
+        checkpointId: "unreleased@abc123456789",
+        unreleasedEntryCommitShas: ["old123456789"],
+      }),
+    );
+
+    const firstVisit = render(<ChangelogPage />);
+    const newEntry = screen.getByText("Added after visit").closest("li");
+    expect(newEntry?.className).toContain("border-accent-500");
+    expect(within(newEntry as HTMLElement).getByText("New")).toBeTruthy();
+    expect(screen.getByText("Already seen").closest("li")?.className).not.toContain("border-accent-500");
+
+    searchParams = { q: "Added after" };
+    firstVisit.rerender(<ChangelogPage />);
+    expect(screen.getByText("Added after visit").closest("li")?.className).toContain("border-accent-500");
+
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem("valet:changelog-seen:user-1") ?? "")).toMatchObject({
+        checkpointId: "unreleased@def123456789",
+        unreleasedEntryCommitShas: ["new123456789", "old123456789"],
+      });
+    });
+    firstVisit.unmount();
+
+    render(<ChangelogPage />);
+    expect(screen.getByText("Added after visit").closest("li")?.className).not.toContain("border-accent-500");
+    expect(screen.queryAllByText("New")).toHaveLength(0);
   });
 
   it("shows an unreleased build with its links and empty state", () => {
