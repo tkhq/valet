@@ -11,11 +11,11 @@ import { deleteTeamApiKey } from "../services/team-resource-deletion.js";
  * longer owns.
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { requireActingUser } from "../middleware/auth.js";
-import { apikey } from "../schema/index.js";
+import { apikey, orgMembers, teamMembers } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember, lockTeamForOwnership } from "../services/teams.js";
 import { TEAM_ADMIN_REQUIRED_CODE } from "../services/team-deletion-access.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -65,6 +65,45 @@ async function teamKeyCreateAccess(
   if (!team) return "hidden";
   if (await canAdministerTeam(db, teamId, userId)) return "allowed";
   return (await isTeamMember(db, teamId, userId)) ? "member-only" : "hidden";
+}
+
+/**
+ * Hold the two rows the create gate reads, so a demotion that commits while
+ * this transaction runs serializes behind it instead of racing it.
+ *
+ * The ownership advisory lock serializes this route against team deletion,
+ * and nothing else. The membership writers take no such lock: `addMember`
+ * and `removeMember` in `services/teams.ts`, and the organization role
+ * writer in `services/org.ts`, each commit on their own. Without the row
+ * locks below, a demotion could commit between the re-check's read and this
+ * transaction's commit, and the key would be pinned for a caller who had
+ * already lost the authority to create it.
+ *
+ * Share, not update. Two concurrent creates on one team need not serialize
+ * against each other, only against a writer, and a role UPDATE or a
+ * membership DELETE blocks on a share lock until this transaction commits.
+ * `services/team-deletion-access.ts` holds the same two rows the same way.
+ *
+ * A caller with no row locks nothing, which is the promotion direction
+ * rather than the revocation one. Somebody who holds no membership cannot
+ * lose an authority they never had, and the read that follows refuses them.
+ */
+async function holdCallerAuthority(
+  tx: AppQueryable,
+  orgId: string,
+  teamId: string,
+  userId: string,
+): Promise<void> {
+  await tx
+    .select({ role: teamMembers.role })
+    .from(teamMembers)
+    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
+    .for("share");
+  await tx
+    .select({ role: orgMembers.role })
+    .from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
+    .for("share");
 }
 
 async function canViewTeamKeys(
@@ -171,7 +210,10 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
       // Serialize the final pin with deleteTeam. All reads use tx: an outer
       // database call here would deadlock PGlite's single writer.
       await lockTeamForOwnership(tx, teamId);
-      // A demotion that lands between the first check and the lock gets the
+      // Hold the rows the gate reads before reading them, so a demotion
+      // landing during this transaction cannot commit underneath it.
+      await holdCallerAuthority(tx, user.orgId, teamId, user.id);
+      // A demotion that lands before the lock, or while it is held, gets the
       // same answer the first check gives, so the caller reads one rule.
       const current = await teamKeyCreateAccess(tx, user.orgId, teamId, user.id);
       if (current === "hidden") return "not-found";
