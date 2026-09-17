@@ -143,7 +143,10 @@ export function cmdlineIdentityKernel(cmdline, argv = K3S_ARGV) {
   if (cmdline.equals(exact)) return true;
   if (cmdline.length === 0) return false;
   const separator = cmdline.indexOf(0);
-  return separator >= 0 && cmdline.subarray(0, separator).toString() === "/usr/local/bin/k3s";
+  const title = separator >= 0 ? cmdline.subarray(0, separator) : cmdline;
+  const space = title.indexOf(0x20);
+  const executable = space >= 0 ? title.subarray(0, space) : title;
+  return executable.equals(Buffer.from("/usr/local/bin/k3s"));
 }
 export function startupKernel({ leader, deadlineExpired }) {
   if (leader === "exited") return "server_exited";
