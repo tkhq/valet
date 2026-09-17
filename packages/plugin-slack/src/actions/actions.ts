@@ -136,26 +136,13 @@ function cacheReadChannelName(cacheKey: string, channelName: string): void {
   }
 }
 
-/** Resolve the requested read channel without making channel-name lookup fatal. */
-async function resolveReadChannelName(token: string, channelId: string): Promise<string | undefined> {
+function cacheReadChannelNameFromAccess(token: string, channelId: string, channelName: string | undefined): string | undefined {
   const cacheKey = readChannelNameCacheKey(token, channelId);
-  const cached = readChannelNameCache.get(cacheKey);
-  if (cached) {
-    // Refresh its insertion order so frequently read channels remain cached.
-    cacheReadChannelName(cacheKey, cached);
-    return cached;
+  if (channelName) {
+    cacheReadChannelName(cacheKey, channelName);
+    return channelName;
   }
-
-  try {
-    const res = await slackGet('conversations.info', token, { channel: channelId });
-    if (!res.ok) return undefined;
-    const data = (await res.json()) as { ok: boolean; channel?: { name?: unknown } };
-    if (!data.ok || typeof data.channel?.name !== 'string') return undefined;
-    cacheReadChannelName(cacheKey, data.channel.name);
-    return data.channel.name;
-  } catch {
-    return undefined;
-  }
+  return readChannelNameCache.get(cacheKey);
 }
 
 function formatUserDisplay(uid: string, user: Record<string, unknown>): string {
@@ -516,8 +503,9 @@ const readHistory = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const channelAccess = await checkPrivateChannelAccess(token, p.channel, ownerSlackUserId(cred));
+    if (!channelAccess.allowed) return { success: false, error: channelAccess.error || 'Access denied' };
+    const channel_name = cacheReadChannelNameFromAccess(token, p.channel, channelAccess.channelName);
     const query: Record<string, unknown> = {
       channel: p.channel,
       limit: p.limit || 100,
@@ -549,7 +537,6 @@ const readHistory = action(Type.Object({
 
     messages = await resolveAndEnrichMessages(token, messages);
 
-    const channel_name = await resolveReadChannelName(token, p.channel);
     const next_cursor = data.response_metadata?.next_cursor || undefined;
     const filtered = p.filter || p.threads_only;
     // Put pagination metadata first — large message arrays may be truncated by tool output limits
@@ -572,8 +559,9 @@ const readThread = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const channelAccess = await checkPrivateChannelAccess(token, p.channel, ownerSlackUserId(cred));
+    if (!channelAccess.allowed) return { success: false, error: channelAccess.error || 'Access denied' };
+    const channel_name = cacheReadChannelNameFromAccess(token, p.channel, channelAccess.channelName);
     const query: Record<string, unknown> = {
       channel: p.channel,
       ts: p.thread_ts,
@@ -590,7 +578,6 @@ const readThread = action(Type.Object({
       (data.messages || []).map((m) => slimMessage(m as Record<string, unknown>)),
     );
 
-    const channel_name = await resolveReadChannelName(token, p.channel);
     const next_cursor = data.response_metadata?.next_cursor || undefined;
     return { success: true, data: { channel: p.channel, ...(channel_name ? { channel_name } : {}), has_more: data.has_more, next_cursor, total: messages.length, messages } };
   },

@@ -4,6 +4,7 @@ export interface ChannelAccessResult {
   allowed: boolean;
   isPrivate: boolean;
   error?: string;
+  channelName?: string;
 }
 
 /**
@@ -24,7 +25,7 @@ export async function checkPrivateChannelAccess(
   const infoData = (await infoRes.json()) as {
     ok: boolean;
     error?: string;
-    channel?: { is_private?: boolean; is_im?: boolean; is_mpim?: boolean };
+    channel?: { name?: string; is_private?: boolean; is_im?: boolean; is_mpim?: boolean };
   };
 
   if (!infoData.ok) {
@@ -36,14 +37,16 @@ export async function checkPrivateChannelAccess(
     return { allowed: false, isPrivate: false, error: 'Slack API error checking channel: no channel data' };
   }
 
+  const channelName = channel.name;
+
   // 2. DMs and group DMs are always allowed
   if (channel.is_im || channel.is_mpim) {
-    return { allowed: true, isPrivate: false };
+    return { allowed: true, isPrivate: false, channelName };
   }
 
   // 3. Public channels are always allowed
   if (!channel.is_private) {
-    return { allowed: true, isPrivate: false };
+    return { allowed: true, isPrivate: false, channelName };
   }
 
   // 4. Private channel — need owner's Slack identity
@@ -74,7 +77,7 @@ export async function checkPrivateChannelAccess(
     }
 
     if (membersData.members?.includes(ownerSlackUserId)) {
-      return { allowed: true, isPrivate: true };
+      return { allowed: true, isPrivate: true, channelName };
     }
 
     cursor = membersData.response_metadata?.next_cursor || undefined;
