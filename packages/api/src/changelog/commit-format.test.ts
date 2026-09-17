@@ -78,6 +78,14 @@ describe("changelog commit format", () => {
     ).toEqual([correction]);
   });
 
+  it.each([
+    "fixup! fix: add export",
+    "squash! feat: add export",
+    "Merge branch 'dev-v2' into feature",
+  ])("skips temporary or merge commit %s", (subject) => {
+    expect(validateCommitMessage({ commitSha: sha, subject, body: "" })).toEqual([]);
+  });
+
   it("lets the explicit marker override an internal type", () => {
     const message = {
       commitSha: sha,
