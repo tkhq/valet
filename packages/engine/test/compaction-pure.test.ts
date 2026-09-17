@@ -366,6 +366,41 @@ describe("compaction: summary checkpoint tail", () => {
     // spending the budget a mandatory window needs.
     expect(selectSummaryCheckpointTail([newest], 100, { keepNewest: false })).toEqual([]);
   });
+
+  it("sends a budget-fitting suffix of a long head, not the whole head", () => {
+    // The size of the gap `coveredEntryIds` hides. A checkpoint records every
+    // head entry; this window is what the summarizer actually reads. The
+    // numbers here are the ones quoted in `compactThreadInner` and in the
+    // compaction spec, so a budget or cap change moves them together.
+    const head: SessionEntry[] = [];
+    for (let i = 0; i < 400; i++) {
+      head.push(
+        i % 8 === 0
+          ? user(`u-${i}`, `prompt ${i} ` + "word ".repeat(40))
+          : assistant(`a-${i}`, "", [
+              { type: "text", text: `step ${i} ` + "word ".repeat(500) },
+              {
+                type: "tool_call",
+                callId: `c-${i}`,
+                toolName: "bash",
+                status: "completed",
+                args: { command: "ls" },
+                result: "output ".repeat(400),
+              },
+            ]),
+      );
+    }
+    const sizeOf = (entry: SessionEntry): number => estimateSummaryEntryTokens(entry);
+    const headTokens = head.reduce((total, entry) => total + sizeOf(entry), 0);
+    expect(headTokens).toBe(403_663);
+
+    const sent = selectSummaryCheckpointTail(head, 64_000, { sizeOf });
+    expect(sent).toHaveLength(62);
+    // The window is a suffix: the oldest 338 entries never reach the model,
+    // and the checkpoint still marks all 400 covered.
+    expect(sent[0].id).toBe(head[338].id);
+    expect(sent.at(-1)!.id).toBe(head.at(-1)!.id);
+  });
 });
 
 describe("compaction: turns", () => {

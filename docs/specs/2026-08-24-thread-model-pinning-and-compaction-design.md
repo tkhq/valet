@@ -429,16 +429,33 @@ newest entry the summarizer can read, and `summarize` refuses an input that
 converts to an empty transcript.
 
 `coveredEntryIds` records the whole head, and the rebuild drops every covered
-entry from model context. Head-first allocation holds that invariant
-structurally, so the coverage check before the summarizer call is an assertion
-a healthy compaction never reaches. A pass that fails it emits
-`compaction_coverage_gap`, records the `valet.compaction.coverage_gap` counter,
-and reports `insufficient`. It writes no checkpoint, so the head stays in live
-context. The overflow retry shrinks the input in the same order it was
-allocated: tail evidence first, then the oldest half of the head, and it stops
-before a slice that carries no head content. A head larger than the budget is
-summarized from the part that fit, and the compaction span records the entries
-and tokens the summarizer never read.
+entry from model context. The coverage check before the summarizer call holds
+one property: at least one head entry reaches the summarizer. It does not hold
+full coverage. A head larger than the summarizer input budget is covered in
+full and read in part. On a 400-entry head worth about 403,000 summarizer
+tokens, 62 entries reach the model and all 400 are recorded as covered.
+`compaction-pure.test.ts` pins that measurement.
+
+The two halves of that gap report separately, and compaction repairs neither.
+
+- No head entry reaches the summarizer. The pass emits
+  `compaction_coverage_gap`, records the `valet.compaction.coverage_gap`
+  counter, and reports the `coverage_gap` outcome. It writes no checkpoint, so
+  the head stays in live context. `/compact` prints this cause and tells the
+  user to start a fresh thread. Shortening the newest turn cannot help here,
+  which is why this outcome is separate from `insufficient` and carries its own
+  message.
+- Some head entries reach the summarizer and the rest do not. This is the
+  common case, and it is the one a checkpoint hides. The pass writes the
+  checkpoint over the full head, counts the unread entries on
+  `valet.compaction.head_entries_unread`, and records the unread entries and
+  tokens on the compaction span. Narrowing `coveredEntryIds` to the part that
+  was read would keep unsummarized entries in the context compaction was
+  called to shrink.
+
+The overflow retry shrinks the input in the same order it was allocated: tail
+evidence first, then the oldest half of the head, and it stops before a slice
+that carries no head content.
 
 The summary has a `Continuation Checkpoint` section. It records the branch,
 commit, changed files, worktree status, last command, failure output, next

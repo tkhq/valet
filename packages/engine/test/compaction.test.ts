@@ -1536,7 +1536,7 @@ describe("compaction: summarizer input covers the head", () => {
     ]);
 
     const outcome = await thread.compactThread({ mode: "manual" });
-    expect(outcome).toBe("insufficient");
+    expect(outcome).toBe("coverage_gap");
 
     const entries = await store.getEntries(session.id, thread.id);
     expect(entries.filter((e) => e.type === "compaction")).toHaveLength(0);
@@ -1754,6 +1754,112 @@ describe("compaction: summarizer input covers the head", () => {
       }),
     ).rejects.toThrow(/no conversation history/);
     expect(faux.getPendingResponseCount()).toBe(1);
+    faux.unregister();
+  });
+
+  // The two automatic callers must treat "coverage_gap" exactly as they
+  // treat "insufficient": compaction cannot help, and it will not help on a
+  // retry. The outcomes are separate values so `/compact` can name the right
+  // corrective action, not so the callers can act differently.
+  const unreadableHead = (sessionId: string, threadId: string) => [
+    { id: "e-1", sessionId, threadId, parentId: null, type: "message" as const, role: "user" as const, content: "", createdAt: 1 },
+    { id: "e-2", sessionId, threadId, parentId: "e-1", type: "message" as const, role: "assistant" as const, content: "", parts: [{ type: "thinking" as const, text: "x".repeat(200) }], createdAt: 2 },
+  ];
+
+  it("feeds the proactive circuit breaker when the head cannot be covered", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-coverage-breaker",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    const summarizerError = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" });
+    faux.setResponses([
+      // Turn 1: the head holds no summarizer text, so compaction reports
+      // coverage_gap and never calls the summarizer. Breaker count 1.
+      fauxAssistantMessage("r1"),
+      // Turns 2 and 3: turn 1 left readable entries in the head, so the
+      // summarizer runs and fails. Breaker counts 2 and 3.
+      fauxAssistantMessage("r2"), summarizerError,
+      fauxAssistantMessage("r3"), summarizerError,
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, unreadableHead(session.id, thread.id));
+
+    for (let turn = 1; turn <= 3; turn++) {
+      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+      await waitFor(
+        () =>
+          events.filter(
+            (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+          ).length >= turn,
+      );
+    }
+
+    const codes = events
+      .filter((e) => e.event.type === "error")
+      .map((e) => (e.event as { code: string }).code);
+    // One gap, two summarizer failures, and the breaker opens on the third.
+    expect(codes.filter((c) => c === "compaction_coverage_gap")).toHaveLength(1);
+    expect(codes.filter((c) => c === "compaction_failed")).toHaveLength(2);
+    expect(codes.filter((c) => c === "compaction_circuit_open")).toHaveLength(1);
+    // The gap pass emits its own error. It must not also emit the generic
+    // proactive-failure error for the same pass.
+    expect(codes.filter((c) => c === "compaction_noop")).toHaveLength(0);
+    expect(faux.getPendingResponseCount()).toBe(0);
+    faux.unregister();
+  });
+
+  it("stops the reactive overflow retry when the head cannot be covered", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-coverage-reactive",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      // The turn overflows, which is what starts reactive compaction.
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "prompt is too long: 100 tokens > 50 maximum",
+      }),
+      // Queued to prove the retry did NOT run. A retry would consume it.
+      fauxAssistantMessage("retried response"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, unreadableHead(session.id, thread.id));
+
+    const receipt = await session.prompt("marker-reactive prompt");
+    await waitFor(() =>
+      events.some(
+        (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+      ),
+    );
+
+    const codes = events
+      .filter((e) => e.event.type === "error")
+      .map((e) => (e.event as { code: string }).code);
+    expect(codes).toContain("compaction_coverage_gap");
+    // The recorded overflow response stands. Retrying the turn would just
+    // overflow again, so the retry response is still queued.
+    expect(faux.getPendingResponseCount()).toBe(1);
+    const entries = await store.getEntries(session.id, thread.id);
+    expect(entries.filter((e) => e.type === "compaction")).toHaveLength(0);
     faux.unregister();
   });
 });

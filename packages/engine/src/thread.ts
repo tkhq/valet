@@ -60,6 +60,7 @@ import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
 import {
   recordCompactionCoverageGap,
+  recordCompactionHeadUnread,
   recordGateUnownedExpired,
   recordSettlement,
   recordTurn,
@@ -234,19 +235,33 @@ export function isItemDrivenInProcess(itemId: string): boolean {
 /**
  * What a compaction pass achieved. "compacted" = a summary was persisted;
  * "pruned" = tool-output elision only; "noop" = the pass found nothing to
- * reclaim; "insufficient" = compaction cannot help this thread as it stands.
- * Two conditions report "insufficient": the newest turn alone exceeds the
- * usable window, so summarizing older turns cannot bring the prompt under
- * the limit; or the history the checkpoint must replace carries no text the
- * summarizer can read (`compaction_coverage_gap`). Both emit their own
+ * reclaim. Two outcomes mean compaction cannot help this thread as it
+ * stands, for different reasons and with different fixes:
+ *
+ * - "insufficient": the newest turn alone exceeds the usable window, so
+ *   summarizing older turns cannot bring the prompt under the limit. The fix
+ *   is to shorten that turn (`context_overflow_unrecoverable`).
+ * - "coverage_gap": the history the checkpoint must replace carries no text
+ *   the summarizer can read, so a checkpoint over it would describe nothing.
+ *   Shortening the newest turn cannot help. The fix is a fresh thread
+ *   (`compaction_coverage_gap`).
+ *
+ * They are separate values because `/compact` prints one diagnosis per
+ * outcome, and one message cannot name both fixes. Both emit their own
  * actionable error inside compactThreadInner, and neither changes between
- * attempts on the same transcript. Proactive callers treat "noop" and
- * "insufficient" as breaker-worthy: the trigger fired but compaction cannot
- * help, so retrying every turn is futile. The reactive caller treats
- * "insufficient" as "do not retry": the overflow response already stands
- * and a retry would just overflow again.
+ * attempts on the same transcript. Proactive callers treat "noop" and both
+ * blocked outcomes as breaker-worthy: the trigger fired but compaction
+ * cannot help, so retrying every turn is futile. The reactive caller treats
+ * both as "do not retry": the overflow response already stands and a retry
+ * would just overflow again. Add a blocked outcome here only with its own
+ * user-facing message.
  */
-export type CompactionOutcome = "compacted" | "pruned" | "noop" | "insufficient";
+export type CompactionOutcome =
+  | "compacted"
+  | "pruned"
+  | "noop"
+  | "insufficient"
+  | "coverage_gap";
 
 /**
  * Metadata key stamped on a user entry whose oversized text was spilled to a
@@ -4030,7 +4045,7 @@ export class Thread {
           );
           return;
         }
-        if (outcome === "insufficient") {
+        if (outcome === "insufficient" || outcome === "coverage_gap") {
           // Compaction cannot help this transcript: the newest turn alone
           // exceeds the window, or the history it must replace carries no
           // summarizer-readable text. Neither changes on a retry, and a
@@ -4200,7 +4215,7 @@ export class Thread {
         "compaction_noop",
         "Compaction found nothing to reclaim: the recent turns already fit the tail budget, so the context is dominated by the system prompt and tool definitions. Reduce enabled tools or start a new thread.",
       );
-    } else if (outcome === "insufficient") {
+    } else if (outcome === "insufficient" || outcome === "coverage_gap") {
       // Compaction cannot help this transcript. compactThreadInner ALREADY
       // emitted the actionable error for the reason it found:
       // context_overflow_unrecoverable, or compaction_coverage_gap.
@@ -4482,11 +4497,22 @@ export class Thread {
       const headIds = new Set(head.map((e) => e.id));
       const coversHead = (selection: readonly SessionEntry[]): boolean =>
         selection.some((entry) => headIds.has(entry.id) && sizeForSummary(entry) > 0);
-      // Invariant (CLAUDE.md: alert, do not auto-repair): never write a
-      // checkpoint that claims coverage of entries the summarizer never
-      // read. Head-first selection holds this structurally, so a pass that
-      // arrives here must replace entries that carry no summarizer text at
-      // all. Check before the call, so the pass costs nothing.
+      // What this guard holds: at least ONE head entry reaches the
+      // summarizer. It does not hold full coverage, and the checkpoint below
+      // is not narrowed to match. `coveredEntryIds` records the whole head.
+      // This input carries only the head's newest budget-fitting suffix. A
+      // head larger than the budget is therefore covered in full and read in
+      // part. Measured on a 400-entry head worth about 403,000 summarizer
+      // tokens: 62 entries reach the model, 400 are recorded as covered.
+      // `compaction-pure.test.ts` pins those numbers. Do not read a passing
+      // guard as a promise that every entry in `coveredEntryIds` was
+      // summarized.
+      // That residual gap is reported, never repaired (CLAUDE.md: alert, do
+      // not auto-repair). The checkpoint write below counts the unread
+      // entries on `valet.compaction.head_entries_unread` and records them on
+      // the span. This branch handles only the total failure, where the head
+      // carries no summarizer text at all. It runs before the summarizer
+      // call, so such a pass costs nothing.
       if (!coversHead(headForSummary)) {
         span?.setAttributes({
           "valet.compaction.insufficient_reason": "coverage_gap",
@@ -4499,7 +4525,7 @@ export class Thread {
           `Compaction found no history to summarize. The ${head.length} entries it must replace hold ` +
             `no text the summarizer can read. Start a new thread if the context still overflows.`,
         );
-        return "insufficient";
+        return "coverage_gap";
       }
       for (let attempt = 0; ; attempt++) {
         try {
@@ -4563,9 +4589,19 @@ export class Thread {
       };
       // A head larger than the summarizer input budget is summarized from
       // the part that fit. Measure that loss instead of hiding it behind a
-      // healthy-looking compression ratio.
+      // healthy-looking compression ratio. This is the coverage gap that
+      // actually happens. The guard above catches only the rare total
+      // failure. These entries pass it, and they leave live context with no
+      // summary behind them. The counter carries the entries and the span
+      // carries the tokens. Neither repairs the gap (CLAUDE.md: alert, do not
+      // auto-repair). Narrowing `coveredEntryIds` to the part that was read
+      // would keep unsummarized entries in a context compaction was called
+      // to shrink.
       const summarized = new Set(headForSummary.map((e) => e.id));
       const unreadHead = head.filter((e) => !summarized.has(e.id));
+      // Record a real gap only: a zero point on every healthy pass would
+      // bury the signal under the baseline rate.
+      if (unreadHead.length > 0) recordCompactionHeadUnread(opts.mode, unreadHead.length);
       span?.setAttributes({
         "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
         "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,

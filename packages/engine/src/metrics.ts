@@ -39,6 +39,7 @@ interface Instruments {
   sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
   compactionCoverageGaps: Counter;
+  compactionHeadEntriesUnread: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -113,6 +114,10 @@ function inst(): Instruments {
       description:
         "Compaction passes that refused to write a checkpoint because the summarizer input carried none of the history the checkpoint would replace. This is an invariant violation, not a workload property: any sustained rate means threads stop compacting (TKAI-461).",
     }),
+    compactionHeadEntriesUnread: meter.createCounter("valet.compaction.head_entries_unread", {
+      description:
+        "Head entries a written compaction checkpoint recorded as covered while the summarizer never read them, by mode. The checkpoint claims the whole head; the summarizer input holds only the part that fit its budget. These entries leave the model context with no summary behind them. Compaction does not repair this, so a sustained rate means threads lose history on every pass: compare the summarizer input budget against real head sizes, do not ignore (TKAI-461).",
+    }),
   };
   return instruments;
 }
@@ -156,6 +161,19 @@ export function recordCacheBreak(cause: string, model?: string): void {
  * thread keeps its history, but it also stops compacting. */
 export function recordCompactionCoverageGap(mode: string): void {
   inst().compactionCoverageGaps.add(1, { mode });
+}
+
+/**
+ * Head entries one written checkpoint covered but the summarizer never read.
+ * This is the common half of the same invariant: the rare total failure
+ * records `recordCompactionCoverageGap` and writes nothing, while a head
+ * larger than the summarizer input budget still writes a checkpoint over
+ * entries no summary describes. Compaction reports that loss and does not
+ * repair it (CLAUDE.md: alert, do not auto-repair). Callers record only a
+ * real gap, so any point on this series is one.
+ */
+export function recordCompactionHeadUnread(mode: string, entries: number): void {
+  inst().compactionHeadEntriesUnread.add(entries, { mode });
 }
 
 export function recordSandboxExec(durationMs: number, job: boolean): void {
