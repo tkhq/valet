@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 export const ROOT = "/home/dockerd/.local/state/valet/kubernetes";
 export const LOCK = `${ROOT}.lock`;
 export const SCOPE = "/sys/fs/cgroup/init/valet-kubernetes";
+export const LEAF = `${SCOPE}/leaf`;
 export const KUBECONFIG = `${ROOT}/kubeconfig.yaml`;
 export const MINIMUM_FREE_BYTES = 2147483648;
 export const K3S_ENV = {
@@ -123,13 +124,13 @@ function atomicJson(path, value) {
   renameSync(temp, path);
   const parent = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY); fsyncSync(parent); closeSync(parent);
 }
-function procIdentity(pid) {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+function procIdentity(pid, procRoot = "/proc") {
+  const stat = readFileSync(`${procRoot}/${pid}/stat`, "utf8");
   const end = stat.lastIndexOf(")");
   const fields = stat.slice(end + 2).split(" ");
   return {
-    pid, startTime: fields[19], bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
-    uid: Number(readFileSync(`/proc/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1]), epoch: EPOCH,
+    pid, startTime: fields[19], bootId: readFileSync(`${procRoot}/sys/kernel/random/boot_id`, "utf8").trim(),
+    uid: Number(readFileSync(`${procRoot}/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1]), epoch: EPOCH,
   };
 }
 function recordLive(record) {
@@ -138,14 +139,23 @@ function recordLive(record) {
     return now.startTime === record.startTime && now.bootId === record.bootId;
   } catch { return false; }
 }
-function identityValid(record) {
+export function cgroupMembershipKernel(line, owned = "/init/valet-kubernetes") {
+  return line === `0::${owned}` || line.startsWith(`0::${owned}/`);
+}
+export function startupKernel({ leader, deadlineExpired }) {
+  if (leader === "exited") return "server_exited";
+  if (leader === "foreign") return "ownership_failure";
+  return deadlineExpired ? "startup_timeout" : "continue";
+}
+export function identityValid(record, procRoot = "/proc") {
   try {
-    const now = procIdentity(record.pid);
+    const now = procIdentity(record.pid, procRoot);
+    const owned = record.cgroup === SCOPE ? "/init/valet-kubernetes" : null;
     return now.startTime === record.startTime && now.bootId === record.bootId && now.uid === 1500 &&
-      record.uid === 1500 && record.epoch === EPOCH && record.cgroup === SCOPE &&
+      record.uid === 1500 && record.epoch === EPOCH && owned !== null &&
       record.argvDigest === createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") &&
-      readFileSync(`/proc/${record.pid}/cmdline`).equals(Buffer.from(`${K3S_ARGV.join("\0")}\0`)) &&
-      readFileSync(`/proc/${record.pid}/cgroup`, "utf8").split("\n").some((line) => line === "0::/init/valet-kubernetes");
+      readFileSync(`${procRoot}/${record.pid}/cmdline`).equals(Buffer.from(`${K3S_ARGV.join("\0")}\0`)) &&
+      readFileSync(`${procRoot}/${record.pid}/cgroup`, "utf8").split("\n").some((line) => cgroupMembershipKernel(line, owned));
   } catch { return false; }
 }
 function ownerValid(owner) {
@@ -259,6 +269,20 @@ function normalizeKubeconfig() {
   if (context === "default") return commandOk(["/usr/local/bin/kubectl", "config", "rename-context", "default", "valet-kubernetes"], env);
   return context === "valet-kubernetes";
 }
+export function createScope(scope = SCOPE) {
+  mkdirSync(scope, { mode: 0o700 });
+  writeFileSync(join(scope, "cgroup.subtree_control"), "+cpuset +cpu +memory +pids\n");
+  const leaf = join(scope, "leaf");
+  mkdirSync(leaf, { mode: 0o700 });
+  return leaf;
+}
+export function launcherScript(leaf = LEAF) {
+  return `printf '%s\n' $$ > ${leaf}/cgroup.procs && exec "$@"`;
+}
+function leaderState(record) {
+  if (!record || !recordLive(record)) return "exited";
+  return identityValid(record) ? "owned" : "foreign";
+}
 function start() {
   const bad = Object.values(checks()).find((value) => !value.ok);
   if (bad) return fail(`${bad.action} Run valet-kubernetes diagnose for details.`, 20);
@@ -303,24 +327,29 @@ function start() {
     return fail("The joined start did not become ready. Run valet-kubernetes diagnose.", 22);
   }
   if (existsSync(SCOPE) && !cleanupOwned()) throw Object.assign(new Error("The prior Kubernetes cgroup is unsafe or populated. Recreate the sandbox before retrying."), { exitCode: 21 });
+  let launchExited = false;
   if (!join) {
-    mkdirSync(SCOPE, { mode: 0o700 });
+    const leaf = createScope();
     const log = openSync(LOG_PATH, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY, 0o600); chmodSync(LOG_PATH, 0o600);
     const env = { ...K3S_ENV, KUBECONFIG, VALET_SANDBOX_KUBERNETES: "1" };
-    const launcher = spawn("/bin/sh", ["-c", `printf '%s\n' $$ > ${SCOPE}/cgroup.procs && exec "$@"`, "launcher", ...K3S_ARGV], { detached: true, env, stdio: ["ignore", log, log] });
+    const launcher = spawn("/bin/sh", ["-c", launcherScript(leaf), "launcher", ...K3S_ARGV], { detached: true, env, stdio: ["ignore", log, log] });
     launcher.unref(); closeSync(log);
-    atomicJson(PID_PATH, { ...procIdentity(launcher.pid), cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex"), operationId: op.id });
+    let identity;
+    try { identity = procIdentity(launcher.pid); } catch { launchExited = true; }
+    if (identity) atomicJson(PID_PATH, { ...identity, cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex"), operationId: op.id });
     const execDeadline = Date.now() + 5_000;
-    while (Date.now() < execDeadline && !identityValid(readJson(PID_PATH, null))) {
+    while (!launchExited && Date.now() < execDeadline && !identityValid(readJson(PID_PATH, null))) {
       if (processGone(launcher.pid)) break;
       sleep(10);
     }
   }
-  while (Date.now() < op.deadline) {
+  let startupFailure;
+  for (;;) {
     const current = readJson(OP_PATH, null);
     if (!current || current.id !== op.id || current.cancelRequested || !ownerValid(current.owner)) return 4;
-    const pid = readJson(PID_PATH, null);
-    if (!pid || !identityValid(pid)) break;
+    const leader = launchExited ? "exited" : leaderState(readJson(PID_PATH, null));
+    startupFailure = startupKernel({ leader, deadlineExpired: Date.now() >= op.deadline });
+    if (startupFailure !== "continue") break;
     if (readiness()) {
       if (!normalizeKubeconfig()) return fail("The kubeconfig context is invalid. Stop the cluster, then retry.", 22);
       let committed = false;
@@ -333,17 +362,21 @@ function start() {
     }
     sleep(1000);
   }
+  if (startupFailure === "ownership_failure") {
+    return fail("The server identity is not owned. Recreate the sandbox before cleanup.", 21);
+  }
   const cleaned = cleanupOwned();
   let committed = false;
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
     if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
-    atomicJson(STATUS_PATH, { state: "error", error: cleaned ? "startup_timeout" : "startup_failed", epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
+    atomicJson(STATUS_PATH, { state: "error", error: cleaned ? startupFailure : "startup_failed", epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
   });
   if (!committed) return 4;
-  return cleaned
-    ? fail("Kubernetes startup timed out. Inspect server.log and run valet-kubernetes diagnose.", 22)
-    : fail("Kubernetes startup cleanup did not drain its cgroup. Recreate the sandbox before retrying.", 21);
+  if (!cleaned) return fail("Kubernetes startup cleanup did not drain its cgroup. Recreate the sandbox before retrying.", 21);
+  return startupFailure === "server_exited"
+    ? fail("Kubernetes server exited during startup. Inspect server.log.", 22)
+    : fail("Kubernetes startup timed out. Inspect server.log and run valet-kubernetes diagnose.", 22);
 }
 function processGone(pid) {
   try { return readFileSync(`/proc/${pid}/status`, "utf8").match(/^State:\s+(.)/m)?.[1] === "Z"; } catch { return true; }

@@ -22,6 +22,46 @@ node --input-type=module -e "import { removeOwnedCgroupDirectories } from '$HELP
 mkdir "$FAKE_SCOPE" || fail "the next start cannot recreate its cgroup"
 rmdir "$FAKE_SCOPE"
 
+# Exercise production identity, topology, launcher, and startup paths with fake kernel files.
+cat > "$TMP/kernel-test.mjs" <<'NODE'
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+const helper = await import(process.argv[2]);
+const tmp = process.argv[3];
+const proc = join(tmp, "proc");
+const pid = 4242;
+mkdirSync(join(proc, String(pid)), { recursive: true });
+mkdirSync(join(proc, "sys/kernel/random"), { recursive: true });
+writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) S ${Array(18).fill("0").join(" ")} 123 0\n`);
+writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tS\nUid:\t1500\t1500\t1500\t1500\n");
+writeFileSync(join(proc, "sys/kernel/random/boot_id"), "boot-test\n");
+writeFileSync(join(proc, String(pid), "cmdline"), Buffer.from(`${helper.K3S_ARGV.join("\0")}\0`));
+const record = {
+  pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: "test",
+  cgroup: helper.SCOPE,
+  argvDigest: createHash("sha256").update(JSON.stringify(helper.K3S_ARGV)).digest("hex"),
+};
+writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes/leaf/k3s_evac\n");
+if (!helper.identityValid(record, proc)) throw new Error("evacuated leader identity was rejected");
+writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes-foreign/leaf\n");
+if (helper.identityValid(record, proc)) throw new Error("foreign sibling identity was accepted");
+
+const scope = join(tmp, "scope");
+const leaf = helper.createScope(scope);
+if (readFileSync(join(scope, "cgroup.subtree_control"), "utf8") !== "+cpuset +cpu +memory +pids\n") throw new Error("scope controllers were not enabled");
+if (existsSync(join(scope, "cgroup.procs"))) throw new Error("fake Scope manager was populated");
+const marker = join(tmp, "launched");
+const launched = spawnSync("/bin/sh", ["-c", helper.launcherScript(leaf), "launcher", "/bin/sh", "-c", `printf ready > ${marker}`]);
+if (launched.status !== 0 || readFileSync(marker, "utf8") !== "ready") throw new Error("launcher did not exec from leaf");
+if (!/^\d+\n$/.test(readFileSync(join(leaf, "cgroup.procs"), "utf8"))) throw new Error("launcher PID was not written to leaf");
+if (helper.startupKernel({ leader: "exited", deadlineExpired: false }) !== "server_exited") throw new Error("leader exit did not fail fast");
+if (helper.startupKernel({ leader: "owned", deadlineExpired: true }) !== "startup_timeout") throw new Error("live deadline did not time out");
+if (helper.startupKernel({ leader: "foreign", deadlineExpired: false }) !== "ownership_failure") throw new Error("foreign leader was not rejected");
+NODE
+VALET_SANDBOX_EPOCH=test node "$TMP/kernel-test.mjs" "$HELPER" "$TMP"
+
 # Exercise the real cgroupfs stop path when the runner delegates a writable scope.
 if mkdir "$SCOPE" 2>/dev/null; then
   mkdir -p "$STATE"

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { capabilityKernel, lifecycleKernel, mapKernel, statusKernel } from "../../docker/valet-kubernetes.mjs";
+import { capabilityKernel, cgroupMembershipKernel, lifecycleKernel, mapKernel, startupKernel, statusKernel } from "../../docker/valet-kubernetes.mjs";
 
 const root = new URL("../../", import.meta.url);
 const specText = readFileSync(new URL("docs/specs/2026-09-12-nested-kubernetes-design.md", root), "utf8");
@@ -50,12 +50,12 @@ function validate(spec, data) {
   const expectedEnv = { HOME: "/home/dockerd", USER: "dockerd", PATH: "/usr/local/bin:/usr/bin:/bin", XDG_RUNTIME_DIR: "/home/dockerd/.local/state/valet/kubernetes/run", XDG_CONFIG_HOME: "/home/dockerd/.local/state/valet/kubernetes/config", K3S_DATA_DIR: dataDir, K3S_ROOTLESS_CIDR: "10.41.0.0/16", K3S_ROOTLESS_MTU: "65520", K3S_ROOTLESS_ENABLE_IPV6: "false", K3S_ROOTLESS_PORT_DRIVER: "builtin", K3S_ROOTLESS_DISABLE_HOST_LOOPBACK: "true" };
   if (!equal(data.k3sEnv, expectedEnv)) fail("invalid k3sEnv");
   if (!equal(data.sandboxEnv, { KUBECONFIG: kubeconfig, VALET_SANDBOX_KUBERNETES: "1" })) fail("invalid sandboxEnv");
-  if (!equal(data.errorReasons, ["startup_failed", "startup_timeout", "stop_failed", "import_owner_lost"])) fail("invalid errorReasons");
+  if (!equal(data.errorReasons, ["startup_failed", "startup_timeout", "server_exited", "stop_failed", "import_owner_lost"])) fail("invalid errorReasons");
   if (!Number.isSafeInteger(data.minimumFreeBytes) || data.minimumFreeBytes <= 0) fail("invalid minimumFreeBytes");
   if (!equal(data.imageTools?.slirp4netns, { package: "slirp4netns=1.2.0-1", path: "/usr/bin/slirp4netns", provenance: "Debian bookworm main" })) fail("invalid slirp4netns contract");
   for (const vector of data.statusVectors) if (!vector.expected.stdout.includes(`\"kubeconfig\":\"${kubeconfig}\"`)) fail(`status kubeconfig drift ${vector.id}`);
 
-  const groups = ["capabilityVectors", "mapVectors", "lifecycleVectors", "statusVectors", "acceptanceVectors"];
+  const groups = ["capabilityVectors", "mapVectors", "cgroupVectors", "startupVectors", "lifecycleVectors", "statusVectors", "acceptanceVectors"];
   const vectors = groups.flatMap((group) => {
     if (!Array.isArray(data[group]) || data[group].length === 0) fail(`missing vector group ${group}`);
     return data[group].map((vector) => ({ ...vector, group }));
@@ -83,12 +83,17 @@ function validate(spec, data) {
     if (!equal(capabilityKernel(requested, provider), vector.expected)) fail(`capability vector ${vector.id}`);
   }
   for (const vector of data.mapVectors) if (!equal(mapKernel(vector.input), vector.expected)) fail(`map vector ${vector.id}`);
+  for (const vector of data.cgroupVectors) if (!equal(cgroupMembershipKernel(vector.input), vector.expected)) fail(`cgroup vector ${vector.id}`);
+  for (const vector of data.startupVectors) if (!equal(startupKernel(vector.input), vector.expected)) fail(`startup vector ${vector.id}`);
   for (const vector of data.lifecycleVectors) if (!equal(lifecycleKernel(vector.input), vector.expected)) fail(`lifecycle vector ${vector.id}`);
   for (const vector of data.statusVectors) if (!equal(statusKernel(vector.input), vector.expected)) fail(`status vector ${vector.id}`);
   return { requirements: tags.length, vectors: vectors.length };
 }
 
 const result = validate(specText, source);
+if (source.cgroupVectors.every((vector) => (vector.input === "0::/init/valet-kubernetes") === vector.expected)) {
+  fail("exact cgroup-match mutation was accepted");
+}
 const mutations = [
   ["duplicate requirement", `${specText}\n[K01]`, clone(source)],
   ["second untagged MUST", specText.replace("[K01]", "It MUST also pass twice. [K01]"), clone(source)],
