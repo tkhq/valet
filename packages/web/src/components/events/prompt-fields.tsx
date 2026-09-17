@@ -62,7 +62,14 @@ export function PromptFields({
   return (
     <div className="space-y-2 pt-2">
       <div className="grid gap-1">
-        <Label htmlFor={`${idPrefix}-system-prompt`}>Instructions for the assistant (optional)</Label>
+        {/* The server refusals name the wire field, the way every sibling
+            refusal in this validator does. Naming it here too makes the two
+            one thing, so a message that says systemPrompt points at a box
+            the reader can find. */}
+        <Label htmlFor={`${idPrefix}-system-prompt`}>
+          Instructions for the assistant (optional){" "}
+          <code className="font-normal text-muted">systemPrompt</code>
+        </Label>
         <Textarea
           id={`${idPrefix}-system-prompt`}
           rows={2}
@@ -72,7 +79,10 @@ export function PromptFields({
         />
       </div>
       <div className="grid gap-1">
-        <Label htmlFor={`${idPrefix}-user-prompt`}>Event message (optional)</Label>
+        <Label htmlFor={`${idPrefix}-user-prompt`}>
+          Event message (optional){" "}
+          <code className="font-normal text-muted">userPromptTemplate</code>
+        </Label>
         <Textarea
           id={`${idPrefix}-user-prompt`}
           rows={2}

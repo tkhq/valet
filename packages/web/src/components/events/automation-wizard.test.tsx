@@ -443,6 +443,21 @@ describe("AutomationWizard", () => {
     });
   });
 
+  // The server refuses a bad template by naming the wire field, the way every
+  // sibling refusal in that validator does. If the form does not show the same
+  // name, a reader told to move a variable to userPromptTemplate is looking for
+  // a box that does not exist under that name.
+  it("names the wire field beside each prompt label, so a server refusal points somewhere", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+
+    const system = screen.getByLabelText(/Instructions for the assistant/);
+    const user = screen.getByLabelText(/Event message/);
+    expect(system.closest("div")?.textContent).toContain("systemPrompt");
+    expect(user.closest("div")?.textContent).toContain("userPromptTemplate");
+  });
+
   it("reply outcome posts the prompt templates it collected on the mention target", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
