@@ -36,8 +36,8 @@ interface Vectors {
   leafConvergenceVectors: Vector<{ leaderLocation: "leaf" | "evac" | "other"; leafProcs: string[]; enabled: string[]; required: string[]; evacExists: boolean }, string>[];
   leaderStateVectors: Vector<LeaderInput, string>[];
   startRecoveryVectors: Vector<LeaderInput, string>[];
-  stopGuardVectors: Vector<LeaderInput, string>[];
-  epochRecoveryVectors: Vector<LeaderInput, string>[];
+  stopGuardVectors: Vector<LeaderInput | null, string>[];
+  epochRecoveryVectors: Vector<LeaderInput | null, string>[];
   lifecycleVectors: Vector<Record<string, unknown>, Record<string, unknown>>[];
   statusVectors: Vector<Record<string, unknown>, { exit: number; persistedAfter: string; stdout: string }>[];
   acceptanceVectors: { id: string; mode: string; step: string; check: string; expected: string; covers: string[] }[];
@@ -68,8 +68,11 @@ function leaderFixture(input: LeaderInput) {
     writeFileSync(join(proc, String(pid), "cmdline"), input.cmdline === "k3s" ? Buffer.from(`${K3S_ARGV.join("\0")}\0`) : "");
     writeFileSync(join(proc, String(pid), "cgroup"), input.cgroup === "owned" ? "0::/init/valet-kubernetes/leaf\n" : "0::/init/foreign\n");
   }
-  const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };
+  const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: process.env.VALET_SANDBOX_EPOCH ?? "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };
   return { proc, record };
+}
+function guardFixture(input: LeaderInput | null) {
+  return input === null ? { proc: "/missing", record: null } : leaderFixture(input);
 }
 
 describe("nested Kubernetes normative vectors", () => {
@@ -101,11 +104,11 @@ describe("nested Kubernetes normative vectors", () => {
     expect(startRecoveryKernel(record, proc)).toBe(expected);
   });
   it.each(vectors.stopGuardVectors)("executes $id through the stop guard", ({ input, expected }) => {
-    const { proc, record } = leaderFixture(input);
+    const { proc, record } = guardFixture(input);
     expect(stopGuardKernel(record, proc)).toBe(expected);
   });
   it.each(vectors.epochRecoveryVectors)("executes $id through the epoch guard", ({ input, expected }) => {
-    const { proc, record } = leaderFixture(input);
+    const { proc, record } = guardFixture(input);
     expect(epochRecoveryKernel(record, proc)).toBe(expected);
   });
   it.each(vectors.lifecycleVectors)("executes $id", ({ input, expected }) => {
