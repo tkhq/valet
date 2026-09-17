@@ -209,8 +209,9 @@ follow the persona's "answer by name". These fixes make one inbound view:
 - `renderSignalEnvelope` renders `addressed="true"|"false"` from the origin's
   reply mode, so the agent tells an addressed mention (answer normally) from an
   overheard follow (reply only via `reply_to_origin`) without guessing.
-- The transcript resolves in-text mentions to names, keeps a `[shared: file]`
-  marker for a file-only message, attributes the bot's own prior posts as "You",
+- The transcript resolves in-text mentions to names, names a message's files in
+  a `[shared: file]` marker beside its text, attributes the bot's own prior
+  posts as "You",
   and preserves the thread's opening message when it trims a long thread.
 
 ### Gap re-hydration (TKAI-284, added 2026-09-01)
@@ -299,6 +300,15 @@ this order:
 
 
 ### Transcript line boundaries (TKAI-434)
+
+Until 2026-09-17 the file marker was a FALLBACK for an empty message body, so
+a file posted with a caption went unmentioned: the transcript carried the
+caption and nothing else. An assistant asked about that file then reported,
+accurately about its input, that it could see no attachment. The marker now
+rides beside the text. It names the file rather than fetching it, because
+`read_thread` already returns each file with its `url` and
+`slack.fetch_file` reads a PDF, and downloading every file in a thread to
+seed one turn would cost far more than naming them.
 
 Thread hydration replaces line breaks in message text, speaker names, and file markers with a visible `⏎` separator. Each Slack message occupies one attributed line. This prevents embedded newlines from creating a second speaker line; it does not make message content trusted.
 
