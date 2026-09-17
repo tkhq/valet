@@ -48,9 +48,20 @@ if (!helper.identityValid(record, proc)) throw new Error("evacuated leader ident
 writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes-foreign/leaf\n");
 if (helper.identityValid(record, proc)) throw new Error("foreign sibling identity was accepted");
 if (helper.leaderState(record, proc) !== "foreign") throw new Error("live foreign leader was not classified as foreign");
+if (helper.startRecoveryKernel(record, proc) !== "refuse-foreign") throw new Error("start recovery accepted a live foreign leader");
+writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) Z ${Array(18).fill("0").join(" ")} 123 0\n`);
 writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tZ\nUid:\t1500\t1500\t1500\t1500\n");
 writeFileSync(join(proc, String(pid), "cmdline"), "");
 if (helper.leaderState(record, proc) !== "exited") throw new Error("zombie leader was not classified as exited");
+if (helper.startRecoveryKernel(record, proc) !== "clean-restart") throw new Error("start recovery refused a zombie leader");
+writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) S ${Array(18).fill("0").join(" ")} 123 0\n`);
+writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tS\nUid:\t1500\t1500\t1500\t1500\n");
+const transition = () => {
+  writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) Z ${Array(18).fill("0").join(" ")} 123 0\n`);
+  writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tZ\nUid:\t1500\t1500\t1500\t1500\n");
+  return false;
+};
+if (helper.leaderState(record, proc, transition) !== "exited") throw new Error("leader exit during identity validation was classified as foreign");
 
 const events = [];
 let settled = helper.settleStartupFailure("ownership_failure", {}, () => { events.push("cleanup"); return true; }, (_op, error) => { events.push(`commit:${error}`); return true; });

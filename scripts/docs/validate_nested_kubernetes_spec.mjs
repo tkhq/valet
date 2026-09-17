@@ -55,7 +55,7 @@ function validate(spec, data) {
   if (!equal(data.imageTools?.slirp4netns, { package: "slirp4netns=1.2.0-1", path: "/usr/bin/slirp4netns", provenance: "Debian bookworm main" })) fail("invalid slirp4netns contract");
   for (const vector of data.statusVectors) if (!vector.expected.stdout.includes(`\"kubeconfig\":\"${kubeconfig}\"`)) fail(`status kubeconfig drift ${vector.id}`);
 
-  const groups = ["capabilityVectors", "mapVectors", "cgroupVectors", "startupVectors", "leaderStateVectors", "lifecycleVectors", "statusVectors", "acceptanceVectors"];
+  const groups = ["capabilityVectors", "mapVectors", "cgroupVectors", "startupVectors", "leaderStateVectors", "startRecoveryVectors", "lifecycleVectors", "statusVectors", "acceptanceVectors"];
   const vectors = groups.flatMap((group) => {
     if (!Array.isArray(data[group]) || data[group].length === 0) fail(`missing vector group ${group}`);
     return data[group].map((vector) => ({ ...vector, group }));
@@ -87,6 +87,8 @@ function validate(spec, data) {
   for (const vector of data.startupVectors) if (!equal(startupKernel(vector.input), vector.expected)) fail(`startup vector ${vector.id}`);
   const zombie = data.leaderStateVectors.find(({ id }) => id === "leader-zombie");
   if (!equal(zombie?.input, { state: "Z", cmdline: "empty", cgroup: "owned" }) || zombie.expected !== "exited") fail("invalid zombie leader vector");
+  const recovery = data.startRecoveryVectors.find(({ id }) => id === "start-recovery-zombie");
+  if (!equal(recovery?.input, zombie.input) || recovery.expected !== "clean-restart") fail("invalid zombie start recovery vector");
   for (const vector of data.lifecycleVectors) if (!equal(lifecycleKernel(vector.input), vector.expected)) fail(`lifecycle vector ${vector.id}`);
   for (const vector of data.statusVectors) if (!equal(statusKernel(vector.input), vector.expected)) fail(`status vector ${vector.id}`);
   return { requirements: tags.length, vectors: vectors.length };

@@ -279,9 +279,22 @@ export function createScope(scope = SCOPE) {
 export function launcherScript(leaf = LEAF) {
   return `printf '%s\n' $$ > ${leaf}/cgroup.procs && exec "$@"`;
 }
-export function leaderState(record, procRoot = "/proc") {
-  if (!record || !recordLive(record, procRoot) || processGone(record.pid, procRoot)) return "exited";
-  return identityValid(record, procRoot) ? "owned" : "foreign";
+function recordExited(record, procRoot = "/proc") {
+  try {
+    const stat = readFileSync(`${procRoot}/${record.pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const bootId = readFileSync(`${procRoot}/sys/kernel/random/boot_id`, "utf8").trim();
+    return fields[19] !== record.startTime || bootId !== record.bootId || fields[0] === "Z";
+  } catch { return true; }
+}
+export function leaderState(record, procRoot = "/proc", validateIdentity = identityValid) {
+  if (!record || recordExited(record, procRoot)) return "exited";
+  if (validateIdentity(record, procRoot)) return "owned";
+  return recordExited(record, procRoot) ? "exited" : "foreign";
+}
+export function startRecoveryKernel(record, procRoot = "/proc") {
+  const leader = leaderState(record, procRoot);
+  return leader === "foreign" ? "refuse-foreign" : leader === "owned" ? "reuse-owned" : "clean-restart";
 }
 function start() {
   const bad = Object.values(checks()).find((value) => !value.ok);
@@ -293,7 +306,8 @@ function start() {
     const pid = readJson(PID_PATH, null);
     const stored = readJson(STATUS_PATH, { state: "stopped" });
     if (current?.type === "import" && !ownerValid(current.owner)) staleImportId = current.id;
-    if (pid && recordLive(pid) && !identityValid(pid)) throw Object.assign(new Error("The server identity is not owned. Recreate the sandbox before cleanup."), { exitCode: 21 });
+    const recovery = startRecoveryKernel(pid);
+    if (recovery === "refuse-foreign") throw Object.assign(new Error("The server identity is not owned. Recreate the sandbox before cleanup."), { exitCode: 21 });
     if (current && ownerValid(current.owner)) {
       if (current.type === "start") { op = current; join = true; return; }
       throw Object.assign(new Error("Another Kubernetes operation is active. Retry after it finishes."), { exitCode: 24 });

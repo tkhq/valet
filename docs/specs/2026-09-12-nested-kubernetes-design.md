@@ -197,6 +197,8 @@ A live recorded leader outside Scope MUST cause exit 21 without a signal. [K160]
 A zombie recorded leader MUST classify as exited before cmdline and ownership checks. [K161]
 An ownership failure MUST persist `ownership_failure` under the Operation commit guard before exit 21. [K162]
 A server exit MUST clean Scope before it persists `server_exited`. [K163]
+Start recovery MUST classify a zombie recorded leader as exited and clean it before restart. [K164]
+After failed identity validation, the Helper MUST recheck exit state against the recorded PID and start time. [K165]
 
 ## 06. Commands, locks, and state kernels
 
@@ -269,7 +271,7 @@ Subordinate files MUST grant UID 1500 outer interval `65536:65535` for both UID 
 | Provider grant expansion | INV-1, INV-3 | Manifest golden for K23 to K32 plus live A2 |
 | Map truncation or alias | INV-3, INV-5 | Executed K103 to K109 vectors plus A5 |
 | PID reuse | INV-1 | K59 to K61 identity vectors plus A9 |
-| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K163 tests plus A6 and A10 |
+| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K165 tests plus A6 and A10 |
 | Lifecycle race | INV-3, INV-6 | K78 to K90 race vectors plus A8 and A12 |
 | Supply substitution | INV-2, INV-3 | K39 to K44 digest and image tests |
 | Ambient import | INV-2 | K64 to K72 argv vector plus A7 tracing |
