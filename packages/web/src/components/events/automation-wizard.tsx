@@ -53,6 +53,7 @@ import {
   toWireFilters,
   type FilterField,
   type UiFilterRow,
+  NO_CHANNEL_MATCH_HELP,
 } from "~/components/events/filter-editor";
 import { useAssistants } from "~/api/assistants";
 import { assistantLabel } from "~/components/session/assistant-rail";
@@ -976,7 +977,7 @@ function ChannelMultiSelect({
         >
           {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
           {!optionsQ.isLoading && options.length === 0 && (
-            <p className="px-2 py-1 text-xs text-muted">No matches</p>
+            <p className="px-2 py-1 text-xs text-muted">{NO_CHANNEL_MATCH_HELP}</p>
           )}
           {options.map((o) => {
             const picked = channels.some((c) => c.id === o.id);

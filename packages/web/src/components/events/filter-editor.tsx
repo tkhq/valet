@@ -14,6 +14,18 @@ import { useFilterOptions } from "~/api/events";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { Button, Input } from "~/components/primitives";
 
+/** What an empty channel picker means, and the one action that fixes it.
+ *
+ * The picker lists the channels the Valet Slack app has JOINED, public and
+ * private alike. That is the right set: Slack delivers a message or a mention
+ * event only for a channel the app is in, so a rule naming any other channel
+ * could never fire. But an empty result read as "private channels are not
+ * supported", because nothing said otherwise, and people asked whether a team
+ * assistant could work in one at all. It can. Somebody has to invite the app
+ * to that channel first. */
+export const NO_CHANNEL_MATCH_HELP =
+  "No matches. This lists channels the Valet app has joined. To use a private channel, invite the app to it in Slack first.";
+
 export type FilterOp = "eq" | "in" | "prefix" | "contains" | "regex";
 
 export interface UiFilterRow {
@@ -423,7 +435,12 @@ function FilterValuePicker({
         >
           {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
           {!optionsQ.isLoading && options.length === 0 && (
-            <p className="px-2 py-1 text-xs text-muted">No matches</p>
+            // The channel source has one reason for an empty result and one
+            // fix, so it says both. Other sources keep the bare answer,
+            // because no single action would resolve them.
+            <p className="px-2 py-1 text-xs text-muted">
+              {source === "slack.channels" ? NO_CHANNEL_MATCH_HELP : "No matches"}
+            </p>
           )}
           {options.map((o) => (
             <button

@@ -6,7 +6,7 @@
  * trigger-dialog.test.tsx.
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { fireEvent, render, screen, fireEvent } from "@testing-library/react";
 
 // The picker queries option lists through this hook. The tests drive its
 // return value per case, so no react-query provider or network is needed.
@@ -260,6 +260,32 @@ describe("FilterEditor value picker", () => {
     const { container } = render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
     expect(screen.getByText("Alice")).toBeTruthy();
     expect(container.textContent).not.toContain("U1");
+  });
+
+  // An empty channel picker used to say only "No matches", which read as
+  // "private channels are not supported". They are: the app has to be invited
+  // to one first, because Slack sends no events for a channel it is not in.
+  it("tells a reader how to reach a private channel when the list is empty", async () => {
+    useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
+    const fields: FilterField[] = [{ field: "channel", options: { source: "slack.channels" } }];
+    const rows: UiFilterRow[] = [row({ field: "channel", op: "eq", value: "" })];
+    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    fireEvent.focus(screen.getByLabelText("Filter value search"));
+    const listbox = await screen.findByRole("listbox", { name: "Filter value options" });
+    expect(listbox.textContent).toContain("invite the app to it in Slack");
+  });
+
+  // Only the channel source has one action that fixes an empty list, so every
+  // other source keeps the bare answer rather than borrowing advice.
+  it("keeps the plain answer for a source with no single fix", async () => {
+    useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
+    const fields: FilterField[] = [{ field: "user", options: { source: "slack.users" } }];
+    const rows: UiFilterRow[] = [row({ field: "user", op: "eq", value: "" })];
+    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    fireEvent.focus(screen.getByLabelText("Filter value search"));
+    const listbox = await screen.findByRole("listbox", { name: "Filter value options" });
+    expect(listbox.textContent).toContain("No matches");
+    expect(listbox.textContent).not.toContain("invite the app");
   });
 
   it("disables the picker until every dependsOn value is present", () => {
