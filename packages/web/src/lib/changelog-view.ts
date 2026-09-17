@@ -33,7 +33,7 @@ function entryTime(entry: ChangelogEntry): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function compareEntries(left: ChangelogEntry, right: ChangelogEntry): number {
+export function compareChangelogEntries(left: ChangelogEntry, right: ChangelogEntry): number {
   const leftTime = entryTime(left);
   const rightTime = entryTime(right);
   if (leftTime !== null && rightTime !== null && leftTime !== rightTime) return rightTime - leftTime;
@@ -44,7 +44,7 @@ function compareEntries(left: ChangelogEntry, right: ChangelogEntry): number {
 
 export function groupChangelogEntries(entries: ChangelogEntry[]): ChangelogEntryGroup[] {
   return CHANGELOG_CATEGORIES.flatMap((category) => {
-    const categoryEntries = entries.filter((entry) => entry.category === category).sort(compareEntries);
+    const categoryEntries = entries.filter((entry) => entry.category === category).sort(compareChangelogEntries);
     return categoryEntries.length > 0 ? [{ category, entries: categoryEntries }] : [];
   });
 }

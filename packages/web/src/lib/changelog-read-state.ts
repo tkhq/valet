@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { ChangelogCheckpoint, ChangelogEntry } from "@valet/api/wire";
+import { compareChangelogEntries } from "./changelog-view";
 import { safeLocalStorage, type StorageReader, type StorageWriter } from "./safe-storage";
 
 const PREFIX = "valet:changelog-seen:";
@@ -109,6 +110,18 @@ export function unreadCheckpointIds(
   return new Set(unread.map((checkpoint) => checkpoint.id));
 }
 
+function matchingSha(left: string, right: string): boolean {
+  return left.startsWith(right) || right.startsWith(left);
+}
+
+function legacyUnreadCommitShas(checkpoint: ChangelogCheckpoint, checkpointId: string): Set<string> | null {
+  if (checkpoint.kind !== "unreleased") return null;
+  const seenSha = checkpointId.slice("unreleased@".length);
+  const entries = [...checkpoint.entries].sort(compareChangelogEntries);
+  const seenIndex = entries.findIndex((entry) => matchingSha(entry.sources.commitSha, seenSha));
+  return seenIndex === -1 ? null : new Set(entries.slice(0, seenIndex).map((entry) => entry.sources.commitSha));
+}
+
 export function isUnreadChangelogEntry(
   checkpoint: ChangelogCheckpoint,
   entry: ChangelogEntry,
@@ -116,8 +129,10 @@ export function isUnreadChangelogEntry(
   seenState: ChangelogReadState | null,
 ): boolean {
   if (checkpoint.kind === "unreleased" && seenState?.checkpointId?.startsWith("unreleased@")) {
-    if (seenState.unreleasedEntryCommitShas === null) return false;
-    return !seenState.unreleasedEntryCommitShas.includes(entry.sources.commitSha);
+    if (seenState.unreleasedEntryCommitShas !== null) {
+      return !seenState.unreleasedEntryCommitShas.includes(entry.sources.commitSha);
+    }
+    return legacyUnreadCommitShas(checkpoint, seenState.checkpointId)?.has(entry.sources.commitSha) ?? false;
   }
   return unreadCheckpoints.has(checkpoint.id);
 }
