@@ -4686,6 +4686,8 @@ export interface ChangelogEntry {
   title: string;
   description: string;
   category: ChangelogCategory;
+  /** Commit author timestamp. Older bundled artifacts can omit this value. */
+  authoredAt?: string;
   sources: { commitSha: string; pullRequest?: number };
   links?: Array<{ label: string; url: string }>;
   /** True when the generator had no pull-request identifier to preserve. */

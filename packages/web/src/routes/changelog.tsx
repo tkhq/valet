@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
-import { ExternalLink } from "lucide-react";
+import { Check, ClipboardCopy, ExternalLink } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
 import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
@@ -23,6 +23,7 @@ import {
   unreadCheckpointIds,
 } from "~/lib/changelog-read-state";
 import { textParam } from "~/lib/search-params";
+import { useCopyToClipboard } from "~/lib/use-copy";
 
 export interface ChangelogSearch {
   category?: ChangelogCategory;
@@ -79,10 +80,17 @@ function buildDate(value: string): string {
   }).format(new Date(value));
 }
 
+function entryDate(value: string | undefined): string | null {
+  if (!value || !Number.isFinite(Date.parse(value))) return null;
+  return buildDate(value);
+}
+
 export function ChangelogPage() {
   const changelog = useChangelog();
   const me = useMe();
+  const { copied, copy } = useCopyToClipboard();
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
+  const runningSha = changelog.data?.artifact.sha;
   const [seenWhenOpened, setSeenWhenOpened] = useState<string | null>();
   const search = readChangelogSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
@@ -141,6 +149,29 @@ export function ChangelogPage() {
       <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
         <h1 className="font-display text-2xl text-ink">Changelog</h1>
         <p className="mt-2 text-sm text-muted">Changes in rolling builds and released versions.</p>
+        {runningSha && (
+          <div className="mt-3 flex flex-wrap items-center gap-x-2 text-sm text-muted">
+            <span>Running commit</span>
+            <a
+              href={`https://github.com/tkhq/valet/commit/${runningSha}`}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`Running commit ${runningSha}`}
+              title={runningSha}
+              className="font-mono hover:text-moss hover:underline"
+            >
+              {runningSha.slice(0, 9)}
+            </a>
+            <button
+              type="button"
+              aria-label="Copy running commit"
+              onClick={() => void copy(runningSha)}
+              className="inline-flex max-sm:min-h-11 items-center hover:text-moss"
+            >
+              {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <ClipboardCopy className="h-3.5 w-3.5" aria-hidden />}
+            </button>
+          </div>
+        )}
 
         {changelog.data.artifact.status === "latest-known" && (
           <div className="mt-6 rounded border border-line bg-ink-wash px-3 py-2 text-sm text-ink">
@@ -264,6 +295,9 @@ export function ChangelogPage() {
                                           )}
                                         </div>
                                         <div className="flex items-start gap-3 text-xs text-muted sm:pt-0.5">
+                                          {entryDate(entry.authoredAt) && (
+                                            <time dateTime={entry.authoredAt}>{entryDate(entry.authoredAt)}</time>
+                                          )}
                                           {entry.sources.pullRequest && (
                                             <a
                                               href={`https://github.com/tkhq/valet/pull/${entry.sources.pullRequest}`}

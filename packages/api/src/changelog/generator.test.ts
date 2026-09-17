@@ -60,6 +60,7 @@ describe("changelog generation", () => {
       "two",
       "fix(web): keep the screen open (#12)",
       "User impact: Users no longer lose the open screen after a refresh.",
+      "2026-09-09T11:00:00Z",
     );
 
     const checkpoint = generateCheckpoint({
@@ -72,6 +73,7 @@ describe("changelog generation", () => {
 
     expect(checkpoint.id).toBe(`1.2.3@${releaseSha}`);
     expect(checkpoint.releasedAt).toBe("2026-09-09T19:00:00.000Z");
+    expect(Date.parse(checkpoint.entries[0]?.authoredAt ?? "")).toBe(Date.parse("2026-09-09T11:00:00Z"));
     expect(checkpoint.entries).toEqual([
       expect.objectContaining({
         title: "Keep the screen open",
