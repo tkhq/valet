@@ -54,7 +54,7 @@ function validate(spec, data) {
   const expectedEnv = { HOME: "/home/dockerd", USER: "dockerd", PATH: "/usr/local/bin:/usr/bin:/bin", XDG_RUNTIME_DIR: "/home/dockerd/.local/state/valet/kubernetes/run", XDG_CONFIG_HOME: "/home/dockerd/.local/state/valet/kubernetes/config", K3S_DATA_DIR: dataDir, K3S_ROOTLESS_CIDR: "10.41.0.0/16", K3S_ROOTLESS_MTU: "65520", K3S_ROOTLESS_ENABLE_IPV6: "false", K3S_ROOTLESS_PORT_DRIVER: "builtin", K3S_ROOTLESS_DISABLE_HOST_LOOPBACK: "true" };
   if (!equal(data.k3sEnv, expectedEnv)) fail("invalid k3sEnv");
   if (!equal(data.sandboxEnv, { KUBECONFIG: kubeconfig, VALET_SANDBOX_KUBERNETES: "1" })) fail("invalid sandboxEnv");
-  if (!equal(data.errorReasons, ["startup_failed", "startup_timeout", "server_exited", "ownership_failure", "stop_failed", "import_owner_lost"])) fail("invalid errorReasons");
+  if (!equal(data.errorReasons, ["startup_failed", "startup_timeout", "server_exited", "ownership_failure", "stop_failed", "import_owner_lost", "state_removal_failed"])) fail("invalid errorReasons");
   if (!equal(data.leafControllers, ["cpuset", "cpu", "memory", "pids"]) || !equal(LEAF_CONTROLLERS, data.leafControllers)) fail("invalid leafControllers");
   if (!equal(data.leafConvergence, { attempts: 10, delayMs: 100 }) || !equal(LEAF_CONVERGENCE, data.leafConvergence)) fail("invalid leafConvergence");
   if (!Number.isSafeInteger(data.minimumFreeBytes) || data.minimumFreeBytes <= 0) fail("invalid minimumFreeBytes");

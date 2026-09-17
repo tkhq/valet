@@ -24,6 +24,8 @@ import {
   statusKernel,
   stopGuardKernel,
   readImportResult,
+  removeStateRoot,
+  ROOT,
   validateArchive,
 } from "../../../docker/valet-kubernetes.mjs";
 
@@ -194,6 +196,35 @@ describe("nested Kubernetes normative vectors", () => {
       expect(dockerfile).toContain(artifact.version);
     }
     expect(dockerfile).not.toMatch(/curl[^\n]*rootlesskit/i);
+  });
+});
+
+describe("state root removal", () => {
+  it("retries access failures in the subordinate-mapped user namespace", () => {
+    let present = true;
+    let namespacedTarget = "";
+    removeStateRoot(ROOT, {
+      remove: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+      exists: () => present,
+      removeInUserNamespace: (target: string) => { namespacedTarget = target; present = false; return 0; },
+    });
+    expect(namespacedTarget).toBe(ROOT);
+  });
+
+  it("fails closed when direct and namespaced removal both fail", () => {
+    let failure: unknown;
+    try {
+      removeStateRoot(ROOT, {
+        remove: () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); },
+        exists: () => true,
+        removeInUserNamespace: () => 1,
+      });
+    } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ code: "state_removal_failed", exitCode: 22 });
+  });
+
+  it("refuses every removal target except the exact state root", () => {
+    expect(() => removeStateRoot(ROOT + "/data")).toThrow("state removal path is unsafe");
   });
 });
 

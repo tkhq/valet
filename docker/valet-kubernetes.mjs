@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statfsSync, statSync, fstatSync,
+  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statfsSync, statSync, fstatSync, mkdtempSync,
   unlinkSync, writeFileSync, chmodSync, rmdirSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -280,6 +280,45 @@ function stateReport(readiness = "unknown", snapshot = stateSnapshot()) {
 function emit(report) { process.stdout.write(report.stdout); return report.exit; }
 function fail(message, exitCode) { process.stderr.write(`Error: ${message}\n`); return exitCode; }
 function commandOk(argv, env = process.env, timeout = 30_000) { return spawnSync(argv[0], argv.slice(1), { env, timeout, stdio: "ignore" }).status === 0; }
+function stateRemovalError() {
+  return Object.assign(new Error("Kubernetes state removal failed (state_removal_failed). Recreate the sandbox, then retry."), {
+    code: "state_removal_failed", exitCode: 22,
+  });
+}
+export function removeStateRoot(root, io = {}) {
+  if (root !== ROOT) {
+    throw Object.assign(new Error("The Kubernetes state removal path is unsafe. Recreate the sandbox before retrying."), { exitCode: 21 });
+  }
+  const remove = io.remove ?? ((path) => rmSync(path, { recursive: true, force: true }));
+  const exists = io.exists ?? existsSync;
+  try {
+    remove(root);
+    if (!exists(root)) return;
+  } catch (error) {
+    if (error?.code !== "EACCES" && error?.code !== "EPERM") throw error;
+  }
+
+  let temporaryRoot;
+  try {
+    temporaryRoot = (io.makeTemporaryRoot ?? (() => mkdtempSync("/tmp/valet-kubernetes-remove-")))();
+    const runtime = join(temporaryRoot, "run");
+    mkdirSync(runtime, { mode: 0o700 });
+    const status = (io.removeInUserNamespace ?? ((target) => spawnSync(
+      "/usr/bin/rootlesskit",
+      ["--state-dir=" + join(runtime, "state"), "/bin/rm", "-rf", "--", target],
+      { env: { ...process.env, HOME: "/home/dockerd", XDG_RUNTIME_DIR: runtime }, stdio: "ignore", timeout: 30_000 },
+    ).status))(root);
+    if (status !== 0 || exists(root)) throw stateRemovalError();
+  } catch (error) {
+    if (error?.code === "state_removal_failed") throw error;
+    throw stateRemovalError();
+  } finally {
+    if (temporaryRoot) {
+      try { rmSync(temporaryRoot, { recursive: true, force: true }); }
+      catch { throw stateRemovalError(); }
+    }
+  }
+}
 
 function checks() {
   const results = {};
@@ -295,7 +334,7 @@ function checks() {
   check("sysReadOnly", () => commandOk(["/bin/sh", "-c", "probe=/sys/.valet-write-test; ! touch \"$probe\" 2>/dev/null || { rm -f \"$probe\"; exit 1; }"]), "Mount the broad /sys path read-only.");
   check("cgroup", () => ["cpu", "cpuset", "memory", "pids"].every((v) => readFileSync("/sys/fs/cgroup/init/cgroup.controllers", "utf8").split(/\s+/).includes(v)), "Delegate cpu, cpuset, memory, and pids below /init.");
   check("slirp4netns", () => { const found = spawnSync("/usr/bin/dpkg-query", ["-W", "-f=${Version}", "slirp4netns"], { encoding: "utf8" }); return realpathSync("/usr/bin/slirp4netns") === "/usr/bin/slirp4netns" && found.status === 0 && found.stdout === "1.2.0-1"; }, "Install Debian Bookworm slirp4netns=1.2.0-1.");
-  for (const tool of ["/usr/local/bin/k3s", "/usr/local/bin/kubectl", "/usr/bin/tini", "/usr/bin/flock"]) check(tool.split("/").pop(), () => statSync(tool).isFile(), "Rebuild the sandbox image from the normative lock.");
+  for (const tool of ["/usr/local/bin/k3s", "/usr/local/bin/kubectl", "/usr/bin/tini", "/usr/bin/flock", "/usr/bin/rootlesskit"]) check(tool.split("/").pop(), () => statSync(tool).isFile(), "Rebuild the sandbox image from the normative lock.");
   return results;
 }
 function diagnose() {
@@ -317,7 +356,10 @@ function prepareRoot() {
   if (existsSync(ROOT) && readJson(STATUS_PATH, {}).epoch !== EPOCH) {
     const recorded = readJson(PID_PATH, null);
     if (epochRecoveryKernel(recorded) === "refuse-live") throw Object.assign(new Error("The prior server identity is still live. Recreate the sandbox before cleanup."), { exitCode: 21 });
-    rmSync(ROOT, { recursive: true, force: true });
+    try { removeStateRoot(ROOT); } catch (error) {
+      if (error?.code === "state_removal_failed") atomicJson(STATUS_PATH, { state: "error", error: "state_removal_failed", epoch: null });
+      throw error;
+    }
   }
   mkdirSync(ROOT, { recursive: true, mode: 0o700 });
   chmodSync(ROOT, 0o700);
@@ -521,7 +563,7 @@ function cleanupOwned() {
   } catch { return false; }
 }
 function stoppedReport() { process.stdout.write(statusKernel({ persisted: "stopped", identity: "dead", readiness: "unknown" }).stdout); return 0; }
-export function stop(procRoot = "/proc", cleanup = cleanupOwned) {
+export function stop(procRoot = "/proc", cleanup = cleanupOwned, removeRoot = removeStateRoot) {
   let stopped = false; let unsafe = false; let active = null;
   withLock(false, () => {
     const status = readJson(STATUS_PATH, { state: "stopped" });
@@ -552,15 +594,20 @@ export function stop(procRoot = "/proc", cleanup = cleanupOwned) {
     });
     return fail("Kubernetes cleanup did not drain its owned cgroup. Retry stop.", 22);
   }
-  let committed = false;
+  let committed = false; let removalFailed = false;
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
     if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
-    rmSync(ROOT, { recursive: true, force: true }); committed = true;
+    try { removeRoot(ROOT); committed = true; }
+    catch (error) {
+      if (error?.code !== "state_removal_failed") throw error;
+      atomicJson(STATUS_PATH, { state: "error", error: "state_removal_failed", epoch: null });
+      if (existsSync(OP_PATH)) unlinkSync(OP_PATH);
+      removalFailed = true;
+    }
   });
-  return committed
-    ? stoppedReport()
-    : fail("The stop Operation was superseded. Retry the command.", 4);
+  if (removalFailed) return fail("Kubernetes state removal failed (state_removal_failed). Recreate the sandbox, then retry.", 22);
+  return committed ? stoppedReport() : fail("The stop Operation was superseded. Retry the command.", 4);
 }
 export function validateArchive(path, freeBytes = statfsSync(ROOT).bavail * statfsSync(ROOT).bsize) {
   if (!path.startsWith("/")) return "Use an absolute archive path.";

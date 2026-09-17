@@ -10,10 +10,35 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 cleanup() { [ -z "${owner:-}" ] || kill -KILL "$owner" 2>/dev/null || true; [ -z "${holder:-}" ] || kill -KILL "$holder" 2>/dev/null || true; rm -rf "$STATE" "$TMP"; rmdir "$SCOPE" 2>/dev/null || true; rm -f "$LOCK".*.ready; }
 trap cleanup EXIT
 cleanup
+mkdir -m 700 "$TMP"
 
 # Both no-op and real stop print stopped state but return success.
 out=$(VALET_SANDBOX_EPOCH=test node "$HELPER" stop) || fail "no-op stop failed"
 node -e 'const x=JSON.parse(process.argv[1]); if(x.state!=="stopped"||x.schema!==1) process.exit(1)' "$out"
+
+# A real subordinate-owned directory requires the RootlessKit removal retry.
+if command -v rootlesskit >/dev/null 2>&1 \
+  && grep -qx 'dockerd:65536:65535' /etc/subuid 2>/dev/null \
+  && grep -qx 'dockerd:65536:65535' /etc/subgid 2>/dev/null; then
+  mkdir -p "$STATE/data"
+  mkdir -m 700 "$TMP/rootlesskit-create-runtime"
+  XDG_RUNTIME_DIR="$TMP/rootlesskit-create-runtime" rootlesskit \
+    --state-dir="$TMP/rootlesskit-create-state" \
+    /bin/sh -c 'mkdir -p "$1/x"; touch "$1/x/f"; chown 65534:65534 "$1/x/f"; chmod 700 "$1/x"; chown 65534:65534 "$1/x"' \
+    create-subordinate-tree "$STATE/data"
+  subordinate_owner=$(stat -c '%u:%g' "$STATE/data/x")
+  [ "$subordinate_owner" != "1500:1500" ] || fail "RootlessKit did not create subordinate-owned state"
+  set +e
+  node --input-type=module -e "import { rmSync } from 'node:fs'; try { rmSync('$STATE', { recursive: true, force: true }); process.exit(10); } catch (error) { if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error; }"
+  direct_status=$?
+  set -e
+  [ "$direct_status" -eq 0 ] || fail "direct state removal did not fail with EACCES or EPERM: $direct_status"
+  VALET_SANDBOX_EPOCH=test node --input-type=module -e "import { removeStateRoot, ROOT } from '$HELPER'; removeStateRoot(ROOT)"
+  [ ! -e "$STATE" ] || fail "RootlessKit retry retained subordinate-owned state"
+else
+  echo "SKIP: RootlessKit subordinate-owned state removal (rootlesskit or subids unavailable)"
+fi
+
 # The production cleanup removes fake cgroup directories bottom-up with rmdir.
 FAKE_SCOPE=$TMP/valet-kubernetes
 mkdir -p "$FAKE_SCOPE/child"
@@ -223,6 +248,20 @@ chmod 700 "$STATE"; chmod 600 "$STATE/state.json" "$STATE/server.pid.json"
 out=$(VALET_SANDBOX_EPOCH=test node --input-type=module -e "const helper=await import('$HELPER'); let cleaned=false; const code=helper.stop('$TMP/proc', () => { cleaned=true; return true; }); if (!cleaned) throw new Error('stop did not run cleanup'); process.exitCode=code") || fail "rewritten-title stop failed"
 node -e 'const x=JSON.parse(process.argv[1]); if(x.state!=="stopped"||x.schema!==1) process.exit(1)' "$out"
 [ ! -e "$STATE" ] || fail "rewritten-title stop retained state"
+
+# A double state-removal failure persists its reason and emits no success JSON.
+mkdir -p "$STATE"
+printf '%s\n' '{"state":"ready","error":null,"epoch":"test"}' > "$STATE/state.json"
+chmod 700 "$STATE"; chmod 600 "$STATE/state.json"
+set +e
+VALET_SANDBOX_EPOCH=test node --input-type=module -e "const helper=await import('$HELPER'); const failed=()=>{ throw Object.assign(new Error('failed'), { code: 'state_removal_failed', exitCode: 22 }); }; process.exitCode=helper.stop('/proc', () => true, failed)" >"$TMP/removal-failure.out" 2>"$TMP/removal-failure.err"
+removal_status=$?
+set -e
+[ "$removal_status" -eq 22 ] || fail "double state removal failure exited $removal_status"
+[ ! -s "$TMP/removal-failure.out" ] || fail "double state removal failure emitted success JSON"
+grep -q 'state_removal_failed' "$TMP/removal-failure.err" || fail "double state removal failure omitted its token"
+node -e 'const x=require(process.argv[1]); if(x.state!=="error"||x.error!=="state_removal_failed"||x.epoch!==null) process.exit(1)' "$STATE/state.json"
+rm -rf "$STATE"
 
 # Exercise the real cgroupfs stop path when the runner delegates a writable scope.
 if mkdir "$SCOPE" 2>/dev/null; then
