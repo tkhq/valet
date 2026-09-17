@@ -119,7 +119,9 @@ The create path now sorts the caller into three cases through one helper:
 - A member of the team who is not an admin gets a 403 that names the rule and two actions: ask an admin of this team, or switch to the personal workspace and create a personal key.
 - Everyone else keeps the 404 that hides the team.
 
-The same helper runs again inside the team ownership lock, so a demotion that lands during the create gets the same answer as a demotion that lands before it. The minted key is still deleted on every refusal, and no secret is returned.
+The same helper runs again inside the team ownership lock, so a demotion that committed before the lock was taken gets the same answer as one that landed before the create began. The minted key is still deleted on every refusal, and no secret is returned.
+
+This does not serialize against a demotion that commits while the create transaction holds the lock. The membership writers in `services/teams.ts` and the organization role writer in `services/org.ts` take no team ownership lock, so they can commit alongside it, and the re-check can read a role that is already stale. Closing that needs the membership writers to share the advisory lock, which is a change to those writers rather than to this route. The window is the span of one create transaction, and the refusal covers every demotion outside it.
 
 The 403 body carries `code: "team_admin_required"` and `teamId`, the same discriminator `TeamAdminRequiredError` sends when the delete path on this resource refuses a member. One client branch therefore answers both refusals, and a client can tell this 403 from the signed-out 403 on the same endpoint. The create refusal does not reuse the error class: that class carries deletion-request wording and a `teamAdminRefusal` lookup for a pending request. A create has no such request, so the body carries no `requestId`.
 

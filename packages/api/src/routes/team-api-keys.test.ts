@@ -379,8 +379,12 @@ describe("team API keys", () => {
           if (!created) throw new Error("Expected better-auth to mint a key");
           mintedId = created.id;
           mintedKey = created.key;
-          // The real mint has committed, but the route has not received it.
-          // Complete the competing operation here without timing or sleeps.
+          // The real mint has committed, but the route has not received it,
+          // so this is the window BETWEEN the mint and the ownership lock.
+          // It is not the window inside the locked transaction: membership
+          // writers take no team ownership lock, so that window is not
+          // serialized and no test here can pin it. Complete the competing
+          // operation now, without timing or sleeps.
           await afterMint(created.id);
           return created;
         });
