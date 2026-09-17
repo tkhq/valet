@@ -158,6 +158,10 @@ Epoch cleanup MUST preserve `<Root>.lock` and every PVC path outside Root. [K55]
 Tests MUST cover crashes before launch, after launch, after readiness, during stop, and during each archive import. [K56]
 A13 MUST prove that pod replacement removes old Cluster data and keeps unrelated PVC data. [K57]
 Stop MUST remove owned Root contents, Root, and Scope while the adjacent exclusive lock remains held. [K58]
+The Helper MUST retry any failed or incomplete Root deletion through /usr/bin/rootlesskit with only the K109 subordinate maps and the exact Root target. [K189]
+A failed direct and RootlessKit deletion MUST persist `state_removal_failed`, emit one corrective error, and emit no stopped success. [K190]
+The RootlessKit deletion uses the same 10-minute budget as the Operation. An interrupted deletion tells the user to retry stop.
+The retry uses a temporary 0700 runtime directory. A temporary-directory cleanup error does not change a verified Root deletion.
 The lock file is outside Root. Stop releases it only after deletion and preserves every other PVC path.
 
 `server.pid.json` records PID, proc start time, boot ID, UID, cgroup ownership boundary, argv digest, epoch, and Operation ID.
