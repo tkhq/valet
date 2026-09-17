@@ -269,7 +269,7 @@ The host records service availability before each filter removes actions. The
 catalog reports `deployment_unconfigured`, `disabled_by_org`,
 `excluded_by_assistant`, and `load_failed` at service level. It never
 reports schemas or action ids for a removed service. Personal credential probes
-report `not_connected` and direct the user to Settings.
+report `not_connected` and direct the user to the Integrations page (`/integrations`).
 
 The deployment and org-credential inventory resolves on every `list_tools`
 call. A cached session therefore sees an org credential immediately after an

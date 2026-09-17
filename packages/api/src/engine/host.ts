@@ -1376,13 +1376,13 @@ export class EngineHost {
       service,
       state: "disabled_by_org" as const,
       reason: "the organization disabled this plugin",
-      fix: "Ask an org admin to enable the plugin.",
+      fix: `An org admin must enable the ${service} plugin.`,
     }));
     const excludedServices = removedActionServices(entitled, plugins).map((service) => ({
       service,
       state: "excluded_by_assistant" as const,
       reason: "this assistant's behavior excludes the service",
-      fix: "Update this assistant's integration behavior.",
+      fix: `This assistant's configuration excludes ${service}; edit the assistant's Integrations settings on its editor page (/assistants/$assistantId).`,
     }));
     const resolveServiceAvailability = async (): Promise<ServiceAvailability[]> => {
       const unavailable = await unavailableServiceSet({
@@ -1396,7 +1396,7 @@ export class EngineHost {
         service,
         state: "deployment_unconfigured" as const,
         reason: "the deployment or organization credential is not configured",
-        fix: "Ask an admin to configure the org credential in Settings.",
+        fix: `An org admin must configure ${service} (org settings → /settings/organization). After configuration, call list_tools (service: "${service}") to confirm — actions appear when the configuration worked; otherwise this warning returns with the reason.`,
       }));
       return mergeServiceAvailability(
         loadFailures,

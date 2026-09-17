@@ -215,7 +215,7 @@ describe("EngineHost + plugin extras", () => {
     const commandResult = entries.at(-1);
     expect(commandResult?.type === "command_result" && commandResult.ok).toBe(false);
     expect(commandResult?.type === "command_result" ? commandResult.output : "").toContain(
-      "Ask an admin to configure the org credential in Settings.",
+      "An org admin must configure gated (org settings → /settings/organization).",
     );
     expect(execute).not.toHaveBeenCalled();
 

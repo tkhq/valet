@@ -974,7 +974,7 @@ function makeListTool(
               service,
               state: "not_connected",
               reason: probeReason ?? "not connected",
-              fix: "Connect the integration in Settings.",
+              fix: `Connect ${service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
             });
           } else {
             entries = entries.filter((e) => e.service !== service);
@@ -982,7 +982,7 @@ function makeListTool(
               service,
               state: "not_connected",
               reason: `not connected; tools hidden. ${probeReason ?? ""}`.trim(),
-              fix: "Connect the integration in Settings.",
+              fix: `Connect ${service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
             });
           }
         }
@@ -1121,7 +1121,7 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       return { text: `invalid params for ${toolId}: ${outcome.error}` };
     case "missing-credential":
       return {
-        text: `${toolId} failed: credential ${outcome.service} not connected — connect it in Settings`,
+        text: `${toolId} failed: credential ${outcome.service} not connected — Connect ${outcome.service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${outcome.service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
       };
     case "service-unavailable":
       return {

@@ -152,7 +152,7 @@ function formatPluginOutcome(
     case "missing-credential":
       return {
         ok: false,
-        output: `Connect the ${outcome.service} integration in Settings.`,
+        output: `Connect ${outcome.service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${outcome.service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
       };
     case "service-unavailable":
       return {

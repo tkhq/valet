@@ -435,7 +435,7 @@ describe("Session.prompt plugin command execution", () => {
         service: "testplug",
         state: "disabled_by_org",
         reason: "the organization disabled this plugin",
-        fix: "Ask an org admin to enable the plugin.",
+        fix: "An org admin must enable the testplug plugin.",
       }],
     });
     const session = await engine.createSession({
@@ -455,7 +455,7 @@ describe("Session.prompt plugin command execution", () => {
     expect(last?.type === "command_result" && last.ok).toBe(false);
     const output = last?.type === "command_result" ? last.output : "";
     expect(output).toContain("the organization disabled this plugin");
-    expect(output).toContain("Ask an org admin to enable the plugin.");
+    expect(output).toContain("An org admin must enable the testplug plugin.");
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -506,6 +506,6 @@ describe("Session.prompt plugin command execution", () => {
     const last = lastEntry(await store.getEntries(session.id, threadId));
     expect(last?.type === "command_result" && last.ok).toBe(false);
     const output = last?.type === "command_result" ? last.output : "";
-    expect(output).toContain("Connect the testplug integration in Settings.");
+    expect(output).toContain("Connect testplug on the Integrations page (/integrations). After connecting, call list_tools (service: \"testplug\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.");
   });
 });

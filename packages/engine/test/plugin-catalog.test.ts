@@ -369,13 +369,16 @@ describe("pluginCatalogTools: list_tools", () => {
     if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
     const payload = decode(toolEnd.event.result) as {
       tools: Array<{ tool_id: string }>;
-      warnings?: Array<{ service: string; reason: string }>;
+      warnings?: Array<{ service: string; reason: string; fix: string }>;
     };
     expect(payload.warnings?.[0]?.service).toBe("github");
     // requiresCredential + no credential → tools hidden from the
     // unfiltered listing, and the warning names the fix.
     expect(payload.tools).toEqual([]);
     expect(payload.warnings?.[0]?.reason).toMatch(/tools hidden/);
+    expect(payload.warnings?.[0]?.fix).toBe(
+      "Connect github on the Integrations page (/integrations). After connecting, call list_tools (service: \"github\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.",
+    );
 
     faux.unregister();
   });
@@ -394,7 +397,7 @@ describe("pluginCatalogTools: list_tools", () => {
       service: "github",
       state: "not_connected",
       reason: "not connected",
-      fix: "Connect the integration in Settings.",
+      fix: "Connect github on the Integrations page (/integrations). After connecting, call list_tools (service: \"github\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.",
     });
   });
 
@@ -529,7 +532,7 @@ describe("pluginCatalogTools: capability boundaries", () => {
       service: "github",
       state: "excluded_by_assistant" as const,
       reason: "this assistant excludes the service",
-      fix: "Update this assistant's behavior.",
+      fix: "This assistant's configuration excludes github; edit the assistant's Integrations settings on its editor page (/assistants/$assistantId).",
     }];
     const [listTool] = pluginCatalogTools({
       plugins: [plugin],
@@ -559,7 +562,7 @@ describe("pluginCatalogTools: call_tool", () => {
       service: "github",
       state: "deployment_unconfigured" as const,
       reason: "the deployment credential is not configured",
-      fix: "Configure GitHub in Settings.",
+      fix: "An org admin must configure github (org settings → /settings/organization). After configuration, call list_tools (service: \"github\") to confirm — actions appear when the configuration worked; otherwise this warning returns with the reason.",
     }];
     const staticPlugin: ActionPlugin = {
       service: "github",
@@ -590,7 +593,7 @@ describe("pluginCatalogTools: call_tool", () => {
         makeCtx(),
       );
       expect(result.text).toContain("the deployment credential is not configured");
-      expect(result.text).toContain("Configure GitHub in Settings.");
+      expect(result.text).toContain("An org admin must configure github (org settings → /settings/organization).");
     }
     expect(executed).toBe(0);
     expect(resolved).toBe(0);
@@ -603,7 +606,7 @@ describe("pluginCatalogTools: call_tool", () => {
       service: "github",
       state: "deployment_unconfigured",
       reason: "the deployment credential is not configured",
-      fix: "Configure GitHub in Settings.",
+      fix: "An org admin must configure github (org settings → /settings/organization). After configuration, call list_tools (service: \"github\") to confirm — actions appear when the configuration worked; otherwise this warning returns with the reason.",
     });
     expect(executed).toBe(0);
 
@@ -619,7 +622,7 @@ describe("pluginCatalogTools: call_tool", () => {
     });
   });
 
-  it("adds the Settings fix to missing-credential errors", async () => {
+  it("adds the Integrations-page fix and verification step to missing-credential errors", async () => {
     const plugin: ActionPlugin = {
       service: "github",
       requiresCredential: true,
@@ -648,7 +651,7 @@ describe("pluginCatalogTools: call_tool", () => {
       makeCtx({ credentials }),
     );
     expect(result.text).toContain(
-      "credential github not connected — connect it in Settings",
+      "credential github not connected — Connect github on the Integrations page (/integrations). After connecting, call list_tools (service: \"github\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.",
     );
   });
 
