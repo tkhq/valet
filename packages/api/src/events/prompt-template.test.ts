@@ -105,10 +105,22 @@ describe("validatePromptTemplate", () => {
     }
   });
 
-  it("accepts the two names an instruction may use", () => {
-    expect(
-      validatePromptTemplate("Triage {{refs.repo}} on {{event.key}}.", "systemPrompt", CATALOG),
-    ).toBeNull();
+  it("accepts the one name an instruction may use", () => {
+    expect(validatePromptTemplate("Triage on {{event.key}}.", "systemPrompt", CATALOG)).toBeNull();
+  });
+
+  // A ref value is read straight from the provider payload, so a sender picks
+  // its text. Linear builds refs.url from the issue title. Admitting a ref here
+  // would let that text render under the instruction heading, which is the one
+  // thing this field promises cannot happen.
+  it("refuses a ref in an instruction, and says where it belongs", () => {
+    const refusal = validatePromptTemplate("Follow {{refs.repo}}.", "systemPrompt", CATALOG);
+    expect(refusal).toContain("cannot use {{refs.repo}}");
+    expect(refusal).toContain("must not carry text from the event");
+    expect(refusal).toContain("userPromptTemplate");
+    // The same ref stays legal in the event message, where it reads as event
+    // text rather than as an instruction.
+    expect(validatePromptTemplate("{{refs.repo}}", "userPromptTemplate", CATALOG)).toBeNull();
   });
 
   it("refuses a variable outside the documented set", () => {
@@ -161,12 +173,50 @@ describe("renderEventPrompt", () => {
 
   it("combines the instructions block with a user template", () => {
     const body = renderEventPrompt(
-      { systemPrompt: "Watch {{refs.repo}}.", userPromptTemplate: "{{event.summary}}" },
+      { systemPrompt: "Watch the repository.", userPromptTemplate: "{{event.summary}}" },
       values,
     );
     expect(body).toBe(
-      "Instructions for this subscription:\nWatch acme/site.\n\n---\n\nIssue #7 opened: broken build",
+      "Instructions for this subscription:\nWatch the repository.\n\n---\n\nIssue #7 opened: broken build",
     );
+  });
+
+  // A plain slice cuts between the two UTF-16 units of an astral character and
+  // leaves a lone high surrogate. Rendering is deterministic, so a delivery
+  // carrying one would fail every retry until it dead-letters.
+  it("cuts on a character boundary, so an emoji at the cap cannot split", () => {
+    const long = buildPromptValues({ ...EVENT, summary: "x".repeat(7_999) + "\u{1F600}" });
+    const body = renderEventPrompt({ userPromptTemplate: "{{event.summary}}" }, long);
+    expect(body.length).toBeLessThanOrEqual(MAX_RENDERED_PROMPT_CHARS);
+    // No lone high surrogate at the cut. isWellFormed needs a newer lib
+    // target than this package sets, so check the code unit directly.
+    const lastUnit = body.charCodeAt(body.length - 1);
+    expect(lastUnit >= 0xd800 && lastUnit <= 0xdbff).toBe(false);
+    expect(body.endsWith("x")).toBe(true);
+  });
+
+  // The template is bounded but the rendered result is not: every placeholder
+  // grows when the event key is longer than "{{event.key}}". A template full
+  // of them therefore expands past its own cap, and without an instruction
+  // bound it takes the whole delivery budget and drops the event the
+  // assistant is supposed to act on. Keys of this length ship today, for
+  // example google_workspace.drive.file.commented.
+  it("bounds the instruction so the event body always has room", () => {
+    const longKey = buildPromptValues({
+      ...EVENT,
+      eventKey: "google_workspace.drive.file.commented",
+    });
+    const repeated = "{{event.key}}".repeat(300);
+    expect(repeated.length).toBeLessThanOrEqual(MAX_PROMPT_TEMPLATE_CHARS);
+    const body = renderEventPrompt(
+      { systemPrompt: repeated, userPromptTemplate: "{{event.summary}}" },
+      longKey,
+    );
+    expect(body.length).toBeLessThanOrEqual(MAX_RENDERED_PROMPT_CHARS);
+    // Without the bound the instruction alone runs past the budget, so both
+    // of these disappear.
+    expect(body).toContain("---");
+    expect(body).toContain("Issue #7 opened: broken build");
   });
 
   it("never re-renders a value that itself looks like a placeholder", () => {

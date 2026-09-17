@@ -55,6 +55,26 @@ import { resolvePath } from "./match.js";
 export const MAX_PROMPT_TEMPLATE_CHARS = 4_000;
 /** Longest body a rendered template delivers. Payload values are unbounded. */
 export const MAX_RENDERED_PROMPT_CHARS = 8_000;
+/** Longest rendered instruction. A template is bounded, but its variables are
+ * not, so a short template with one large ref could expand to the whole
+ * delivery budget and leave no room for the event itself. The assistant then
+ * read an instruction about an event it never saw. */
+export const MAX_RENDERED_INSTRUCTION_CHARS = 4_000;
+
+/** Cut to `max` UTF-16 units without splitting a surrogate pair.
+ *
+ * A plain `slice` cuts between the two units of an astral character, such as
+ * an emoji, and leaves a lone high surrogate. The string is then ill formed,
+ * which strict JSON or database serialization can refuse. Rendering is
+ * deterministic, so every retry of that delivery would fail the same way until
+ * it dead-letters. */
+export function truncateWellFormed(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  const isLoneHighSurrogate = last >= 0xd800 && last <= 0xdbff;
+  return isLoneHighSurrogate ? cut.slice(0, -1) : cut;
+}
 
 /** The heading above the rendered `systemPrompt` in the delivered body. */
 const INSTRUCTIONS_HEADING = "Instructions for this subscription:";
@@ -81,12 +101,23 @@ const PLACEHOLDER_RE = /\{\{([^{}]*)\}\}/g;
 /** The names `userPromptTemplate` may use. Anything else is refused. */
 const VARIABLE_RE = /^(event\.(key|summary|body)|refs\.[A-Za-z0-9_-]+|payload\.[A-Za-z0-9_-]+)$/;
 
-/** The names `systemPrompt` may use: the two that carry no event text. */
-const INSTRUCTION_VARIABLE_RE = /^(event\.key|refs\.[A-Za-z0-9_-]+)$/;
+/** The names `systemPrompt` may use. `event.key` alone, because it is the only
+ * one a sender cannot choose the text of: a plugin registers the key and an
+ * event either matches it or does not.
+ *
+ * `refs.<name>` used to be admitted here and had to go. A ref value is read
+ * straight from the provider payload, so a sender picks its text. Linear
+ * builds `refs.url` from the issue title, and Slack builds
+ * `refs.channel_name` from the channel name. A rule reading
+ * "Follow the runbook at {{refs.url}}" therefore rendered sender-chosen words
+ * under the instruction heading, which is the one thing this field promises
+ * cannot happen. A ref still belongs in `userPromptTemplate`, where the text
+ * is presented as the event rather than as an instruction. */
+const INSTRUCTION_VARIABLE_RE = /^event\.key$/;
 
 /** The variable set of each field, for an error message that teaches. */
 const VARIABLE_HELP: Record<PromptField, string> = {
-  systemPrompt: "Use event.key or refs.<name>.",
+  systemPrompt: "Use event.key.",
   userPromptTemplate:
     "Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.",
 };
@@ -253,9 +284,16 @@ export function renderEventPrompt(
     if (rendered.trim().length === 0) onEmptyRender?.();
     else body = rendered;
   }
-  const composed =
-    config.systemPrompt !== undefined
-      ? `${INSTRUCTIONS_HEADING}\n${render(config.systemPrompt, instructionValues(values))}\n\n---\n\n${body}`
-      : body;
-  return composed.slice(0, MAX_RENDERED_PROMPT_CHARS);
+  if (config.systemPrompt === undefined) {
+    return truncateWellFormed(body, MAX_RENDERED_PROMPT_CHARS);
+  }
+  // The instruction is bounded before it is composed, so the event body always
+  // has room. Bounding only the composed result let a large ref fill the whole
+  // budget and drop the event.
+  const instruction = truncateWellFormed(
+    render(config.systemPrompt, instructionValues(values)),
+    MAX_RENDERED_INSTRUCTION_CHARS,
+  );
+  const composed = `${INSTRUCTIONS_HEADING}\n${instruction}\n\n---\n\n${body}`;
+  return truncateWellFormed(composed, MAX_RENDERED_PROMPT_CHARS);
 }

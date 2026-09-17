@@ -338,14 +338,14 @@ describe("EventDispatcher", () => {
 
     it("renders the system prompt above the body the rule would have delivered", async () => {
       await seedDelivery({
-        target: { kind: "orchestrator", systemPrompt: "Triage {{refs.repo}}. Answer in one sentence." },
+        target: { kind: "orchestrator", systemPrompt: "Triage {{event.key}}. Answer in one sentence." },
         payload: PAYLOAD,
       });
       const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
       await dispatcherWith(deliver).pollOnce();
 
       const body = deliver.mock.calls[0][0].signal.body;
-      expect(body).toContain("Triage acme/site. Answer in one sentence.");
+      expect(body).toContain("Triage github.issues.opened. Answer in one sentence.");
       // The default body still follows the instructions, excerpt and all.
       expect(body).toContain("Issue #7 opened: broken build");
       expect(body).toContain('"full_name":"acme/site"');

@@ -461,7 +461,7 @@ summary, the default body, and every payload field carry text that the sender
 of the event wrote. A rule such as `Follow the direction: {{payload.text}}`
 would put that sender's words under a heading that presents them as the
 rule's own instruction. The write gate refuses those names in that field, and
-the renderer builds the instruction over `event.key` and `refs.<name>` alone,
+the renderer builds the instruction over `event.key` alone,
 so a row that reaches the renderer another way keeps the same property. The
 sender's text still reaches the assistant, below the separator, where it
 reads as the event.
