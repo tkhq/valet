@@ -142,7 +142,7 @@ import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
-import { unavailableServiceSet } from "../services/integration-availability.js";
+import { unavailableServiceInventory } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { isTeamMember } from "../services/teams.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
@@ -1009,7 +1009,14 @@ export class EngineHost {
     // team's skills, not the prompting member's. SessionOptions.owner below
     // uses the same principal.
     const principal = sessionPrincipal(meta);
-    const extras = await this.sessionExtras(principal, meta.orgId, [], extraPlugins);
+    const extras = await this.sessionExtras(
+      principal,
+      meta.orgId,
+      [],
+      extraPlugins,
+      null,
+      isSecurityRunner ? buildSecurityRunnerTools().map((tool) => tool.name) : [],
+    );
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, extraPlugins);
 
     const engine = new Engine({
@@ -1363,6 +1370,7 @@ export class EngineHost {
     // plugins keep shadow priority.
     extraPlugins: readonly ValetPlugin[] = [],
     behavior: AssistantBehavior | null = null,
+    appendedNativeToolNames: readonly string[] = [],
   ): Promise<PluginSessionExtras> {
     const assembled = [...this.basePlugins(), ...extraPlugins];
     const assembledServices = actionServices(assembled);
@@ -1385,13 +1393,19 @@ export class EngineHost {
       fix: `This assistant's configuration excludes ${service}; edit the assistant's Integrations settings on its editor page (/assistants/$assistantId).`,
     }));
     const resolveServiceAvailability = async (): Promise<ServiceAvailability[]> => {
-      const unavailable = await unavailableServiceSet({
+      const inventory = await unavailableServiceInventory({
         plugins: entitled,
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
         owner,
       });
+      const unavailable = inventory.unavailable;
+      const availabilityFailures = inventory.failures.map(({ service, reason }) => ({
+        service,
+        state: "load_failed" as const,
+        reason: `availability check failed: ${reason}`,
+      }));
       const deploymentServices = unavailableActionServices(plugins, unavailable).map((service) => ({
         service,
         state: "deployment_unconfigured" as const,
@@ -1400,6 +1414,7 @@ export class EngineHost {
       }));
       return mergeServiceAvailability(
         loadFailures,
+        availabilityFailures,
         disabledServices,
         excludedServices,
         deploymentServices,
@@ -1407,7 +1422,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill"],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
@@ -2583,7 +2598,14 @@ export class EngineHost {
     // (`use-workflow-assistant.ts`), so this scope costs the panel nothing.
     const pins = principal.type === "user" ? PINNED_ACTIONS : [];
     const pinnedIds = pinnedIdSet(pins);
-    const extras = await this.sessionExtras(principal, meta.orgId, pins, [], behavior);
+    const extras = await this.sessionExtras(
+      principal,
+      meta.orgId,
+      pins,
+      [],
+      behavior,
+      buildMemoryTools().map((tool) => tool.name),
+    );
 
     // The profile comes from the app row, not from the caller's meta. An
     // assistant session is woken by many callers — the web, a channel

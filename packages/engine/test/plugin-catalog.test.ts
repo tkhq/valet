@@ -1867,3 +1867,67 @@ describe("pinned tool: the model's summary", () => {
     ]);
   });
 });
+
+describe("pluginCatalogTools: availability failure containment", () => {
+  it("re-checks availability after approval before executing", async () => {
+    let available = true;
+    let executed = false;
+    const plugin: ActionPlugin = {
+      service: "test",
+      requiresCredential: true,
+      actions: [{
+        id: "test.dangerous",
+        name: "Dangerous",
+        description: "requires approval",
+        riskLevel: "critical",
+        parameters: Type.Object({}),
+        execute: async () => { executed = true; return { success: true }; },
+      }],
+    };
+    const catalog = buildPluginCatalog([plugin], undefined, {
+      resolveServiceAvailability: () => available ? [] : [{
+        service: "test", state: "deployment_unconfigured", reason: "removed",
+      }],
+    });
+    const result = await invokeAction(catalog, "test.dangerous", {}, makeCtx({
+      requestDecision: async () => {
+        available = false;
+        return { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() };
+      },
+    }), "run it");
+    expect(result).toMatchObject({ kind: "service-unavailable", service: "test" });
+    expect(executed).toBe(false);
+  });
+
+  it("contains failed availability checks and permits credential-free actions", async () => {
+    let executed = false;
+    const free: ActionPlugin = {
+      service: "free",
+      actions: [{
+        id: "free.run", name: "Run", description: "runs", riskLevel: "low",
+        parameters: Type.Object({}), execute: async () => { executed = true; return { success: true }; },
+      }],
+    };
+    const required: ActionPlugin = { ...free, service: "required", requiresCredential: true,
+      actions: [{ ...free.actions[0], id: "required.run" }] };
+    const failing = () => { throw new Error("store unavailable"); };
+    const [listTool] = pluginCatalogTools({ plugins: [free, required], resolveServiceAvailability: failing });
+    const listed = await listTool.execute({}, makeCtx());
+    expect(listed.text).toContain("availability check failed: store unavailable");
+    await expect(invokeAction(buildPluginCatalog([free], undefined, { resolveServiceAvailability: failing }), "free.run", {}, makeCtx(), "run")).resolves.toMatchObject({ kind: "ok" });
+    expect(executed).toBe(true);
+    await expect(invokeAction(buildPluginCatalog([required], undefined, { resolveServiceAvailability: failing }), "required.run", {}, makeCtx(), "run")).resolves.toEqual({ kind: "error", message: "could not verify service availability: store unavailable; retry" });
+  });
+
+  it("filters availability warnings by service", async () => {
+    const { plugin } = makeMockPlugin();
+    const other: ActionPlugin = { ...plugin, service: "linear", actions: plugin.actions.map((action) => ({ ...action, id: action.id.replace("github", "linear") })) };
+    const [listTool] = pluginCatalogTools({ plugins: [plugin, other], serviceAvailability: [
+      { service: "github", state: "excluded_by_assistant", reason: "excluded" },
+      { service: "linear", state: "load_failed", reason: "failed" },
+    ] });
+    const payload = decode((await listTool.execute({ service: "github" }, makeCtx())).text) as { warnings: Array<{ service: string }> };
+    expect(payload.warnings.map((warning) => warning.service)).toContain("github");
+    expect(payload.warnings.map((warning) => warning.service)).not.toContain("linear");
+  });
+});

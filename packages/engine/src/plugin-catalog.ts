@@ -464,8 +464,13 @@ export async function invokeAction(
   const dotIdx = actionId.indexOf(".");
   if (dotIdx > 0) {
     const prefix = actionId.slice(0, dotIdx);
-    const unavailable = await unavailableService(catalog, prefix);
-    if (unavailable) return serviceUnavailableOutcome(unavailable);
+    const availability = await checkServiceAvailability(
+      catalog,
+      prefix,
+      serviceRequiresCredential(catalog, prefix),
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) return outcome;
     availabilityCheckedService = prefix;
   }
 
@@ -488,8 +493,13 @@ export async function invokeAction(
   if (!entry) return { kind: "unknown", toolId: actionId };
 
   if (availabilityCheckedService !== entry.service) {
-    const unavailable = await unavailableService(catalog, entry.service);
-    if (unavailable) return serviceUnavailableOutcome(unavailable);
+    const availability = await checkServiceAvailability(
+      catalog,
+      entry.service,
+      entry.plugin.requiresCredential === true,
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) return outcome;
   }
 
   const resolver = ctx.policyResolver;
@@ -520,6 +530,13 @@ export async function invokeAction(
       // yet been decided — distinct from an outright deny.
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
+      const availability = await checkServiceAvailability(
+        catalog,
+        entry.service,
+        entry.plugin.requiresCredential === true,
+      );
+      const outcome = availabilityOutcome(availability);
+      if (outcome) return outcome;
     }
     return executeAction(entry, actionId, args, summary, ctx);
   }
@@ -665,6 +682,23 @@ export async function invokeAction(
         ? { kind: "denied-approval", reason: "approval-processing-failed" }
         : { kind: "denied-approval" };
     }
+    const availability = await checkServiceAvailability(
+      catalog,
+      entry.service,
+      entry.plugin.requiresCredential === true,
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) {
+      emitInvocation(resolver, {
+        ...baseRecord,
+        status: outcome.kind === "service-unavailable" ? "rejected" : "error",
+        resolvedMode: "require_approval",
+        provenance: decision.provenance,
+        gateOrdinal,
+        ...(outcome.kind === "error" ? { error: outcome.message } : {}),
+      });
+      return outcome;
+    }
   }
 
   // allow, or an approved require_approval → execute with audit.
@@ -754,14 +788,44 @@ function buildCatalog(
   };
 }
 
-async function unavailableService(
+interface ServiceAvailabilityCheck {
+  unavailable?: ServiceAvailability;
+  error?: string;
+}
+
+function serviceRequiresCredential(catalog: Catalog, service: string): boolean {
+  return [
+    ...catalog.entries.map((entry) => entry.plugin),
+    ...catalog.dynamicPlugins,
+  ].some((plugin) => plugin.service === service && plugin.requiresCredential === true);
+}
+
+async function checkServiceAvailability(
   catalog: Catalog,
   service: string,
-): Promise<ServiceAvailability | undefined> {
-  const availability = catalog.resolveServiceAvailability
-    ? await catalog.resolveServiceAvailability()
-    : catalog.serviceAvailability;
-  return availability.find((item) => item.service === service && item.state !== "available");
+  requiresCredential: boolean,
+): Promise<ServiceAvailabilityCheck> {
+  try {
+    const availability = catalog.resolveServiceAvailability
+      ? await catalog.resolveServiceAvailability()
+      : catalog.serviceAvailability;
+    return {
+      unavailable: availability.find((item) => item.service === service && item.state !== "available"),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const hasStaticUnavailable = catalog.serviceAvailability.some(
+      (item) => item.service === service && item.state !== "available",
+    );
+    return requiresCredential || hasStaticUnavailable
+      ? { error: `could not verify service availability: ${message}; retry` }
+      : {};
+  }
+}
+
+function availabilityOutcome(check: ServiceAvailabilityCheck): InvokeActionResult | undefined {
+  if (check.unavailable) return serviceUnavailableOutcome(check.unavailable);
+  return check.error ? { kind: "error", message: check.error } : undefined;
 }
 
 function serviceUnavailableOutcome(
@@ -905,18 +969,34 @@ function makeListTool(
         state?: ServiceAvailabilityState;
         fix?: string;
       }> = [];
-      const availability = catalog.resolveServiceAvailability
-        ? await catalog.resolveServiceAvailability()
-        : catalog.serviceAvailability;
+      let availability = catalog.serviceAvailability;
+      try {
+        availability = catalog.resolveServiceAvailability
+          ? await catalog.resolveServiceAvailability()
+          : catalog.serviceAvailability;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push({
+          service: a.service ?? "catalog",
+          reason: `availability check failed: ${message} — availability states may be incomplete; retry`,
+        });
+      }
       const unavailable = availability.filter((item) => item.state !== "available");
       for (const item of unavailable) {
+        entries = entries.filter((entry) => entry.service !== item.service);
+      }
+      const warnedUnavailable = unavailable.filter(
+        (item) =>
+          (!a.service || item.service === a.service) &&
+          (!query.hasInput || matchesSearchQuery(query, [item.service])),
+      );
+      for (const item of warnedUnavailable) {
         warnings.push({
           service: item.service,
           state: item.state,
           reason: item.reason,
           ...(item.fix ? { fix: item.fix } : {}),
         });
-        entries = entries.filter((entry) => entry.service !== item.service);
       }
 
       // Merge in dynamic (resolveActions-backed) plugins whose service
