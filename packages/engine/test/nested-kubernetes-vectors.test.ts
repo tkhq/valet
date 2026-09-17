@@ -10,7 +10,10 @@ import {
   cgroupMembershipKernel,
   K3S_ARGV,
   K3S_ENV,
+  LEAF_CONTROLLERS,
+  LEAF_CONVERGENCE,
   leaderState,
+  leafConvergenceKernel,
   lifecycleKernel,
   mapKernel,
   SCOPE,
@@ -27,6 +30,7 @@ interface Vectors {
   mapVectors: Vector<number[][], boolean>[];
   cgroupVectors: Vector<string, boolean>[];
   startupVectors: Vector<{ leader: string; deadlineExpired: boolean }, string>[];
+  leafConvergenceVectors: Vector<{ leaderLocation: "leaf" | "evac" | "other"; leafProcs: string[]; enabled: string[]; required: string[]; evacExists: boolean }, string>[];
   leaderStateVectors: Vector<{ state: string; cmdline: "empty" | "k3s"; cgroup: "owned" | "foreign" }, string>[];
   startRecoveryVectors: Vector<{ state: string; cmdline: "empty" | "k3s"; cgroup: "owned" | "foreign" }, string>[];
   lifecycleVectors: Vector<Record<string, unknown>, Record<string, unknown>>[];
@@ -36,6 +40,8 @@ interface Vectors {
   artifacts: { arch: string; name: string; version: string; url: string; sha256: string }[];
   k3sArgv: string[];
   k3sEnv: Record<string, string>;
+  leafControllers: string[];
+  leafConvergence: { attempts: number; delayMs: number };
 }
 const vectors = JSON.parse(
   readFileSync(
@@ -56,6 +62,9 @@ describe("nested Kubernetes normative vectors", () => {
   });
   it.each(vectors.startupVectors)("executes $id", ({ input, expected }) => {
     expect(startupKernel(input)).toBe(expected);
+  });
+  it.each(vectors.leafConvergenceVectors)("executes $id", ({ input, expected }) => {
+    expect(leafConvergenceKernel(input)).toBe(expected);
   });
   it.each(vectors.leaderStateVectors)("executes $id at the proc seam", ({ input, expected }) => {
     const proc = mkdtempSync(join(tmpdir(), "valet-kubernetes-proc-"));
@@ -103,10 +112,13 @@ describe("nested Kubernetes normative vectors", () => {
   it("uses the normative process contract", () => {
     expect(K3S_ARGV).toEqual(vectors.k3sArgv);
     expect(K3S_ENV).toEqual(vectors.k3sEnv);
+    expect(LEAF_CONTROLLERS).toEqual(["cpuset", "cpu", "memory", "pids"]);
+    expect(LEAF_CONTROLLERS).toEqual(vectors.leafControllers);
+    expect(LEAF_CONVERGENCE).toEqual(vectors.leafConvergence);
   });
 
   it("requires unique, non-vacuous safety kernel vectors", () => {
-    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.startupVectors, vectors.leaderStateVectors, vectors.startRecoveryVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
+    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.startupVectors, vectors.leafConvergenceVectors, vectors.leaderStateVectors, vectors.startRecoveryVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
     const all = groups.flat();
     expect(new Set(all.map(({ id }) => id)).size).toBe(all.length);
     for (const vector of all) {
