@@ -210,8 +210,9 @@ follow the persona's "answer by name". These fixes make one inbound view:
   reply mode, so the agent tells an addressed mention (answer normally) from an
   overheard follow (reply only via `reply_to_origin`) without guessing.
 - The transcript resolves in-text mentions to names, names a message's files in
-  a `[shared: file]` marker beside its text, attributes the bot's own prior
-  posts as "You",
+  a `[shared: file]` marker beside its text (adding `+N unnamed` for entries
+  Slack sends without a name, such as a tombstoned deletion), attributes the
+  bot's own prior posts as "You",
   and preserves the thread's opening message when it trims a long thread.
 
 ### Gap re-hydration (TKAI-284, added 2026-09-01)
@@ -305,7 +306,11 @@ Until 2026-09-17 the file marker was a FALLBACK for an empty message body, so
 a file posted with a caption went unmentioned: the transcript carried the
 caption and nothing else. An assistant asked about that file then reported,
 accurately about its input, that it could see no attachment. The marker now
-rides beside the text. It names the file rather than fetching it, because
+rides beside the text. Because it is built for every captioned message rather
+than only file-only posts, it reads each entry defensively: a throw inside the
+per-message map would reject the enclosing `Promise.all`, and the caller turns
+that into a null transcript, so one malformed entry would cost the whole
+thread. It names the file rather than fetching it, because
 `read_thread` already returns each file with its `url` and
 `slack.fetch_file` reads a PDF, and downloading every file in a thread to
 seed one turn would cost far more than naming them.

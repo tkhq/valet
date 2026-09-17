@@ -34,10 +34,22 @@ function str(v: unknown): string | undefined {
  *  `url` and `slack.fetch_file` reads it. Downloading every file in a thread
  *  to seed one turn would cost far more than naming them. */
 function fileMarker(raw: RawReply): string | null {
-  const files = Array.isArray(raw.files) ? (raw.files as Record<string, unknown>[]) : [];
+  const files = Array.isArray(raw.files) ? (raw.files as unknown[]) : [];
   if (files.length === 0) return null;
-  const named = files.map((f) => str(f.name)).filter((n): n is string => !!n);
-  return named.length ? `[shared: ${named.join(", ")}]` : `[shared ${files.length} file(s)]`;
+  // Read `.name` defensively. This runs on every captioned message now, and
+  // a throw here rejects the enclosing Promise.all: the caller turns that
+  // rejection into a null transcript, so one malformed entry would cost the
+  // whole thread. Slack tombstones a deleted file as an object with no name,
+  // so a nameless entry is ordinary rather than hostile.
+  const named = files
+    .map((f) => (typeof f === "object" && f !== null ? str((f as Record<string, unknown>).name) : undefined))
+    .filter((n): n is string => !!n);
+  const unnamed = files.length - named.length;
+  if (named.length === 0) return `[shared ${files.length} file(s)]`;
+  // Name what can be named and still account for the rest, so a mixed array
+  // does not hide a file behind its neighbour.
+  const rest = unnamed > 0 ? `, +${unnamed} unnamed` : "";
+  return `[shared: ${named.join(", ")}${rest}]`;
 }
 
 /** Keep the thread's opening message (the topic) and the most recent tail; drop

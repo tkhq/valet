@@ -169,6 +169,36 @@ describe("fetchThreadTranscript", () => {
     expect(out).toBe("Brian: the homework [shared: a.pdf, b.pdf]\nAda: thanks");
   });
 
+  it("survives a malformed entry in a message's files array", async () => {
+    const api = fakeApi(
+      [
+        { user: "U1", text: "the plan", files: [null] },
+        { user: "U2", text: "ok" },
+      ],
+      { U1: "Brian", U2: "Ada" },
+    );
+    // Every other field of the raw payload is treated as hostile here. An
+    // unguarded read of `.name` throws inside Promise.all, the caller catches
+    // the rejection to null, and the assistant hydrates NOTHING: one bad
+    // entry costs the whole thread, silently.
+    const out = await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0" });
+    expect(out).toBe("Brian: the plan [shared 1 file(s)]\nAda: ok");
+  });
+
+  it("counts the files it cannot name beside the ones it can", async () => {
+    const api = fakeApi(
+      [
+        // Slack tombstones a deleted file as an object with no name, so a
+        // mixed array is a real thread, not a synthetic case.
+        { user: "U1", text: "both docs attached", files: [{ name: "a.pdf" }, { id: "F2", mode: "tombstone" }] },
+        { user: "U2", text: "ok" },
+      ],
+      { U1: "Brian", U2: "Ada" },
+    );
+    const out = await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0" });
+    expect(out).toBe("Brian: both docs attached [shared: a.pdf, +1 unnamed]\nAda: ok");
+  });
+
   it("names an unnamed file by count rather than dropping it", async () => {
     const api = fakeApi(
       [
