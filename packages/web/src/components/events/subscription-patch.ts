@@ -11,6 +11,7 @@ import type {
 } from "@valet/api/wire";
 import { selectsSlackMention, storedAnyChannel } from "~/lib/slack-mention";
 import { sameWireFilters } from "./filter-editor";
+import type { PromptFieldsValue } from "./prompt-fields";
 
 function sameKeySet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
@@ -29,6 +30,10 @@ function sameKeySet(a: string[], b: string[]): boolean {
  *    the server re-runs the mention gate against the new flag.
  *  - When the patch changes the match of a mention rule and "Any channel"
  *    is set, the `anyChannel` opt-out rides along.
+ *
+ * A prompt template is read only for an assistant target, the one kind that
+ * renders one. An emptied field sends `null`, which clears it on the row and
+ * returns the rule to the default event message.
  */
 export function buildSubscriptionPatch(
   sub: EventSubscriptionWire,
@@ -37,6 +42,7 @@ export function buildSubscriptionPatch(
     eventKeys: string[];
     filters: EventSubscriptionFilterWire[];
     anyChannel: boolean;
+    prompts?: PromptFieldsValue;
   },
 ): PatchEventSubscriptionRequest | null {
   const body: PatchEventSubscriptionRequest = {};
@@ -56,6 +62,16 @@ export function buildSubscriptionPatch(
   }
   if ((body.filters !== undefined || body.eventKeys !== undefined) && mention && form.anyChannel) {
     body.anyChannel = true;
+  }
+
+  if (form.prompts && sub.target.kind === "orchestrator") {
+    const target = sub.target;
+    for (const field of ["systemPrompt", "userPromptTemplate"] as const) {
+      const next = form.prompts[field].trim();
+      const stored = target[field] ?? "";
+      if (next === stored) continue;
+      body[field] = next.length > 0 ? next : null;
+    }
   }
 
   return Object.keys(body).length === 0 ? null : body;

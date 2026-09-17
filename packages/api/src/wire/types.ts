@@ -4460,6 +4460,27 @@ export type EventSubscriptionTargetWire =
       /** Follow the thread: after this rule delivers a channel mention, later
        * messages in that thread route to the assistant without a re-mention. */
       follow?: boolean;
+      /**
+       * A standing instruction for this rule, rendered above the event in
+       * every delivery it makes. Absent means the assistant reads the event
+       * with no added instruction, which is what every rule written before
+       * this field did.
+       *
+       * This field takes `{{event.key}}` and `{{refs.<name>}}` only. The
+       * other variables carry text that the sender of the event wrote, and
+       * an instruction must not carry that text.
+       */
+      systemPrompt?: string;
+      /**
+       * The event message this rule delivers, in place of the default body.
+       * Absent keeps the default body.
+       *
+       * This field takes the full variable set: `{{event.key}}`,
+       * `{{event.summary}}`, `{{event.body}}`, `{{refs.<name>}}`, and
+       * `{{payload.<field>}}` for a filter field the rule's events declare. A
+       * write that names anything else is refused.
+       */
+      userPromptTemplate?: string;
     };
 
 /**
@@ -4598,6 +4619,17 @@ export interface PatchEventSubscriptionRequest {
    * so a rule that should belong elsewhere is rewritten, not patched.
    */
   assistantId?: string | null;
+  /**
+   * Rewrite this orchestrator rule's prompt templates. `null` clears the
+   * field, so the rule delivers the default body again. Absent leaves it
+   * alone. See `EventSubscriptionTargetWire` for the variable set.
+   *
+   * Prompt configuration does not change what the rule matches, so a patch
+   * that only rewrites a template re-runs no collision gate.
+   */
+  systemPrompt?: string | null;
+  /** See `systemPrompt`. */
+  userPromptTemplate?: string | null;
   /** See `CreateEventSubscriptionRequest.audience`. Absent leaves the stored
    * audience alone. */
   audience?: EventSubscriptionAudienceWire;

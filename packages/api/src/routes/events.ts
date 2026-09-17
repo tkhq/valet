@@ -837,6 +837,25 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     }
   }
 
+  // The prompt templates are the other part of `target` a patch may rewrite,
+  // and only on an orchestrator target. `null` clears the field, so the rule
+  // delivers the default body again; the merged re-validation below checks a
+  // new template against the rule's events. Shape only here: the template
+  // language is `events/prompt-template.ts`'s to judge.
+  for (const field of ["systemPrompt", "userPromptTemplate"] as const) {
+    const patched = body[field];
+    if (patched === undefined) continue;
+    if (patchedTarget.kind !== "orchestrator") {
+      return c.json({ error: `${field} is only valid on an orchestrator target` }, 400);
+    }
+    if (patched === null) {
+      const { [field]: _cleared, ...rest } = patchedTarget;
+      patchedTarget = rest;
+    } else {
+      patchedTarget = { ...patchedTarget, [field]: patched };
+    }
+  }
+
   // Re-validate the row as it would exist after the patch — provided fields
   // get full validation in the context of the untouched ones.
   const merged = {

@@ -443,6 +443,92 @@ describe("AutomationWizard", () => {
     });
   });
 
+  // The server refuses a bad template by naming the wire field, the way every
+  // sibling refusal in that validator does. If the form does not show the same
+  // name, a reader told to move a variable to userPromptTemplate is looking for
+  // a box that does not exist under that name.
+  it("names the wire field beside each prompt label, so a server refusal points somewhere", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+
+    const system = screen.getByLabelText(/Instructions for the assistant/);
+    const user = screen.getByLabelText(/Event message/);
+    expect(system.closest("div")?.textContent).toContain("systemPrompt");
+    expect(user.closest("div")?.textContent).toContain("userPromptTemplate");
+  });
+
+  it("reply outcome posts the prompt templates it collected on the mention target", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    clickNext(); // What. The reply outcome is the default.
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+    fireEvent.change(screen.getByLabelText(/Instructions for the assistant/), {
+      target: { value: "Answer in one sentence." },
+    });
+    fireEvent.change(screen.getByLabelText(/Event message/), {
+      target: { value: "Mention: {{event.body}}" },
+    });
+    clickNext(); // Reply
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Slack replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({
+      kind: "orchestrator",
+      orchestrator: "user",
+      follow: true,
+      systemPrompt: "Answer in one sentence.",
+      userPromptTemplate: "Mention: {{event.body}}",
+    });
+  });
+
+  it("notify outcome posts the prompt templates it collected on the assistant target", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Send a notification/);
+    clickNext(); // What
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext(); // Match
+
+    // Step 3, Then: your assistant, plus what it should read.
+    fireEvent.change(screen.getByLabelText(/Instructions for the assistant/), {
+      target: { value: "Triage it. Answer in one sentence." },
+    });
+    fireEvent.change(screen.getByLabelText(/Event message/), {
+      target: { value: "{{event.summary}} on {{refs.repo}}" },
+    });
+    clickNext();
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "PR triage" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({
+      kind: "orchestrator",
+      orchestrator: "user",
+      follow: false,
+      systemPrompt: "Triage it. Answer in one sentence.",
+      userPromptTemplate: "{{event.summary}} on {{refs.repo}}",
+    });
+  });
+
+  it("offers no prompt template on a workflow target, whose prompts live on its nodes", () => {
+    workflowsData = { workflows: [{ id: "wf-1", name: "Deploy" }] };
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Run a workflow on an event/);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext();
+
+    expect(screen.queryByLabelText(/Instructions for the assistant/)).toBeNull();
+    expect(screen.queryByLabelText(/Event message/)).toBeNull();
+  });
+
   it("schedule outcome posts a schedule with a cron and an orchestrator prompt", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
