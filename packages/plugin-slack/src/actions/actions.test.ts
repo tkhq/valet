@@ -703,7 +703,14 @@ describe('slack actions', () => {
 
     const [url] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(url).toContain('https://slack.com/api/pins.list');
-    expect(result).toMatchObject({ success: true, data: { total: 2 } });
+    // The action description promises the agent that the result names the
+    // channel, and the spec lists get_pins beside read_history and
+    // read_thread. Pin both fields, or the get_pins half of that promise can
+    // be removed with the suite still green.
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 2 },
+    });
   });
 
   it('get_channel_info returns topic/purpose/creator for a normal channel', async () => {
