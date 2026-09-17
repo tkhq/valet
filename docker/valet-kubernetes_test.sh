@@ -45,15 +45,24 @@ const record = {
 };
 writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes/leaf/k3s_evac\n");
 if (!helper.identityValid(record, proc)) throw new Error("evacuated leader identity was rejected");
+if (helper.leaderState(record, proc) !== "owned") throw new Error("healthy leader was not classified as owned");
+if (helper.startRecoveryKernel(record, proc) !== "reuse-owned") throw new Error("start recovery did not reuse a healthy leader");
+if (helper.stopGuardKernel(record, proc) !== "allow-cleanup") throw new Error("stop refused a healthy owned leader");
+if (helper.epochRecoveryKernel(record, proc) !== "refuse-live") throw new Error("epoch recovery deleted a live owned leader");
 writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes-foreign/leaf\n");
 if (helper.identityValid(record, proc)) throw new Error("foreign sibling identity was accepted");
 if (helper.leaderState(record, proc) !== "foreign") throw new Error("live foreign leader was not classified as foreign");
 if (helper.startRecoveryKernel(record, proc) !== "refuse-foreign") throw new Error("start recovery accepted a live foreign leader");
+if (helper.stopGuardKernel(record, proc) !== "refuse-foreign") throw new Error("stop accepted a live foreign leader");
+if (helper.epochRecoveryKernel(record, proc) !== "refuse-live") throw new Error("epoch recovery deleted a live foreign leader");
 writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) Z ${Array(18).fill("0").join(" ")} 123 0\n`);
 writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tZ\nUid:\t1500\t1500\t1500\t1500\n");
 writeFileSync(join(proc, String(pid), "cmdline"), "");
 if (helper.leaderState(record, proc) !== "exited") throw new Error("zombie leader was not classified as exited");
 if (helper.startRecoveryKernel(record, proc) !== "clean-restart") throw new Error("start recovery refused a zombie leader");
+if (helper.stopGuardKernel(record, proc) !== "allow-cleanup") throw new Error("stop refused a zombie leader");
+if (helper.epochRecoveryKernel(record, proc) !== "clean-root") throw new Error("epoch recovery refused a zombie leader");
+if (helper.leaderState(record, join(tmp, "missing-proc")) !== "exited") throw new Error("missing process data was not classified as exited");
 writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) S ${Array(18).fill("0").join(" ")} 123 0\n`);
 writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tS\nUid:\t1500\t1500\t1500\t1500\n");
 const transition = () => {

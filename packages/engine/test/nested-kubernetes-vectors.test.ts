@@ -8,6 +8,7 @@ import {
   archiveKind,
   capabilityKernel,
   cgroupMembershipKernel,
+  epochRecoveryKernel,
   K3S_ARGV,
   K3S_ENV,
   LEAF_CONTROLLERS,
@@ -20,19 +21,23 @@ import {
   startupKernel,
   startRecoveryKernel,
   statusKernel,
+  stopGuardKernel,
   readImportResult,
   validateArchive,
 } from "../../../docker/valet-kubernetes.mjs";
 
 interface Vector<TInput, TExpected> { id: string; mode?: string; input: TInput; expected: TExpected; covers?: string[] }
+interface LeaderInput { state: "S" | "Z" | "S->Z" | "missing"; cmdline: "empty" | "k3s"; cgroup: "owned" | "foreign" }
 interface Vectors {
   capabilityVectors: Vector<{ requested: boolean; provider: false | "v1" }, string>[];
   mapVectors: Vector<number[][], boolean>[];
   cgroupVectors: Vector<string, boolean>[];
   startupVectors: Vector<{ leader: string; deadlineExpired: boolean }, string>[];
   leafConvergenceVectors: Vector<{ leaderLocation: "leaf" | "evac" | "other"; leafProcs: string[]; enabled: string[]; required: string[]; evacExists: boolean }, string>[];
-  leaderStateVectors: Vector<{ state: string; cmdline: "empty" | "k3s"; cgroup: "owned" | "foreign" }, string>[];
-  startRecoveryVectors: Vector<{ state: string; cmdline: "empty" | "k3s"; cgroup: "owned" | "foreign" }, string>[];
+  leaderStateVectors: Vector<LeaderInput, string>[];
+  startRecoveryVectors: Vector<LeaderInput, string>[];
+  stopGuardVectors: Vector<LeaderInput, string>[];
+  epochRecoveryVectors: Vector<LeaderInput, string>[];
   lifecycleVectors: Vector<Record<string, unknown>, Record<string, unknown>>[];
   statusVectors: Vector<Record<string, unknown>, { exit: number; persistedAfter: string; stdout: string }>[];
   acceptanceVectors: { id: string; mode: string; step: string; check: string; expected: string; covers: string[] }[];
@@ -49,6 +54,23 @@ const vectors = JSON.parse(
     "utf8",
   ),
 ) as Vectors;
+
+function leaderFixture(input: LeaderInput) {
+  const proc = mkdtempSync(join(tmpdir(), "valet-kubernetes-proc-"));
+  const pid = 4242;
+  mkdirSync(join(proc, "sys/kernel/random"), { recursive: true });
+  writeFileSync(join(proc, "sys/kernel/random/boot_id"), "boot-test\n");
+  if (input.state !== "missing") {
+    const initialState = input.state === "S->Z" ? "S" : input.state;
+    mkdirSync(join(proc, String(pid)), { recursive: true });
+    writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) ${initialState} ${Array(18).fill("0").join(" ")} 123 0\n`);
+    writeFileSync(join(proc, String(pid), "status"), `Name:\tk3s\nState:\t${initialState}\nUid:\t1500\t1500\t1500\t1500\n`);
+    writeFileSync(join(proc, String(pid), "cmdline"), input.cmdline === "k3s" ? Buffer.from(`${K3S_ARGV.join("\0")}\0`) : "");
+    writeFileSync(join(proc, String(pid), "cgroup"), input.cgroup === "owned" ? "0::/init/valet-kubernetes/leaf\n" : "0::/init/foreign\n");
+  }
+  const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };
+  return { proc, record };
+}
 
 describe("nested Kubernetes normative vectors", () => {
   it.each(vectors.capabilityVectors)("executes $id", ({ input, expected }) => {
@@ -67,36 +89,24 @@ describe("nested Kubernetes normative vectors", () => {
     expect(leafConvergenceKernel(input)).toBe(expected);
   });
   it.each(vectors.leaderStateVectors)("executes $id at the proc seam", ({ input, expected }) => {
-    const proc = mkdtempSync(join(tmpdir(), "valet-kubernetes-proc-"));
-    const pid = 4242;
-    mkdirSync(join(proc, String(pid)), { recursive: true });
-    mkdirSync(join(proc, "sys/kernel/random"), { recursive: true });
-    const initialState = input.state === "S->Z" ? "S" : input.state;
-    writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) ${initialState} ${Array(18).fill("0").join(" ")} 123 0\n`);
-    writeFileSync(join(proc, String(pid), "status"), `Name:\tk3s\nState:\t${initialState}\nUid:\t1500\t1500\t1500\t1500\n`);
-    writeFileSync(join(proc, "sys/kernel/random/boot_id"), "boot-test\n");
-    writeFileSync(join(proc, String(pid), "cmdline"), input.cmdline === "k3s" ? Buffer.from(`${K3S_ARGV.join("\0")}\0`) : "");
-    writeFileSync(join(proc, String(pid), "cgroup"), input.cgroup === "owned" ? "0::/init/valet-kubernetes/leaf\n" : "0::/init/foreign\n");
-    const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };
+    const { proc, record } = leaderFixture(input);
     const transition = input.state === "S->Z" ? () => {
-      writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) Z ${Array(18).fill("0").join(" ")} 123 0\n`);
-      writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tZ\nUid:\t1500\t1500\t1500\t1500\n");
+      writeFileSync(join(proc, String(record.pid), "stat"), `${record.pid} (k3s) Z ${Array(18).fill("0").join(" ")} 123 0\n`);
       return false;
     } : undefined;
     expect(leaderState(record, proc, transition)).toBe(expected);
   });
   it.each(vectors.startRecoveryVectors)("executes $id through the start recovery guard", ({ input, expected }) => {
-    const proc = mkdtempSync(join(tmpdir(), "valet-kubernetes-recovery-proc-"));
-    const pid = 4242;
-    mkdirSync(join(proc, String(pid)), { recursive: true });
-    mkdirSync(join(proc, "sys/kernel/random"), { recursive: true });
-    writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) ${input.state} ${Array(18).fill("0").join(" ")} 123 0\n`);
-    writeFileSync(join(proc, String(pid), "status"), `Name:\tk3s\nState:\t${input.state}\nUid:\t1500\t1500\t1500\t1500\n`);
-    writeFileSync(join(proc, "sys/kernel/random/boot_id"), "boot-test\n");
-    writeFileSync(join(proc, String(pid), "cmdline"), input.cmdline === "k3s" ? Buffer.from(`${K3S_ARGV.join("\0")}\0`) : "");
-    writeFileSync(join(proc, String(pid), "cgroup"), input.cgroup === "owned" ? "0::/init/valet-kubernetes/leaf\n" : "0::/init/foreign\n");
-    const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };
+    const { proc, record } = leaderFixture(input);
     expect(startRecoveryKernel(record, proc)).toBe(expected);
+  });
+  it.each(vectors.stopGuardVectors)("executes $id through the stop guard", ({ input, expected }) => {
+    const { proc, record } = leaderFixture(input);
+    expect(stopGuardKernel(record, proc)).toBe(expected);
+  });
+  it.each(vectors.epochRecoveryVectors)("executes $id through the epoch guard", ({ input, expected }) => {
+    const { proc, record } = leaderFixture(input);
+    expect(epochRecoveryKernel(record, proc)).toBe(expected);
   });
   it.each(vectors.lifecycleVectors)("executes $id", ({ input, expected }) => {
     expect(lifecycleKernel(input)).toEqual(expected);
@@ -118,7 +128,7 @@ describe("nested Kubernetes normative vectors", () => {
   });
 
   it("requires unique, non-vacuous safety kernel vectors", () => {
-    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.startupVectors, vectors.leafConvergenceVectors, vectors.leaderStateVectors, vectors.startRecoveryVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
+    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.startupVectors, vectors.leafConvergenceVectors, vectors.leaderStateVectors, vectors.startRecoveryVectors, vectors.stopGuardVectors, vectors.epochRecoveryVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
     const all = groups.flat();
     expect(new Set(all.map(({ id }) => id)).size).toBe(all.length);
     for (const vector of all) {
