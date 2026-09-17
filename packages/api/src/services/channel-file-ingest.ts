@@ -28,6 +28,9 @@ import type { Sandbox } from "@valet/engine";
 import { resolveUploadDest } from "./path-validation.js";
 import { extractPdf, pdfStubMarkdown } from "./pdf-extract.js";
 
+/** How many `name-N.ext` variants to try before overwriting the last one. */
+const MAX_NAME_ATTEMPTS = 50;
+
 /** The `type: "file"` half of `PromptAttachment`, minus the discriminant. */
 export interface IngestedChannelFile {
   path: string;
@@ -64,18 +67,18 @@ export async function ingestChannelFile(
   // under /workspace/uploads/.
   const dest = resolveUploadDest(fallbackName(opts.name));
   if (!dest.ok) return null;
-  const uploadPath = dest.path;
-  const filename = uploadPath.slice(uploadPath.lastIndexOf("/") + 1);
 
+  let uploadPath: string;
   try {
-    const parentDir = dirname(uploadPath);
+    const parentDir = dirname(dest.path);
     if (parentDir && parentDir !== "/workspace") {
       await sandbox.mkdir(parentDir);
     }
+    uploadPath = await freePath(sandbox, dest.path);
     await sandbox.writeBinary(uploadPath, data);
   } catch (err) {
     console.error(
-      `[channel-file-ingest] failed to write ${uploadPath}: ${err instanceof Error ? err.message : String(err)}`,
+      `[channel-file-ingest] failed to write ${dest.path}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return null;
   }
@@ -85,7 +88,7 @@ export async function ingestChannelFile(
     bytes: data.byteLength,
     sha256: createHash("sha256").update(data).digest("hex"),
     mimeType,
-    name: filename,
+    name: uploadPath.slice(uploadPath.lastIndexOf("/") + 1),
   };
 
   if (isPdf(mimeType, data)) {
@@ -125,6 +128,44 @@ async function writePdfSidecar(
       `[channel-file-ingest] PDF extraction failed for ${uploadPath}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return undefined;
+  }
+}
+
+/**
+ * The first free path at or beside `preferred`.
+ *
+ * One chat message can carry two files with the same name. Writing both to
+ * one path would leave two attachments pointing at one file, each reporting
+ * the other's size and hash, so the second becomes `report-2.pdf`. The
+ * upload route answers a collision with 409 instead; a channel file has
+ * nobody to ask, so it is renamed.
+ *
+ * A stat that fails for any reason other than "missing" is treated as
+ * occupied: guessing "free" there is what overwrites a file.
+ */
+async function freePath(sandbox: Sandbox, preferred: string): Promise<string> {
+  const dot = preferred.lastIndexOf(".");
+  const slash = preferred.lastIndexOf("/");
+  const stem = dot > slash ? preferred.slice(0, dot) : preferred;
+  const ext = dot > slash ? preferred.slice(dot) : "";
+  for (let n = 1; n <= MAX_NAME_ATTEMPTS; n++) {
+    const candidate = n === 1 ? preferred : `${stem}-${n}${ext}`;
+    if (!(await exists(sandbox, candidate))) return candidate;
+  }
+  // Every candidate is taken. Overwriting the last one loses less than
+  // dropping the attachment, and the note still names a real file.
+  return `${stem}-${MAX_NAME_ATTEMPTS}${ext}`;
+}
+
+async function exists(sandbox: Sandbox, path: string): Promise<boolean> {
+  try {
+    await sandbox.stat(path);
+    return true;
+  } catch (err) {
+    const e = err as { code?: unknown; message?: unknown };
+    const missing =
+      e.code === "ENOENT" || (typeof e.message === "string" && e.message.includes("ENOENT"));
+    return !missing;
   }
 }
 

@@ -92,6 +92,51 @@ describe("ingestChannelFile", () => {
     expect(result?.path).toBe("/workspace/uploads/passwd");
   });
 
+  it("does not overwrite a file already at the destination", async () => {
+    const sandbox = new VirtualSandbox("sb-6");
+    const first = new TextEncoder().encode("first report");
+    const second = new TextEncoder().encode("second report");
+
+    const a = await ingestChannelFile({
+      sandbox,
+      name: "report.txt",
+      mimeType: "text/plain",
+      data: first,
+    });
+    const b = await ingestChannelFile({
+      sandbox,
+      name: "report.txt",
+      mimeType: "text/plain",
+      data: second,
+    });
+
+    // One Slack message can carry two files with the same name. Writing both
+    // to one path leaves two attachments pointing at one file, each claiming
+    // the other's size and hash.
+    expect(a?.path).toBe("/workspace/uploads/report.txt");
+    expect(b?.path).toBe("/workspace/uploads/report-2.txt");
+    expect(await sandbox.readBinary("/workspace/uploads/report.txt")).toEqual(first);
+    expect(await sandbox.readBinary("/workspace/uploads/report-2.txt")).toEqual(second);
+  });
+
+  it("keeps a PDF sidecar beside its own renamed copy", async () => {
+    const sandbox = new VirtualSandbox("sb-7");
+    const data = textPdf();
+
+    await ingestChannelFile({ sandbox, name: "q.pdf", mimeType: "application/pdf", data });
+    const second = await ingestChannelFile({
+      sandbox,
+      name: "q.pdf",
+      mimeType: "application/pdf",
+      data,
+    });
+
+    expect(second?.path).toBe("/workspace/uploads/q-2.pdf");
+    // The sidecar has to follow the renamed file, or the note points the
+    // agent at the first PDF's text.
+    expect(second?.markdownPath).toBe("/workspace/uploads/q-2.pdf.md");
+  });
+
   it("returns null when the file cannot be written", async () => {
     const sandbox = new VirtualSandbox("sb-5");
     sandbox.writeBinary = async () => {
