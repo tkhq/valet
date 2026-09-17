@@ -115,18 +115,18 @@ describe("changelog read state", () => {
   });
 
   it("migrates a legacy rolling checkpoint from an entry in the middle", () => {
-    const older = { ...entry("older"), authoredAt: "2026-09-08T12:00:00Z" };
-    const seen = { ...entry("seen"), authoredAt: "2026-09-09T12:00:00Z" };
-    const newer = { ...entry("newer"), authoredAt: "2026-09-10T12:00:00Z" };
+    const older = { ...entry("aaaaaaa1"), authoredAt: "2026-09-08T12:00:00Z" };
+    const seen = { ...entry("bbbbbbb2"), authoredAt: "2026-09-09T12:00:00Z" };
+    const newer = { ...entry("ccccccc3"), authoredAt: "2026-09-10T12:00:00Z" };
     const current: ChangelogCheckpoint = {
       kind: "unreleased",
-      id: "unreleased@newer",
-      buildSha: "newer",
+      id: "unreleased@ccccccc3",
+      buildSha: "ccccccc3",
       builtAt: "2026-09-10T12:00:00Z",
       previousSha: "aaa",
       entries: [older, seen, newer],
     };
-    const legacy = { checkpointId: "unreleased@seen", unreleasedEntryCommitShas: null };
+    const legacy = { checkpointId: "unreleased@bbbbbbb2", unreleasedEntryCommitShas: null };
     const unread = unreadCheckpointIds([current], legacy.checkpointId);
 
     expect(isUnreadChangelogEntry(current, newer, unread, legacy)).toBe(true);
@@ -135,17 +135,17 @@ describe("changelog read state", () => {
   });
 
   it("does not mark entries new when the legacy rolling checkpoint is newest", () => {
-    const newest = { ...entry("newest"), authoredAt: "2026-09-10T12:00:00Z" };
-    const older = { ...entry("older"), authoredAt: "2026-09-09T12:00:00Z" };
+    const newest = { ...entry("ccccccc3"), authoredAt: "2026-09-10T12:00:00Z" };
+    const older = { ...entry("aaaaaaa1"), authoredAt: "2026-09-09T12:00:00Z" };
     const current: ChangelogCheckpoint = {
       kind: "unreleased",
-      id: "unreleased@newest",
-      buildSha: "newest",
+      id: "unreleased@ccccccc3",
+      buildSha: "ccccccc3",
       builtAt: "2026-09-10T12:00:00Z",
       previousSha: "aaa",
       entries: [older, newest],
     };
-    const legacy = { checkpointId: "unreleased@newest", unreleasedEntryCommitShas: null };
+    const legacy = { checkpointId: "unreleased@ccccccc3", unreleasedEntryCommitShas: null };
     const unread = unreadCheckpointIds([current], legacy.checkpointId);
 
     expect(current.entries.map((currentEntry) => isUnreadChangelogEntry(current, currentEntry, unread, legacy))).toEqual([
@@ -170,6 +170,48 @@ describe("changelog read state", () => {
     const unread = unreadCheckpointIds([current], legacy.checkpointId);
 
     expect(isUnreadChangelogEntry(current, current.entries[1]!, unread, legacy)).toBe(true);
+  });
+
+  it("fails closed for an ambiguous legacy rolling checkpoint SHA", () => {
+    const current: ChangelogCheckpoint = {
+      kind: "unreleased",
+      id: "unreleased@abc1234ffff",
+      buildSha: "abc1234ffff",
+      builtAt: "2026-09-10T12:00:00Z",
+      previousSha: "aaa",
+      entries: [
+        { ...entry("abc1234aaaa"), authoredAt: "2026-09-10T12:00:00Z" },
+        { ...entry("abc1234bbbb"), authoredAt: "2026-09-09T12:00:00Z" },
+      ],
+    };
+    const legacy = { checkpointId: "unreleased@abc1234", unreleasedEntryCommitShas: null };
+    const unread = unreadCheckpointIds([current], legacy.checkpointId);
+
+    expect(current.entries.map((currentEntry) => isUnreadChangelogEntry(current, currentEntry, unread, legacy))).toEqual([
+      false,
+      false,
+    ]);
+  });
+
+  it("fails closed for a legacy rolling checkpoint SHA shorter than seven characters", () => {
+    const current: ChangelogCheckpoint = {
+      kind: "unreleased",
+      id: "unreleased@abcdef123456",
+      buildSha: "abcdef123456",
+      builtAt: "2026-09-10T12:00:00Z",
+      previousSha: "aaa",
+      entries: [
+        { ...entry("abcdef123456"), authoredAt: "2026-09-09T12:00:00Z" },
+        { ...entry("bbbbbbb2"), authoredAt: "2026-09-10T12:00:00Z" },
+      ],
+    };
+    const legacy = { checkpointId: "unreleased@abcdef", unreleasedEntryCommitShas: null };
+    const unread = unreadCheckpointIds([current], legacy.checkpointId);
+
+    expect(current.entries.map((currentEntry) => isUnreadChangelogEntry(current, currentEntry, unread, legacy))).toEqual([
+      false,
+      false,
+    ]);
   });
 
   it("reads old checkpoint-only values without marking all rolling entries as new", () => {

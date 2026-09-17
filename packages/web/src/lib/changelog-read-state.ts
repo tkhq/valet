@@ -117,9 +117,12 @@ function matchingSha(left: string, right: string): boolean {
 function legacyUnreadCommitShas(checkpoint: ChangelogCheckpoint, checkpointId: string): Set<string> | null {
   if (checkpoint.kind !== "unreleased") return null;
   const seenSha = checkpointId.slice("unreleased@".length);
+  if (!/^[0-9a-f]{7,}$/i.test(seenSha)) return null;
   const entries = [...checkpoint.entries].sort(compareChangelogEntries);
-  const seenIndex = entries.findIndex((entry) => matchingSha(entry.sources.commitSha, seenSha));
-  return seenIndex === -1 ? null : new Set(entries.slice(0, seenIndex).map((entry) => entry.sources.commitSha));
+  const matches = entries.filter((entry) => matchingSha(entry.sources.commitSha, seenSha));
+  if (matches.length !== 1) return null;
+  const seenIndex = entries.indexOf(matches[0]!);
+  return new Set(entries.slice(0, seenIndex).map((entry) => entry.sources.commitSha));
 }
 
 export function isUnreadChangelogEntry(
