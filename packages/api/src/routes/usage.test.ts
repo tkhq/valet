@@ -450,7 +450,18 @@ describe("GET /api/usage/daily-agents", () => {
 // Member activity deliberately differs from billing attribution for shared agents.
 describe("GET /api/usage/breakdown — team daily active agents", () => {
   const DAY = 86_400_000;
-  const today = Date.UTC(2026, 8, 10);
+  // Anchored to the current UTC day, not to a calendar date. Two tests below
+  // pass `now` explicitly and are indifferent to where this sits. The third
+  // drives the live route, which measures its window from the server's own
+  // clock, so a fixed date walks out of that window and the test starts
+  // failing on a day nobody changed anything. It was pinned to 2026-09-10 and
+  // began failing exactly seven days later, against a seven-day window.
+  const midnightUtc = new Date();
+  const today = Date.UTC(
+    midnightUtc.getUTCFullYear(),
+    midnightUtc.getUTCMonth(),
+    midnightUtc.getUTCDate(),
+  );
   const now = today + 12 * 60 * 60 * 1000;
 
   async function seedActivity(testApi: TestApi) {
