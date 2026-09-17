@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { Check, ClipboardCopy, ExternalLink } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
@@ -18,9 +18,11 @@ import {
   type ChangelogSort,
 } from "~/lib/changelog-view";
 import {
-  lastSeenCheckpoint,
+  isUnreadChangelogEntry,
+  lastSeenChangelogState,
   markChangelogSeen,
   unreadCheckpointIds,
+  type ChangelogReadState,
 } from "~/lib/changelog-read-state";
 import { textParam } from "~/lib/search-params";
 import { useCopyToClipboard } from "~/lib/use-copy";
@@ -91,16 +93,17 @@ export function ChangelogPage() {
   const { copied, copy } = useCopyToClipboard();
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
   const runningSha = changelog.data?.artifact.sha;
-  const [seenWhenOpened, setSeenWhenOpened] = useState<string | null>();
+  const [seenWhenOpened, setSeenWhenOpened] = useState<ChangelogReadState | null>();
+  const openingSnapshot = useRef<ChangelogReadState | null | undefined>(undefined);
   const search = readChangelogSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
   const category: ChangelogCategoryFilter = search.category ?? "all";
   const sort: ChangelogSort = search.sort ?? "newest";
   const query = search.q ?? "";
   const requestedPage = search.page ?? 1;
-  const unread = seenWhenOpened === undefined
+  const unread = seenWhenOpened === undefined || seenWhenOpened?.checkpointId === null
     ? new Set<string>()
-    : unreadCheckpointIds(checkpoints, seenWhenOpened);
+    : unreadCheckpointIds(checkpoints, seenWhenOpened?.checkpointId ?? null);
   const newestId = checkpoints[0]?.id;
   const visibleCheckpoints = filterAndSortCheckpoints(checkpoints, category, query, sort);
   const totalPages = pageCount(visibleCheckpoints.length);
@@ -112,10 +115,12 @@ export function ChangelogPage() {
   }
 
   useEffect(() => {
-    if (!me.data || !newestId || seenWhenOpened !== undefined) return;
-    setSeenWhenOpened(lastSeenCheckpoint(me.data.id));
-    markChangelogSeen(me.data.id, newestId);
-  }, [me.data, newestId, seenWhenOpened]);
+    if (!me.data || !newestId || openingSnapshot.current !== undefined) return;
+    const seen = lastSeenChangelogState(me.data.id);
+    openingSnapshot.current = seen;
+    setSeenWhenOpened(seen);
+    markChangelogSeen(me.data.id, newestId, checkpoints);
+  }, [checkpoints, me.data, newestId]);
 
   useEffect(() => {
     if (changelog.isPending || requestedPage === currentPage) return;
@@ -285,11 +290,23 @@ export function ChangelogPage() {
                               <ul className="divide-y divide-line">
                                 {group.entries.map((entry) => {
                                   const commit = entry.sources.commitSha;
+                                  const entryUnread = isUnreadChangelogEntry(
+                                    checkpoint,
+                                    entry,
+                                    unread,
+                                    seenWhenOpened ?? null,
+                                  );
                                   return (
-                                    <li key={`${checkpoint.id}-${commit}`} className="py-2 first:pt-0 last:pb-0">
+                                    <li
+                                      key={`${checkpoint.id}-${commit}`}
+                                      className={`py-2 first:pt-0 last:pb-0${entryUnread ? " -mx-2 rounded border-l-2 border-accent-500 bg-ink-wash px-2" : ""}`}
+                                    >
                                       <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-x-4">
                                         <div className="min-w-0">
-                                          <h4 className="font-medium leading-5 text-ink">{entry.title}</h4>
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <h4 className="font-medium leading-5 text-ink">{entry.title}</h4>
+                                            {entryUnread && <Badge variant="accent">New</Badge>}
+                                          </div>
                                           {entry.description && (
                                             <p className="mt-0.5 text-sm leading-5 text-muted">{entry.description}</p>
                                           )}
