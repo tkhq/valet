@@ -135,12 +135,6 @@ function procIdentity(pid, procRoot = "/proc") {
     uid: Number(readFileSync(`${procRoot}/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1]), epoch: EPOCH,
   };
 }
-function recordLive(record, procRoot = "/proc") {
-  try {
-    const now = procIdentity(record.pid, procRoot);
-    return now.startTime === record.startTime && now.bootId === record.bootId;
-  } catch { return false; }
-}
 export function cgroupMembershipKernel(line, owned = "/init/valet-kubernetes") {
   return line === `0::${owned}` || line.startsWith(`0::${owned}/`);
 }
@@ -312,7 +306,7 @@ function prepareRoot() {
   }
   if (existsSync(ROOT) && readJson(STATUS_PATH, {}).epoch !== EPOCH) {
     const recorded = readJson(PID_PATH, null);
-    if (recorded && recordLive(recorded)) throw Object.assign(new Error("The prior server identity is still live. Recreate the sandbox before cleanup."), { exitCode: 21 });
+    if (epochRecoveryKernel(recorded) === "refuse-live") throw Object.assign(new Error("The prior server identity is still live. Recreate the sandbox before cleanup."), { exitCode: 21 });
     rmSync(ROOT, { recursive: true, force: true });
   }
   mkdirSync(ROOT, { recursive: true, mode: 0o700 });
@@ -366,6 +360,12 @@ export function startRecoveryKernel(record, procRoot = "/proc") {
   const leader = leaderState(record, procRoot);
   return leader === "foreign" ? "refuse-foreign" : leader === "owned" ? "reuse-owned" : "clean-restart";
 }
+export function stopGuardKernel(record, procRoot = "/proc") {
+  return leaderState(record, procRoot) === "foreign" ? "refuse-foreign" : "allow-cleanup";
+}
+export function epochRecoveryKernel(record, procRoot = "/proc") {
+  return leaderState(record, procRoot) === "exited" ? "clean-root" : "refuse-live";
+}
 function start() {
   const bad = Object.values(checks()).find((value) => !value.ok);
   if (bad) return fail(`${bad.action} Run valet-kubernetes diagnose for details.`, 20);
@@ -383,7 +383,7 @@ function start() {
       throw Object.assign(new Error("Another Kubernetes operation is active. Retry after it finishes."), { exitCode: 24 });
     }
     if (stored.state === "stopping") throw Object.assign(new Error("Kubernetes is stopping. Retry after stop finishes."), { exitCode: 4 });
-    if (pid && identityValid(pid)) {
+    if (recovery === "reuse-owned") {
       if (current) unlinkSync(OP_PATH);
       alreadyRunning = true;
       return;
@@ -517,7 +517,7 @@ function stop() {
     const status = readJson(STATUS_PATH, { state: "stopped" });
     const pid = readJson(PID_PATH, null);
     if (status.state === "stopped" && !pid && !existsSync(ROOT)) { stopped = true; return; }
-    if (pid && recordLive(pid) && !identityValid(pid)) { unsafe = true; return; }
+    if (stopGuardKernel(pid) === "refuse-foreign") { unsafe = true; return; }
     active = readJson(OP_PATH, null);
     if (active && ownerValid(active.owner)) { active.cancelRequested = true; atomicJson(OP_PATH, active); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH }); }
   });
