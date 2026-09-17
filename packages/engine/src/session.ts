@@ -874,7 +874,7 @@ export class Session {
       channel,
       createdAt: echoAt,
     };
-    await this.providers.store.appendEntries(this.id, thread.id, [echo]);
+    await thread.appendEntry(echo);
     let source: CommandSource;
     let name: string;
     let result: { ok: boolean; output: string };
@@ -1009,7 +1009,7 @@ export class Session {
       channel,
       createdAt: Math.max(Date.now(), notBefore + 1),
     };
-    await this.providers.store.appendEntries(this.id, thread.id, [entry]);
+    await thread.appendEntry(entry);
     await this.emit({ type: "command_result", threadId: thread.id, entry });
   }
 
@@ -1294,7 +1294,7 @@ export class Session {
       gate,
       createdAt: Date.now(),
     };
-    await this.providers.store.appendEntries(this.id, thread.id, [gateEntry]);
+    await thread.appendEntry(gateEntry);
     await this.emit(
       { type: "decision_gate", threadId: thread.id, gate },
       { eventKey: `gate:${gate.id}:pending` },

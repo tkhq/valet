@@ -168,10 +168,12 @@ describe("Session.prompt command interception", () => {
     let entered!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
-    vi.spyOn(store, "getEntries").mockImplementationOnce(async () => {
+    const snapshot = await store.getThreadSnapshot(session.id, thread.id);
+    if (!snapshot) throw new Error("missing thread snapshot");
+    vi.spyOn(store, "getThreadSnapshot").mockImplementationOnce(async () => {
       entered();
       await blocked;
-      return [];
+      return { thread: snapshot.thread, entries: [] };
     });
     let activeAtEnd: boolean | undefined;
     bus.subscribe({}, (event) => {
@@ -218,10 +220,10 @@ describe("Session.prompt command interception", () => {
     let entered!: () => void;
     const blocked = new Promise<void>((_resolve, rejectPromise) => { reject = rejectPromise; });
     const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
-    vi.spyOn(store, "getEntries").mockImplementationOnce(async () => {
+    vi.spyOn(store, "getThreadSnapshot").mockImplementationOnce(async () => {
       entered();
       await blocked;
-      return [];
+      return null;
     });
 
     const proactive = thread.compactThread({ mode: "proactive" });

@@ -84,6 +84,9 @@ export function registerWsRoutes(
       const rawFromOffset = c.req.query("fromOffset");
       const fromOffset =
         rawFromOffset !== undefined && rawFromOffset !== "" ? rawFromOffset : undefined;
+      const clientCapabilities = new Set(
+        (c.req.query("capabilities") ?? "").split(",").filter(Boolean),
+      );
 
       let seq = 0;
       const lifecycle = createWsConnectionLifecycle();
@@ -265,13 +268,17 @@ export function registerWsRoutes(
             }
 
             // Seed compaction after replay. The snapshot corrects a reconnect
-            // whose fromOffset is already past compaction_start.
-            for (const thread of engineSession.listThreads()) {
-              send(ws, {
-                type: "compaction.state",
-                threadId: thread.id,
-                active: thread.isCompacting(),
-              });
+            // whose fromOffset is already past compaction_start. Only clients
+            // that advertise support receive this new event type. An old web
+            // tab can otherwise treat the unknown frame as undefined state.
+            if (clientCapabilities.has("compaction-state")) {
+              for (const thread of engineSession.listThreads()) {
+                send(ws, {
+                  type: "compaction.state",
+                  threadId: thread.id,
+                  active: thread.isCompacting(),
+                });
+              }
             }
 
             // Seed per-thread model state after the subscription and replay.

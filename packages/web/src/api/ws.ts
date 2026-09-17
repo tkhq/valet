@@ -81,7 +81,9 @@ function wsUrl(sessionId: string, fromOffset: string | undefined): string {
   // In production, the same /api path is served by the API directly.
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const base = `${proto}//${window.location.host}/api/sessions/${encodeURIComponent(sessionId)}/ws`;
-  return fromOffset ? `${base}?fromOffset=${encodeURIComponent(fromOffset)}` : base;
+  const params = new URLSearchParams({ capabilities: "compaction-state" });
+  if (fromOffset) params.set("fromOffset", fromOffset);
+  return `${base}?${params.toString()}`;
 }
 
 export function useSessionWebSocket(sessionId: string) {

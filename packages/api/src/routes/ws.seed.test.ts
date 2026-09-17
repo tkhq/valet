@@ -44,8 +44,12 @@ async function collectUntil(
   predicate: (ev: WireEvent) => boolean,
   timeoutMs = 5_000,
   fromOffset?: string,
+  capabilities: string[] = [],
 ): Promise<WireEvent[]> {
-  const suffix = fromOffset === undefined ? "" : `?fromOffset=${encodeURIComponent(fromOffset)}`;
+  const params = new URLSearchParams();
+  if (fromOffset !== undefined) params.set("fromOffset", fromOffset);
+  if (capabilities.length > 0) params.set("capabilities", capabilities.join(","));
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
   const ws = new WebSocket(`${wsUrl}/api/sessions/${sessionId}/ws${suffix}`);
   const frames: WireEvent[] = [];
   return await new Promise<WireEvent[]>((resolve, reject) => {
@@ -166,6 +170,37 @@ describe("WS handshake seeds per-thread state after init", () => {
     expect(queueStates.map((event) => event.state.status)).toEqual(["idle", "running"]);
     expect(queueStates.map((event) => event.offset)).toEqual([undefined, offset]);
     expect(queueStates.at(-1)?.state.activeItemId).toBe("q-newer");
+  });
+
+  it("does not send compaction state to a client without the capability", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+
+    const frames = await collectUntil(
+      api.wsUrl,
+      sessionId,
+      (event) => event.type === "model.state",
+    );
+
+    expect(frames.some((event) => event.type === "compaction.state")).toBe(false);
+  });
+
+  it("sends compaction state to a client that advertises the capability", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+
+    const frames = await collectUntil(
+      api.wsUrl,
+      sessionId,
+      (event) => event.type === "compaction.state",
+      5_000,
+      undefined,
+      ["compaction-state"],
+    );
+
+    const state = frames.find((event) => event.type === "compaction.state");
+    if (state?.type !== "compaction.state") throw new Error("missing compaction state seed");
+    expect(state.active).toBe(false);
   });
 
   it("subscribes before it reads one active or idle model snapshot per thread", async () => {

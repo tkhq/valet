@@ -1749,6 +1749,11 @@ export interface ListOpts {
 export interface SessionStore {
   saveSession(session: SessionData): Promise<void>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
+  /** Read a thread row and its entries from one coherent store snapshot. */
+  getThreadSnapshot(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
   // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
   // fence is provided and does not name the item's current attempt.
   appendEntries(

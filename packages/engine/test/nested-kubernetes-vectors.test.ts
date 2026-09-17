@@ -27,7 +27,12 @@ interface Vectors {
   k3sArgv: string[];
   k3sEnv: Record<string, string>;
 }
-const vectors = JSON.parse(readFileSync("../../docs/specs/nested-kubernetes-v1-vectors.json", "utf8")) as Vectors;
+const vectors = JSON.parse(
+  readFileSync(
+    new URL("../../../docs/specs/nested-kubernetes-v1-vectors.json", import.meta.url),
+    "utf8",
+  ),
+) as Vectors;
 
 describe("nested Kubernetes normative vectors", () => {
   it.each(vectors.capabilityVectors)("executes $id", ({ input, expected }) => {
@@ -61,7 +66,10 @@ describe("nested Kubernetes normative vectors", () => {
       expect(vector.covers?.length).toBeGreaterThan(0);
       expect(vector.expected).not.toBeUndefined();
     }
-    const design = readFileSync("../../docs/specs/2026-09-12-nested-kubernetes-design.md", "utf8");
+    const design = readFileSync(
+      new URL("../../../docs/specs/2026-09-12-nested-kubernetes-design.md", import.meta.url),
+      "utf8",
+    );
     const required = new Set([...design.matchAll(/\[K(\d+)\]/g)].map((match) => Number(match[1])));
     const covered = new Set<number>();
     for (const vector of all) for (const range of vector.covers ?? []) {
@@ -86,7 +94,10 @@ describe("nested Kubernetes normative vectors", () => {
   });
 
   it("installs every locked artifact with its URL and checksum", () => {
-    const dockerfile = readFileSync("../../docker/Dockerfile.sandbox-k8s", "utf8");
+    const dockerfile = readFileSync(
+      new URL("../../../docker/Dockerfile.sandbox-k8s", import.meta.url),
+      "utf8",
+    );
     for (const artifact of vectors.artifacts) {
       expect(dockerfile).toContain(artifact.url);
       expect(dockerfile).toContain(artifact.sha256);

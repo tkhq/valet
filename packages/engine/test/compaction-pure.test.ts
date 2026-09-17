@@ -7,15 +7,19 @@ import {
   estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
+  estimateTotalTokens,
   estimateEntryTokens,
   extractFileContext,
   planPrune,
   selectCutPoint,
+  selectSummaryCheckpointTail,
   storedToolResultText,
   stripAnalysisScratchpad,
   tailBudget,
   turns,
   usableTokens,
+  walkTranscriptDag,
+  type CompactionEntry,
   type MessageEntry,
   type SessionEntry,
 } from "../src/index.js";
@@ -128,6 +132,128 @@ describe("compaction: usableTokens / tailBudget", () => {
     expect(tailBudget(100_000, { maxPreserveRecentTokens: 8_000 })).toBe(8_000);
     // The floor still wins over a configured ceiling below it.
     expect(tailBudget(100_000, { maxPreserveRecentTokens: 1_000 })).toBe(2_000);
+  });
+});
+
+describe("compaction: transcript DAG", () => {
+  it("walks only the active branch and keeps its tool output for the summary", () => {
+    const root = user("u-root", "implement the fix");
+    const tool = assistant("a-tool", "", [
+      {
+        type: "tool_call",
+        callId: "call-active",
+        toolName: "bash",
+        status: "completed",
+        args: { command: "git status --short" },
+        result: "M packages/engine/src/thread.ts",
+      },
+    ]);
+    tool.parentId = root.id;
+    const activeUser = user("u-active", "continue the implementation");
+    activeUser.parentId = tool.id;
+    const activeLeaf = assistant("a-active", "working");
+    activeLeaf.parentId = activeUser.id;
+    const abandonedUser = user("u-abandoned", "unrelated branch");
+    abandonedUser.parentId = root.id;
+    const abandonedLeaf = assistant("a-abandoned", "wrong branch");
+    abandonedLeaf.parentId = abandonedUser.id;
+    const entries = [root, tool, abandonedUser, abandonedLeaf, activeUser, activeLeaf];
+
+    const path = walkTranscriptDag(entries, activeLeaf.id);
+    expect(path.map((entry) => entry.id)).toEqual([
+      root.id,
+      tool.id,
+      activeUser.id,
+      activeLeaf.id,
+    ]);
+    const summaryInput = entriesToSummaryMessages(path, { toolOutputMaxChars: 2_000 });
+    expect(JSON.stringify(summaryInput)).toContain("M packages/engine/src/thread.ts");
+    expect(JSON.stringify(summaryInput)).not.toContain("wrong branch");
+
+    const live = entriesToAgentMessages(entries, MODEL, { activeLeafEntryId: activeLeaf.id });
+    expect(JSON.stringify(live)).toContain("continue the implementation");
+    expect(JSON.stringify(live)).not.toContain("unrelated branch");
+  });
+
+  it("keeps the chronological prefix from transcripts written before DAG links", () => {
+    const oldUser = user("old-user", "old request");
+    const oldAssistant = assistant("old-assistant", "old answer");
+    const continued = user("continued", "new request");
+    continued.parentId = oldAssistant.id;
+
+    expect(
+      walkTranscriptDag([oldUser, oldAssistant, continued], continued.id).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([oldUser.id, oldAssistant.id, continued.id]);
+  });
+
+  it("keeps a legacy compaction and its chronological null-parent suffix", () => {
+    const e1 = user("e1", "covered request");
+    const e2 = assistant("e2", "covered answer");
+    const c1: CompactionEntry = {
+      id: "c1",
+      sessionId: "s",
+      threadId: "t",
+      parentId: e2.id,
+      type: "compaction",
+      summary: "LEGACY-SUMMARY",
+      coveredEntryIds: [e1.id, e2.id],
+      tokenCountBefore: 20,
+      tokenCountAfter: 5,
+      createdAt: 3,
+    };
+    const inactive = user("inactive", "inactive linked branch");
+    inactive.parentId = e1.id;
+    const e3 = user("e3", "post-compaction instruction");
+    const e4 = assistant("e4", "post-compaction detail");
+
+    const active = walkTranscriptDag([e1, e2, c1, inactive, e3, e4], e4.id);
+    expect(active.map((entry) => entry.id)).toEqual([c1.id, e3.id, e4.id]);
+    const messages = entriesToAgentMessages(active, MODEL, { activeLeafEntryId: e4.id });
+    expect(JSON.stringify(messages)).toContain("LEGACY-SUMMARY");
+    expect(JSON.stringify(messages)).toContain("post-compaction instruction");
+    expect(JSON.stringify(messages)).not.toContain("inactive linked branch");
+  });
+
+  it("rejects a broken active path instead of silently dropping context", () => {
+    const leaf = assistant("leaf", "answer");
+    leaf.parentId = "missing-parent";
+    expect(() => walkTranscriptDag([leaf], leaf.id)).toThrow(
+      "Transcript DAG is missing entry missing-parent.",
+    );
+  });
+});
+
+describe("compaction: summary checkpoint tail", () => {
+  it("keeps the newest evidence within a bounded token suffix", () => {
+    const old = user("old-tail", "x".repeat(20_000));
+    const recent = user("recent-tail", "recent checkpoint evidence");
+    const latest = assistant("latest-tail", "latest state");
+    expect(
+      selectSummaryCheckpointTail([old, recent, latest], 100).map((entry) => entry.id),
+    ).toEqual([recent.id, latest.id]);
+  });
+
+  it("aligns a capped suffix to the next user entry", () => {
+    const old = user("old-boundary", "x".repeat(20_000));
+    const boundaryAssistant = assistant("assistant-boundary", "x".repeat(40));
+    const checkpoint = user("checkpoint-user", "current checkpoint");
+    const evidence = assistant("checkpoint-evidence", "tests are green");
+
+    const selected = selectSummaryCheckpointTail(
+      [old, boundaryAssistant, checkpoint, evidence],
+      20,
+    );
+
+    expect(selected.map((entry) => entry.id)).toEqual([checkpoint.id, evidence.id]);
+    expect(selected[0]).toMatchObject({ type: "message", role: "user" });
+    expect(estimateTotalTokens(selected)).toBeLessThanOrEqual(20);
+  });
+
+  it("keeps the newest entry even when it alone exceeds the budget", () => {
+    const latest = user("large-latest", "x".repeat(20_000));
+    expect(selectSummaryCheckpointTail([latest], 100)).toEqual([latest]);
   });
 });
 

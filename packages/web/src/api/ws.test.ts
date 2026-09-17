@@ -59,6 +59,9 @@ describe("useSessionWebSocket", () => {
     const { unmount } = renderSocketHook("s1");
     const socket = FakeWebSocket.instances[0];
     expect(socket).toBeDefined();
+    expect(new URL(socket?.url ?? "http://invalid").searchParams.get("capabilities")).toBe(
+      "compaction-state",
+    );
 
     act(() => socket?.onopen?.());
     expect(useStreamStore.getState().bySession["s1"]?.conn).toBe("open");

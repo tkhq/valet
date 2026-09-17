@@ -708,6 +708,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.messages = [...slice.messages, { ...ev.message, persistence: "durable" }];
       return next;
     }
+
+    default:
+      // A newer server can add a frame before this tab reloads its bundle.
+      // Preserve the session slice when that happens.
+      return slice;
   }
 }
 
