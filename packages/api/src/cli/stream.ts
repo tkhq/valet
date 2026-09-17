@@ -69,6 +69,7 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   "model.state": true,
   compaction_start: true,
   compaction_end: true,
+  "compaction.state": true,
   decision_gate: true,
   decision_gate_resolved: true,
   decision_gate_expired: true,

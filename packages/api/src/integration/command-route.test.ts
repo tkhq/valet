@@ -216,6 +216,21 @@ describe("command_result REST round-trip (Task 11)", () => {
     expect(cmd?.role).toBe("system");
   });
 
+  it("returns a started receipt for /compact", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+
+    const response = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ text: "/compact" }),
+    });
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as SendPromptResponse;
+    expect(body.messageId).toBeNull();
+    expect(body.command).toEqual({ name: "compact", source: "builtin", status: "started" });
+  });
+
   it("a builtin command posted with threadId lands on that thread", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);

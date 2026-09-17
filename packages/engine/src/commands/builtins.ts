@@ -171,10 +171,18 @@ async function modelCommand(
 
 async function compactCommand(args: string[], thread: Thread): Promise<BuiltinResult> {
   const instructions = args.join(" ").trim();
-  const outcome = await thread.compactThread({
+  const { outcome, joined } = await thread.compactThreadWithStatus({
     mode: "manual",
     ...(instructions ? { instructions } : {}),
   });
+  if (joined) {
+    return {
+      ok: true,
+      output: instructions
+        ? "Joined the compaction already in progress. This request did not change the instructions for the existing pass."
+        : "Joined the compaction already in progress.",
+    };
+  }
   // Report what actually happened. "Compacted." on a pass that summarized
   // nothing misleads a user the circuit breaker told to retry manually.
   if (outcome === "noop") {

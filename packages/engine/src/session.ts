@@ -881,10 +881,23 @@ export class Session {
     if (resolved.source === "builtin") {
       source = "builtin";
       name = resolved.name;
+      if (name === "compact") {
+        // Manual compaction can take longer than the HTTP timeout. Start it
+        // after the echo is durable, then finish on the existing event rail.
+        const pending = executeBuiltin(name, args, this, this.options.commandContext, thread);
+        void this.finishDetachedCommand(thread, name, source, pending, echoAt, channel).catch(
+          (err: unknown) => console.error("detached command result persistence failed:", err),
+        );
+        return {
+          sessionId: this.id,
+          threadId: thread.id,
+          queueItemId: "",
+          status: "queued",
+          command: { name, source, status: "started" },
+        };
+      }
       // Same failure contract as the plugin path below: a throwing builtin
-      // (e.g. /compact when the summarizer provider errors) must persist an
-      // ok:false command_result next to the already-persisted echo entry,
-      // not reject the whole submission into a raw HTTP 500 (TKAI-306).
+      // must persist an ok:false command_result next to the durable echo.
       try {
         result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
       } catch (err) {
@@ -943,6 +956,29 @@ export class Session {
       status: "queued",
       command: { name, source },
     };
+  }
+
+  /** Finish a detached command and persist one success or failure result. */
+  private async finishDetachedCommand(
+    thread: Thread,
+    name: string,
+    source: CommandSource,
+    pending: Promise<{ ok: boolean; output: string }>,
+    notBefore: number,
+    channel?: ChannelTarget,
+  ): Promise<void> {
+    let result: { ok: boolean; output: string };
+    try {
+      result = await pending;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      result = {
+        ok: false,
+        output:
+          `Compaction failed: ${reason}. Retry /compact, or start a new thread if the failure continues.`,
+      };
+    }
+    await this.persistCommandResult(thread, name, source, result, notBefore, channel);
   }
 
   /**

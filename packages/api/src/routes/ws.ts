@@ -10,8 +10,8 @@
  *   - `init` is sent first, metadata-only. Thread history loads via REST.
  *   - After `init`, the handshake seeds each thread's queue and non-idle
  *     status before durable replay can advance that state.
- *   - The handshake subscribes before reading active model state. The model
- *     snapshot follows replay and buffered live frames, so it is authoritative.
+ *   - The handshake subscribes before reading transient state. Compaction and
+ *     model snapshots follow replay, so they are authoritative.
  *   - Resume: `?fromOffset=<offset>` replays durable events after that offset
  *     before live delivery resumes. Durable frames carry a persistent
  *     `offset`; ephemeral frames (text_delta) never do. Without the query
@@ -84,6 +84,9 @@ export function registerWsRoutes(
       const rawFromOffset = c.req.query("fromOffset");
       const fromOffset =
         rawFromOffset !== undefined && rawFromOffset !== "" ? rawFromOffset : undefined;
+      const clientCapabilities = new Set(
+        (c.req.query("capabilities") ?? "").split(",").filter(Boolean),
+      );
 
       let seq = 0;
       const lifecycle = createWsConnectionLifecycle();
@@ -262,6 +265,20 @@ export function registerWsRoutes(
               }
               liveBuffer.length = 0;
               replaying = false;
+            }
+
+            // Seed compaction after replay. The snapshot corrects a reconnect
+            // whose fromOffset is already past compaction_start. Only clients
+            // that advertise support receive this new event type. An old web
+            // tab can otherwise treat the unknown frame as undefined state.
+            if (clientCapabilities.has("compaction-state")) {
+              for (const thread of engineSession.listThreads()) {
+                send(ws, {
+                  type: "compaction.state",
+                  threadId: thread.id,
+                  active: thread.isCompacting(),
+                });
+              }
             }
 
             // Seed per-thread model state after the subscription and replay.

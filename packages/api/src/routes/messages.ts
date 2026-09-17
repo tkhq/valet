@@ -832,6 +832,7 @@ export async function submitSessionPrompt(
     // Commands take no queue item; "" would read as a real (broken) id.
     messageId: receipt.queueItemId || null,
     threadId: receipt.threadId,
+    ...(receipt.command ? { command: receipt.command } : {}),
   };
 }
 
