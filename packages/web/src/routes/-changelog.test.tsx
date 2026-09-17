@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
 import type { ChangelogEntry, GetChangelogResponse } from "@valet/api/wire";
@@ -130,6 +131,13 @@ describe("ChangelogPage", () => {
     expect(await screen.findAllByText("New")).toHaveLength(3);
   });
 
+  it("does not mark entries new for malformed persisted read state", () => {
+    window.localStorage.setItem("valet:changelog-seen:user-1", "{");
+    render(<ChangelogPage />);
+
+    expect(screen.queryAllByText("New")).toHaveLength(0);
+  });
+
   it("restores filters and search from a shared URL", () => {
     searchParams = { category: "fix" };
     const view = render(<ChangelogPage />);
@@ -190,7 +198,7 @@ describe("ChangelogPage", () => {
     expect(screen.getByRole("heading", { level: 2, name: "1.0.0" })).toBeTruthy();
   });
 
-  it("highlights only newly added unreleased entries until the next visit", async () => {
+  it("highlights only newly added unreleased entries until the next visit under StrictMode", async () => {
     data.manifest.checkpoints.unshift({
       kind: "unreleased",
       id: "unreleased@def123456789",
@@ -207,14 +215,22 @@ describe("ChangelogPage", () => {
       }),
     );
 
-    const firstVisit = render(<ChangelogPage />);
+    const firstVisit = render(
+      <StrictMode>
+        <ChangelogPage />
+      </StrictMode>,
+    );
     const newEntry = screen.getByText("Added after visit").closest("li");
     expect(newEntry?.className).toContain("border-accent-500");
     expect(within(newEntry as HTMLElement).getByText("New")).toBeTruthy();
     expect(screen.getByText("Already seen").closest("li")?.className).not.toContain("border-accent-500");
 
     searchParams = { q: "Added after" };
-    firstVisit.rerender(<ChangelogPage />);
+    firstVisit.rerender(
+      <StrictMode>
+        <ChangelogPage />
+      </StrictMode>,
+    );
     expect(screen.getByText("Added after visit").closest("li")?.className).toContain("border-accent-500");
 
     await waitFor(() => {

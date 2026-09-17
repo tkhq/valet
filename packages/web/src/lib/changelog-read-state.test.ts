@@ -66,6 +66,30 @@ describe("changelog read state", () => {
     expect([...unreadCheckpointIds(checkpoints, "3@ccc")]).toEqual([]);
   });
 
+  it("fails closed for malformed JSON read state", () => {
+    const storage = {
+      getItem: () => "{",
+      setItem: () => undefined,
+    };
+
+    expect(lastSeenChangelogState("user-a", storage)).toEqual({
+      checkpointId: null,
+      unreleasedEntryCommitShas: null,
+    });
+  });
+
+  it("fails closed for an unknown JSON read state", () => {
+    const storage = {
+      getItem: () => JSON.stringify({ version: 2, seen: "unreleased@previous" }),
+      setItem: () => undefined,
+    };
+
+    expect(lastSeenChangelogState("user-a", storage)).toEqual({
+      checkpointId: null,
+      unreleasedEntryCommitShas: null,
+    });
+  });
+
   it("marks only added entries in a partially seen unreleased checkpoint as new", () => {
     const first = entry("first");
     const added = entry("added");

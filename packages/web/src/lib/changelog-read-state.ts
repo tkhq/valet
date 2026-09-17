@@ -6,7 +6,8 @@ const PREFIX = "valet:changelog-seen:";
 const listeners = new Set<() => void>();
 
 export interface ChangelogReadState {
-  checkpointId: string;
+  /** Null is a fail-closed state for invalid persisted data. */
+  checkpointId: string | null;
   /** Null preserves the old checkpoint-only storage format. */
   unreleasedEntryCommitShas: string[] | null;
 }
@@ -33,10 +34,14 @@ function parseReadState(value: string | null): ChangelogReadState | null {
         unreleasedEntryCommitShas: parsed.unreleasedEntryCommitShas,
       };
     }
+    return { checkpointId: null, unreleasedEntryCommitShas: null };
   } catch {
-    // Old values are checkpoint ids, not JSON.
+    // Only a non-JSON checkpoint id can use the legacy checkpoint-only format.
+    if (/^[^\s@]+@[^\s@]+$/.test(value)) {
+      return { checkpointId: value, unreleasedEntryCommitShas: null };
+    }
+    return { checkpointId: null, unreleasedEntryCommitShas: null };
   }
-  return { checkpointId: value, unreleasedEntryCommitShas: null };
 }
 
 export function lastSeenChangelogState(
@@ -110,7 +115,7 @@ export function isUnreadChangelogEntry(
   unreadCheckpoints: Set<string>,
   seenState: ChangelogReadState | null,
 ): boolean {
-  if (checkpoint.kind === "unreleased" && seenState?.checkpointId.startsWith("unreleased@")) {
+  if (checkpoint.kind === "unreleased" && seenState?.checkpointId?.startsWith("unreleased@")) {
     if (seenState.unreleasedEntryCommitShas === null) return false;
     return !seenState.unreleasedEntryCommitShas.includes(entry.sources.commitSha);
   }

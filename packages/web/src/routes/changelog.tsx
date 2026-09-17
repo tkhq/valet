@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { Check, ClipboardCopy, ExternalLink } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
@@ -94,13 +94,14 @@ export function ChangelogPage() {
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
   const runningSha = changelog.data?.artifact.sha;
   const [seenWhenOpened, setSeenWhenOpened] = useState<ChangelogReadState | null>();
+  const openingSnapshot = useRef<ChangelogReadState | null | undefined>(undefined);
   const search = readChangelogSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
   const category: ChangelogCategoryFilter = search.category ?? "all";
   const sort: ChangelogSort = search.sort ?? "newest";
   const query = search.q ?? "";
   const requestedPage = search.page ?? 1;
-  const unread = seenWhenOpened === undefined
+  const unread = seenWhenOpened === undefined || seenWhenOpened?.checkpointId === null
     ? new Set<string>()
     : unreadCheckpointIds(checkpoints, seenWhenOpened?.checkpointId ?? null);
   const newestId = checkpoints[0]?.id;
@@ -114,10 +115,12 @@ export function ChangelogPage() {
   }
 
   useEffect(() => {
-    if (!me.data || !newestId || seenWhenOpened !== undefined) return;
-    setSeenWhenOpened(lastSeenChangelogState(me.data.id));
+    if (!me.data || !newestId || openingSnapshot.current !== undefined) return;
+    const seen = lastSeenChangelogState(me.data.id);
+    openingSnapshot.current = seen;
+    setSeenWhenOpened(seen);
     markChangelogSeen(me.data.id, newestId, checkpoints);
-  }, [checkpoints, me.data, newestId, seenWhenOpened]);
+  }, [checkpoints, me.data, newestId]);
 
   useEffect(() => {
     if (changelog.isPending || requestedPage === currentPage) return;
