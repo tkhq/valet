@@ -161,7 +161,7 @@ Stop MUST remove owned Root contents, Root, and Scope while the adjacent exclusi
 The lock file is outside Root. Stop releases it only after deletion and preserves every other PVC path.
 
 `server.pid.json` records PID, proc start time, boot ID, UID, cgroup ownership boundary, argv digest, epoch, and Operation ID.
-A valid identity MUST match every field, UID 1500, the current epoch, the Scope ownership boundary, and K47. [K59]
+A valid identity MUST match every recorded field, UID 1500, the current epoch, the Scope boundary, the K47 digest, and K182 through K186. [K59]
 A live mismatch MUST never receive a signal or authorize state deletion. [K60]
 A dead or reboot-stale identity MUST authorize cleanup only inside Root and Scope. [K61]
 The Helper MUST create Scope as a Manager child and Services sibling. [K62]
@@ -215,6 +215,11 @@ Stop MUST allow cleanup for a healthy owned leader. [K178]
 Epoch recovery MUST refuse Root cleanup for each live recorded leader. [K179]
 Stop MUST allow cleanup when no leader record exists. [K180]
 Epoch recovery MUST allow Root cleanup when no leader record exists. [K181]
+Identity validation MUST accept the exact K47 command line. [K182]
+Identity validation MUST accept a nonempty title whose first NUL-delimited token equals `/usr/local/bin/k3s`. [K183]
+Identity validation MUST reject an empty command line. [K184]
+Identity validation MUST reject a foreign binary as the first command-line token. [K185]
+Identity validation MUST reject a binary whose first token only starts with `/usr/local/bin/k3s`. [K186]
 
 ## 06. Commands, locks, and state kernels
 
@@ -287,7 +292,7 @@ Subordinate files MUST grant UID 1500 outer interval `65536:65535` for both UID 
 | Provider grant expansion | INV-1, INV-3 | Manifest golden for K23 to K32 plus live A2 |
 | Map truncation or alias | INV-3, INV-5 | Executed K103 to K109 vectors plus A5 |
 | PID reuse | INV-1 | K59 to K61 identity vectors plus A9 |
-| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K181 tests plus A6 and A10 |
+| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K186 tests plus A6 and A10 |
 | Lifecycle race | INV-3, INV-6 | K78 to K90 race vectors plus A8 and A12 |
 | Supply substitution | INV-2, INV-3 | K39 to K44 digest and image tests |
 | Ambient import | INV-2 | K64 to K72 argv vector plus A7 tracing |
