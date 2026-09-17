@@ -152,6 +152,7 @@ describe("assistant behavior on a built session", () => {
     expect(listed).not.toContain("github.delete_repo");
     // The non-allowlisted service's action is gone.
     expect(listed).not.toContain("slack.post_message");
+    expect(listed).toContain("excluded_by_assistant");
 
     // The skillsProvider re-read returns only allowlisted skills, across both
     // the plugin skill and the stored skill.

@@ -158,6 +158,8 @@ export {
   type PluginActionResult,
   type PluginCatalog,
   type PluginCatalogOptions,
+  type ServiceAvailability,
+  type ServiceAvailabilityState,
   type PinnedActionSpec,
   type PinRejectedHandler,
   type InvokeActionResult,

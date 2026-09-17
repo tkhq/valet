@@ -68,17 +68,15 @@ describe("assemblePlugins", () => {
 });
 
 describe("pluginSessionExtras", () => {
-  it("returns no catalog tools when there are zero action plugins", () => {
+  it("keeps catalog tools when there are zero action plugins", () => {
     const plugins = [makePlugin("skills-only", { skills: [{ name: "s", content: "c" }] })];
     const { tools } = pluginSessionExtras(plugins);
-    // The `skill` tool still ships — a skills-only plugin set has something
-    // to reach — but neither catalog tool does.
-    expect(tools.map((t) => t.name)).toEqual(["skill"]);
+    expect(tools.map((t) => t.name)).toEqual(["list_tools", "call_tool", "skill"]);
   });
 
-  it("returns no tools at all for a plugin set with neither actions nor skills", () => {
+  it("keeps catalog tools for an inert plugin set", () => {
     const { tools } = pluginSessionExtras([makePlugin("inert")]);
-    expect(tools).toEqual([]);
+    expect(tools.map((tool) => tool.name)).toEqual(["list_tools", "call_tool"]);
   });
 
   it("returns exactly [list_tools, call_tool] when action plugins exist", () => {

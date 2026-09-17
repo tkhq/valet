@@ -30,7 +30,13 @@
  */
 import { createHash } from "node:crypto";
 import { pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
-import type { PinnedActionSpec, RoleSpec, SkillSource, ToolDef } from "@valet/engine";
+import type {
+  PinnedActionSpec,
+  PluginCatalogOptions,
+  RoleSpec,
+  SkillSource,
+  ToolDef,
+} from "@valet/engine";
 import { buildSkillTool, SKILL_TOOL_NAME } from "./skill-tool.js";
 
 export interface AssembledPlugins {
@@ -171,20 +177,18 @@ export function pluginSessionExtras(
   plugins: ValetPlugin[],
   extraSkills: SkillSource[] = [],
   pins: readonly PinnedActionSpec[] = [],
+  catalogOptions: Omit<PluginCatalogOptions, "plugins" | "pins" | "reservedToolNames"> = {},
 ): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
-  const tools =
-    actionPlugins.length > 0
-      ? pluginCatalogTools({
-          plugins: actionPlugins,
-          pins,
-          // The `skill` tool is appended below, after the catalog has
-          // already chosen its pinned names — so the catalog has to be told
-          // that name is taken.
-          reservedToolNames: [SKILL_TOOL_NAME],
-          onPinRejected: warnPinRejected,
-        })
-      : [];
+  const tools = pluginCatalogTools({
+    ...catalogOptions,
+    plugins: actionPlugins,
+    pins,
+    // The `skill` tool is appended below, after the catalog has already
+    // chosen its pinned names. The catalog must know that this name is used.
+    reservedToolNames: [SKILL_TOOL_NAME],
+    onPinRejected: warnPinRejected,
+  });
   const { skills, shadowed } = mergedSkillSources(plugins, extraSkills);
   const roles = plugins.flatMap((p) => p.roles ?? []);
 

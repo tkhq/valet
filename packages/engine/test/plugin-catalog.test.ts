@@ -388,7 +388,12 @@ describe("pluginCatalogTools: list_tools", () => {
       warnings?: Array<{ service: string; reason: string }>;
     };
     expect(payload.tools.length).toBeGreaterThan(0);
-    expect(payload.warnings?.[0]).toEqual({ service: "github", reason: "no credential connected" });
+    expect(payload.warnings?.[0]).toEqual({
+      service: "github",
+      state: "not_connected",
+      reason: "not connected",
+      fix: "Connect the integration in Settings.",
+    });
   });
 
   it("credential-less plugins are never probed or warned about", async () => {
@@ -460,7 +465,86 @@ describe("pluginCatalogTools: list_tools", () => {
   });
 });
 
+describe("pluginCatalogTools: capability boundaries", () => {
+  it("warns on an empty catalog and names matching native tools", async () => {
+    const [listTool] = pluginCatalogTools({
+      plugins: [],
+      nativeToolNames: ["thread_read", "list_threads", "bash"],
+    });
+
+    const result = await listTool.execute({ query: "thread" }, makeCtx());
+    const payload = decode(result.text) as {
+      tools: unknown[];
+      warnings: Array<{ reason: string }>;
+    };
+
+    expect(payload.tools).toEqual([]);
+    expect(payload.warnings.at(-1)?.reason).toContain("native tools are not listed here");
+    expect(payload.warnings.at(-1)?.reason).toContain("list_threads, thread_read");
+  });
+
+  it("hides unavailable services without exposing action ids", async () => {
+    const { plugin } = makeMockPlugin();
+    const unavailable = [{
+      service: "github",
+      state: "excluded_by_assistant" as const,
+      reason: "this assistant excludes the service",
+      fix: "Update this assistant's behavior.",
+    }];
+    const [listTool] = pluginCatalogTools({
+      plugins: [plugin],
+      serviceAvailability: unavailable,
+      resolveServiceAvailability: () => unavailable,
+    });
+
+    const result = await listTool.execute({ service: "github" }, makeCtx());
+    const payload = decode(result.text) as {
+      tools: unknown[];
+      warnings: Array<{ service: string; state?: string }>;
+    };
+    expect(payload.tools).toEqual([]);
+    expect(payload.warnings).toContainEqual(expect.objectContaining({
+      service: "github",
+      state: "excluded_by_assistant",
+    }));
+    expect(result.text).not.toContain("github.create_issue");
+  });
+});
+
 describe("pluginCatalogTools: call_tool", () => {
+  it("adds the Settings fix to missing-credential errors", async () => {
+    const plugin: ActionPlugin = {
+      service: "github",
+      requiresCredential: true,
+      actions: [{
+        id: "github.read",
+        name: "Read",
+        description: "Read data.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async (_args, ctx) => {
+          await ctx.credentials.request("Read GitHub data");
+          return { success: true };
+        },
+      }],
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const credentials: CredentialProvider = {
+      get: async () => null,
+      request: async () => {
+        throw new Error("credential github not connected");
+      },
+    };
+
+    const result = await callTool.execute(
+      { tool_id: "github.read", params: {}, summary: "Read data" },
+      makeCtx({ credentials }),
+    );
+    expect(result.text).toContain(
+      "credential github not connected — connect it in Settings",
+    );
+  });
+
   it("dispatches by tool_id and returns rendered data with credentials available", async () => {
     const { plugin, calls } = makeMockPlugin();
     const tools = pluginCatalogTools({ plugins: [plugin] });

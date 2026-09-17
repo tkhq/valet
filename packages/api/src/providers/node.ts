@@ -375,22 +375,29 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const { allowlist, denylist } = configHasPlugins
     ? { allowlist: configPlugins!.allow, denylist: configPlugins!.deny }
     : parseValetPluginsEnv(process.env.VALET_PLUGINS);
+  const nodeModulesResult = opts.plugins
+    ? { plugins: [], quarantined: [] }
+    : await loadNodeModulesPlugins({
+        searchPaths: [resolve(apiPkgRoot, "node_modules"), resolve(repoRoot, "node_modules")],
+        allowlist,
+        denylist,
+      });
   const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
     : assemblePlugins([
         bundledPlugins,
-        (
-          await loadNodeModulesPlugins({
-            searchPaths: [resolve(apiPkgRoot, "node_modules"), resolve(repoRoot, "node_modules")],
-            allowlist,
-            denylist,
-          })
-        ).plugins,
+        nodeModulesResult.plugins,
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
         [workflowsActions, skillsActions, assistantsActions],
       ]);
+  const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
+    service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),
+    state: "load_failed" as const,
+    reason,
+    fix: "Ask an admin to repair or remove the plugin package.",
+  }));
 
   // Declared plugin-store expression indexes (plugin-store design). Idempotent
   // `CREATE INDEX IF NOT EXISTS`, run once per boot after the plugin set is
@@ -452,6 +459,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     sandboxTokenMaster: opts.encryptionKey,
     sandboxApiUrl: opts.sandboxApiUrl,
     plugins,
+    pluginLoadFailures,
     actionPluginByService,
     // GH-T10 fix: session `github` actions resolve through the token service
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox

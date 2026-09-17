@@ -9,9 +9,64 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
-import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
+import type {
+  ActionPlugin,
+  Credential,
+  CredentialProvider,
+  DecisionGateRequest,
+  DecisionResolution,
+  MessageQuery,
+  PluginAction,
+  Sandbox,
+  Session,
+  SessionEntry,
+  ToolContext,
+  ValetPlugin,
+} from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+
+const stubCredentials: CredentialProvider = {
+  get: async (): Promise<Credential | null> => null,
+  request: async (): Promise<Credential> => {
+    throw new Error("not implemented in test stub");
+  },
+};
+
+function makeCtx(credentials: CredentialProvider = stubCredentials): ToolContext {
+  const sandbox: Partial<Sandbox> & { id: string } = { id: "sb-1" };
+  return {
+    userId: "local-user",
+    orgId: "local-org",
+    sessionId: "s1",
+    threadId: "t1",
+    credentials,
+    sandbox: sandbox as Sandbox,
+    requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
+      throw new Error("not implemented in test stub");
+    },
+    signal: new AbortController().signal,
+    threadRead: async (_key: string, _opts?: MessageQuery): Promise<SessionEntry[]> => [],
+    listThreads: async () => [],
+    setModel: async ({ model }: { model: string }) => ({ fromModel: model, toModel: model }),
+  };
+}
+
+function expectPromptToolConsistency(session: Session): void {
+  if (session.options.systemPrompt?.includes("list_tools")) {
+    expect(session.options.tools?.map((tool) => tool.name)).toContain("list_tools");
+  }
+}
+
+async function listTools(
+  session: Session,
+  credentials: CredentialProvider = stubCredentials,
+  query?: string,
+): Promise<string> {
+  const tool = session.options.tools?.find((candidate) => candidate.name === "list_tools");
+  if (!tool) throw new Error("session has no list_tools tool");
+  return (await tool.execute(query ? { query } : {}, makeCtx(credentials))).text ?? "";
+}
 
 function makeAction(id: string): PluginAction {
   return {
@@ -49,6 +104,7 @@ describe("EngineHost + plugin extras", () => {
       { actorUserId: "local-user", orgId: "local-org" },
     );
 
+    expectPromptToolConsistency(session);
     const toolNames = (session.options.tools ?? []).map((t) => t.name);
     expect(toolNames).toContain("list_tools");
     expect(toolNames).toContain("call_tool");
@@ -80,6 +136,8 @@ describe("EngineHost + plugin extras", () => {
       workspace: "/tmp",
     });
 
+    expectPromptToolConsistency(parent);
+    expectPromptToolConsistency(child);
     const toolNames = (child.options.tools ?? []).map((t) => t.name);
     // `skill` joins the catalog tools whenever the plugin set ships a skill
     // (see `plugins/skill-tool.ts`).
@@ -88,7 +146,20 @@ describe("EngineHost + plugin extras", () => {
     expect(child.options.roles?.map((r) => r.name)).toEqual(["demo-role"]);
   });
 
-  it("with plugins: [] nothing changes — orchestrator gets only memory tools, no skills/roles", async () => {
+  it("workflow sessions keep list_tools when their prompt names it", async () => {
+    api = await bootTestApi({ plugins: [] });
+    const session = await api.providers.engineHost.workflowSessionFor("wf:catalog:node", {
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+
+    expectPromptToolConsistency(session);
+    expect(session.options.tools?.map((tool) => tool.name)).toContain("list_tools");
+  });
+
+  it("with plugins: [] the orchestrator keeps catalog and memory tools", async () => {
     api = await bootTestApi({ plugins: [] });
     const { engineHost } = api.providers;
 
@@ -98,8 +169,8 @@ describe("EngineHost + plugin extras", () => {
     );
 
     const toolNames = (session.options.tools ?? []).map((t) => t.name);
-    expect(toolNames).not.toContain("list_tools");
-    expect(toolNames).not.toContain("call_tool");
+    expect(toolNames).toContain("list_tools");
+    expect(toolNames).toContain("call_tool");
     expect(toolNames).toEqual(
       expect.arrayContaining(["mem_write", "mem_patch", "mem_read", "mem_search", "mem_rm"]),
     );
@@ -107,10 +178,9 @@ describe("EngineHost + plugin extras", () => {
     expect(session.options.roles).toBeUndefined();
   });
 
-  it("strips an unconfigured service's tools from session builds until the org credential exists", async () => {
-    // Availability gate (integration-availability design): requires.orgCredential
-    // unmet means the agent never sees the service's tools. With the fixture as
-    // the only action plugin, the whole catalog (list_tools/call_tool) drops.
+  it("refreshes an unconfigured service in the same session after the org credential is stored", async () => {
+    // The action schema stays private while the org credential is absent.
+    // The live inventory rechecks the credential on each list_tools call.
     const gatedPlugin: ValetPlugin = {
       name: "gated",
       version: "0.0.1",
@@ -127,19 +197,26 @@ describe("EngineHost + plugin extras", () => {
       orgId: "local-org",
       workspace: "/tmp",
     });
-    expect((before.options.tools ?? []).map((t) => t.name)).not.toContain("list_tools");
+    expect((before.options.tools ?? []).map((t) => t.name)).toContain("list_tools");
+    const unavailable = await listTools(before);
+    expect(unavailable).toContain("deployment_unconfigured");
+    expect(unavailable).not.toContain("gated.ping");
 
     await engineCredentials.save({ type: "org", id: "local-org" }, "gated", {
       type: "bot_token",
       accessToken: "org-token",
     });
 
-    const after = await engineHost.sessionFor("gate-after", {
-      userId: "local-user",
-      orgId: "local-org",
-      workspace: "/tmp",
+    const available = await listTools(before, {
+      get: async (service): Promise<Credential | null> => {
+        if (service !== "gated") return null;
+        const stored = await engineCredentials.get({ type: "org", id: "local-org" }, service);
+        return stored?.accessToken ? { accessToken: stored.accessToken } : null;
+      },
+      request: stubCredentials.request,
     });
-    expect((after.options.tools ?? []).map((t) => t.name)).toContain("list_tools");
+    expect(available).toContain("gated.ping");
+    expect(available).not.toContain("deployment_unconfigured");
   });
 
   it("keeps a service's tools for a team session when the team holds its own token and no org row exists", async () => {
@@ -178,10 +255,11 @@ describe("EngineHost + plugin extras", () => {
       orgId: "local-org",
       workspace: "/tmp",
     });
-    expect((userSession.options.tools ?? []).map((t) => t.name)).not.toContain("list_tools");
+    expect((userSession.options.tools ?? []).map((t) => t.name)).toContain("list_tools");
+    expect(await listTools(userSession)).toContain("deployment_unconfigured");
   });
 
-  it("with plugins: [] a generic session gets no tools/skills/roles at all", async () => {
+  it("with plugins: [] a generic session keeps the catalog pair", async () => {
     api = await bootTestApi({ plugins: [] });
     const { engineHost } = api.providers;
 
@@ -191,7 +269,10 @@ describe("EngineHost + plugin extras", () => {
       workspace: "/tmp",
     });
 
-    expect(session.options.tools).toBeUndefined();
+    expectPromptToolConsistency(session);
+    expect(session.options.tools?.map((tool) => tool.name)).toEqual(["list_tools", "call_tool"]);
+    const nativeResult = await listTools(session, stubCredentials, "thread");
+    expect(nativeResult).toContain("list_threads, thread_read");
     expect(session.options.skills).toBeUndefined();
     expect(session.options.roles).toBeUndefined();
   });
