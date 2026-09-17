@@ -270,50 +270,99 @@ export function walkTranscriptDag(
 }
 
 /**
- * Keep a bounded suffix for checkpoint evidence, aligned to a turn boundary.
+ * Size one entry the way the summarizer payload will carry it.
  *
- * The budgeted window can open in the middle of a turn. When it does, prefer
- * the next user entry inside the window, because a summary that starts at a
- * turn boundary reads better. When the window holds no later user entry, the
- * window sits inside one long assistant run: extend BACKWARD to the entry
- * that started that turn instead. The result can then exceed `maxTokens`, and
- * the caller's SummarizeOverflowError retry shrinks it.
+ * `estimateEntryTokens` counts raw content. The conversion to summarizer
+ * messages caps prose at SUMMARY_PROSE_MAX_CHARS, caps tool args and results
+ * at `toolOutputMaxChars`, drops thinking, and skips every non-message
+ * entry. A 300,000-char assistant run therefore costs about 5,000 tokens of
+ * summarizer input, not 75,000. The summarizer window budgets with this
+ * ruler, so a window cannot reject entries whose real payload would have fit
+ * many times over (TKAI-461). It returns 0 for an entry the summarizer reads
+ * as nothing.
+ */
+export function estimateSummaryEntryTokens(
+  entry: SessionEntry,
+  opts?: { toolOutputMaxChars?: number; attributeAuthors?: boolean },
+): number {
+  const messages = entriesToSummaryMessages([entry], {
+    toolOutputMaxChars: opts?.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
+    attributeAuthors: opts?.attributeAuthors ?? false,
+  });
+  let total = 0;
+  for (const message of messages) {
+    const content = message.content;
+    if (typeof content === "string") {
+      total += estimateTokens(content);
+      continue;
+    }
+    for (const block of content) {
+      if (block.type === "text") total += estimateTokens(block.text);
+    }
+  }
+  return total;
+}
+
+export interface SummaryWindowOptions {
+  /**
+   * Size one entry for the budget walk. The default counts raw content;
+   * callers that feed the result to the summarizer pass
+   * `estimateSummaryEntryTokens`, so the window and the payload measure
+   * with one ruler.
+   */
+  sizeOf?: (entry: SessionEntry) => number;
+  /**
+   * Keep the newest entry even when it alone exceeds `maxTokens`. Set for a
+   * window that must not come back empty (the head). Clear it for optional
+   * evidence, which is trimmed to what the budget holds.
+   */
+  keepNewest?: boolean;
+}
+
+/**
+ * Select the newest entries that fit a token budget, for the summarizer.
  *
- * Never return an empty selection for a non-empty input (TKAI-461). Callers
- * feed the result to the summarizer and record coverage separately, so an
- * empty selection summarized nothing while the checkpoint still claimed the
- * whole head, and the covered entries left the model context for good.
+ * The window is a budgeted suffix, and it carries no user-first constraint:
+ * `summarize` prepends its own preface, so a window that opens in the middle
+ * of a turn is a legal provider payload. An earlier version aligned the
+ * window forward to the next user entry and dropped the entries in front of
+ * it, and it returned NOTHING when the window held no later user entry. The
+ * caller then summarized an empty transcript while its checkpoint still
+ * recorded the whole head as covered, and that head left the model context
+ * for good (TKAI-461).
+ *
+ * With `keepNewest`, the result is never empty for a non-empty input. Pass
+ * the payload ruler as `sizeOf` for the second guarantee: the window then
+ * never converts to an empty summarizer transcript.
  */
 export function selectSummaryCheckpointTail(
   entries: readonly SessionEntry[],
   maxTokens: number,
+  opts?: SummaryWindowOptions,
 ): SessionEntry[] {
+  const sizeOf = opts?.sizeOf ?? estimateEntryTokens;
+  const keepNewest = opts?.keepNewest ?? true;
   let start = entries.length;
   let tokens = 0;
   while (start > 0) {
-    const next = estimateEntryTokens(entries[start - 1]);
-    if (start < entries.length && tokens + next > maxTokens) break;
+    const next = sizeOf(entries[start - 1]);
+    if ((start < entries.length || !keepNewest) && tokens + next > maxTokens) break;
     start--;
     tokens += next;
   }
-  const suffix = entries.slice(start);
-  const firstMessage = suffix.findIndex((entry) => entry.type === "message");
-  const firstEntry = suffix[firstMessage];
-  if (!firstEntry || firstEntry.type !== "message" || firstEntry.role === "user") {
-    return suffix;
+  const window = entries.slice(start);
+  // Some entries render into no summarizer message at all: a command result,
+  // a decision gate, a prior checkpoint, an assistant step that held only
+  // thinking. They cost nothing, so the budget walk can stop with a window
+  // made only of them. That window converts to an empty transcript, and the
+  // summary is then written from the prompt template alone. Step back to the
+  // nearest entry the summarizer can read.
+  if (window.length > 0 && window.every((entry) => sizeOf(entry) === 0)) {
+    for (let index = start - 1; index >= 0; index--) {
+      if (sizeOf(entries[index]) > 0) return entries.slice(index);
+    }
   }
-  const nextUser = suffix.findIndex(
-    (entry, index) =>
-      index > firstMessage && entry.type === "message" && entry.role === "user",
-  );
-  if (nextUser >= 0) return suffix.slice(nextUser);
-  for (let index = start - 1; index >= 0; index--) {
-    const entry = entries[index];
-    if (entry.type === "message" && entry.role === "user") return entries.slice(index);
-  }
-  // No user entry anywhere before the window. `summarize` prepends its own
-  // preface, so an assistant-first selection is still a legal payload.
-  return suffix;
+  return window;
 }
 
 // ── Turn segmentation ──────────────────────────────────────────────
@@ -760,6 +809,17 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
     attributeAuthors: opts.attributeAuthors ?? false,
   });
+  if (messages.length === 0) {
+    // Non-message entries (command results, decision gates, checkpoints) and
+    // assistant entries that held only thinking render into nothing. An
+    // input made only of those leaves the model filling the template from
+    // the prompt alone, and the caller stores that as a summary of history
+    // nothing ever read (TKAI-461).
+    throw new Error(
+      "The summarizer input holds no conversation history, so the summary would be written from nothing. " +
+        "Run /compact again, or start a new thread.",
+    );
+  }
   const firstMessage = messages[0];
   if (firstMessage?.role === "assistant") {
     messages.unshift({

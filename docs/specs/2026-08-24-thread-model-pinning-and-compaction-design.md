@@ -399,26 +399,46 @@ inactive branches.
 Compaction now selects, prunes, and summarizes entries from the active path.
 The compaction entry points to the prior active leaf. Its `coveredEntryIds`
 contains the compacted path prefix. The summarizer input has a 64,000-token
-limit. It includes up to 8,000 estimated tokens from the recent tail before it
-keeps the newest head entries that fit. If the recent tail alone exceeds its
-8,000-token budget, the input drops it and spends the whole budget on the head.
-Existing per-block limits still apply. This keeps current task evidence without
-resending the full active path.
+limit, and it is allocated in one order: the head first, the recent tail
+second. The head takes its window from the head alone, so the newest turn
+cannot pull the window off the history the checkpoint replaces. The recent tail
+then takes what the head leaves, up to 8,000 estimated tokens, and it is
+trimmed to what fits. A newest entry that alone exceeds that budget leaves no
+tail evidence. The tail stays verbatim in live context either way. Existing
+per-block limits still apply.
 
-A budget cap can cut into a turn. The selection then prefers the next user
-entry inside the window. When the window holds no later user entry, it sits
-inside one long assistant run. The selection then extends backward to the entry
-that started that turn. The result can exceed the cap, and the overflow retry
-shrinks it. The selection never returns an empty window for a non-empty input.
-The summarizer prepends a synthetic user message when its input still starts
-with an assistant message. Several providers reject that shape with a plain 400
-error, and that error is not an overflow, so it would abort the overflow retry.
+The window is budgeted with the same caps the payload uses. The conversion to
+summarizer messages caps prose at 20,000 chars, and it caps each tool result at
+the configured tool-output limit, 2,000 chars by default. A 300,000-char
+assistant run therefore costs about 5,000 tokens of input, not 75,000. A budget
+walk over raw sizes rejected entries whose real payload fits many times over.
+
+A budget cap can cut into a turn. The window keeps that shape: it is the
+newest entries that fit, with no alignment to a user entry. The summarizer
+prepends a synthetic user message when its input starts with an assistant
+message. Several providers reject that shape with a plain 400 error, and that
+error is not an overflow, so it would abort the overflow retry. An earlier
+version aligned the window forward to the next user entry, which dropped the
+entries in front of it, and returned an empty window when no later user entry
+existed. The summarizer then wrote a summary from nothing.
+
+Some entries render into no summarizer message: a command result, a decision
+gate, a prior checkpoint, an assistant step that held only thinking. They cost
+no budget, so a window can stop on them alone. The selection steps back to the
+newest entry the summarizer can read, and `summarize` refuses an input that
+converts to an empty transcript.
 
 `coveredEntryIds` records the whole head, and the rebuild drops every covered
-entry from model context. Compaction therefore checks that the summarizer input
-holds at least one head entry before it writes the checkpoint. A pass that
-fails this check emits `compaction_coverage_gap` and reports `insufficient`. It
-writes no checkpoint, so the head stays in live context.
+entry from model context. Head-first allocation holds that invariant
+structurally, so the coverage check before the summarizer call is an assertion
+a healthy compaction never reaches. A pass that fails it emits
+`compaction_coverage_gap`, records the `valet.compaction.coverage_gap` counter,
+and reports `insufficient`. It writes no checkpoint, so the head stays in live
+context. The overflow retry shrinks the input in the same order it was
+allocated: tail evidence first, then the oldest half of the head, and it stops
+before a slice that carries no head content. A head larger than the budget is
+summarized from the part that fit, and the compaction span records the entries
+and tokens the summarizer never read.
 
 The summary has a `Continuation Checkpoint` section. It records the branch,
 commit, changed files, worktree status, last command, failure output, next

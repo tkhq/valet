@@ -245,6 +245,7 @@ export {
   estimateTokens,
   estimateEntryTokens,
   estimateTotalTokens,
+  estimateSummaryEntryTokens,
   estimateContextTokens,
   estimateLiveContextTokens,
   storedToolResultText,
@@ -268,6 +269,7 @@ export {
   type SelectCutPointOptions,
   type SummarizeOptions,
   type SummarizeResult,
+  type SummaryWindowOptions,
   type Turn,
 } from "./compaction.js";
 export {

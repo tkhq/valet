@@ -9,6 +9,7 @@ import {
   estimateTokens,
   estimateTotalTokens,
   estimateEntryTokens,
+  estimateSummaryEntryTokens,
   extractFileContext,
   planPrune,
   selectCutPoint,
@@ -226,6 +227,21 @@ describe("compaction: transcript DAG", () => {
 });
 
 describe("compaction: summary checkpoint tail", () => {
+  function commandResult(id: string): SessionEntry {
+    return {
+      id,
+      sessionId: "s",
+      threadId: "t",
+      parentId: null,
+      type: "command_result",
+      command: "/status",
+      source: "builtin",
+      ok: true,
+      output: "ready",
+      createdAt: 1,
+    };
+  }
+
   it("keeps the newest evidence within a bounded token suffix", () => {
     const old = user("old-tail", "x".repeat(20_000));
     const recent = user("recent-tail", "recent checkpoint evidence");
@@ -235,7 +251,7 @@ describe("compaction: summary checkpoint tail", () => {
     ).toEqual([recent.id, latest.id]);
   });
 
-  it("aligns a capped suffix to the next user entry", () => {
+  it("keeps a mid-turn window instead of aligning it to the next user entry", () => {
     const old = user("old-boundary", "x".repeat(20_000));
     const boundaryAssistant = assistant("assistant-boundary", "x".repeat(40));
     const checkpoint = user("checkpoint-user", "current checkpoint");
@@ -246,8 +262,15 @@ describe("compaction: summary checkpoint tail", () => {
       20,
     );
 
-    expect(selected.map((entry) => entry.id)).toEqual([checkpoint.id, evidence.id]);
-    expect(selected[0]).toMatchObject({ type: "message", role: "user" });
+    // Aligning forward to `checkpoint` would drop an assistant step the
+    // budget still holds, and the caller records that step as covered
+    // either way (TKAI-461). `summarize` prepends its own preface, so a
+    // window that opens mid-turn is a legal payload.
+    expect(selected.map((entry) => entry.id)).toEqual([
+      boundaryAssistant.id,
+      checkpoint.id,
+      evidence.id,
+    ]);
     expect(estimateTotalTokens(selected)).toBeLessThanOrEqual(20);
   });
 
@@ -256,16 +279,35 @@ describe("compaction: summary checkpoint tail", () => {
     expect(selectSummaryCheckpointTail([latest], 100)).toEqual([latest]);
   });
 
-  it("extends backward to the enclosing turn when the window holds no later user entry", () => {
+  it("stays inside the budget when the window opens inside one long turn", () => {
     // One user message followed by an assistant run larger than the budget.
-    // The window opens mid-run, so there is no later user entry to align on.
-    // Returning nothing here hands the summarizer an empty transcript while
-    // the caller still marks the whole head covered (TKAI-461).
+    // Returning nothing here handed the summarizer an empty transcript while
+    // the caller still marked the whole head covered (TKAI-461). Extending
+    // backward to the turn opener instead would return the whole head and
+    // defeat the budget, so the window stops where the budget stops.
     const opener = user("turn-opener", "start the long turn");
     const bulk = assistant("assistant-bulk", "x".repeat(40_000));
     const latest = assistant("assistant-latest", "latest step");
 
     const selected = selectSummaryCheckpointTail([opener, bulk, latest], 8_000);
+
+    expect(selected.map((entry) => entry.id)).toEqual([latest.id]);
+    expect(estimateTotalTokens(selected)).toBeLessThanOrEqual(8_000);
+  });
+
+  it("sizes the window with the caps the summarizer payload applies", () => {
+    const opener = user("capped-opener", "start the long turn");
+    const bulk = assistant("capped-bulk", "x".repeat(300_000));
+    const latest = assistant("capped-latest", "latest step");
+
+    // The raw estimate says this step costs 75_000 tokens. The summarizer
+    // caps one prose block at 20_000 chars, so its real cost is ~5_000.
+    expect(estimateEntryTokens(bulk)).toBeGreaterThan(64_000);
+    expect(estimateSummaryEntryTokens(bulk)).toBeLessThan(8_000);
+
+    const selected = selectSummaryCheckpointTail([opener, bulk, latest], 8_000, {
+      sizeOf: estimateSummaryEntryTokens,
+    });
 
     expect(selected.map((entry) => entry.id)).toEqual([opener.id, bulk.id, latest.id]);
   });
@@ -277,6 +319,52 @@ describe("compaction: summary checkpoint tail", () => {
     const selected = selectSummaryCheckpointTail([bulk, latest], 8_000);
 
     expect(selected.map((entry) => entry.id)).toEqual([latest.id]);
+  });
+
+  it("steps back to the newest entry the summarizer can read", () => {
+    // A command result and a branch summary both render into no summarizer
+    // message. A window made only of them converts to an empty transcript,
+    // and the summary is then written from the prompt template alone.
+    const opener = user("gap-opener", "start the turn");
+    const bulk = assistant("gap-bulk", "x".repeat(40_000));
+    const command = commandResult("gap-command");
+    const branch: SessionEntry = {
+      id: "gap-branch",
+      sessionId: "s",
+      threadId: "t",
+      parentId: null,
+      type: "branch_summary",
+      summary: "y".repeat(4_000),
+      branchRootId: "b-root",
+      branchLeafId: "b-leaf",
+      createdAt: 1,
+    };
+    // The raw ruler charges for a branch summary the summarizer never reads.
+    expect(estimateEntryTokens(branch)).toBeGreaterThan(0);
+    expect(estimateSummaryEntryTokens(branch)).toBe(0);
+    expect(estimateSummaryEntryTokens(command)).toBe(0);
+
+    const selected = selectSummaryCheckpointTail([opener, bulk, branch, command], 10, {
+      sizeOf: estimateSummaryEntryTokens,
+    });
+
+    expect(selected.map((entry) => entry.id)).toEqual([bulk.id, branch.id, command.id]);
+    expect(entriesToSummaryMessages(selected, { toolOutputMaxChars: 2_000 })).toHaveLength(1);
+  });
+
+  it("trims optional evidence to the budget instead of dropping all of it", () => {
+    const oldest = user("evidence-oldest", "x".repeat(4_000));
+    const middle = user("evidence-middle", "x".repeat(4_000));
+    const newest = user("evidence-newest", "x".repeat(4_000));
+
+    const selected = selectSummaryCheckpointTail([oldest, middle, newest], 2_200, {
+      keepNewest: false,
+    });
+
+    expect(selected.map((entry) => entry.id)).toEqual([middle.id, newest.id]);
+    // Optional evidence that cannot fit at all yields nothing, instead of
+    // spending the budget a mandatory window needs.
+    expect(selectSummaryCheckpointTail([newest], 100, { keepNewest: false })).toEqual([]);
   });
 });
 
