@@ -147,8 +147,17 @@ cannot be reached by accident.
 
 ## Not covered
 
-- Team and org scopes. A delegated credential carries the owner's scope,
-  since the scope is part of the credential the team borrows.
+- Setting a scope on a team-owned credential. The routes resolve the caller's
+  own `user:` row, so a Google Workspace credential stored on a team has no
+  way to carry a scope.
+- Showing a borrowed scope to the team. A shared credential DOES enforce the
+  owner's scope: `TeamCredentialStore.get` resolves a delegated reference to
+  the owner's whole row, metadata included, which a case in
+  `plugins/team-credential-store.test.ts` pins. Nothing tells the team that a
+  narrowing is in force, so a teammate sees files missing and no reason why.
+  The team integrations view is a separate component
+  (`components/integrations/team-credentials.tsx`) and carries no folder
+  control at all.
 - Shared drives beyond what containment reaches. A file in a shared drive
   resolves parents the same way, so a shared-drive folder can be scoped, but
   nothing special-cases `driveId`.
