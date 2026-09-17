@@ -9,6 +9,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import type {
@@ -16,6 +17,7 @@ import type {
   CredentialOwner,
   CredentialStore,
   PluginAction,
+  PluginActionContext,
   StoredCredential,
   ValetPlugin,
 } from "@valet/engine";
@@ -140,6 +142,55 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: false } });
     expect(fixture.calls()).toBe(1);
+  });
+
+  it("a workflow tool action can extract a document, the same as a session action", async () => {
+    // Document extraction needs no session, thread or sandbox: it is a pure
+    // call over bytes, and the native extractor lives in this process. A
+    // workflow node that reads a PDF must not be told extraction is
+    // unavailable on the deployment when the deployment can do it.
+    let seen: PluginActionContext["extractDocument"];
+    const probe = countingAction({
+      execute: async (_args, ctx) => {
+        seen = ctx.extractDocument;
+        return { success: true, data: {} };
+      },
+    });
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [probe.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+
+    await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:extract" },
+      userOwner,
+    );
+
+    expect(typeof seen).toBe("function");
+  });
+
+  it("the workflow extractor reads a real PDF and declines a non-PDF", async () => {
+    let extract: NonNullable<PluginActionContext["extractDocument"]> | undefined;
+    const probe = countingAction({
+      execute: async (_args, ctx) => {
+        extract = ctx.extractDocument;
+        return { success: true, data: {} };
+      },
+    });
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [probe.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:extract2" },
+      userOwner,
+    );
+
+    const pdf = new Uint8Array(readFileSync(new URL("../services/__fixtures__/sample.pdf", import.meta.url)));
+    // Wired to the real extractor, not a stub that resolves to null.
+    await expect(
+      extract?.({ data: pdf, mimeType: "application/pdf", name: "sample.pdf" }),
+    ).resolves.toMatchObject({ markdown: expect.stringContaining("Quarterly Revenue Report") });
+    // Anything the api cannot extract answers null, so the caller says why.
+    await expect(
+      extract?.({ data: new Uint8Array([1, 2, 3]), mimeType: "application/zip", name: "x.zip" }),
+    ).resolves.toBeNull();
   });
 
   it("dedup: a duplicate invocationId returns the ORIGINAL result without re-invoking execute", async () => {
