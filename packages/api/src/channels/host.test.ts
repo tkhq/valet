@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import {
@@ -363,10 +364,13 @@ describe("ChannelHost.handleUpdate", () => {
     ]);
   });
 
-  it("does not send a non-image DM attachment as a provider image block", async () => {
+  it("delivers a PDF DM attachment as a sandbox file, never as a provider image block", async () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const pdf = new Uint8Array(
+      readFileSync(new URL("../services/__fixtures__/sample.pdf", import.meta.url)),
+    );
     fakeTransport.fetchedMedia = {
-      data: new Uint8Array([1, 2, 3]),
+      data: pdf,
       mimeType: "application/pdf",
       name: "report.pdf",
     };
@@ -389,11 +393,61 @@ describe("ChannelHost.handleUpdate", () => {
     }
 
     const entry = entries.find((candidate) => candidate.type === "message" && candidate.role === "user");
-    expect(entry?.type === "message" ? entry.attachments : undefined).toBeUndefined();
-    expect(entry?.type === "message" ? entry.content : undefined).toContain(
-      "attachment skipped: unsupported media type application/pdf",
+    const attachments = entry?.type === "message" ? entry.attachments : undefined;
+    // A PDF reaches the agent as a file on disk with its text beside it. The
+    // engine renders that as a path the agent reads with its ordinary tools.
+    expect(attachments).toEqual([
+      {
+        type: "file",
+        path: "/workspace/uploads/report.pdf",
+        bytes: pdf.byteLength,
+        sha256: expect.any(String),
+        mimeType: "application/pdf",
+        markdownPath: "/workspace/uploads/report.pdf.md",
+        name: "report.pdf",
+      },
+    ]);
+    // The reason this path was image-only: a PDF sent as an image block is a
+    // provider error. Keep that pinned.
+    expect(attachments?.every((a) => a.type !== "image")).toBe(true);
+    expect(entry?.type === "message" ? entry.content : undefined).not.toContain(
+      "attachment skipped",
     );
     expect(entries.some((candidate) => candidate.type === "message" && candidate.role === "assistant")).toBe(true);
+  });
+
+  it("falls back to a skipped note when a channel file cannot be stored", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    fakeTransport.fetchedMedia = {
+      data: new Uint8Array([1, 2, 3]),
+      // No basename survives sanitizing, so the write never happens.
+      mimeType: "application/octet-stream",
+      name: "..",
+    };
+    await host.handleUpdate(
+      "fake",
+      inbound({ dispatchId: "unstorable-1", media: [{ kind: "document", fileId: "f3", fileName: ".." }] }),
+    );
+
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "user", id: USER_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const threadId = session.thread("fake:99").id;
+    let entry: { content?: string; attachments?: unknown } | undefined;
+    for (let i = 0; i < 50; i++) {
+      const entries = await session.providers.store.getEntries(session.id, threadId);
+      const candidate = entries.find((item) => item.type === "message" && item.role === "user");
+      entry = candidate?.type === "message" ? candidate : undefined;
+      if (entry) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    // Losing the message because one attachment failed would be worse than
+    // losing the attachment, so the text still says what happened.
+    expect(entry?.attachments).toBeUndefined();
+    expect(entry?.content).toContain("attachment skipped");
   });
 
   it("linked message is admitted on the orchestrator thread telegram-style key with dispatch dedup", async () => {

@@ -687,6 +687,81 @@ describe('slack actions', () => {
     ]);
   });
 
+  it('fetch_file returns extracted text for a PDF', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx({
+        extractDocument: async () => ({ markdown: '## Quarterly Revenue Report' }),
+      }),
+    );
+
+    // The whole point of the bug: a PDF must come back as readable text, not
+    // as a note saying it cannot be viewed.
+    expect(result).toEqual({
+      success: true,
+      data: {
+        content: '## Quarterly Revenue Report',
+        mimetype: 'application/pdf',
+        filename: 'report.pdf',
+      },
+    });
+  });
+
+  it('fetch_file says why a scanned PDF has no text', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/scan.pdf' },
+      pluginCtx({ extractDocument: async () => null }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('no text layer');
+  });
+
+  it('fetch_file reports a missing extractor instead of blaming the file type', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    // A host that wires no extractor. The old message told the agent the file
+    // type was unviewable, which sent it looking for a tool that does not
+    // exist; name the real reason instead.
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF text extraction is not available');
+  });
+
+  it('fetch_file still returns metadata for a file type it cannot read', async () => {
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/zip' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/bundle.zip' },
+      pluginCtx(),
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { mimetype: 'application/zip' },
+    });
+  });
+
   it('get_pins fetches pinned messages and files', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(
