@@ -119,32 +119,6 @@ const userCache = new Map<string, string>();
 const channelCache = new Map<string, string>();
 const botCache = new Map<string, string>();
 
-// Keep this small because action modules can live for a worker isolate's lifetime.
-const MAX_READ_CHANNEL_NAME_CACHE_ENTRIES = 100;
-const readChannelNameCache = new Map<string, string>();
-
-function readChannelNameCacheKey(token: string, channelId: string): string {
-  return `${token}\0${channelId}`;
-}
-
-function cacheReadChannelName(cacheKey: string, channelName: string): void {
-  readChannelNameCache.delete(cacheKey);
-  readChannelNameCache.set(cacheKey, channelName);
-  if (readChannelNameCache.size > MAX_READ_CHANNEL_NAME_CACHE_ENTRIES) {
-    const oldestCacheKey = readChannelNameCache.keys().next().value;
-    if (oldestCacheKey) readChannelNameCache.delete(oldestCacheKey);
-  }
-}
-
-function cacheReadChannelNameFromAccess(token: string, channelId: string, channelName: string | undefined): string | undefined {
-  const cacheKey = readChannelNameCacheKey(token, channelId);
-  if (channelName) {
-    cacheReadChannelName(cacheKey, channelName);
-    return channelName;
-  }
-  return readChannelNameCache.get(cacheKey);
-}
-
 function formatUserDisplay(uid: string, user: Record<string, unknown>): string {
   const profile = (user.profile || {}) as Record<string, unknown>;
   const handle = ((profile.display_name as string) || (user.name as string) || uid);
@@ -505,7 +479,7 @@ const readHistory = action(Type.Object({
     if (!token) return { success: false, error: 'Missing bot_token' };
     const channelAccess = await checkPrivateChannelAccess(token, p.channel, ownerSlackUserId(cred));
     if (!channelAccess.allowed) return { success: false, error: channelAccess.error || 'Access denied' };
-    const channel_name = cacheReadChannelNameFromAccess(token, p.channel, channelAccess.channelName);
+    const channel_name = channelAccess.channelName;
     const query: Record<string, unknown> = {
       channel: p.channel,
       limit: p.limit || 100,
@@ -561,7 +535,7 @@ const readThread = action(Type.Object({
     if (!token) return { success: false, error: 'Missing bot_token' };
     const channelAccess = await checkPrivateChannelAccess(token, p.channel, ownerSlackUserId(cred));
     if (!channelAccess.allowed) return { success: false, error: channelAccess.error || 'Access denied' };
-    const channel_name = cacheReadChannelNameFromAccess(token, p.channel, channelAccess.channelName);
+    const channel_name = channelAccess.channelName;
     const query: Record<string, unknown> = {
       channel: p.channel,
       ts: p.thread_ts,

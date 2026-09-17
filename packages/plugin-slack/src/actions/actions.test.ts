@@ -403,7 +403,7 @@ describe('slack actions', () => {
     });
   });
 
-  it('read_history preserves a successful result when channel metadata has no name', async () => {
+  it('read_history succeeds when channel metadata has no name', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [], has_more: false }));
 
@@ -412,6 +412,18 @@ describe('slack actions', () => {
     expect(result).toEqual({
       success: true,
       data: { channel: 'C495F', has_more: false, next_cursor: undefined, total: 0, messages: [] },
+    });
+  });
+
+  it('read_history fails when channel authorization returns ok:false', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
+
+    const result = await action('slack.read_history').execute({ channel: 'C495E' }, pluginCtx());
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack API error checking channel: channel_not_found',
     });
   });
 
