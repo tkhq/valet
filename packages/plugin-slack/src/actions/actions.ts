@@ -470,15 +470,16 @@ const readHistory = action(Type.Object({
   }))({
   id: 'slack.read_history',
   name: 'Read History',
-  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
+  description: 'Read recent messages from a Slack channel the bot has joined. Results include channel_name for explanations; use the channel ID only in tool arguments. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const channelAccess = await checkPrivateChannelAccess(token, p.channel, ownerSlackUserId(cred));
+    if (!channelAccess.allowed) return { success: false, error: channelAccess.error || 'Access denied' };
+    const channel_name = channelAccess.channelName;
     const query: Record<string, unknown> = {
       channel: p.channel,
       limit: p.limit || 100,
@@ -513,7 +514,7 @@ const readHistory = action(Type.Object({
     const next_cursor = data.response_metadata?.next_cursor || undefined;
     const filtered = p.filter || p.threads_only;
     // Put pagination metadata first — large message arrays may be truncated by tool output limits
-    return { success: true, data: { has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
+    return { success: true, data: { channel: p.channel, ...(channel_name ? { channel_name } : {}), has_more: data.has_more, next_cursor, ...(filtered ? { fetched } : {}), total: messages.length, messages } };
   },
 });
 
@@ -525,15 +526,16 @@ const readThread = action(Type.Object({
   }))({
   id: 'slack.read_thread',
   name: 'Read Thread',
-  description: 'Read replies in a Slack thread. Bot must be a member of the channel.',
+  description: 'Read replies in a Slack thread. Results include channel_name for explanations; use the channel ID only in tool arguments. Bot must be a member of the channel.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const denied = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
-    if (denied) return denied;
+    const channelAccess = await checkPrivateChannelAccess(token, p.channel, ownerSlackUserId(cred));
+    if (!channelAccess.allowed) return { success: false, error: channelAccess.error || 'Access denied' };
+    const channel_name = channelAccess.channelName;
     const query: Record<string, unknown> = {
       channel: p.channel,
       ts: p.thread_ts,
@@ -551,7 +553,7 @@ const readThread = action(Type.Object({
     );
 
     const next_cursor = data.response_metadata?.next_cursor || undefined;
-    return { success: true, data: { has_more: data.has_more, next_cursor, total: messages.length, messages } };
+    return { success: true, data: { channel: p.channel, ...(channel_name ? { channel_name } : {}), has_more: data.has_more, next_cursor, total: messages.length, messages } };
   },
 });
 
