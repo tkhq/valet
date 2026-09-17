@@ -977,7 +977,13 @@ function ChannelMultiSelect({
         >
           {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
           {!optionsQ.isLoading && options.length === 0 && (
-            <p className="px-2 py-1 text-xs text-muted">{NO_CHANNEL_MATCH_HELP}</p>
+            // Same rule as the filter picker: a rejected lookup is empty too,
+            // and inviting the app would not fix an outage.
+            <p className="px-2 py-1 text-xs text-muted">
+              {optionsQ.data === undefined
+                ? "Could not load the channels. Check your connection and try again."
+                : NO_CHANNEL_MATCH_HELP}
+            </p>
           )}
           {options.map((o) => {
             const picked = channels.some((c) => c.id === o.id);

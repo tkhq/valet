@@ -14,7 +14,10 @@ import { useFilterOptions } from "~/api/events";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { Button, Input } from "~/components/primitives";
 
-/** What an empty channel picker means, and the one action that fixes it.
+/** What a SUCCESSFUL but empty channel picker means, and the one action that
+ * fixes it. Only show it when the lookup answered. A failed lookup also leaves
+ * the list empty, and telling somebody to invite the app would be a confident
+ * wrong diagnosis for an outage.
  *
  * The picker lists the channels the Valet Slack app has JOINED, public and
  * private alike. That is the right set: Slack delivers a message or a mention
@@ -435,11 +438,16 @@ function FilterValuePicker({
         >
           {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
           {!optionsQ.isLoading && options.length === 0 && (
-            // The channel source has one reason for an empty result and one
-            // fix, so it says both. Other sources keep the bare answer,
-            // because no single action would resolve them.
+            // A rejected lookup settles with no data and an empty list, the
+            // same shape as a real empty answer. Say so instead of naming a
+            // fix that cannot apply. `answered` is the test: the channel
+            // advice only goes out when the lookup actually returned.
             <p className="px-2 py-1 text-xs text-muted">
-              {source === "slack.channels" ? NO_CHANNEL_MATCH_HELP : "No matches"}
+              {optionsQ.data === undefined
+                ? "Could not load the options. Check your connection and try again."
+                : source === "slack.channels"
+                  ? NO_CHANNEL_MATCH_HELP
+                  : "No matches"}
             </p>
           )}
           {options.map((o) => (

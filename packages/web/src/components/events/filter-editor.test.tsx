@@ -275,6 +275,20 @@ describe("FilterEditor value picker", () => {
     expect(listbox.textContent).toContain("invite the app to it in Slack");
   });
 
+  // A rejected lookup settles with no data and an empty list, the same shape
+  // as a real empty answer. Inviting the app cannot fix an outage, so the
+  // advice must not go out for one.
+  it("does not blame a missing invite when the lookup failed", async () => {
+    useFilterOptions.mockReturnValue(optionsResult({ data: undefined }));
+    const fields: FilterField[] = [{ field: "channel", options: { source: "slack.channels" } }];
+    const rows: UiFilterRow[] = [row({ field: "channel", op: "eq", value: "" })];
+    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    fireEvent.focus(screen.getByLabelText("Filter value search"));
+    const listbox = await screen.findByRole("listbox", { name: "Filter value options" });
+    expect(listbox.textContent).toContain("Could not load the options");
+    expect(listbox.textContent).not.toContain("invite the app");
+  });
+
   // Only the channel source has one action that fixes an empty list, so every
   // other source keeps the bare answer rather than borrowing advice.
   it("keeps the plain answer for a source with no single fix", async () => {
