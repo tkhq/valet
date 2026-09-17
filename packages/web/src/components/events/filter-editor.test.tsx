@@ -6,7 +6,7 @@
  * trigger-dialog.test.tsx.
  */
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, fireEvent } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 // The picker queries option lists through this hook. The tests drive its
 // return value per case, so no react-query provider or network is needed.
