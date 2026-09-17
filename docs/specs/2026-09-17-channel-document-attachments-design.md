@@ -77,6 +77,24 @@ document with none and for any format other than PDF, and throws only when
 extraction is unavailable. The field is optional, so a host that wires no
 extractor leaves plugin actions to degrade rather than fail.
 
+A `PluginActionContext` is built in exactly two places, and both set the
+field:
+
+- `Thread.buildToolContext` (`packages/engine/src/thread.ts`) for a session
+  action, from `CreateSessionOptions`.
+- `buildActionContext` (`packages/api/src/plugins/action-invoker.ts`) for a
+  workflow tool node, which has no session, thread or sandbox behind it.
+
+Everywhere else takes the context as a parameter. The workflow site was
+missed when the field was introduced, so a workflow node reading a PDF
+reported that extraction was unavailable on the deployment: wrong about the
+deployment, and true only of that context. Extraction belongs here because it
+is a pure call over bytes against the native extractor in the api process,
+unlike the thread, sandbox and approval capabilities that context stubs out.
+A case in `plugins/action-invoker.test.ts` extracts a real PDF fixture
+through the workflow context, so the two paths cannot drift apart again
+silently.
+
 ## `slack.fetch_file`
 
 The action gains a PDF branch between the text branch and the
