@@ -48,6 +48,7 @@ export function parseCommitMessage({ subject, body = "" }) {
 }
 
 export function validateCommitMessage({ commitSha, subject, body = "" }) {
+  if (/^(?:fixup!|squash!|Merge\s)/.test(subject)) return [];
   const parsed = parseCommitMessage({ subject, body });
   if (!parsed.ok) return [`${commitSha}: ${parsed.correction}`];
   if (!parsed.metadataValid) {
