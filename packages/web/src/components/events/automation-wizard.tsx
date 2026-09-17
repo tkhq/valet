@@ -978,11 +978,17 @@ function ChannelMultiSelect({
           {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
           {!optionsQ.isLoading && options.length === 0 && (
             // Same rule as the filter picker: a rejected lookup is empty too,
-            // and inviting the app would not fix an outage.
+            // and inviting the app would not fix an outage. `reason` is read
+            // inline rather than from the latched state, because that state is
+            // set in an effect and lands one render late. Without the inline
+            // read, an unconnected Slack painted the invite advice for one
+            // frame before the fallback replaced it.
             <p className="px-2 py-1 text-xs text-muted">
               {optionsQ.data === undefined
                 ? "Could not load the channels. Check your connection and try again."
-                : NO_CHANNEL_MATCH_HELP}
+                : optionsQ.data.reason !== undefined
+                  ? optionsQ.data.reason
+                  : NO_CHANNEL_MATCH_HELP}
             </p>
           )}
           {options.map((o) => {
