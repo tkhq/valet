@@ -254,7 +254,7 @@ mkdir -p "$STATE"
 printf '%s\n' '{"state":"ready","error":null,"epoch":"test"}' > "$STATE/state.json"
 chmod 700 "$STATE"; chmod 600 "$STATE/state.json"
 set +e
-VALET_SANDBOX_EPOCH=test node --input-type=module -e "const helper=await import('$HELPER'); const failed=()=>{ throw Object.assign(new Error('failed'), { code: 'state_removal_failed', exitCode: 22 }); }; process.exitCode=helper.stop('/proc', () => true, failed)" >"$TMP/removal-failure.out" 2>"$TMP/removal-failure.err"
+VALET_SANDBOX_EPOCH=test node --input-type=module -e "const helper=await import('$HELPER'); const failed=()=>{ throw Object.assign(new Error('Kubernetes state removal failed (state_removal_failed). Recreate the sandbox, then retry.'), { code: 'state_removal_failed', exitCode: 22 }); }; process.exitCode=helper.stop('/proc', () => true, failed)" >"$TMP/removal-failure.out" 2>"$TMP/removal-failure.err"
 removal_status=$?
 set -e
 [ "$removal_status" -eq 22 ] || fail "double state removal failure exited $removal_status"

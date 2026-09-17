@@ -14,6 +14,7 @@ export const SCOPE = "/sys/fs/cgroup/init/valet-kubernetes";
 export const LEAF = `${SCOPE}/leaf`;
 export const KUBECONFIG = `${ROOT}/kubeconfig.yaml`;
 export const MINIMUM_FREE_BYTES = 2147483648;
+export const STATE_REMOVAL_TIMEOUT_MS = 600_000;
 export const LEAF_CONTROLLERS = ["cpuset", "cpu", "memory", "pids"];
 export const LEAF_CONVERGENCE = { attempts: 10, delayMs: 100 };
 export const K3S_ENV = {
@@ -280,10 +281,11 @@ function stateReport(readiness = "unknown", snapshot = stateSnapshot()) {
 function emit(report) { process.stdout.write(report.stdout); return report.exit; }
 function fail(message, exitCode) { process.stderr.write(`Error: ${message}\n`); return exitCode; }
 function commandOk(argv, env = process.env, timeout = 30_000) { return spawnSync(argv[0], argv.slice(1), { env, timeout, stdio: "ignore" }).status === 0; }
-function stateRemovalError() {
-  return Object.assign(new Error("Kubernetes state removal failed (state_removal_failed). Recreate the sandbox, then retry."), {
-    code: "state_removal_failed", exitCode: 22,
-  });
+function stateRemovalError(interrupted = false) {
+  const message = interrupted
+    ? "Kubernetes state removal was interrupted (state_removal_failed). Retry stop."
+    : "Kubernetes state removal failed (state_removal_failed). Recreate the sandbox, then retry.";
+  return Object.assign(new Error(message), { code: "state_removal_failed", exitCode: 22 });
 }
 export function removeStateRoot(root, io = {}) {
   if (root !== ROOT) {
@@ -291,31 +293,31 @@ export function removeStateRoot(root, io = {}) {
   }
   const remove = io.remove ?? ((path) => rmSync(path, { recursive: true, force: true }));
   const exists = io.exists ?? existsSync;
-  try {
-    remove(root);
-    if (!exists(root)) return;
-  } catch (error) {
-    if (error?.code !== "EACCES" && error?.code !== "EPERM") throw error;
-  }
+  let rootPresent = true;
+  try { remove(root); rootPresent = exists(root); } catch {}
+  if (!rootPresent) return;
 
   let temporaryRoot;
   try {
     temporaryRoot = (io.makeTemporaryRoot ?? (() => mkdtempSync("/tmp/valet-kubernetes-remove-")))();
     const runtime = join(temporaryRoot, "run");
     mkdirSync(runtime, { mode: 0o700 });
-    const status = (io.removeInUserNamespace ?? ((target) => spawnSync(
+    const result = (io.removeInUserNamespace ?? ((target) => spawnSync(
       "/usr/bin/rootlesskit",
       ["--state-dir=" + join(runtime, "state"), "/bin/rm", "-rf", "--", target],
-      { env: { ...process.env, HOME: "/home/dockerd", XDG_RUNTIME_DIR: runtime }, stdio: "ignore", timeout: 30_000 },
-    ).status))(root);
-    if (status !== 0 || exists(root)) throw stateRemovalError();
+      { env: { ...process.env, HOME: "/home/dockerd", XDG_RUNTIME_DIR: runtime }, stdio: "ignore", timeout: STATE_REMOVAL_TIMEOUT_MS },
+    )))(root);
+    const status = typeof result === "number" ? result : result.status;
+    const interrupted = typeof result === "object" && result !== null &&
+      ((result.signal !== null && result.signal !== undefined) || result.error?.code === "ETIMEDOUT");
+    if (status !== 0 || exists(root)) throw stateRemovalError(interrupted);
   } catch (error) {
     if (error?.code === "state_removal_failed") throw error;
     throw stateRemovalError();
   } finally {
     if (temporaryRoot) {
-      try { rmSync(temporaryRoot, { recursive: true, force: true }); }
-      catch { throw stateRemovalError(); }
+      try { (io.removeTemporaryRoot ?? ((path) => rmSync(path, { recursive: true, force: true })))(temporaryRoot); }
+      catch {}
     }
   }
 }
@@ -594,7 +596,7 @@ export function stop(procRoot = "/proc", cleanup = cleanupOwned, removeRoot = re
     });
     return fail("Kubernetes cleanup did not drain its owned cgroup. Retry stop.", 22);
   }
-  let committed = false; let removalFailed = false;
+  let committed = false; let removalFailure = null;
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
     if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
@@ -603,10 +605,10 @@ export function stop(procRoot = "/proc", cleanup = cleanupOwned, removeRoot = re
       if (error?.code !== "state_removal_failed") throw error;
       atomicJson(STATUS_PATH, { state: "error", error: "state_removal_failed", epoch: null });
       if (existsSync(OP_PATH)) unlinkSync(OP_PATH);
-      removalFailed = true;
+      removalFailure = error;
     }
   });
-  if (removalFailed) return fail("Kubernetes state removal failed (state_removal_failed). Recreate the sandbox, then retry.", 22);
+  if (removalFailure) return fail(removalFailure.message, removalFailure.exitCode);
   return committed ? stoppedReport() : fail("The stop Operation was superseded. Retry the command.", 4);
 }
 export function validateArchive(path, freeBytes = statfsSync(ROOT).bavail * statfsSync(ROOT).bsize) {

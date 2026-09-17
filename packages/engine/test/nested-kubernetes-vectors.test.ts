@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -19,6 +20,7 @@ import {
   lifecycleKernel,
   mapKernel,
   SCOPE,
+  STATE_REMOVAL_TIMEOUT_MS,
   startupKernel,
   startRecoveryKernel,
   statusKernel,
@@ -200,6 +202,12 @@ describe("nested Kubernetes normative vectors", () => {
 });
 
 describe("state root removal", () => {
+  it("allows the namespaced remover to use the operation budget", () => {
+    expect(STATE_REMOVAL_TIMEOUT_MS).toBe(600_000);
+    const helper = readFileSync(new URL("../../../docker/valet-kubernetes.mjs", import.meta.url), "utf8");
+    expect(helper).toContain("timeout: STATE_REMOVAL_TIMEOUT_MS");
+  });
+
   it("retries access failures in the subordinate-mapped user namespace", () => {
     let present = true;
     let namespacedTarget = "";
@@ -209,6 +217,16 @@ describe("state root removal", () => {
       removeInUserNamespace: (target: string) => { namespacedTarget = target; present = false; return 0; },
     });
     expect(namespacedTarget).toBe(ROOT);
+  });
+
+  it("retries every direct removal error", () => {
+    let present = true;
+    removeStateRoot(ROOT, {
+      remove: () => { throw Object.assign(new Error("busy"), { code: "EBUSY" }); },
+      exists: () => present,
+      removeInUserNamespace: () => { present = false; return 0; },
+    });
+    expect(present).toBe(false);
   });
 
   it("fails closed when direct and namespaced removal both fail", () => {
@@ -221,6 +239,34 @@ describe("state root removal", () => {
       });
     } catch (error) { failure = error; }
     expect(failure).toMatchObject({ code: "state_removal_failed", exitCode: 22 });
+  });
+
+  it("reports an interrupted namespaced removal as retryable", () => {
+    let failure: unknown;
+    try {
+      removeStateRoot(ROOT, {
+        remove: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+        exists: () => true,
+        removeInUserNamespace: () => spawnSync("/bin/sh", ["-c", "sleep 1"], { timeout: 20 }),
+      });
+    } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ code: "state_removal_failed", exitCode: 22 });
+    expect(String(failure)).toContain("Retry stop");
+    expect(String(failure)).not.toContain("Recreate the sandbox");
+  });
+
+  it("ignores temporary cleanup failure after Root is absent", () => {
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "valet-kubernetes-cleanup-"));
+    let present = true;
+    expect(() => removeStateRoot(ROOT, {
+      remove: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+      exists: () => present,
+      makeTemporaryRoot: () => temporaryRoot,
+      removeInUserNamespace: () => { present = false; return 0; },
+      removeTemporaryRoot: () => { throw new Error("cleanup failed"); },
+    })).not.toThrow();
+    expect(present).toBe(false);
+    rmSync(temporaryRoot, { recursive: true, force: true });
   });
 
   it("refuses every removal target except the exact state root", () => {
