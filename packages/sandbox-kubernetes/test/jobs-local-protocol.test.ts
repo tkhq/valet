@@ -219,7 +219,7 @@ describe.skipIf(!hasSetsid || !hasBase64W0)("job-mode shell protocol against a r
     const kickoff = sh(
       jobKickoffCommand(
         execId,
-        "printf hi; printf '\\xf0\\x9f'; sleep 0.3; printf '\\x9a\\x80'; printf END",
+        "printf hi; printf '\\360\\237'; sleep 0.3; printf '\\232\\200'; printf END",
       ),
     );
     expect(kickoff.status).toBe(0);
