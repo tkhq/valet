@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { capabilityKernel, cgroupMembershipKernel, LEAF_CONTROLLERS, LEAF_CONVERGENCE, leafConvergenceKernel, lifecycleKernel, mapKernel, startupKernel, statusKernel } from "../../docker/valet-kubernetes.mjs";
+import { capabilityKernel, cgroupMembershipKernel, cmdlineIdentityKernel, K3S_ARGV, LEAF_CONTROLLERS, LEAF_CONVERGENCE, leafConvergenceKernel, lifecycleKernel, mapKernel, startupKernel, statusKernel } from "../../docker/valet-kubernetes.mjs";
 
 const root = new URL("../../", import.meta.url);
 const specText = readFileSync(new URL("docs/specs/2026-09-12-nested-kubernetes-design.md", root), "utf8");
@@ -12,6 +12,14 @@ const canonical = (value) => value === null || typeof value !== "object" ? JSON.
     : `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
 const equal = (a, b) => canonical(a) === canonical(b);
 const fail = (message) => { throw new Error(message); };
+const cmdlineInput = (input, argv = K3S_ARGV) => {
+  if (input === "exact") return Buffer.from(`${argv.join("\0")}\0`);
+  if (input === "rewritten") return Buffer.concat([Buffer.from(`${argv[0]}\0server\0`), Buffer.alloc(280)]);
+  if (input === "foreign") return Buffer.from("/usr/bin/sleep\0" + "100\0");
+  if (input === "prefix") return Buffer.from("/usr/local/bin/k3s-evil\0server\0");
+  if (input === "empty") return Buffer.alloc(0);
+  fail(`invalid cmdline input ${input}`);
+};
 
 function expandCover(cover) {
   const one = /^K(\d{2,3})$/.exec(cover);
@@ -57,7 +65,7 @@ function validate(spec, data) {
   if (!equal(data.imageTools?.slirp4netns, { package: "slirp4netns=1.2.0-1", path: "/usr/bin/slirp4netns", provenance: "Debian bookworm main" })) fail("invalid slirp4netns contract");
   for (const vector of data.statusVectors) if (!vector.expected.stdout.includes(`\"kubeconfig\":\"${kubeconfig}\"`)) fail(`status kubeconfig drift ${vector.id}`);
 
-  const groups = ["capabilityVectors", "mapVectors", "cgroupVectors", "startupVectors", "leafConvergenceVectors", "leaderStateVectors", "startRecoveryVectors", "stopGuardVectors", "epochRecoveryVectors", "lifecycleVectors", "statusVectors", "acceptanceVectors"];
+  const groups = ["capabilityVectors", "mapVectors", "cgroupVectors", "cmdlineIdentityVectors", "startupVectors", "leafConvergenceVectors", "leaderStateVectors", "startRecoveryVectors", "stopGuardVectors", "epochRecoveryVectors", "lifecycleVectors", "statusVectors", "acceptanceVectors"];
   const vectors = groups.flatMap((group) => {
     if (!Array.isArray(data[group]) || data[group].length === 0) fail(`missing vector group ${group}`);
     return data[group].map((vector) => ({ ...vector, group }));
@@ -89,6 +97,7 @@ function validate(spec, data) {
   }
   for (const vector of data.mapVectors) if (!equal(mapKernel(vector.input), vector.expected)) fail(`map vector ${vector.id}`);
   for (const vector of data.cgroupVectors) if (!equal(cgroupMembershipKernel(vector.input), vector.expected)) fail(`cgroup vector ${vector.id}`);
+  for (const vector of data.cmdlineIdentityVectors) if (!equal(cmdlineIdentityKernel(cmdlineInput(vector.input), data.k3sArgv), vector.expected)) fail(`cmdline identity vector ${vector.id}`);
   for (const vector of data.startupVectors) if (!equal(startupKernel(vector.input), vector.expected)) fail(`startup vector ${vector.id}`);
   for (const vector of data.leafConvergenceVectors) if (!equal(leafConvergenceKernel(vector.input), vector.expected)) fail(`leaf convergence vector ${vector.id}`);
   const zombie = data.leaderStateVectors.find(({ id }) => id === "leader-zombie");
@@ -106,6 +115,16 @@ function validate(spec, data) {
 const result = validate(specText, source);
 if (source.cgroupVectors.every((vector) => (vector.input === "0::/init/valet-kubernetes") === vector.expected)) {
   fail("exact cgroup-match mutation was accepted");
+}
+const cmdlineMutations = [
+  ["byte-exact cmdline", (cmdline, argv) => cmdline.equals(Buffer.from(`${argv.join("\0")}\0`))],
+  ["prefix cmdline", (cmdline) => {
+    const separator = cmdline.indexOf(0);
+    return separator >= 0 && cmdline.subarray(0, separator).toString().startsWith("/usr/local/bin/k3s");
+  }],
+];
+for (const [name, kernel] of cmdlineMutations) {
+  if (source.cmdlineIdentityVectors.every((vector) => kernel(cmdlineInput(vector.input), source.k3sArgv) === vector.expected)) fail(`${name} mutation was accepted`);
 }
 const mutations = [
   ["duplicate requirement", `${specText}\n[K01]`, clone(source)],
@@ -125,4 +144,4 @@ for (const [name, spec, data] of mutations) {
   try { validate(spec, data); } catch { rejected = true; }
   if (!rejected) fail(`mutation was accepted: ${name}`);
 }
-console.log(`nested-kubernetes vectors passed: ${result.requirements} requirements, ${result.vectors} vectors, ${mutations.length} mutation probes`);
+console.log(`nested-kubernetes vectors passed: ${result.requirements} requirements, ${result.vectors} vectors, ${mutations.length + cmdlineMutations.length} mutation probes`);

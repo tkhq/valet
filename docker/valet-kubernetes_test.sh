@@ -49,6 +49,24 @@ if (helper.leaderState(record, proc) !== "owned") throw new Error("healthy leade
 if (helper.startRecoveryKernel(record, proc) !== "reuse-owned") throw new Error("start recovery did not reuse a healthy leader");
 if (helper.stopGuardKernel(record, proc) !== "allow-cleanup") throw new Error("stop refused a healthy owned leader");
 if (helper.epochRecoveryKernel(record, proc) !== "refuse-live") throw new Error("epoch recovery deleted a live owned leader");
+const rewritten = Buffer.concat([Buffer.from(`${helper.K3S_ARGV[0]}\0server\0`), Buffer.alloc(280)]);
+writeFileSync(join(proc, String(pid), "cmdline"), rewritten);
+if (!helper.cmdlineIdentityKernel(rewritten, helper.K3S_ARGV)) throw new Error("rewritten k3s title was rejected");
+if (!helper.identityValid(record, proc)) throw new Error("rewritten leader identity was rejected");
+if (helper.stopGuardKernel(record, proc) !== "allow-cleanup") throw new Error("stop refused a rewritten live leader");
+const rewrittenScope = join(tmp, "rewritten-stop-scope");
+mkdirSync(join(rewrittenScope, "child"), { recursive: true });
+if (!helper.removeOwnedCgroupDirectories(rewrittenScope) || existsSync(rewrittenScope)) throw new Error("rewritten leader stop recovery did not clean its scope");
+const statePath = join(tmp, "rewritten-state.json");
+const pidPath = join(tmp, "rewritten-pid.json");
+writeFileSync(statePath, JSON.stringify({ state: "ready", error: null, epoch: "test" }));
+writeFileSync(pidPath, JSON.stringify(record));
+const snapshot = helper.stateSnapshot(proc, { status: statePath, pid: pidPath });
+const ready = helper.statusKernel({ persisted: snapshot.stored.state, identity: snapshot.identity, readiness: "ready", errorReason: snapshot.stored.error });
+if (ready.exit !== 0 || JSON.parse(ready.stdout).state !== "ready") throw new Error("rewritten leader status was not ready");
+if (helper.cmdlineIdentityKernel(Buffer.alloc(0), helper.K3S_ARGV)) throw new Error("empty cmdline was accepted");
+if (helper.cmdlineIdentityKernel(Buffer.from("/usr/bin/sleep\0"), helper.K3S_ARGV)) throw new Error("foreign cmdline was accepted");
+if (helper.cmdlineIdentityKernel(Buffer.from("/usr/local/bin/k3s-evil\0server\0"), helper.K3S_ARGV)) throw new Error("cmdline prefix trick was accepted");
 writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes-foreign/leaf\n");
 if (helper.identityValid(record, proc)) throw new Error("foreign sibling identity was accepted");
 if (helper.leaderState(record, proc) !== "foreign") throw new Error("live foreign leader was not classified as foreign");
@@ -180,8 +198,21 @@ for (const path of [...missingEvac.writes, ...raced.writes, ...protectedLeader.w
   if (path !== join(owner, "cgroup.subtree_control") && path !== join(owner, "k3s_evac") && path !== join(owner, "k3s_evac", "cgroup.procs")) throw new Error(`convergence escaped leaf: ${path}`);
 }
 if (helper.convergeLeaf(raced.fakeLeaf, join(tmp, "foreign", "k3s_evac"), required, raced.io)) throw new Error("foreign evacuation path was accepted");
+writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) S ${Array(18).fill("0").join(" ")} 123 0\n`);
+writeFileSync(join(proc, String(pid), "status"), "Name:\tk3s\nState:\tS\nUid:\t1500\t1500\t1500\t1500\n");
+writeFileSync(join(proc, String(pid), "cmdline"), rewritten);
+writeFileSync(join(proc, String(pid), "cgroup"), "0::/init/valet-kubernetes/leaf/k3s_evac\n");
 NODE
 VALET_SANDBOX_EPOCH=test node "$TMP/kernel-test.mjs" "$HELPER" "$TMP"
+
+# A live rewritten-title leader passes the production stop guard and reaches cleanup.
+mkdir -p "$STATE"
+printf '%s\n' '{"state":"error","error":"ownership_failure","epoch":"test"}' > "$STATE/state.json"
+cp "$TMP/rewritten-pid.json" "$STATE/server.pid.json"
+chmod 700 "$STATE"; chmod 600 "$STATE/state.json" "$STATE/server.pid.json"
+out=$(VALET_SANDBOX_EPOCH=test node --input-type=module -e "const helper=await import('$HELPER'); let cleaned=false; const code=helper.stop('$TMP/proc', () => { cleaned=true; return true; }); if (!cleaned) throw new Error('stop did not run cleanup'); process.exitCode=code") || fail "rewritten-title stop failed"
+node -e 'const x=JSON.parse(process.argv[1]); if(x.state!=="stopped"||x.schema!==1) process.exit(1)' "$out"
+[ ! -e "$STATE" ] || fail "rewritten-title stop retained state"
 
 # Exercise the real cgroupfs stop path when the runner delegates a writable scope.
 if mkdir "$SCOPE" 2>/dev/null; then

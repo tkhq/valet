@@ -138,6 +138,13 @@ function procIdentity(pid, procRoot = "/proc") {
 export function cgroupMembershipKernel(line, owned = "/init/valet-kubernetes") {
   return line === `0::${owned}` || line.startsWith(`0::${owned}/`);
 }
+export function cmdlineIdentityKernel(cmdline, argv = K3S_ARGV) {
+  const exact = Buffer.from(`${argv.join("\0")}\0`);
+  if (cmdline.equals(exact)) return true;
+  if (cmdline.length === 0) return false;
+  const separator = cmdline.indexOf(0);
+  return separator >= 0 && cmdline.subarray(0, separator).toString() === "/usr/local/bin/k3s";
+}
 export function startupKernel({ leader, deadlineExpired }) {
   if (leader === "exited") return "server_exited";
   if (leader === "foreign") return "ownership_failure";
@@ -218,7 +225,7 @@ export function identityValid(record, procRoot = "/proc") {
     return now.startTime === record.startTime && now.bootId === record.bootId && now.uid === 1500 &&
       record.uid === 1500 && record.epoch === EPOCH && owned !== null &&
       record.argvDigest === createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") &&
-      readFileSync(`${procRoot}/${record.pid}/cmdline`).equals(Buffer.from(`${K3S_ARGV.join("\0")}\0`)) &&
+      cmdlineIdentityKernel(readFileSync(`${procRoot}/${record.pid}/cmdline`), K3S_ARGV) &&
       readFileSync(`${procRoot}/${record.pid}/cgroup`, "utf8").split("\n").some((line) => cgroupMembershipKernel(line, owned));
   } catch { return false; }
 }
@@ -259,10 +266,10 @@ export function withLock(shared, fn) {
     closeSync(fd);
   }
 }
-function stateSnapshot() {
-  const stored = readJson(STATUS_PATH, { state: "stopped", error: null });
-  const pid = readJson(PID_PATH, null);
-  return { stored, identity: pid && identityValid(pid) ? "valid" : "dead" };
+export function stateSnapshot(procRoot = "/proc", paths = { status: STATUS_PATH, pid: PID_PATH }) {
+  const stored = readJson(paths.status, { state: "stopped", error: null });
+  const pid = readJson(paths.pid, null);
+  return { stored, identity: pid && identityValid(pid, procRoot) ? "valid" : "dead" };
 }
 function stateReport(readiness = "unknown", snapshot = stateSnapshot()) {
   return statusKernel({ persisted: snapshot.stored.state, identity: snapshot.identity, readiness, errorReason: snapshot.stored.error });
@@ -511,13 +518,13 @@ function cleanupOwned() {
   } catch { return false; }
 }
 function stoppedReport() { process.stdout.write(statusKernel({ persisted: "stopped", identity: "dead", readiness: "unknown" }).stdout); return 0; }
-function stop() {
+export function stop(procRoot = "/proc", cleanup = cleanupOwned) {
   let stopped = false; let unsafe = false; let active = null;
   withLock(false, () => {
     const status = readJson(STATUS_PATH, { state: "stopped" });
     const pid = readJson(PID_PATH, null);
     if (status.state === "stopped" && !pid && !existsSync(ROOT)) { stopped = true; return; }
-    if (stopGuardKernel(pid) === "refuse-foreign") { unsafe = true; return; }
+    if (stopGuardKernel(pid, procRoot) === "refuse-foreign") { unsafe = true; return; }
     active = readJson(OP_PATH, null);
     if (active && ownerValid(active.owner)) { active.cancelRequested = true; atomicJson(OP_PATH, active); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH }); }
   });
@@ -535,7 +542,7 @@ function stop() {
     if (current && ownerValid(current.owner)) throw Object.assign(new Error("Another Kubernetes operation became active. Retry stop."), { exitCode: 24 });
     op = operation("stop"); atomicJson(OP_PATH, op); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH });
   });
-  if (!cleanupOwned()) {
+  if (!cleanup()) {
     withLock(false, () => {
       const claim = readJson(OP_PATH, null);
       if (claim?.id === op.id && !claim.cancelRequested && ownerValid(claim.owner)) { atomicJson(STATUS_PATH, { state: "error", error: "stop_failed", epoch: EPOCH }); unlinkSync(OP_PATH); }
