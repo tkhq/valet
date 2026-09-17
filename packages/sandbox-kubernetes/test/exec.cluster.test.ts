@@ -318,7 +318,7 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
       deps,
       podName,
       execId,
-      "printf hi; printf '\\xf0\\x9f'; sleep 0.3; printf '\\x9a\\x80'; printf END",
+      "printf hi; printf '\\360\\237'; sleep 0.3; printf '\\232\\200'; printf END",
     );
 
     let offset = 0;
