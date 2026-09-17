@@ -60,7 +60,6 @@ import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
 import {
   recordCompactionCoverageGap,
-  recordCompactionHeadUnread,
   recordGateUnownedExpired,
   recordSettlement,
   recordTurn,
@@ -4425,6 +4424,31 @@ export class Thread {
       return "insufficient";
     }
 
+    // A checkpoint covers what its summary describes, and no more. The
+    // summarizer input is a budgeted window, so a head bigger than that
+    // budget is summarized across several passes: this pass takes the newest
+    // part the budget holds, and the older part stays in live context for a
+    // later pass to take (TKAI-461).
+    //
+    // Entries the superseded checkpoint already covered stay covered. Their
+    // content reaches this summary through `previousSummary`, and
+    // `entriesToAgentMessages` reads only the NEWEST checkpoint, so leaving
+    // them out would put them back into the context an earlier pass removed.
+    const supersededCheckpoint = findMostRecentCompaction(entries);
+    const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
+    const pendingHead = head.filter((e) => !carriedCoverage.has(e.id));
+    if (!pendingHead.some((e) => e.type === "message")) {
+      // Nothing left to reclaim: the checkpoint this pass would supersede
+      // covers every head message already, and what remains (an older
+      // checkpoint, a command result, a decision gate) never reaches the
+      // model context. A new checkpoint would repeat the last one and free
+      // nothing. Report it the way the caller handles any futile pass, so
+      // the breaker counts it instead of compacting again on the next turn.
+      // This is not a coverage gap: a gap means live history would be lost,
+      // and there is no live history here.
+      return prunePlan.willCommit ? "pruned" : "noop";
+    }
+
     // Step 3: summarize.
     await session.emit(
       { type: "compaction_start", threadId: this.id },
@@ -4436,13 +4460,12 @@ export class Thread {
     // the web store's compacting indicator only clears on the end frame. The
     // finally covers the summarizer AND the persist/rebuild steps.
     try {
-      const previousSummary = findMostRecentCompaction(entries)?.summary;
+      const previousSummary = supersededCheckpoint?.summary;
       // Overflow retry (TKAI-306): if the summarize call itself blows the
       // summarizer model's context, shrink the input and try again. The
-      // CompactionEntry below still covers the FULL head. Under overflow
-      // duress, losing the oldest detail from the summary beats failing the
-      // compaction outright, and `previousSummary` still anchors facts from
-      // earlier compactions.
+      // checkpoint covers whatever survives the shrink, so a dropped slice
+      // costs a later pass, not the history. `previousSummary` still anchors
+      // facts from earlier compactions.
       // Size the summarizer window with the ruler its payload uses. The
       // conversion caps prose and tool output, so an entry's raw estimate
       // overstates its summarizer cost, by up to 100x for a tool-heavy turn.
@@ -4464,13 +4487,14 @@ export class Thread {
         Math.max(usableTokens(model), SUMMARY_CHECKPOINT_TAIL_MAX_TOKENS),
         SUMMARY_INPUT_MAX_TOKENS,
       );
-      // Head coverage is an allocation rule, not a hope. The checkpoint
-      // below records the FULL head as covered, and `entriesToAgentMessages`
-      // then drops every covered entry from the model context, so the
-      // summarizer input must carry head entries. The head takes its window
-      // from the head alone: a window over [head, tail] aligns onto the
-      // newest turn and leaves the head unread (TKAI-461).
-      let headForSummary = selectSummaryCheckpointTail(head, summaryInputBudget, {
+      // Head coverage is an allocation rule, not a hope. Every covered entry
+      // leaves the model context, so the window the summarizer reads is what
+      // the checkpoint may claim. The window comes from the pending head
+      // alone: a window over [head, tail] aligns onto the newest turn and
+      // leaves the head unread, and a window over already-covered entries
+      // spends the budget on history `previousSummary` already carries
+      // (TKAI-461).
+      let headForSummary = selectSummaryCheckpointTail(pendingHead, summaryInputBudget, {
         sizeOf: sizeForSummary,
       });
       // Recent tail evidence anchors the recovery checkpoint in the current
@@ -4494,35 +4518,25 @@ export class Thread {
       // conversion skips non-message entries and assistant entries that
       // render to nothing, so a window can hold head entries by id and still
       // send the summarizer no head content.
-      const headIds = new Set(head.map((e) => e.id));
+      const pendingHeadIds = new Set(pendingHead.map((e) => e.id));
       const coversHead = (selection: readonly SessionEntry[]): boolean =>
-        selection.some((entry) => headIds.has(entry.id) && sizeForSummary(entry) > 0);
-      // What this guard holds: at least ONE head entry reaches the
-      // summarizer. It does not hold full coverage, and the checkpoint below
-      // is not narrowed to match. `coveredEntryIds` records the whole head.
-      // This input carries only the head's newest budget-fitting suffix. A
-      // head larger than the budget is therefore covered in full and read in
-      // part. Measured on a 400-entry head worth about 403,000 summarizer
-      // tokens: 62 entries reach the model, 400 are recorded as covered.
-      // `compaction-pure.test.ts` pins those numbers. Do not read a passing
-      // guard as a promise that every entry in `coveredEntryIds` was
-      // summarized.
-      // That residual gap is reported, never repaired (CLAUDE.md: alert, do
-      // not auto-repair). The checkpoint write below counts the unread
-      // entries on `valet.compaction.head_entries_unread` and records them on
-      // the span. This branch handles only the total failure, where the head
-      // carries no summarizer text at all. It runs before the summarizer
-      // call, so such a pass costs nothing.
+        selection.some((entry) => pendingHeadIds.has(entry.id) && sizeForSummary(entry) > 0);
+      // This guard handles the pass that can summarize nothing: the pending
+      // head carries no text the summarizer reads, so any checkpoint would
+      // describe an empty transcript. It runs before the summarizer call, so
+      // such a pass costs nothing. A pending head that is only PARTLY
+      // readable is not this case. The checkpoint below claims the window
+      // and no more, so the rest keeps its place in live context.
       if (!coversHead(headForSummary)) {
         span?.setAttributes({
           "valet.compaction.insufficient_reason": "coverage_gap",
           "valet.compaction.input_budget_tokens": summaryInputBudget,
-          "valet.compaction.head_entries": head.length,
+          "valet.compaction.head_entries": pendingHead.length,
         });
         recordCompactionCoverageGap(opts.mode);
         this.emitError(
           "compaction_coverage_gap",
-          `Compaction found no history to summarize. The ${head.length} entries it must replace hold ` +
+          `Compaction found no history to summarize. The ${pendingHead.length} entries it must replace hold ` +
             `no text the summarizer can read. Start a new thread if the context still overflows.`,
         );
         return "coverage_gap";
@@ -4574,6 +4588,20 @@ export class Thread {
       }
 
       // Step 4: persist CompactionEntry.
+      //
+      // The covered set is the window this pass summarized, plus what the
+      // superseded checkpoint covered. Both halves are described by this
+      // summary: the window through the input above, the carried half
+      // through `previousSummary`. Head entries outside the window are not
+      // claimed, so they keep their place in live context and the next pass
+      // sees a shorter pending head.
+      //
+      // `tokenCountBefore` and `fileContext` measure the same covered set, so
+      // the compression ratio reports the history this checkpoint replaced
+      // and not the history it left behind.
+      const summarized = new Set(headForSummary.map((e) => e.id));
+      const covered = new Set([...carriedCoverage, ...summarized]);
+      const coveredEntries = entries.filter((e) => covered.has(e.id));
       const compactionEntry: CompactionEntry = {
         id: uid("c"),
         sessionId: session.id,
@@ -4581,33 +4609,23 @@ export class Thread {
         parentId: null,
         type: "compaction",
         summary: summaryResult.summary,
-        coveredEntryIds: head.map((e) => e.id),
-        tokenCountBefore: estimateTotalTokens(head),
+        coveredEntryIds: coveredEntries.map((e) => e.id),
+        tokenCountBefore: estimateTotalTokens(coveredEntries),
         tokenCountAfter: estimateTokens(summaryResult.summary),
-        fileContext: extractFileContext(head),
+        fileContext: extractFileContext(coveredEntries),
         createdAt: Date.now(),
       };
-      // A head larger than the summarizer input budget is summarized from
-      // the part that fit. Measure that loss instead of hiding it behind a
-      // healthy-looking compression ratio. This is the coverage gap that
-      // actually happens. The guard above catches only the rare total
-      // failure. These entries pass it, and they leave live context with no
-      // summary behind them. The counter carries the entries and the span
-      // carries the tokens. Neither repairs the gap (CLAUDE.md: alert, do not
-      // auto-repair). Narrowing `coveredEntryIds` to the part that was read
-      // would keep unsummarized entries in a context compaction was called
-      // to shrink.
-      const summarized = new Set(headForSummary.map((e) => e.id));
-      const unreadHead = head.filter((e) => !summarized.has(e.id));
-      // Record a real gap only: a zero point on every healthy pass would
-      // bury the signal under the baseline rate.
-      if (unreadHead.length > 0) recordCompactionHeadUnread(opts.mode, unreadHead.length);
+      // Head entries this pass deferred to the next one. They are live
+      // context, not lost history, so this is a size signal and not a
+      // violation: a head that needs many passes shows up here as a large
+      // deferral that shrinks pass over pass.
+      const deferredHead = pendingHead.filter((e) => !summarized.has(e.id));
       span?.setAttributes({
         "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
         "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
         "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
-        "valet.compaction.entries_unsummarized": unreadHead.length,
-        "valet.compaction.tokens_unsummarized": estimateTotalTokens(unreadHead),
+        "valet.compaction.head_entries_deferred": deferredHead.length,
+        "valet.compaction.head_tokens_deferred": estimateTotalTokens(deferredHead),
       });
       // Fenced under the current turn's attempt (compaction is always in-turn).
       await this.appendEntry(compactionEntry, this.fence);

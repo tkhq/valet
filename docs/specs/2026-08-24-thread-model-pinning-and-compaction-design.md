@@ -398,10 +398,12 @@ inactive branches.
 
 Compaction now selects, prunes, and summarizes entries from the active path.
 The compaction entry points to the prior active leaf. Its `coveredEntryIds`
-contains the compacted path prefix. The summarizer input has a 64,000-token
-limit, and it is allocated in one order: the head first, the recent tail
-second. The head takes its window from the head alone, so the newest turn
-cannot pull the window off the history the checkpoint replaces. The recent tail
+contains the part of the path prefix this summary describes. The summarizer
+input has a 64,000-token limit, and it is allocated in one order: the head
+first, the recent tail second. The head takes its window from the entries the
+active checkpoint has not covered yet, so neither the newest turn nor history a
+previous summary already carries can pull the window off the entries this
+checkpoint will replace. The recent tail
 then takes what the head leaves, up to 8,000 estimated tokens, and it is
 trimmed to what fits. A newest entry that alone exceeds that budget leaves no
 tail evidence. The tail stays verbatim in live context either way. Existing
@@ -428,30 +430,43 @@ no budget, so a window can stop on them alone. The selection steps back to the
 newest entry the summarizer can read, and `summarize` refuses an input that
 converts to an empty transcript.
 
-`coveredEntryIds` records the whole head, and the rebuild drops every covered
-entry from model context. The coverage check before the summarizer call holds
-one property: at least one head entry reaches the summarizer. It does not hold
-full coverage. A head larger than the summarizer input budget is covered in
-full and read in part. On a 400-entry head worth about 403,000 summarizer
-tokens, 62 entries reach the model and all 400 are recorded as covered.
+`coveredEntryIds` records what the summary describes, and the rebuild drops
+every covered entry from model context. One pass therefore claims two sets: the
+window it sent the summarizer, and whatever the checkpoint it supersedes already
+covered. The carried half reaches the new summary through `previousSummary`, and
+the rebuild reads only the newest checkpoint, so a pass that dropped the carried
+half would put earlier covered entries back into the context.
+
+Head entries outside the window are not claimed. They keep their place in live
+context, and the next pass sees a shorter pending head. A head larger than the
+summarizer input budget is compacted over several passes. On a 400-entry head
+worth about 403,000 summarizer tokens, 62 entries fit one window;
 `compaction-pure.test.ts` pins that measurement.
 
-The two halves of that gap report separately, and compaction repairs neither.
+The chain converges. Each written checkpoint covers at least one head entry that
+was not covered before, because the window is selected from the pending head
+alone and the guard below rejects a window with no readable entry in it. The
+count of uncovered head entries therefore falls with every pass, and a pass that
+finds every head entry already covered reclaims nothing and reports `noop`,
+which the caller counts toward the breaker. A repeated pass on one shape cannot
+spin without progress.
 
-- No head entry reaches the summarizer. The pass emits
+Two blocked cases report separately, and compaction repairs neither.
+
+- The pending head carries no text the summarizer reads. The pass emits
   `compaction_coverage_gap`, records the `valet.compaction.coverage_gap`
   counter, and reports the `coverage_gap` outcome. It writes no checkpoint, so
   the head stays in live context. `/compact` prints this cause and tells the
   user to start a fresh thread. Shortening the newest turn cannot help here,
   which is why this outcome is separate from `insufficient` and carries its own
   message.
-- Some head entries reach the summarizer and the rest do not. This is the
-  common case, and it is the one a checkpoint hides. The pass writes the
-  checkpoint over the full head, counts the unread entries on
-  `valet.compaction.head_entries_unread`, and records the unread entries and
-  tokens on the compaction span. Narrowing `coveredEntryIds` to the part that
-  was read would keep unsummarized entries in the context compaction was
-  called to shrink.
+- The turn that hit the limit cannot be helped by summarizing the head at all.
+  The pass reports `insufficient` with `context_overflow_unrecoverable`.
+
+The compaction span carries the deferred remainder on
+`valet.compaction.head_entries_deferred` and
+`valet.compaction.head_tokens_deferred`. Deferred entries are live context, not
+lost history, so this is a size signal and not a violation.
 
 The overflow retry shrinks the input in the same order it was allocated: tail
 evidence first, then the oldest half of the head, and it stops before a slice

@@ -9,7 +9,6 @@ import {
 // instrument names, descriptions, and attributes these calls land on.
 const recorded = vi.hoisted(() => ({
   coverageGap: [] as string[],
-  headUnread: [] as Array<{ mode: string; entries: number }>,
 }));
 
 vi.mock("../src/metrics.js", async (importOriginal) => {
@@ -18,9 +17,6 @@ vi.mock("../src/metrics.js", async (importOriginal) => {
     ...actual,
     recordCompactionCoverageGap: (mode: string) => {
       recorded.coverageGap.push(mode);
-    },
-    recordCompactionHeadUnread: (mode: string, entries: number) => {
-      recorded.headUnread.push({ mode, entries });
     },
   };
 });
@@ -32,7 +28,6 @@ import {
   VirtualSandboxProvider,
   executeBuiltin,
   type BusEvent,
-  type CompactionEntry,
   type MessageEntry,
   type SessionEntry,
 } from "../src/index.js";
@@ -64,26 +59,6 @@ function message(
   return { ...ids, type: "message", ...row };
 }
 
-/** A head whose oldest turn cannot fit the summarizer input budget. */
-function partialCoverageEntries(sessionId: string, threadId: string): SessionEntry[] {
-  const ids = { sessionId, threadId };
-  return [
-    message(ids, { id: "e-1", parentId: null, role: "user", content: "marker-e-1 first prompt", createdAt: 1 }),
-    message(ids, {
-      id: "e-2", parentId: "e-1", role: "assistant", content: "",
-      parts: Array.from({ length: 12 }, (_, i) => ({
-        type: "text" as const,
-        text: `marker-e-2 step ${i} ${OVERSIZED_STEP}`,
-      })),
-      createdAt: 2,
-    }),
-    message(ids, { id: "e-3", parentId: "e-2", role: "user", content: "marker-e-3 second prompt", createdAt: 3 }),
-    message(ids, { id: "e-4", parentId: "e-3", role: "assistant", content: "marker-e-4 second response", createdAt: 4 }),
-    message(ids, { id: "e-5", parentId: "e-4", role: "user", content: "marker-e-5 third prompt", createdAt: 5 }),
-    message(ids, { id: "e-6", parentId: "e-5", role: "assistant", content: "marker-e-6 third response", createdAt: 6 }),
-  ];
-}
-
 /** A head that holds no text the summarizer can read. */
 function coverageGapEntries(sessionId: string, threadId: string): SessionEntry[] {
   const ids = { sessionId, threadId };
@@ -97,69 +72,6 @@ function coverageGapEntries(sessionId: string, threadId: string): SessionEntry[]
 
 beforeEach(() => {
   recorded.coverageGap.length = 0;
-  recorded.headUnread.length = 0;
-});
-
-describe("compaction metrics: the head the summarizer never read", () => {
-  it("counts the covered head entries a pass left unread", async () => {
-    const faux = registerFauxProvider({
-      provider: "compact-metrics-unread",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
-    });
-    faux.setResponses([fauxAssistantMessage(SUMMARY_RESPONSE)]);
-    const { engine, store } = makeEngine();
-    const session = await engine.createSession({
-      userId: "u",
-      orgId: "o",
-      workspace: "/",
-      sandbox: {},
-      model: faux.getModel("tiny")!,
-      compaction: { tailTurns: 1, autoContinue: false },
-    });
-    const thread = session.thread();
-    await store.appendEntries(session.id, thread.id, partialCoverageEntries(session.id, thread.id));
-
-    const outcome = await thread.compactThread({ mode: "manual" });
-    expect(outcome).toBe("compacted");
-
-    const entries = await store.getEntries(session.id, thread.id);
-    const compaction = entries.find((e): e is CompactionEntry => e.type === "compaction");
-    // The checkpoint claims the full head. e-2 alone exceeds the input
-    // budget, so the summarizer read e-3 and e-4 only.
-    expect(compaction!.coveredEntryIds).toEqual(["e-1", "e-2", "e-3", "e-4"]);
-    expect(recorded.headUnread).toEqual([{ mode: "manual", entries: 2 }]);
-    faux.unregister();
-  });
-
-  it("records nothing when the summarizer read every covered entry", async () => {
-    const faux = registerFauxProvider({
-      provider: "compact-metrics-full",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
-    });
-    faux.setResponses([fauxAssistantMessage(SUMMARY_RESPONSE)]);
-    const { engine, store } = makeEngine();
-    const session = await engine.createSession({
-      userId: "u",
-      orgId: "o",
-      workspace: "/",
-      sandbox: {},
-      model: faux.getModel("tiny")!,
-      compaction: { tailTurns: 1, autoContinue: false },
-    });
-    const thread = session.thread();
-    const small = partialCoverageEntries(session.id, thread.id);
-    // Replace the oversized run with a step the input budget holds.
-    small[1] = message(
-      { sessionId: session.id, threadId: thread.id },
-      { id: "e-2", parentId: "e-1", role: "assistant", content: "marker-e-2 first response", createdAt: 2 },
-    );
-    await store.appendEntries(session.id, thread.id, small);
-
-    const outcome = await thread.compactThread({ mode: "manual" });
-    expect(outcome).toBe("compacted");
-    expect(recorded.headUnread).toEqual([]);
-    faux.unregister();
-  });
 });
 
 describe("compaction metrics: the head the summarizer could not read at all", () => {
@@ -186,7 +98,6 @@ describe("compaction metrics: the head the summarizer could not read at all", ()
     expect(outcome).toBe("coverage_gap");
 
     expect(recorded.coverageGap).toEqual(["manual"]);
-    expect(recorded.headUnread).toEqual([]);
     const errors = events.filter(
       (e) => e.event.type === "error" && e.event.code === "compaction_coverage_gap",
     );

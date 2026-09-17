@@ -23,7 +23,6 @@ vi.mock("@opentelemetry/api", () => ({
 
 import {
   recordCompactionCoverageGap,
-  recordCompactionHeadUnread,
   recordSandboxWorkspaceGrow,
 } from "../src/metrics.js";
 
@@ -53,19 +52,6 @@ describe("compaction coverage metrics", () => {
       name: "valet.compaction.coverage_gap",
       value: 1,
       attributes: { mode: "reactive" },
-    });
-  });
-
-  it("counts the head entries a written checkpoint covered but left unread", () => {
-    recordCompactionHeadUnread("proactive", 7);
-
-    expect(metricState.descriptions.get("valet.compaction.head_entries_unread")).toContain(
-      "do not ignore",
-    );
-    expect(metricState.points).toContainEqual({
-      name: "valet.compaction.head_entries_unread",
-      value: 7,
-      attributes: { mode: "proactive" },
     });
   });
 });

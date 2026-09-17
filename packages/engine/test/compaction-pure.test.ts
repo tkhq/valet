@@ -368,10 +368,11 @@ describe("compaction: summary checkpoint tail", () => {
   });
 
   it("sends a budget-fitting suffix of a long head, not the whole head", () => {
-    // The size of the gap `coveredEntryIds` hides. A checkpoint records every
-    // head entry; this window is what the summarizer actually reads. The
-    // numbers here are the ones quoted in `compactThreadInner` and in the
-    // compaction spec, so a budget or cap change moves them together.
+    // How much of a long head one pass can take. The checkpoint claims this
+    // window and no more, so the rest of the head stays in live context and
+    // the next pass starts where this one stopped. The numbers here are the
+    // ones quoted in the compaction spec, so a budget or cap change moves
+    // them together.
     const head: SessionEntry[] = [];
     for (let i = 0; i < 400; i++) {
       head.push(
@@ -396,8 +397,8 @@ describe("compaction: summary checkpoint tail", () => {
 
     const sent = selectSummaryCheckpointTail(head, 64_000, { sizeOf });
     expect(sent).toHaveLength(62);
-    // The window is a suffix: the oldest 338 entries never reach the model,
-    // and the checkpoint still marks all 400 covered.
+    // The window is a suffix: the oldest 338 entries do not reach the model
+    // on this pass, so they are not covered and a later pass takes them.
     expect(sent[0].id).toBe(head[338].id);
     expect(sent.at(-1)!.id).toBe(head.at(-1)!.id);
   });
