@@ -463,6 +463,13 @@ Two blocked cases report separately, and compaction repairs neither.
 - The turn that hit the limit cannot be helped by summarizing the head at all.
   The pass reports `insufficient` with `context_overflow_unrecoverable`.
 
+Both outcomes are final for the turn that produced them. A reactive pass that
+reports one of them counts one failure toward the breaker, and the post-turn
+proactive check stands down for the rest of that turn. The error reaches the
+user once, the counter records one violation, and the breaker advances by one.
+The next turn starts clear, because its transcript may be one compaction can
+help.
+
 The compaction span carries the deferred remainder on
 `valet.compaction.head_entries_deferred` and
 `valet.compaction.head_tokens_deferred`. Deferred entries are live context, not

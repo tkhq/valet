@@ -1858,12 +1858,69 @@ describe("compaction: summarizer input covers the head", () => {
     const codes = events
       .filter((e) => e.event.type === "error")
       .map((e) => (e.event as { code: string }).code);
-    expect(codes).toContain("compaction_coverage_gap");
+    // One failure, one report. The post-turn proactive check sees the same
+    // oversized context and must not run a second pass over it, which would
+    // print the identical error again for one turn.
+    expect(codes.filter((c) => c === "compaction_coverage_gap")).toHaveLength(1);
     // The recorded overflow response stands. Retrying the turn would just
     // overflow again, so the retry response is still queued.
     expect(faux.getPendingResponseCount()).toBe(1);
     const entries = await store.getEntries(session.id, thread.id);
     expect(entries.filter((e) => e.type === "compaction")).toHaveLength(0);
+    faux.unregister();
+  });
+
+  it("counts one blocked reactive pass once toward the breaker", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-coverage-reactive-breaker",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    const summarizerError = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" });
+    faux.setResponses([
+      // Turn 1: the turn overflows, reactive compaction finds an unreadable
+      // head, and the pass reports the gap. Breaker count 1.
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "prompt is too long: 100 tokens > 50 maximum",
+      }),
+      // Turns 2 and 3: turn 1 left a readable prompt in the head, so the
+      // proactive pass reaches the summarizer and it fails. Counts 2 and 3.
+      fauxAssistantMessage("r2"), summarizerError,
+      fauxAssistantMessage("r3"), summarizerError,
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, unreadableHead(session.id, thread.id));
+
+    for (let turn = 1; turn <= 3; turn++) {
+      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+      await waitFor(
+        () =>
+          events.filter(
+            (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+          ).length >= turn,
+      );
+    }
+
+    const codes = events
+      .filter((e) => e.event.type === "error")
+      .map((e) => (e.event as { code: string }).code);
+    // The blocked reactive pass reports once and counts once. It counts,
+    // because the thread must stop retrying a compaction that cannot help;
+    // it counts ONCE, because one failure is one failure.
+    expect(codes.filter((c) => c === "compaction_coverage_gap")).toHaveLength(1);
+    expect(codes.filter((c) => c === "compaction_failed")).toHaveLength(2);
+    expect(codes.filter((c) => c === "compaction_circuit_open")).toHaveLength(1);
+    expect(faux.getPendingResponseCount()).toBe(0);
     faux.unregister();
   });
 });

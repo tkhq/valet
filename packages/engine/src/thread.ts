@@ -477,6 +477,16 @@ export class Thread {
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
   private overflowRetryInProgress = false;
   /**
+   * Set when a compaction pass in this turn reported an outcome that no
+   * second pass can change: the newest turn is too large, or the head holds
+   * no summarizer-readable text. The reactive path already emitted the
+   * actionable error and counted the failure, so the post-turn proactive
+   * check must not run the same pass again over the same context. Without
+   * this the user saw one failure reported twice in one turn. Cleared at the
+   * start of every turn.
+   */
+  private turnCompactionBlocked = false;
+  /**
    * Consecutive proactive-compaction failures (TKAI-306). At
    * MAX_CONSECUTIVE_COMPACTION_FAILURES the proactive trigger opens the
    * circuit and stops retrying; any successful compaction (manual /compact
@@ -3707,6 +3717,8 @@ export class Thread {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
+    // Per-turn: the next turn may hold a transcript compaction can help.
+    this.turnCompactionBlocked = false;
     this.currentAssistantMessageId = undefined;
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
@@ -4052,6 +4064,14 @@ export class Thread {
           // the actionable error; leave the recorded overflow response and
           // stop, instead of looping. This is the bug that bricked a
           // session when a single pasted transcript exceeded the context.
+          //
+          // Count it once, here. The post-turn proactive check would
+          // otherwise run the identical pass over the identical context: the
+          // user read the same error twice for one failure, and one failure
+          // moved the breaker by one anyway. The breaker still has to move,
+          // or an unhelpable thread runs a doomed pass on every turn.
+          this.turnCompactionBlocked = true;
+          this.bumpCompactionFailureBreaker();
           return;
         }
         // Drop the failed assistant message from the agent transcript and retry.
@@ -4262,6 +4282,10 @@ export class Thread {
   private shouldCompactProactive(): boolean {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return false;
+    // A compaction pass in this turn already reported that it cannot help
+    // this transcript. Running the proactive pass now repeats that report
+    // for one failure and advances the breaker twice.
+    if (this.turnCompactionBlocked) return false;
     // Circuit breaker (TKAI-306): a thread whose proactive compaction keeps
     // failing must not hammer the summarizer on every turn. A successful
     // compaction (including manual /compact) closes the breaker again.
