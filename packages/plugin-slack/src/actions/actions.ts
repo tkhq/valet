@@ -623,7 +623,7 @@ const fetchFile = action(Type.Object({
   }))({
   id: 'slack.fetch_file',
   name: 'Fetch File',
-  description: 'Download a file from Slack. For images, the content is returned visually so you can see it. For text files, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
+  description: 'Download a file from Slack. For images, the content is returned visually so you can see it. For text files and PDFs, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -655,6 +655,9 @@ const fetchFile = action(Type.Object({
     const MAX_IMAGE_DISPLAY = 1 * 1024 * 1024;
     const MAX_IMAGE_FETCH = 10 * 1024 * 1024;
     const MAX_TEXT_SIZE = 1 * 1024 * 1024;
+    // Matches the transport's document budget, so a PDF the inbound path
+    // would accept is not refused here.
+    const MAX_PDF_FETCH = 25 * 1024 * 1024;
 
     // Image files — return via the attachments pipeline so the user can see them in the chat UI
     if (contentType.startsWith('image/')) {
@@ -686,12 +689,47 @@ const fetchFile = action(Type.Object({
       return { success: true, data: { content: text, mimetype: contentType } };
     }
 
+    // PDFs — the host extracts the text, because no sandbox image carries a
+    // PDF tool and the extractor is a native binary that lives beside the api.
+    if (contentType === 'application/pdf') {
+      const buf = await res.arrayBuffer();
+      const filename = parsedUrl.pathname.split('/').pop() || 'document.pdf';
+      if (buf.byteLength > MAX_PDF_FETCH) {
+        return { success: false, error: `PDF too large (${Math.round(buf.byteLength / 1024 / 1024)}MB). Max 25MB.` };
+      }
+      if (!ctx.extractDocument) {
+        return {
+          success: false,
+          error: 'PDF text extraction is not available on this deployment. Ask the user to paste the relevant text, or to re-share the file so it is attached to the message.',
+        };
+      }
+      try {
+        const extracted = await ctx.extractDocument({
+          data: new Uint8Array(buf),
+          mimeType: contentType,
+          name: filename,
+        });
+        if (!extracted) {
+          return {
+            success: false,
+            error: `${filename} has no text layer — it is probably a scan or an image-only PDF. Ask the user for a text version, or for the specific figures you need.`,
+          };
+        }
+        return { success: true, data: { content: extracted.markdown, mimetype: contentType, filename } };
+      } catch (err) {
+        return {
+          success: false,
+          error: `Could not read ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+
     // Other file types — return metadata only
     return {
       success: true,
       data: {
         mimetype: contentType,
-        note: 'File type is not viewable. Only images and text files can be fetched.',
+        note: 'This file type cannot be read here. Images, text files and PDFs can be fetched.',
       },
     };
   },

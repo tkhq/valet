@@ -16,6 +16,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
+  SANDBOX_READY_TIMEOUT_MS,
   type ActionPlugin,
   type ChannelTransport,
   type CommandResultEntry,
@@ -56,6 +57,7 @@ import { userPrincipal } from "../lib/request-principal.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import { digestGate } from "./gate-digest.js";
@@ -1058,6 +1060,35 @@ export class ChannelHost {
     await this.dropLog(orgId, "verify_failed", undefined, `${channelType} webhook verification failed`);
   }
 
+  /**
+   * Puts one non-image channel attachment into the session sandbox.
+   *
+   * Returns `undefined` when the file cannot be stored, so the caller can
+   * degrade to a note. The sandbox has to be awake to hold the file; the
+   * turn that follows needs it awake anyway, and the Slack webhook already
+   * answered 200 before this runs, so the wait costs no provider timeout.
+   */
+  private async storeChannelFile(
+    session: Session,
+    fetched: { data: Uint8Array; mimeType: string; name?: string },
+  ): Promise<IngestedChannelFile | undefined> {
+    const attachment = session.attachment;
+    if (attachment.state === "released") return undefined;
+    try {
+      const { sandbox } = await attachment.ensureReady({ timeoutMs: SANDBOX_READY_TIMEOUT_MS });
+      const stored = await ingestChannelFile({
+        sandbox,
+        name: fetched.name ?? "attachment",
+        mimeType: fetched.mimeType,
+        data: fetched.data,
+      });
+      return stored ?? undefined;
+    } catch (err) {
+      console.error("[channel-host] could not store a channel attachment", err);
+      return undefined;
+    }
+  }
+
   private async maybeReplyUnlinked(transport: ChannelTransport | undefined, conversationKey: string): Promise<void> {
     const now = this.now();
     const last = this.unlinkedReplyAt.get(conversationKey);
@@ -1103,18 +1134,25 @@ export class ChannelHost {
         text += "\n\n[attachment skipped: too large or unavailable]";
         continue;
       }
-      if (!fetched.mimeType.startsWith("image/")) {
-        text += `\n\n[attachment skipped: unsupported media type ${fetched.mimeType}]`;
+      if (fetched.mimeType.startsWith("image/")) {
+        // Signal content is persisted before the turn runs. Keep image data
+        // JSON-safe across that queue boundary.
+        attachments.push({
+          type: "image",
+          url: `data:${fetched.mimeType};base64,${Buffer.from(fetched.data).toString("base64")}`,
+          mimeType: fetched.mimeType,
+          name: fetched.name,
+        });
         continue;
       }
-      // Signal content is persisted before the turn runs. Keep image data
-      // JSON-safe across that queue boundary.
-      attachments.push({
-        type: "image",
-        url: `data:${fetched.mimeType};base64,${Buffer.from(fetched.data).toString("base64")}`,
-        mimeType: fetched.mimeType,
-        name: fetched.name,
-      });
+      // A PDF, spreadsheet or archive cannot ride an image content block, so
+      // it goes to the sandbox instead and the agent reads it from there.
+      const file = await this.storeChannelFile(session, fetched);
+      if (!file) {
+        text += `\n\n[attachment skipped: could not store ${fetched.mimeType}]`;
+        continue;
+      }
+      attachments.push({ type: "file", ...file });
     }
 
     const content: SignalContent = {

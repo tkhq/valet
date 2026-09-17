@@ -297,4 +297,19 @@ describe("changelog generation", () => {
       "immutable",
     );
   });
+
+  it("never publishes an opt-out trailer as the entry description", () => {
+    // Defense in depth: shouldIncludeCommit already drops these, so this
+    // guards the path that builds an entry anyway.
+    const entry = entryFromCommit({
+      commitSha: "abc1234",
+      authoredAt: "2026-09-17T08:23:00Z",
+      subject: "fix(slack): name the channel in Slack read results (#729)",
+      body: "Changelog: none",
+      files: ["packages/plugin-slack/src/actions/actions.test.ts"],
+    });
+    expect(entry.description).toBe("Fixed: Name the channel in Slack read results.");
+    expect(entry.description).not.toContain("none");
+    expect(entry.followUp).toBe(true);
+  });
 });

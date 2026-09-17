@@ -727,6 +727,21 @@ export interface ToolContext {
    * hosts (and tests) that wire no store.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /**
+   * Host-provided text extraction for a document the model cannot read on
+   * its own. A PDF is the case that matters: no sandbox image carries a PDF
+   * text tool, and the extractor ships as a native binary beside the host,
+   * so a plugin action cannot do this itself.
+   *
+   * Returns `null` when the document holds no extractable text (a scanned
+   * page), and throws when extraction is unavailable. Absent on hosts that
+   * wire no extractor — callers must degrade, not fail.
+   */
+  extractDocument?: (doc: {
+    data: Uint8Array;
+    mimeType: string;
+    name?: string;
+  }) => Promise<{ markdown: string } | null>;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /**
    * Optional host policy resolver consulted by `call_tool` before invoking a
@@ -2307,6 +2322,15 @@ export interface CreateSessionOptions {
    * `buildToolContext`. Absent === no `pluginStore` on plugin actions.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /**
+   * Threaded onto `ToolContext.extractDocument` via `buildToolContext`.
+   * Absent === plugin actions get no document extraction.
+   */
+  extractDocument?: (doc: {
+    data: Uint8Array;
+    mimeType: string;
+    name?: string;
+  }) => Promise<{ markdown: string } | null>;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
