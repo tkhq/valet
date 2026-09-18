@@ -2046,6 +2046,10 @@ export interface PrepStep {
 export interface DesiredSandboxSpec {
   /** Target OCI image ref. Ignored by the Task 3 attachment — Task 5 wires it. */
   image?: string;
+  /** Environment values tied to the desired image. These values override
+   * create-time values so callers cannot spoof reserved image metadata.
+   * Undefined removes a create-time value from the provider environment. */
+  env?: Record<string, string | undefined>;
   /** Repository resource overrides. Undefined gives no authoritative opinion;
    * an empty object authoritatively declares no repository overrides. */
   resources?: Pick<SandboxResources, "cpu" | "memory">;

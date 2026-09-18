@@ -155,7 +155,7 @@ async function seedPushedRepoBake(db: AppDb, sourceId: string): Promise<void> {
   await db.insert(bakes).values({
     id: "pb-1",
     sourceId,
-    identityHash: "",
+    identityHash: "recipe-identity",
     commitSha: "abc123",
     imageRef: "valet-prebuild/acme-widgets:abc123",
     status: "pushed",
@@ -218,6 +218,7 @@ describe("resolveSnapshot", () => {
     expect(snap.repoBake?.imageRef).toBe("valet-prebuild/acme-widgets:abc123");
     expect(snap.repoBake?.bakedSha).toBe("abc123");
     expect(snap.repoBake?.bakeId).toBe("pb-1");
+    expect(snap.repoBake?.identityHash).toBe("recipe-identity");
     expect(snap.repoBake?.recipe).toEqual([
       { id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" },
     ]);

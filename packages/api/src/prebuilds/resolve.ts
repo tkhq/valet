@@ -43,9 +43,11 @@ import type { SessionMeta } from "../engine/host.js";
 export interface PrebuildResolution {
   /** The prebuilt image ref to boot the sandbox from. */
   imageRef: string;
-  /** `prebuilds.id` — persisted on `agent_sessions.prebuild_id`. */
+  /** `bakes.id` — persisted on `agent_sessions.bake_id`. */
   prebuildId: string;
-  /** Commit the image baked the repo at (`prebuilds.commit_sha`). The
+  /** Recipe identity stored on the selected bake. */
+  identityHash: string;
+  /** Commit the image baked the repo at (`bakes.commit_sha`). The
    * fetch-on-start diff keys install re-runs off `<bakedSha>..HEAD`. */
   bakedSha: string;
   /** Lockfile-detected install steps snapshotted at build time
@@ -137,6 +139,7 @@ export async function resolvePrebuildImage(
     return {
       imageRef: prebuild.imageRef,
       prebuildId: prebuild.id,
+      identityHash: prebuild.identityHash,
       bakedSha: prebuild.commitSha,
       recipe: parseRecipeSteps(prebuild.recipe),
     };

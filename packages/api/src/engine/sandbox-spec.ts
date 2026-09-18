@@ -37,6 +37,7 @@ export interface ResolveSnapshot {
   repoBake: {
     imageRef: string;
     bakedSha: string;
+    identityHash: string;
     recipe: RecipeStep[];
     bakeId: string;
   } | null;

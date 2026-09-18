@@ -993,9 +993,17 @@ export class SandboxAttachment {
       this.persistResources(desired?.resources, desired?.preserveResourceFields);
       const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
         (desired !== undefined && desired.resources === undefined ? (["cpu", "memory"] as const) : undefined);
+      const createEnv = { ...(this.createOpts.env ?? {}) };
+      for (const [name, value] of Object.entries(desired?.env ?? {})) {
+        if (value === undefined) delete createEnv[name];
+        else createEnv[name] = value;
+      }
       const sandbox = await provider.create({
         ...this.createOpts,
         image: bootImage,
+        // Desired image metadata is reserved. Apply it after create-time env;
+        // undefined removes a spoofed value when no metadata exists.
+        ...(this.createOpts.env !== undefined || desired?.env !== undefined ? { env: createEnv } : {}),
         preserveResourcesOnAdopt: desired !== undefined && desired.resources === undefined,
         preserveResourceFieldsOnAdopt,
         readResourceOverrides: preserveResourceFieldsOnAdopt !== undefined && preserveResourceFieldsOnAdopt.length > 0

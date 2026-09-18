@@ -60,7 +60,7 @@ One sentence: **a sandbox is a cache materialization of a pure spec over a durab
 
 8. **Reconcile is wired only when `capabilities().isolated`** — local/virtual backends exec against the host and get none of this, same gate as credential-only prep.
 
-9. **Source of truth for the running image moves to the attachment.** `CreateSessionOptions.image` is demoted to an initial value; after any replacement the attachment's observed image is authoritative. `agent_sessions.prebuild_id` demotes to historical observability (which bake the session FIRST booted from); it no longer implies the running image. The cached-session-opts-vs-running-pod drift bug class becomes unrepresentable.
+9. **Source of truth for the running image moves to the attachment.** `CreateSessionOptions.image` is demoted to an initial value; after any replacement the attachment's observed image is authoritative. `agent_sessions.bake_id` provides historical observability. A repository bake also supplies reserved `VALET_BAKE_COMMIT`, `VALET_BAKE_IDENTITY`, and `VALET_BAKE_ID` environment values at sandbox creation. The spec environment overrides the create-time environment. A base or stock image supplies none of these values. The cached-session-opts-vs-running-pod drift bug class becomes unrepresentable.
 
 10. **Prep failure semantics carry over as per-step `critical` flags:** clone, credential-script, and Git identity steps are critical on cold creation, adoption, and resume. A critical failure stops the plan. An optional failure logs and continues. applied.json records successful steps; the next window retries failed steps.
 

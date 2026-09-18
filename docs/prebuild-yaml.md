@@ -2,6 +2,24 @@
 
 Place this file at the root of your repository to configure sandbox resources and image prebuilds. All fields are optional. Without this file, image builds use auto-detection and sandboxes use saved defaults.
 
+## Branch sessions and bake provenance
+
+Valet reads image bake recipes from the repository's default branch head. It does not bake a branch recipe when you start a branch session.
+
+Branch sessions use runtime flags from the session's resolved commit. These flags include `kubernetes`, `docker`, `resources`, and `workspaceStorage`. The sandbox image still uses the recipe from the default branch bake.
+
+Use these environment variables to identify the selected repository bake:
+
+| Variable | Value |
+|---|---|
+| `VALET_BAKE_COMMIT` | Commit SHA used for the repository bake. |
+| `VALET_BAKE_IDENTITY` | Identity hash for the resolved recipe and parent image. |
+| `VALET_BAKE_ID` | Internal bake record ID. |
+
+If `VALET_BAKE_COMMIT` is absent, the session did not use a repository bake. The sandbox used a base-image fallback instead.
+
+To test an unmerged recipe, use the local CLI flow below. Valet does not schedule branch bakes on demand.
+
 ## Test the recipe locally
 
 Recipes run inside the platform's image bake, but you can validate and run one from a checkout with the `valet` CLI — no running Valet instance needed:

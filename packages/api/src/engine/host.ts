@@ -1536,6 +1536,11 @@ export class EngineHost {
 
       return {
         image: spec.image !== stockImage ? spec.image : undefined,
+        env: {
+          VALET_BAKE_COMMIT: snap.repoBake?.bakedSha,
+          VALET_BAKE_IDENTITY: snap.repoBake?.identityHash,
+          VALET_BAKE_ID: snap.repoBake?.bakeId,
+        },
         specHash: specHash(spec, resources, repoFlags.preserveResourceFields),
         steps,
         ...(resources !== undefined ? { resources } : {}),
