@@ -155,6 +155,66 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '111.222', channel: 'D2' } });
   });
 
+  it('lookup_user_by_email resolves an explicit email for dm_user', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ok: true,
+        user: { id: 'U123', name: 'ada', profile: { display_name: 'Ada' } },
+      }),
+    );
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'ada@example.com' },
+      pluginCtx(),
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/users.lookupByEmail?email=ada%40example.com');
+    expect(init.method).toBe('GET');
+    expect(result).toEqual({ success: true, data: { id: 'U123', display_name: 'Ada' } });
+  });
+
+  it('lookup_user_by_email rejects a missing recipient email without a fallback', async () => {
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: '   ' },
+      pluginCtx(),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      success: false,
+      error: 'Recipient email is required. Provide the exact Slack account email address.',
+    });
+  });
+
+  it('lookup_user_by_email reports a missing Slack lookup scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'missing_scope' }));
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'ada@example.com' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack recipient lookup needs the users:read.email bot scope. Reinstall the Slack app to grant it.',
+    });
+  });
+
+  it('lookup_user_by_email reports no matching user without a fallback', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'users_not_found' }));
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'nobody@example.com' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'No Slack user matches nobody@example.com. Check the recipient email, then try again.',
+    });
+  });
+
   it('add_reaction posts reactions.add with channel/timestamp/name', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));

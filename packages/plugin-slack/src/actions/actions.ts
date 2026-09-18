@@ -11,7 +11,7 @@ import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
-import { SlackApi } from "../transport/api.js";
+import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn } from "../transport/format.js";
 
@@ -366,6 +366,45 @@ const dmUser = action(Type.Object({
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
     return openAndSendDM(token, p.user, p.text, ctx);
+  },
+});
+
+const lookupUserByEmail = action(Type.Object({
+    email: Type.String({ description: 'Exact Slack account email address.' }),
+  }))({
+  id: 'slack.lookup_user_by_email',
+  name: 'Lookup User by Email',
+  description: 'Resolve one explicit Slack email address to a user ID for dm_user. Use the returned id only for that email recipient. This needs the users:read.email bot scope.',
+  riskLevel: 'low',
+  execute: async (args, ctx) => {
+    const email = args.email.trim();
+    if (email === '') {
+      return { success: false, error: 'Recipient email is required. Provide the exact Slack account email address.' };
+    }
+
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? '';
+    if (!token) return { success: false, error: 'Missing bot_token. Connect the organization Slack app in Settings.' };
+
+    try {
+      const match = await new SlackApi(token).lookupUserByEmail(email);
+      if (!match) {
+        return { success: false, error: `No Slack user matches ${email}. Check the recipient email, then try again.` };
+      }
+      return { success: true, data: { id: match.id, display_name: match.displayName } };
+    } catch (err) {
+      if (err instanceof SlackApiError && err.detail === 'missing_scope') {
+        return {
+          success: false,
+          error: 'Slack recipient lookup needs the users:read.email bot scope. Reinstall the Slack app to grant it.',
+        };
+      }
+      const detail = err instanceof SlackApiError ? err.detail : 'unknown error';
+      return {
+        success: false,
+        error: `Slack recipient lookup failed: ${detail}. Check the Slack app connection, then try again.`,
+      };
+    }
   },
 });
 
@@ -1258,6 +1297,7 @@ export const slackPlugin: ActionPlugin = {
   actions: [
     dmOwner,
     dmUser,
+    lookupUserByEmail,
     addReaction,
     listChannels,
     readHistory,
