@@ -101,7 +101,11 @@ DRIVER=vfs
 if su -s /bin/sh dockerd -c "unshare --user --map-root-user --mount /bin/sh -c 'cd $DATA_ROOT && rm -rf .ovlprobe && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m && mount -t overlay overlay -olowerdir=.ovlprobe/l,upperdir=.ovlprobe/u,workdir=.ovlprobe/w .ovlprobe/m'" >>"$LOG" 2>&1; then
   DRIVER=overlay2
 elif su -s /bin/sh dockerd -c 'exec 3<>/dev/fuse' 2>>"$LOG"; then
-  DRIVER=fuse-overlayfs
+  if /usr/local/bin/fuse-smoke >>"$LOG" 2>&1; then
+    DRIVER=fuse-overlayfs
+  else
+    printf '%s\n' "valet: warning: FUSE mount smoke failed; using vfs storage" | tee -a "$LOG" >&2
+  fi
 fi
 su -s /bin/sh dockerd -c "rm -rf '$DATA_ROOT/.ovlprobe'" 2>/dev/null || true
 echo "valet: starting rootless dockerd with storage driver: $DRIVER" >> "$LOG"

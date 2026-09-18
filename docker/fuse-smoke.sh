@@ -3,14 +3,16 @@ set -euo pipefail
 
 fail() { printf 'Error: %s\n' "$1" >&2; exit 20; }
 
+[ "${1:-}" = "" ] || [ "$1" = "--check-only" ] \
+  || fail "Unknown option: $1. Use --check-only or no option."
 [ "$(dpkg-query -W -f='${Version}' fuse3 2>/dev/null)" = "3.14.0-4" ] \
   || fail "The fuse3 package is not 3.14.0-4. Rebuild the sandbox image."
 [ "$(dpkg-query -W -f='${Version}' fuse-overlayfs 2>/dev/null)" = "1.10-1" ] \
   || fail "The fuse-overlayfs package is not 1.10-1. Rebuild the sandbox image."
 [ -x /usr/bin/fuse-overlayfs ] \
   || fail "The fuse-overlayfs tool is missing. Rebuild the sandbox image."
-[ "$(stat -c '%a:%U:%G' /usr/bin/fusermount3 2>/dev/null)" = "4755:root:root" ] \
-  || fail "The fusermount3 mode is not 4755 root:root. Rebuild the sandbox image."
+[ "$(stat -c '%a:%U:%G' /usr/bin/fusermount3 2>/dev/null)" = "755:root:root" ] \
+  || fail "The fusermount3 mode is not 0755 root:root. Rebuild the sandbox image."
 
 if [ ! -e /dev/fuse ]; then
   printf 'SKIP: FUSE mount smoke (/dev/fuse is unavailable)\n'
@@ -20,13 +22,15 @@ fi
   || fail "/dev/fuse is not character device 10:229. Correct the RuntimeClass, then recreate the sandbox."
 [ "$(stat -c '%a' /dev/fuse)" = "666" ] \
   || fail "/dev/fuse mode is not 0666. Correct the RuntimeClass, then recreate the sandbox."
+[ "${1:-}" = "--check-only" ] && exit 0
 
 root=$(mktemp -d)
 cleanup() { rm -rf "$root"; }
 trap cleanup EXIT
 chown dockerd:dockerd "$root"
 
-if ! su -s /bin/bash dockerd -c "FUSE_SMOKE_ROOT='$root' unshare --user --map-root-user --mount /bin/bash -s" <<'INNER'
+set +e
+timeout 30 su -s /bin/bash dockerd -c "FUSE_SMOKE_ROOT='$root' unshare --user --map-root-user --mount /bin/bash -s" <<'INNER'
 set -euo pipefail
 mount --make-rprivate /
 mkdir -p "$FUSE_SMOKE_ROOT"/{lower,upper,work,mount}
@@ -57,8 +61,12 @@ umount "$FUSE_SMOKE_ROOT/mount"
 wait "$fuse_pid"
 trap - EXIT
 INNER
-then
-  fail "The nested user-namespace FUSE mount failed. Check the RuntimeClass device grant, then recreate the sandbox."
-fi
+smoke_status=$?
+set -e
+case "$smoke_status" in
+  0) ;;
+  124) fail "The nested user-namespace FUSE mount timed out after 30 seconds. Check the device and kernel, then retry." ;;
+  *) fail "The nested user-namespace FUSE mount failed. Check the RuntimeClass device grant, then recreate the sandbox." ;;
+esac
 
 printf 'PASS: FUSE mount smoke (nested user namespace)\n'

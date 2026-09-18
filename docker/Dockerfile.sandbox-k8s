@@ -226,10 +226,10 @@ COPY --from=gateway-build /out/gateway /gateway
 # the non-root `dockerd` user. Pinned; bump deliberately.
 #
 # FUSE mounts run as root in a nested user namespace. That root owns its mount
-# namespace and can use the mount syscall without a setuid helper. Debian's
-# fuse3 package keeps fusermount3 mode 4755 for tool compatibility, but the
-# smoke does not depend on that privilege transition. It also does not use
-# allow_other, so /etc/fuse.conf stays at the Debian default.
+# namespace and can use the mount syscall without a setuid helper. Remove
+# Debian's fusermount3 setuid bit so UID 1500 cannot mount in the outer mount
+# namespace. The smoke does not use allow_other, so /etc/fuse.conf stays at
+# the Debian default.
 ARG DOCKER_VERSION=5:29.7.2-1~debian.12~bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gnupg uidmap fuse3=3.14.0-4 fuse-overlayfs=1.10-1 slirp4netns=1.2.0-1 iproute2 iptables \
@@ -243,6 +243,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker-ce=${DOCKER_VERSION} \
         docker-ce-rootless-extras=${DOCKER_VERSION} \
         docker-buildx-plugin \
+    && chmod 0755 /usr/bin/fusermount3 \
     && rm -rf /var/lib/apt/lists/*
 
 # First-class nested Kubernetes v1 artifacts. The vector lock supplies these hashes.
