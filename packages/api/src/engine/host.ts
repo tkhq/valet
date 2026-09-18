@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   Engine,
+  builtinTools,
   assistantSessionId,
   parseAssistantSessionId,
   NoCredentialsError,
@@ -23,6 +24,7 @@ import {
   type SessionData,
   type SessionStartRef,
   type SessionStore,
+  type ServiceAvailability,
   type Thread,
   type StoredCredential,
   type ResolvedModel,
@@ -34,7 +36,6 @@ import { CredentialReferenceBrokenError } from "../plugins/team-credential-store
 import { pluginStore } from "../services/plugin-store.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import {
-  buildPluginCatalog,
   loadRoleFromMarkdown,
   type ActionPlugin,
   type CommandContext,
@@ -142,7 +143,7 @@ import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
-import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
+import { unavailableServiceInventory } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { isTeamMember } from "../services/teams.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
@@ -169,6 +170,47 @@ import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
  * it up in the engagement's `config_persona_markdown` map). Absent means no repo
  * role was stashed for this persona; the function then falls back.
  */
+function actionServices(plugins: readonly ValetPlugin[]): Set<string> {
+  return new Set(plugins.flatMap((plugin) => (plugin.actions ?? []).map((action) => action.service)));
+}
+
+function removedActionServices(
+  before: readonly ValetPlugin[],
+  after: readonly ValetPlugin[],
+): string[] {
+  const afterServices = actionServices(after);
+  return [...actionServices(before)].filter((service) => !afterServices.has(service)).sort();
+}
+
+function unavailableActionServices(
+  plugins: readonly ValetPlugin[],
+  unavailableCredentials: ReadonlySet<string>,
+): string[] {
+  return [
+    ...new Set(
+      plugins.flatMap((plugin) =>
+        (plugin.actions ?? [])
+          .filter((action) =>
+            unavailableCredentials.has(action.credentialService ?? action.service),
+          )
+          .map((action) => action.service),
+      ),
+    ),
+  ].sort();
+}
+
+function mergeServiceAvailability(
+  ...groups: readonly ServiceAvailability[][]
+): ServiceAvailability[] {
+  const merged = new Map<string, ServiceAvailability>();
+  for (const group of groups) {
+    for (const item of group) {
+      if (!merged.has(item.service)) merged.set(item.service, item);
+    }
+  }
+  return [...merged.values()].sort((a, b) => a.service.localeCompare(b.service));
+}
+
 export function securityRolesForCell(
   persona: string,
   repoRoleMarkdown?: string,
@@ -291,6 +333,8 @@ export interface EngineHostOpts {
    * instance.
    */
   plugins?: ValetPlugin[];
+  /** Plugins that the host quarantined before assembly. */
+  pluginLoadFailures?: ServiceAvailability[];
   /**
    * Assembled service→ActionPlugin index (plugin-system-v2 Task 4's
    * `assemblePlugins` output). Used only to look up a plugin's
@@ -966,7 +1010,14 @@ export class EngineHost {
     // team's skills, not the prompting member's. SessionOptions.owner below
     // uses the same principal.
     const principal = sessionPrincipal(meta);
-    const extras = await this.sessionExtras(principal, meta.orgId, [], extraPlugins);
+    const extras = await this.sessionExtras(
+      principal,
+      meta.orgId,
+      [],
+      extraPlugins,
+      null,
+      isSecurityRunner ? buildSecurityRunnerTools().map((tool) => tool.name) : [],
+    );
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, extraPlugins);
 
     const engine = new Engine({
@@ -1048,6 +1099,7 @@ export class EngineHost {
       sessionId,
       () => builtSession,
       specProvider !== undefined,
+      extras.pluginCatalog,
     );
     // Repo AGENTS.md instructions (agents-md spec, decision 5): same lazy
     // `builtSession` accessor as the command options above.
@@ -1321,42 +1373,69 @@ export class EngineHost {
     // plugins keep shadow priority.
     extraPlugins: readonly ValetPlugin[] = [],
     behavior: AssistantBehavior | null = null,
+    appendedNativeToolNames: readonly string[] = [],
   ): Promise<PluginSessionExtras> {
     const assembled = [...this.basePlugins(), ...extraPlugins];
-    // Org entitlement filter (plugin-entitlements design): drop any GATEABLE
-    // plugin the owner's org disables for the owner, so a disabled
-    // action-plugin's tools never reach a normal session. Best-effort — a
-    // lookup failure leaves the plugin in place (default to allowed) and logs,
-    // so an entitlement read can never break a build. Security rides its
-    // create-route gate primarily; this covers future action-plugins.
-    const allPlugins = await this.filterEntitledPlugins(assembled, owner, orgId);
-    // Availability gate (integration-availability design): a service whose
-    // deployment/org prerequisite is missing never reaches the catalog, so
-    // `list_tools` has nothing to hide. Per-build, not process-static: the
-    // org-credential half of availability changes when an admin connects or
-    // removes the org app. `owner` lets a team session keep a service the
-    // team holds its own row for.
-    const gated = gateUnavailableActions(
-      allPlugins,
-      await unavailableServiceSet({
-        plugins: allPlugins,
+    const assembledServices = actionServices(assembled);
+    const loadFailures = (this.opts.pluginLoadFailures ?? []).filter(
+      (item) => !assembledServices.has(item.service),
+    );
+    const entitled = await this.filterEntitledPlugins(assembled, owner, orgId);
+    const plugins = applyBehaviorToPlugins(entitled, behavior, pinnedIdSet(pins));
+
+    const disabledServices = removedActionServices(assembled, entitled).map((service) => ({
+      service,
+      state: "disabled_by_org" as const,
+      reason: "the organization disabled this plugin",
+      fix: `An org admin must enable the ${service} plugin.`,
+    }));
+    const excludedServices = removedActionServices(entitled, plugins).map((service) => ({
+      service,
+      state: "excluded_by_assistant" as const,
+      reason: "this assistant's behavior excludes the service",
+      fix: `This assistant's configuration excludes ${service}; edit the assistant's Integrations settings on its editor page (/assistants/$assistantId).`,
+    }));
+    const resolveServiceAvailability = async (): Promise<ServiceAvailability[]> => {
+      const inventory = await unavailableServiceInventory({
+        plugins: entitled,
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
         owner,
-      }),
-    );
-    // Behavior filter AFTER availability gating: both subtract, order only
-    // matters for the wrapper identity, and gating first keeps its
-    // unavailable-service messages accurate. The pin set rides along so the
-    // filter never gates a pinned action (assistant-editor design, "Never
-    // gated") — pins resolve from this same filtered catalog below.
-    const plugins = applyBehaviorToPlugins(gated, behavior, pinnedIdSet(pins));
-    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
+      });
+      const unavailable = inventory.unavailable;
+      const availabilityFailures = inventory.failures.map(({ service, reason }) => ({
+        service,
+        state: "load_failed" as const,
+        reason: `availability check failed: ${reason}`,
+      }));
+      const deploymentServices = unavailableActionServices(plugins, unavailable).map((service) => ({
+        service,
+        state: "deployment_unconfigured" as const,
+        reason: "the deployment or organization credential is not configured",
+        fix: `An org admin must configure ${service} (org settings → /settings/organization). After configuration, call list_tools (service: "${service}") to confirm — actions appear when the configuration worked; otherwise this warning returns with the reason.`,
+      }));
+      return mergeServiceAvailability(
+        loadFailures,
+        availabilityFailures,
+        disabledServices,
+        excludedServices,
+        deploymentServices,
+      );
+    };
+    const serviceAvailability = await resolveServiceAvailability();
+    const catalogOptions = {
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...appendedNativeToolNames],
+      serviceAvailability,
+      resolveServiceAvailability,
+    };
+
+    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins, catalogOptions);
     return pluginSessionExtras(
       plugins,
       filterSkillSources(await listSkillSourcesFor(this.opts.db, owner, orgId), behavior),
       pins,
+      catalogOptions,
     );
   }
 
@@ -2100,6 +2179,7 @@ export class EngineHost {
     sessionId: string,
     getSession: () => Session | undefined,
     hasPrep: boolean,
+    pluginCatalog: PluginCatalog,
     behavior: AssistantBehavior | null = null,
     pinnedActionIds: ReadonlySet<string> = new Set(),
   ): Promise<
@@ -2142,8 +2222,6 @@ export class EngineHost {
     const pluginCommands = plugins.flatMap((p) =>
       (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
     );
-    const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
-    const pluginCatalog = buildPluginCatalog(actionPlugins);
 
     return {
       ...(workspaceSkillsProvider ? { workspaceSkillsProvider } : {}),
@@ -2523,7 +2601,14 @@ export class EngineHost {
     // (`use-workflow-assistant.ts`), so this scope costs the panel nothing.
     const pins = principal.type === "user" ? PINNED_ACTIONS : [];
     const pinnedIds = pinnedIdSet(pins);
-    const extras = await this.sessionExtras(principal, meta.orgId, pins, [], behavior);
+    const extras = await this.sessionExtras(
+      principal,
+      meta.orgId,
+      pins,
+      [],
+      behavior,
+      buildMemoryTools().map((tool) => tool.name),
+    );
 
     // The profile comes from the app row, not from the caller's meta. An
     // assistant session is woken by many callers — the web, a channel
@@ -2557,6 +2642,7 @@ export class EngineHost {
       sessionId,
       () => builtSession,
       false,
+      extras.pluginCatalog,
       behavior,
       pinnedIds,
     );

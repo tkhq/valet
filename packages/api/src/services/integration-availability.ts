@@ -144,18 +144,35 @@ export function missingClientEnv(
  * services (`decl.service ?? plugin.name`), the same key the credential
  * store and `gateUnavailableActions`'s join use.
  */
-export async function unavailableServiceSet(params: AvailabilityContext): Promise<Set<string>> {
-  const unavailable = new Set<string>();
-  await Promise.all(
-    params.plugins.flatMap((plugin) =>
-      (plugin.credentials ?? []).map(async (decl) => {
-        const service = decl.service ?? plugin.name;
-        const mode = await connectModeFor({ ...params, decl, service });
-        if (mode === "unconfigured") unavailable.add(service);
-      }),
-    ),
+export async function unavailableServiceInventory(params: AvailabilityContext): Promise<{
+  unavailable: Set<string>;
+  failures: Array<{ service: string; reason: string }>;
+}> {
+  const declarations = params.plugins.flatMap((plugin) =>
+    (plugin.credentials ?? []).map((decl) => ({ decl, service: decl.service ?? plugin.name })),
   );
-  return unavailable;
+  const results = await Promise.allSettled(
+    declarations.map(async ({ decl, service }) => ({
+      service,
+      mode: await connectModeFor({ ...params, decl, service }),
+    })),
+  );
+  const unavailable = new Set<string>();
+  const failures = new Map<string, string>();
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    const service = declarations[index].service;
+    if (result.status === "fulfilled") {
+      if (result.value.mode === "unconfigured") unavailable.add(service);
+    } else if (!failures.has(service)) {
+      failures.set(service, result.reason instanceof Error ? result.reason.message : String(result.reason));
+    }
+  }
+  return { unavailable, failures: [...failures].map(([service, reason]) => ({ service, reason })) };
+}
+
+export async function unavailableServiceSet(params: AvailabilityContext): Promise<Set<string>> {
+  return (await unavailableServiceInventory(params)).unavailable;
 }
 
 /**
