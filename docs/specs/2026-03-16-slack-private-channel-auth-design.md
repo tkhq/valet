@@ -57,8 +57,19 @@ Each channel-targeting action calls the helper before proceeding:
 | `slack.dm_owner` | No check (DM conversation). |
 | `slack.dm_user` | No check (DM conversation). |
 | `slack.list_users` | No check (workspace-level). |
+| `slack.lookup_user_by_email` | No check (workspace-level). |
 
 Error message for denied actions: `"Access denied: you are not a member of this private channel"`
+
+### Workflow recipient lookup
+
+`slack.dm_user` stays ID-only. A workflow that has an explicit recipient email
+must first call `slack.lookup_user_by_email`, then pass the returned `id` to
+`slack.dm_user`. The lookup uses the organization bot and Slack
+`users.lookupByEmail`; it needs the `users:read.email` bot scope. A missing
+email, missing scope, or no matching member returns an error. The workflow
+must stop on that error. It must not select the owner, an assistant, or another
+workspace member as a fallback.
 
 ### Inbound webhook enforcement
 
