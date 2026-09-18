@@ -64,6 +64,7 @@ function defer<T>(): Deferred<T> {
 class FakeProvider implements SandboxProvider {
   readonly backend = "fake";
   createCalls = 0;
+  createOpts: SandboxCreateOpts[] = [];
   destroyCalls: string[] = [];
   private pending: Array<Deferred<Sandbox>> = [];
   private caps: SandboxCapabilities = {
@@ -86,8 +87,9 @@ class FakeProvider implements SandboxProvider {
     return d;
   }
 
-  async create(_opts: SandboxCreateOpts): Promise<Sandbox> {
+  async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     this.createCalls++;
+    this.createOpts.push(opts);
     const d = this.pending.shift();
     if (!d) return makeFakeSandbox(`fake-auto`);
     return d.promise;
@@ -123,6 +125,59 @@ function makeSpecProvider(applyFn: (sandbox: Sandbox) => Promise<void>): SpecPro
 }
 
 describe("SandboxAttachment specProvider seam", () => {
+  it("appends desired env after caller env so reserved values win", async () => {
+    const provider = new FakeProvider();
+    const specProvider: SpecProvider = async () => ({
+      env: { VALET_BAKE_COMMIT: "real-sha", VALET_BAKE_IDENTITY: "real-identity" },
+      specHash: "bake-provenance",
+      steps: [],
+    });
+    const attachment = new SandboxAttachment(
+      provider,
+      { env: { CALLER_VALUE: "kept", VALET_BAKE_COMMIT: "spoofed" } },
+      specProvider,
+    );
+
+    provider.nextDeferred().resolve(makeFakeSandbox("sb-1"));
+    await attachment.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.createOpts[0]?.env).toEqual({
+      CALLER_VALUE: "kept",
+      VALET_BAKE_COMMIT: "real-sha",
+      VALET_BAKE_IDENTITY: "real-identity",
+    });
+  });
+
+  it("removes spoofed reserved env when desired metadata is absent", async () => {
+    const provider = new FakeProvider();
+    const specProvider: SpecProvider = async () => ({
+      env: {
+        VALET_BAKE_COMMIT: undefined,
+        VALET_BAKE_IDENTITY: undefined,
+        VALET_BAKE_ID: undefined,
+      },
+      specHash: "base-image",
+      steps: [],
+    });
+    const attachment = new SandboxAttachment(
+      provider,
+      {
+        env: {
+          CALLER_VALUE: "kept",
+          VALET_BAKE_COMMIT: "spoofed-sha",
+          VALET_BAKE_IDENTITY: "spoofed-identity",
+          VALET_BAKE_ID: "spoofed-id",
+        },
+      },
+      specProvider,
+    );
+
+    provider.nextDeferred().resolve(makeFakeSandbox("sb-1"));
+    await attachment.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.createOpts[0]?.env).toEqual({ CALLER_VALUE: "kept" });
+  });
+
   it("absent specProvider: provision path is unchanged — ready at epoch 1, no prep", async () => {
     const provider = new FakeProvider();
     const attachment = new SandboxAttachment(provider, {});

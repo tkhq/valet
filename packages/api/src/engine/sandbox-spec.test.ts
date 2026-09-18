@@ -33,6 +33,7 @@ const snapWithRepoBake: ResolveSnapshot = {
   repoBake: {
     imageRef: "ghcr.io/acme/widget-bake:abc123",
     bakedSha: "deadbeef",
+    identityHash: "recipe-identity",
     recipe: [],
     bakeId: "bake-1",
   },

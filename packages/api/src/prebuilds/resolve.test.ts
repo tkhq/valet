@@ -91,12 +91,13 @@ async function seedPrebuild(
     commitSha: string;
     createdAt: number;
     recipe?: unknown;
+    identityHash?: string;
   },
 ): Promise<void> {
   await db.insert(bakes).values({
     id: opts.id,
     sourceId,
-    identityHash: "",
+    identityHash: opts.identityHash ?? "identity",
     commitSha: opts.commitSha,
     imageRef: opts.imageRef,
     status: opts.status,
@@ -137,6 +138,7 @@ describe("resolvePrebuildImage", () => {
       imageRef: "valet-prebuild/acme-widgets:new",
       commitSha: "newsha",
       createdAt: NOW + 1000,
+      identityHash: "new-identity",
       recipe: { recipe: [{ id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" }], setup: [] },
     });
 
@@ -144,6 +146,7 @@ describe("resolvePrebuildImage", () => {
     expect(res).toEqual({
       imageRef: "valet-prebuild/acme-widgets:new",
       prebuildId: "pb-new",
+      identityHash: "new-identity",
       bakedSha: "newsha",
       recipe: [{ id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" }],
     });

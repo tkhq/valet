@@ -2,7 +2,7 @@
  * Session-create prebuild resolution end-to-end at the `EngineHost` seam
  * (sandbox images v2 plan, Task 4, spec decisions 1/8). Proves the resolved
  * prebuilt image ref reaches `SandboxCreateOpts.image` on the real provider
- * `create()` call and that `agent_sessions.prebuild_id` is persisted — using a
+ * `create()` call and that `agent_sessions.bake_id` is persisted — using a
  * recording fake provider (customImage: true) whose sandbox tolerates the
  * fetch-on-start prep exec sequence, so no Docker daemon is involved.
  *
@@ -20,6 +20,7 @@ import { RecordingSandboxProvider } from "../test-helpers/recording-sandbox.js";
 const ORG = "local-org";
 const REPO = "acme/widgets";
 const IMAGE_REF = "valet-prebuild/acme-widgets:sha1";
+const IDENTITY_HASH = "recipe-identity-1";
 
 describe("EngineHost prebuild resolution at session create", () => {
   let api: TestApi | undefined;
@@ -52,7 +53,7 @@ describe("EngineHost prebuild resolution at session create", () => {
     await db.insert(bakes).values({
       id: "pb1",
       sourceId: "cfg1",
-      identityHash: "",
+      identityHash: IDENTITY_HASH,
       commitSha: "sha1",
       imageRef: IMAGE_REF,
       status: "pushed",
@@ -74,7 +75,7 @@ describe("EngineHost prebuild resolution at session create", () => {
     targetDir: "widgets",
   };
 
-  it("boots the sandbox from the pushed prebuild image and persists prebuild_id", async () => {
+  it("boots the sandbox from the pushed prebuild image and persists bake_id", async () => {
     const provider = new RecordingSandboxProvider();
     api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
     await seedPrebuild(api.providers.db);
@@ -105,6 +106,9 @@ describe("EngineHost prebuild resolution at session create", () => {
     expect(provider.createCalls.length).toBeGreaterThan(0);
     for (const call of provider.createCalls) {
       expect(call.image).toBe(IMAGE_REF);
+      expect(call.env?.VALET_BAKE_COMMIT).toBe("sha1");
+      expect(call.env?.VALET_BAKE_IDENTITY).toBe(IDENTITY_HASH);
+      expect(call.env?.VALET_BAKE_ID).toBe("pb1");
     }
     const rows = await api.providers.db
       .select()
@@ -113,7 +117,7 @@ describe("EngineHost prebuild resolution at session create", () => {
     expect(rows[0]?.bakeId).toBe("pb1");
   });
 
-  it("falls back to the stock image (and leaves prebuild_id null) when the config is disabled", async () => {
+  it("falls back to the stock image (and leaves bake_id null) when the config is disabled", async () => {
     const provider = new RecordingSandboxProvider();
     api = await bootTestApi({ sandboxProvider: provider, defaultImage: "stock:img" });
     await seedPrebuild(api.providers.db, false);
@@ -143,6 +147,9 @@ describe("EngineHost prebuild resolution at session create", () => {
 
     for (const call of provider.createCalls) {
       expect(call.image).toBe("stock:img");
+      expect(call.env).not.toHaveProperty("VALET_BAKE_COMMIT");
+      expect(call.env).not.toHaveProperty("VALET_BAKE_IDENTITY");
+      expect(call.env).not.toHaveProperty("VALET_BAKE_ID");
     }
     const rows = await api.providers.db
       .select()

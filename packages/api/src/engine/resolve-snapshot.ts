@@ -127,6 +127,7 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
       ? {
           imageRef: prebuild.imageRef,
           bakedSha: prebuild.bakedSha,
+          identityHash: prebuild.identityHash,
           recipe: prebuild.recipe,
           bakeId: prebuild.prebuildId,
         }
