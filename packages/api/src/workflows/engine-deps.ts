@@ -189,7 +189,11 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   if (!run.owner) throw new Error(`workflow engine-deps: run ${runId} has no recorded owner`);
 
   const defRows = await opts.db
-    .select({ orgId: workflowDefinitions.orgId })
+    .select({
+      orgId: workflowDefinitions.orgId,
+      ownerType: workflowDefinitions.ownerType,
+      ownerId: workflowDefinitions.ownerId,
+    })
     .from(workflowDefinitions)
     .where(eq(workflowDefinitions.id, run.params.workflowId))
     .limit(1);
@@ -198,15 +202,28 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     throw new Error(`workflow engine-deps: definition not found: ${run.params.workflowId}`);
   }
 
-  const owner = parsePrincipal(`${run.owner.ownerType}:${run.owner.ownerId}`);
+  // A schedule run can survive an older scheduler that copied the schedule
+  // creator onto the run. The definition owns the workflow and is the only
+  // identity that can receive `slack.dm_owner`. Resolve scheduled runs from
+  // that authoritative row. Other trigger paths keep their recorded owner.
+  const ownerRecord = isScheduleTrigger(run.params.input)
+    ? { ownerType: defRow.ownerType, ownerId: defRow.ownerId }
+    : run.owner;
+  const owner = ownerRecord && parsePrincipal(`${ownerRecord.ownerType}:${ownerRecord.ownerId}`);
   if (!owner) {
     throw new Error(
-      `workflow engine-deps: run ${runId} has an unrecognized owner: ${JSON.stringify(run.owner)}`,
+      `workflow engine-deps: run ${runId} has an unrecognized owner: ${JSON.stringify(ownerRecord)}`,
     );
   }
 
   return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
     assistantId: workflowAssistantId(run.definition), origin: run.params.origin };
+}
+
+/** True only for the scheduler's persisted trigger envelope. */
+function isScheduleTrigger(input: unknown): boolean {
+  return typeof input === "object" && input !== null &&
+    "type" in input && input.type === "schedule";
 }
 
 /**

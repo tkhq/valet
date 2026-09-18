@@ -17,6 +17,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
 import { assistants, workflowDefinitions } from "../schema/index.js";
+import { linkIdentity } from "../channels/identity-links.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -220,6 +221,77 @@ describe("buildWorkflowEngineDeps: invokeAction", () => {
 
     expect(result).toEqual({ ok: true, result: { echoed: "no creds here", hasCredential: false } });
     expect(fixture.calls()).toBe(1);
+  });
+
+  it("uses the definition owner for a scheduled run with a legacy owner", async () => {
+    let receivedOwnerSlackId: string | undefined;
+    const action: PluginAction = {
+      id: "slack.owner_id",
+      name: "owner_id",
+      description: "reports the resolved Slack owner",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const credential = await ctx.credentials.get();
+        const ownerSlackId = credential?.metadata?.["owner_slack_user_id"];
+        receivedOwnerSlackId = typeof ownerSlackId === "string" ? ownerSlackId : undefined;
+        return { success: true, data: { token: credential?.accessToken ?? null } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "slack", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const runId = "wfrun_scheduled_legacy_owner";
+    const workflowId = "wf_scheduled_legacy_owner";
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      orgId: LOCAL_ORG.id,
+      ownerType: "user",
+      ownerId: LOCAL_USER.id,
+      name: "scheduled-owner",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await workflowStore.createRun(
+      runId,
+      { workflowId, definitionVersionId: "v1", input: { type: "schedule" } },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      // Pre-fix scheduler rows recorded the schedule author, not the
+      // workflow definition owner. This author has no Slack identity.
+      { ownerType: "user", ownerId: "schedule-author" },
+    );
+    await engineCredentials.save({ type: "org", id: LOCAL_ORG.id }, "slack", {
+      type: "bot_token",
+      accessToken: "org-token",
+    });
+    await linkIdentity(db, { provider: "slack", externalId: "UWORKFLOWOWNER", userId: LOCAL_USER.id });
+
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost,
+      store: workflowStore,
+      db,
+      engineStore,
+      actionPluginByService,
+      credentials: engineCredentials,
+    });
+    const result = await deps.invokeAction({
+      service: "slack",
+      action: "owner_id",
+      params: {},
+      invocationId: `workflow:${runId}:dm_owner`,
+    });
+
+    expect(result).toEqual({ ok: true, result: { token: "org-token" } });
+    expect(receivedOwnerSlackId).toBe("UWORKFLOWOWNER");
   });
 
   it("a team-owned run resolves a direct team credential, not the clicker's", async () => {

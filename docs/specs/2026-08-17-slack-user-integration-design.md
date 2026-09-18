@@ -284,6 +284,10 @@ session resolver). Without it, private-channel reads and `slack.dm_owner`
 fail with "Owner has not linked their Slack identity" even when the owner
 is linked — the failure mode of run `wfrun_mt1kva4i5wqesi`.
 
+For a scheduled workflow, the definition owner is authoritative. The engine
+uses it for Slack identity lookup when a persisted run has a different legacy
+owner. This prevents a schedule creator identity from changing the recipient.
+
 Team- and org-owned runs get no enrichment: no single person's channel
 membership can authorize a private-channel read, so those actions keep
 failing closed.
