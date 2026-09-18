@@ -224,9 +224,15 @@ COPY --from=gateway-build /out/gateway /gateway
 # docs/specs/2026-08-15-sandbox-docker-design.md). Baked always, dormant
 # unless VALET_SANDBOX_DOCKER=1 — start scripts launch dockerd-rootless as
 # the non-root `dockerd` user. Pinned; bump deliberately.
+#
+# FUSE mounts run as root in a nested user namespace. That root owns its mount
+# namespace and can use the mount syscall without a setuid helper. Remove
+# Debian's fusermount3 setuid bit so UID 1500 cannot mount in the outer mount
+# namespace. The smoke does not use allow_other, so /etc/fuse.conf stays at
+# the Debian default.
 ARG DOCKER_VERSION=5:29.7.2-1~debian.12~bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gnupg uidmap fuse-overlayfs slirp4netns=1.2.0-1 iproute2 iptables \
+      gnupg uidmap fuse3=3.14.0-4 fuse-overlayfs=1.10-1 slirp4netns=1.2.0-1 iproute2 iptables \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
@@ -237,6 +243,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker-ce=${DOCKER_VERSION} \
         docker-ce-rootless-extras=${DOCKER_VERSION} \
         docker-buildx-plugin \
+    && chmod 0755 /usr/bin/fusermount3 \
     && rm -rf /var/lib/apt/lists/*
 
 # First-class nested Kubernetes v1 artifacts. The vector lock supplies these hashes.
@@ -274,13 +281,15 @@ RUN (getent group docker >/dev/null || groupadd docker) \
 
 COPY docker/cgroup-delegation.sh /cgroup-delegation.sh
 COPY docker/cgroup-bootstrap.sh /cgroup-bootstrap.sh
+COPY docker/fuse-smoke.sh /usr/local/bin/fuse-smoke
 COPY docker/kubernetes-preflight.sh /kubernetes-preflight.sh
 COPY docker/valet-kubernetes.mjs /usr/local/bin/valet-kubernetes
 COPY docker/userns-preflight.sh /userns-preflight.sh
 COPY docker/start-docker.sh /start-docker.sh
 COPY docker/start-headless.sh /start-headless.sh
 RUN chmod +x /cgroup-bootstrap.sh /cgroup-delegation.sh /kubernetes-preflight.sh /userns-preflight.sh /start-docker.sh /start-headless.sh \
-    && chmod 0755 /usr/local/bin/valet-kubernetes
+    && chmod 0755 /usr/local/bin/fuse-smoke /usr/local/bin/valet-kubernetes \
+    && /usr/local/bin/fuse-smoke
 
 COPY docker/start-full.sh /start-full.sh
 RUN chmod +x /start-full.sh

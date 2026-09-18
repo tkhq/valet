@@ -5,7 +5,9 @@ fail() { printf 'Error: %s\n' "$1" >&2; exit 20; }
 [ -n "${VALET_SANDBOX_EPOCH:-}" ] || fail "The sandbox epoch is missing. Recreate the sandbox through Valet."
 VALET_DOCKER_USERNS=1 /userns-preflight.sh || fail "The outer ID map is incomplete. Set userNamespaces.idsPerPod to 131072, then recreate the sandbox."
 [ -c /dev/net/tun ] && [ "$(stat -c '%t:%T' /dev/net/tun)" = "a:c8" ] || fail "TUN 10:200 is missing. Correct the RuntimeClass, then recreate the sandbox."
+[ "$(stat -c '%a' /dev/net/tun)" = "666" ] || fail "TUN mode is not 0666. Correct the RuntimeClass, then recreate the sandbox."
 [ -c /dev/kmsg ] && [ "$(stat -c '%t:%T' /dev/kmsg)" = "1:3" ] || fail "The null kmsg device is missing. Correct the RuntimeClass, then recreate the sandbox."
+/usr/local/bin/fuse-smoke --check-only
 for tool in /usr/local/bin/k3s /usr/local/bin/kubectl /usr/bin/slirp4netns /usr/bin/tini /usr/bin/flock; do
   [ -x "$tool" ] || fail "$tool is missing. Rebuild the sandbox image from the normative lock."
 done
