@@ -74,6 +74,39 @@ describe("OnePasswordTokenRow", () => {
     expect(dialog.getByText(/op:\/\/Vault\/Item\/field/)).toBeTruthy();
   });
 
+  // A member who follows step 2 can be refused by 1Password: creating a
+  // service account needs an account permission, and 1Password answers
+  // "contact your administrator" without it. Valet cannot see that
+  // permission, so the steps have to name the condition and the way out
+  // rather than leave the reader stuck on 1Password's screen.
+  it("the dialog says what to do when 1Password refuses to create a service account", async () => {
+    const user = userEvent.setup();
+    personalRow();
+    await user.click(screen.getByRole("button", { name: "Connect 1Password" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText(/contact your administrator/i)).toBeTruthy();
+    // Both ways out, so the reader can ask for whichever their admin prefers.
+    expect(dialog.getByText(/create and manage service accounts/i)).toBeTruthy();
+    expect(dialog.getByText(/scoped to that vault alone/i)).toBeTruthy();
+  });
+
+  it("carries the same refusal guidance on the organization dialog", async () => {
+    const user = userEvent.setup();
+    render(
+      <OnePasswordTokenRow
+        scope="org"
+        connected={false}
+        label="Organization token"
+        hint="A 1Password service account token shared across the organization."
+        removeNote="This token is shared across the organization."
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Connect 1Password" }));
+    // An organization admin in Valet is not necessarily an administrator in
+    // 1Password, so this reader can be refused the same way.
+    expect(within(screen.getByRole("dialog")).getByText(/contact your administrator/i)).toBeTruthy();
+  });
+
   it("a personal token saves with no scope field", async () => {
     const user = userEvent.setup();
     personalRow();
