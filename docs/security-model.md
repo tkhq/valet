@@ -103,6 +103,10 @@ Consequences:
 - **On Kubernetes, sandboxes live in their own namespace**
   (`valet-sandboxes`) and the API's service account holds only the narrow
   role needed there (Sandbox CRs, `pods/exec`, `pods/log`).
+- The capability RuntimeClass exposes TUN (`10:200`) and FUSE (`10:229`) as
+  read-write character devices. Both devices use mode `0666`. It binds null
+  (`1:3`) to `/dev/kmsg`. FUSE adds no workload capability. A workload mounts
+  FUSE as root in a nested user namespace that owns its mount namespace.
 - The `local` sandbox backend has **no isolation** (host fs/processes) and is
   for dev/test only.
 
