@@ -13,6 +13,7 @@
  */
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
+import type { SecurityCredentialDecl } from "@valet/shared";
 export type { CommandInfo, RegistryDiagnostic };
 
 // ── Common ────────────────────────────────────────────────────────────────
@@ -128,6 +129,13 @@ export interface SessionDetail extends SessionSummary {
   repos?: RepoBinding[];
 }
 
+/** One declared 1Password credential reference (Part 12 §Config schema), as
+ * the setup page's wizard sends it on create. The wire name for the shared
+ * credential declaration: the create route, the repo config parser, and the
+ * setup form all validate this one shape, so a credential threads from the
+ * form to the engagement row with no rename at either seam. */
+export type SecurityConfigCredentialDeclWire = SecurityCredentialDecl;
+
 export interface CreateSessionRequest {
   workspace: string;
   title?: string;
@@ -192,6 +200,12 @@ export interface CreateSessionRequest {
       signupUrl?: string;
       rateLimitRps?: number;
     } | null;
+    /** Declared 1Password credential references (Part 12 §Config schema).
+     * The server preflight-resolves each one through `seedSecurityReview`
+     * before the engagement is created (INV-33); a failing reference refuses
+     * the create with a 400 naming the label and the remedy. Absent or empty
+     * leaves `security_engagements.credentials_json` null. */
+    credentials?: SecurityConfigCredentialDeclWire[];
   };
   /** Final plan steps from the `/security/new` setup page (dynamic-config
    * M-F2). When present on a security create, the server uses these verbatim
@@ -276,6 +290,11 @@ export interface SecurityEngagementWire {
     /** Compiled probe rate the runtime applies. Integer 1..1000. */
     rateLimitRps?: number;
   } | null;
+  /** Labels of the 1Password credentials declared on this engagement (Part
+   * 12). Never the `op://` reference (INV-38) or a resolved value (INV-37),
+   * only the name. The needs panel offers these as the picker for a
+   * `kind: "credential"` need. Empty when the engagement declared none. */
+  credentialLabels: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -430,6 +449,17 @@ export interface SecurityPreviewRequest {
    * `presetReportDefault`. Ignored when a `.valet/security.yml` seed
    * declares its own steps; those steps already decide. */
   includeReport?: boolean;
+  /** Team that will own the review. When present, credential scopes are
+   * evaluated as that team's; otherwise as the calling user. */
+  teamId?: string;
+}
+
+/** One declared credential the preview could not validate. The preview
+ * reports these and still returns the declarations: create is the gate that
+ * refuses. `message` is the corrective action, never the resolved value. */
+export interface SecurityCredentialWarningWire {
+  label: string;
+  message: string;
 }
 
 /** POST /api/sessions/security/preview — response. The seeded config plus the
@@ -457,11 +487,16 @@ export interface SecurityPreviewResponse {
     rateLimitRps?: number;
   } | null;
     configTools: SecurityToolDeclWire[] | null;
+    /** Repository-declared credentials, references only. */
+    credentials: SecurityConfigCredentialDeclWire[];
     /** True when a valid `.valet/security.yml` seeded this preview. */
     hasRepoConfig: boolean;
   };
   /** The seeded plan parsed into structured steps for the plan editor. */
   planCells: SecurityPlanCellWire[];
+  /** Declared credentials that failed preflight. Empty when every declared
+   * reference resolved and matched its kind's shape. */
+  credentialWarnings: SecurityCredentialWarningWire[];
 }
 
 /** The engagement report artifact (M-P3). The report cell writes `markdown`
@@ -776,6 +811,11 @@ export interface SecurityNeedWire {
   description: string;
   status: "open" | "auto_resolved" | "needs_human" | "answered" | "dismissed";
   resolution: string | null;
+  /** The declared credential label the human picked to answer a
+   * `kind: "credential"` need (Part 12, INV-39). Always null for every other
+   * kind. `resolution` stays null on a credential need; the CHECK constraint
+   * on `security_needs` enforces that at the database. */
+  credentialLabel: string | null;
   createdAt: number;
   resolvedAt: number | null;
 }

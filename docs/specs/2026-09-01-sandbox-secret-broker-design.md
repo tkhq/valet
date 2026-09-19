@@ -1,4 +1,4 @@
-# Sandbox Secret Broker and `valet-secrets` — Design
+# Sandbox Secret Broker and `valet-secrets`: Design
 
 **Date:** 2026-09-01
 **Status:** Implemented (feat/onepassword-credentials-v2)
@@ -22,15 +22,24 @@ a destination, and the value is placed there.
 
 ## Scope
 
-- `POST /api/sandbox-secrets/resolve` — the broker, authenticated by the
+- `POST /api/sandbox-secrets/resolve`: the broker, authenticated by the
   sandbox token rung.
-- `valet-secrets` — a generated POSIX shell script installed into
+- `valet-secrets`: a generated POSIX shell script installed into
   `/usr/local/bin` by the existing `credential-scripts` prep step.
 - One paragraph in `CODING_SYSTEM_PROMPT` naming the command.
 
 **Non-goals:** reading the VALUE of a secret a caller did not name; a second
-provider behind the broker; per-session reference allowlists; write access of
-any kind.
+provider behind the broker; write access of any kind.
+
+A per-session reference allowlist was a listed non-goal here. It is no longer
+one: for a sandbox whose session a `security_cells` row claims, the broker
+now refuses any reference the owning engagement did not declare in
+`credentials_json`, checked before `resolveReference` runs. Every other
+caller is unaffected. `POST /find` carries the same lifecycle gate: only a
+running cell in a running engagement may search. It applies no reference
+allowlist, because the caller supplies no reference and the answer carries no
+value. See `docs/specs/valet-security/spec/12-credentials-via-1password.md`,
+INV-34.
 
 `find` narrows an earlier non-goal rather than dropping it. Naming a
 destination is useless when you do not know the destination: an agent told
@@ -75,7 +84,7 @@ the vault or item id instead, so every reference `find` prints resolves.
 5. **Base64 itself.** The caller is a POSIX shell with no JSON parser.
    A byte-level extractor cut every value at its first `"` and never unescaped
    a backslash or a newline, so a password containing a quote and every private
-   key arrived corrupted but plausible — the worst way for a credential to
+   key arrived corrupted but plausible, the worst way for a credential to
    fail. The base64 alphabet contains no JSON metacharacter, so the shell can
    cut the field safely and `base64 -d` restores the exact bytes.
 
@@ -89,7 +98,7 @@ the vault or item id instead, so every reference `find` prints resolves.
    inherit the key to the rest, so the script unsets it before `exec`. This
    narrows the environment path only. On a backend with a creds mount the
    token is also a file at `/etc/valet/creds/token`, which the child can still
-   read — a shell script cannot take a filesystem away from a process it
+   read. A shell script cannot take a filesystem away from a process it
    execs. Treat the child as trusted code that should not be handed extra
    credentials, not as a sandbox boundary.
 
@@ -114,7 +123,7 @@ the vault or item id instead, so every reference `find` prints resolves.
    token's holder the session's owner? A session changes hands through
    `PATCH /api/sessions/:id`, and tokens minted before the move stay valid
    for their full TTL, since revocation is reserved for `destroy`. So a
-   user-owned row alone is not enough — the row's owner must also be the user
+   user-owned row alone is not enough: the row's owner must also be the user
    the presented token was minted for. Otherwise whoever takes ownership of a
    session can present the earlier actor's token, which this route resolves
    with, and read that actor's personal vault.
@@ -183,7 +192,7 @@ Every failure names a corrective action, per the repo rule.
 | Bad variable name | 2 | Refused before any shell sees the pair. The shell's own error for a bad identifier quotes the value next to the name. |
 | Malformed arguments | 2 | Usage, including how to quote a reference containing a space. |
 | Reference nothing resolved | 3 | Names the reference and what to check in 1Password. |
-| Reference resolved to a blank field | 3 | Named separately — a blank field needs a different fix from a wrong name. |
+| Reference resolved to a blank field | 3 | Named separately: a blank field needs a different fix from a wrong name. |
 | Broker slower than 30 seconds | 4 | Named as a timeout, not as an unreachable api. |
 | Broker refused or was unreachable | 4 | Reports the API's own message. |
 | 1Password refused the token and nothing resolved | 4 | The broker answers 502 naming the token to check; the CLI relays it. Reporting this as "nothing resolved" sent the reader to check vault names that were correct. |
@@ -202,8 +211,8 @@ node) is told it has no secrets command and must ask. Orchestrators run no
 prep either and carry their own rule (below).
 
 The orchestrator needs its own rule, and one sentence inside the Delegation
-section was not enough. Asked for a 1Password value, it ran `op read` — the
-vendor CLI it knows from training — got zero bytes, and told the user their
+section was not enough. Asked for a 1Password value, it ran `op read` (the
+vendor CLI it knows from training), got zero bytes, and told the user their
 vault and item names were wrong when they were correct. The rule it needed
 named `valet-secrets`, a command that session does not have, and never named
 1Password or a secret, so nothing matched the words a person writes. Naming the
@@ -219,7 +228,7 @@ than a fallback. `persona.test.ts` pins each of those properties.
 
 ## Testing
 
-- `packages/api/src/routes/sandbox-secrets.test.ts` — resolves and names
+- `packages/api/src/routes/sandbox-secrets.test.ts`: resolves and names
   misses, requires a sandbox token and names the fix without one, names every
   unsupported reference, and round-trips a value containing a quote, a
   backslash, and a newline; refuses the personal scope on a team-owned session
@@ -227,9 +236,9 @@ than a fallback. `persona.test.ts` pins each of those properties.
   is absent; ignores obsolete reference preferences; refuses inaccessible team references
   without org substitution; and returns
   positional `values` with `null` for a miss.
-- `packages/api/src/engine/prompt-rules.test.ts` — the composed prompt names
+- `packages/api/src/engine/prompt-rules.test.ts`: the composed prompt names
   the command and the reference shape.
-- `packages/api/src/engine/sandbox-spec.test.ts` — golden spec hashes cover the
+- `packages/api/src/engine/sandbox-spec.test.ts`: golden spec hashes cover the
   installed script, so editing it re-installs on sandboxes that already ran prep.
 - Verified by hand against a real vault, in a real docker sandbox, with a real
   sandbox token: the secret reaches the child, `VALET_SANDBOX_TOKEN` does not,

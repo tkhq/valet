@@ -29,6 +29,11 @@
  * cannot name its way into a vault the session could not already read.
  */
 import { parse as parseYaml } from "yaml";
+import {
+  CREDENTIAL_ENV_RE,
+  CREDENTIAL_LABEL_RE,
+  RESERVED_CREDENTIAL_LABELS,
+} from "@valet/shared";
 
 /** One declared command-to-credential binding. */
 export interface CredentialCommand {
@@ -37,21 +42,19 @@ export interface CredentialCommand {
   command: string;
   /** The environment variable the real command reads. */
   env: string;
+  /** Run the wrapper's arguments as the target command instead of finding a
+   * real binary with the wrapper's name. Security credential labels use this
+   * launcher form; repo declarations keep binary-wrapper behavior. */
+  launcher?: boolean;
   /** An exact `op://vault/item/field`. Mutually exclusive with `credential`. */
   reference?: string;
   /** A name for the vault search to resolve. Mutually exclusive with `reference`. */
   credential?: string;
+  /** Additional values injected by the same launcher, such as an mTLS cert. */
+  additionalEnv?: Array<{ env: string; reference: string }>;
 }
 
 export const CREDENTIAL_COMMANDS_PATH = ".valet/credentials.yaml";
-
-/** A command name has to be a bare filename: it becomes a path under
- * /usr/local/bin, and anything with a slash or a space would either escape
- * that directory or never be found. */
-const COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-/** Same shape `export` accepts, checked here so a bad name never reaches a
- * shell that would quote the VALUE next to it in its error. */
-const ENV_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Reads and validates the repo's declarations. `null` when the file is
@@ -84,10 +87,13 @@ export async function loadCredentialCommands(
       throw new Error(`${at} must be a mapping`);
     }
     const e = entry as Record<string, unknown>;
-    if (typeof e.command !== "string" || !COMMAND_RE.test(e.command)) {
+    if (typeof e.command !== "string" || !CREDENTIAL_LABEL_RE.test(e.command)) {
       throw new Error(`${at}: command must be a bare command name`);
     }
-    if (typeof e.env !== "string" || !ENV_RE.test(e.env)) {
+    if (RESERVED_CREDENTIAL_LABELS.has(e.command)) {
+      throw new Error(`${at}: ${e.command} is reserved by sandbox prep`);
+    }
+    if (typeof e.env !== "string" || !CREDENTIAL_ENV_RE.test(e.env)) {
       throw new Error(`${at}: env must be a valid environment variable name`);
     }
     const hasReference = typeof e.reference === "string" && e.reference !== "";

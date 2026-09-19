@@ -37,6 +37,9 @@ The acceptance scenario (Appendix A) pins the observable at engagement level: a 
 | [Part 07: Anti-Fabrication and Anti-Cap Checks](spec/07-anti-fabrication.md) | Finding-count monotonicity, `traces_to.pivot_need` citation, tool-version audit, enforcement inside `sec_cell_complete`. |
 | [Part 08: UX and Web Flow](spec/08-ux-flow.md) | Hub, setup wizard, running view, consolidated ask card, delta rendering, per-flow rules for source-only, live pentest, live-plus-pivot, re-scan. |
 | [Part 09: Resume from Terminal + Launch Checklist](spec/09-resume-and-launch-checklist.md) | Resume contract for closed engagements with open needs or failed cells, late needs answer, scope schema extensions (login_url, signup_url, rate_limit_rps), Launch checklist replacing the passive Review step. |
+| [Part 11: Runtime Execution (two-mode)](spec/11-runtime-execution.md) | v2 rewrite. `sec_verify_exec` (sandbox-side, default) wraps `valet-secrets` + `curl`; `sec_http_request` (api-side, opt-in) for private-network targets. Node hygiene section conditional on egress mode. |
+| [Part 12: Credentials via 1Password](spec/12-credentials-via-1password.md) | v2 rewrite against landed `OnePasswordService` + `sandbox-secrets.ts` broker + `valet-secrets` CLI. Three scopes (org, personal, team), team-first. Per-engagement broker allowlist added on top of the landed broker. Tripwire seeded from broker resolves for a security cell, held in a per-session index grouped by engagement. |
+| [Part 13: UX v2](spec/13-ux-v2.md) | DAG plan editor, focus/invariants under Advanced, wider findings pane with a read-only activity stream, three-verdict findings with a human overlay that keeps the fingerprint stable, HTML report artifact, rescan v2, architecture memory on `/architecture.yml`. Supersession table for Parts 08/09 sections. |
 | [Appendix A: Acceptance Scenario](spec/appendix-a-acceptance.md) | Normative end-to-end integration test (clean start -> 5 personas -> pivot round -> delta re-runs -> 13 findings), mapped to Valet routes. |
 | [Appendix B: Threat Model](spec/appendix-b-threat-model.md) | Threats to the runner, tools, loot, findings, coordinator, cross-engagement isolation, and their mitigations. |
 | [Appendix C: Non-Goals](spec/appendix-c-non-goals.md) | v1 exclusions with a re-entry seam per item (multi-round pivots, loot encryption, MCP daemons, GPG signatures, cross-engagement loot reuse, tool caching, deferred needs bucket, collision audit, expiry audit). |
@@ -49,10 +52,10 @@ An implementation conforms to one of five cumulative levels. Each includes every
 | Level | Name | An L0..L4 implementation ships |
 |---|---|---|
 | L0 | Pure decision kernel | Fingerprint function, needs classification, `delta_targets` computation, auto-catalog outcome computation, anti-cap check outcome computation. No I/O. |
-| L1 | Tool provisioning | L0 plus the in-sandbox tool install (APT, GitHub release, `go install`, `pip`, `git clone` + build), the per-persona preflight probe, and the coverage report schema. Personas mark missing-tool oracles NOT_ASSESSED. |
+| L1 | Tool provisioning | L0 plus the in-sandbox tool install (APT, GitHub release, `go install`, `pip`, `git clone` + build), the per-persona preflight probe, and the coverage report schema. Personas mark missing-tool oracles NOT_ASSESSED. Plus Part 12 v2 preflight (INV-33) and Part 11 v2 sandbox-side default (`sec_verify_exec`). |
 | L2 | Coordinator (discover mode) | L1 plus the pivot-coordinator persona in discover mode, `needs.yml` reads across prior cells, classification, and the consolidated `human_setup_ask.md`. No auto-catalog execution required. |
-| L3 | Coordinator (resolve mode) plus delta re-runs | L2 plus resolve mode, three auto-catalog patterns (`scope-auto-include`, `propagate-session`, `rerun-with-existing-loot`), `loot.catalog.yml` writes, `delta_targets` computation, the `post-pivot-delta` dispatch contract. |
-| L4 | Full system | L3 plus `create-test-account`, `tool-auth-reuse`, and the three anti-cap checks enforced in `sec_cell_complete` (finding-count monotonicity, `pivot_need` citation, tool-version audit). |
+| L3 | Coordinator (resolve mode) plus delta re-runs | L2 plus resolve mode, three auto-catalog patterns (`scope-auto-include`, `propagate-session`, `rerun-with-existing-loot`), `loot.catalog.yml` writes, `delta_targets` computation, the `post-pivot-delta` dispatch contract. Plus Part 12 v2 broker allowlist (INV-34), Part 12 v2 launcher delivery (INV-36), and Part 11 v2 verify-cell header (INV-31). |
+| L4 | Full system | L3 plus `create-test-account`, `tool-auth-reuse`, and the three anti-cap checks enforced in `sec_cell_complete` (finding-count monotonicity, `pivot_need` citation, tool-version audit). Plus Part 12 v2 tripwire seam (INV-35) and Part 11 v2 wrapper-strip (INV-30). |
 
 Valet Security v1 targets **L3**. The tool inventory (Part 03) and the pivot-coordinator persona (Part 05) are the two large land items.
 
@@ -69,6 +72,7 @@ The spec doc directory maps to Valet paths as follows.
 | Every SQL schema change | `packages/api/migrations/pg/0000_app.sql` and `packages/api/src/schema/index.ts`, with a `SCHEMA_REPAIRS` entry in `packages/api/src/lib/drizzle.ts`. |
 | Every scanner install step | `packages/api/src/engine/security-bootstrap.ts::securityToolPrepSteps`. |
 | Per-persona preflight scripts | `docker/sec-preflight-<persona>.sh` and the merged `docker/sec-preflight.sh` for the default set. |
+| Part 13 web-side changes | `packages/web/src/routes/security.*, packages/web/src/components/security/*`. |
 | L0 reference implementation | `docs/specs/valet-security/reference/*.py`. |
 | Normative test vectors | `docs/specs/valet-security/vectors/*.json`. |
 | Prose validator | `docs/specs/valet-security/scripts/check-prose.py`. |
@@ -102,6 +106,11 @@ docs/specs/valet-security/
 │   ├── 05-pivot-coordinator.md
 │   ├── 06-loot-catalog.md
 │   ├── 07-anti-fabrication.md
+│   ├── 08-ux-flow.md
+│   ├── 09-resume-and-launch-checklist.md
+│   ├── 11-runtime-execution.md
+│   ├── 12-credentials-via-1password.md
+│   ├── 13-ux-v2.md
 │   ├── appendix-a-acceptance.md
 │   ├── appendix-b-threat-model.md
 │   ├── appendix-c-non-goals.md
@@ -128,3 +137,5 @@ docs/specs/valet-security/
 `v1-draft, 2026-08-29`: first pass, prose only. Vectors placeholder. Concept-note vocabulary not aligned to Valet.
 
 `v1, 2026-08-31`: this pass. Rewrote every part to name Valet v2 tables, tools, and personas. Added Part 03 tool inventory. Added Part 05 pivot-coordinator persona spec, its role markdown, and its playbook. Reference implementation and vector files under `reference/` and `vectors/`. Two prose + conformance scripts under `scripts/`. Advisor-flagged fixes: `normalize_path` now rejects paths that escape repo root. The `rerun-with-existing-loot` derivation rule (`https://<session.host>/*`) is documented in Part 05 §5.7. The level filter examples in Appendix D map `L0..L4` to `0..4` and compare integers. Fingerprint values replace the v1-draft placeholders. The placeholder set had no conformant implementation so nothing on the wire is invalidated.
+
+`v1.1, 2026-09-12`: Part 10 dropped. Part 11 rewritten with a two-mode egress contract (sandbox-side default via `sec_verify_exec` + `valet-secrets`; api-side fallback via `sec_http_request`). Part 12 rewritten against landed 1Password subsystem (three scopes, six typed auth-error kinds, `packages/shared/src/security-credentials.ts` as the declaration-grammar authority, per-engagement broker allowlist added on top of the landed broker, tripwire seam through broker resolves for a security cell). New Part 13 (UX v2) added as normative spec covering DAG plan editor, three-verdict findings with human overlay, HTML report artifact, rescan v2, architecture memory, plus a supersession table for Parts 08 and 09.

@@ -61,6 +61,7 @@ const engagement: SecurityEngagementWire = {
   configPersonas: null,
   configTools: null,
   authorizedScope: null,
+  credentialLabels: [],
   createdAt: 1,
   updatedAt: 2,
 };

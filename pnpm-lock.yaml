@@ -772,6 +772,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
