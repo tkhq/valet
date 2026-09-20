@@ -1756,6 +1756,13 @@ export interface ListOpts {
   createdBefore?: Date;
 }
 
+export interface SubmissionAdmissionOptions {
+  steer?: boolean;
+  steerScope?: "all" | "active-and-source";
+  maxPending?: number;
+  promoteFromItemId?: string;
+}
+
 export interface SessionStore {
   saveSession(session: SessionData): Promise<void>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
@@ -1816,8 +1823,11 @@ export interface SessionStore {
    * Idempotent admission. Same dispatchId + deep-equal content → returns the
    * existing item with admitted=false. Same dispatchId + different content →
    * throws ConflictError. steer:true additionally stamps supersededByItemId
-   * on every unsettled item of the thread admitted before this one, in the
-   * same atomic step, and returns their ids.
+   * on unsettled items in the selected steerScope, in the same atomic step,
+   * and returns their ids. The default "all" scope supersedes every prior
+   * unsettled item. "active-and-source" supersedes only the running or
+   * gate-blocked item plus promoteFromItemId, preserves queued siblings, and
+   * inserts the promoted successor at the runnable head.
    *
    * opts.maxPending, when set, enforces the per-thread pending cap INSIDE
    * this call's own transaction: the store counts the thread's unsettled,
@@ -1829,14 +1839,15 @@ export interface SessionStore {
    *
    * opts.promoteFromItemId, when set, requires that item to still be queued
    * and not superseded on this thread. If it is not, the call throws
-   * ValidationError and does not insert. Promote-to-steer uses this so a
-   * concurrent claim cannot admit a second user entry.
+   * ValidationError and does not insert. The "active-and-source" scope
+   * requires both steer:true and promoteFromItemId. Promote-to-steer uses
+   * this atomic mode so a concurrent claim cannot admit a second user entry.
    */
   admitSubmission(
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
+    opts?: SubmissionAdmissionOptions,
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }>;
   /**
    * CAS queued→running. Succeeds only when itemId is the thread's runnable

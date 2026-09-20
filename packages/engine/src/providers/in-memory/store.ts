@@ -12,6 +12,7 @@ import type {
   SessionStatus,
   SessionStore,
   SettlePatchRef,
+  SubmissionAdmissionOptions,
   SubmissionClaim,
   SubmissionOutcome,
   SuspendedTurnState,
@@ -275,7 +276,7 @@ export class InMemorySessionStore implements SessionStore {
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
+    opts?: SubmissionAdmissionOptions,
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     const r = this.row(sessionId);
 
@@ -328,7 +329,24 @@ export class InMemorySessionStore implements SessionStore {
       }
     }
 
-    const stored: QueueItem = { ...item, dispatchId };
+    const promotionScope = opts?.steerScope === "active-and-source";
+    if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
+      throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
+    }
+    const queuedCreatedAt = promotionScope
+      ? [...r.queueItems.values()]
+          .filter(
+            (candidate) =>
+              candidate.threadId === threadId &&
+              candidate.status === "queued" &&
+              !candidate.supersededByItemId,
+          )
+          .map((candidate) => candidate.createdAt)
+      : [];
+    // Queue order is createdAt + id. Move the successor just ahead of the
+    // oldest queued sibling; the validated source guarantees a non-empty set.
+    const promotedCreatedAt = promotionScope ? Math.min(...queuedCreatedAt) - 1 : item.createdAt;
+    const stored: QueueItem = { ...item, dispatchId, createdAt: promotedCreatedAt };
     r.queueItems.set(stored.id, stored);
     if (stored.dispatchId) {
       r.dispatchIndex.set(stored.dispatchId, stored.id);
@@ -341,11 +359,19 @@ export class InMemorySessionStore implements SessionStore {
         if (other.threadId !== threadId) continue;
         if (other.status === "settled") continue;
         if (other.supersededByItemId) continue;
+        if (
+          promotionScope &&
+          other.id !== opts.promoteFromItemId &&
+          other.status !== "running" &&
+          other.status !== "blocked_on_decision_gate"
+        ) {
+          continue;
+        }
         // "Admitted before this one" is approximated by createdAt ordering;
         // callers construct items with monotonic timestamps in practice, and
         // Map insertion order (== admission order) breaks any tie the same
         // way the SQL backends' insertion-ordered scan will.
-        if (other.createdAt > stored.createdAt) continue;
+        if (!promotionScope && other.createdAt > stored.createdAt) continue;
         other.supersededByItemId = stored.id;
         other.updatedAt = Date.now();
         supersededItemIds.push(other.id);

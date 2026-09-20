@@ -54,7 +54,7 @@ describe("POST /messages: queueMode and promote", () => {
     expect(body.error).toMatch(/send the message again/i);
   });
 
-  it("admits a followup without aborting the running item, then promote steers", async () => {
+  it("promotes the selected followup while preserving other queued work", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
     const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
@@ -114,6 +114,7 @@ describe("POST /messages: queueMode and promote", () => {
     const original = await store.getQueueItem(sessionId, firstBody.messageId!);
     const supersededFollowup = await store.getQueueItem(sessionId, followupBody.messageId!);
     expect(supersededFollowup?.outcome).toEqual({ outcome: "superseded" });
-    expect(original?.supersededByItemId).toBe(promoteBody.messageId);
+    expect(original?.status).toBe("queued");
+    expect(original?.supersededByItemId).toBeUndefined();
   });
 });

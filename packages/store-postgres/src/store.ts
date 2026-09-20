@@ -14,6 +14,7 @@ import type {
   SessionStatus,
   SessionStore,
   SettlePatchRef,
+  SubmissionAdmissionOptions,
   SubmissionClaim,
   SubmissionOutcome,
   SuspendedTurnState,
@@ -140,6 +141,13 @@ const INSERT_QUEUE_ITEM_SQL = `
 // Steer supersession: stamp every unsettled, not-yet-superseded item of the
 // thread admitted at or before the steering item's createdAt (matches
 // InMemorySessionStore.admitSubmission's steer loop exactly).
+const PROMOTION_PENDING_SQL = `
+  SELECT * FROM engine_queue_items
+  WHERE session_id = $1 AND thread_id = $2
+    AND status != 'settled' AND superseded_by_item_id IS NULL
+  FOR UPDATE
+`;
+
 const STEER_CANDIDATES_SQL = `
   SELECT id FROM engine_queue_items
   WHERE session_id = $1 AND thread_id = $2 AND id != $3
@@ -794,13 +802,18 @@ export class PgSessionStore implements SessionStore {
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
+    opts?: SubmissionAdmissionOptions,
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     let deduped: QueueItem | null;
+    let admittedItem: QueueItem | null;
     let supersededItemIds: string[];
     try {
-      ({ deduped, supersededItemIds } = await this.db.transaction(
-        async (tx): Promise<{ deduped: QueueItem | null; supersededItemIds: string[] }> => {
+      ({ deduped, admittedItem, supersededItemIds } = await this.db.transaction(
+        async (tx): Promise<{
+          deduped: QueueItem | null;
+          admittedItem: QueueItem | null;
+          supersededItemIds: string[];
+        }> => {
           // Serialize admissions for this thread. The dispatchId dedup check,
           // pending-cap count, and insert must all observe the same snapshot
           // as a concurrent admission for the same thread — analogous to
@@ -817,7 +830,11 @@ export class PgSessionStore implements SessionStore {
             );
             const raw = existing.rows[0];
             if (raw) {
-              return { deduped: this.resolveDispatchDedup(raw, item), supersededItemIds: [] };
+              return {
+                deduped: this.resolveDispatchDedup(raw, item),
+                admittedItem: null,
+                supersededItemIds: [],
+              };
             }
           }
 
@@ -829,15 +846,35 @@ export class PgSessionStore implements SessionStore {
             }
           }
 
-          if (opts?.promoteFromItemId) {
-            // Lock the source row so a concurrent claim waits. If the
-            // item is no longer queued, abort before the insert.
-            const source = await tx.query(
-              "SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2 FOR UPDATE",
-              [sessionId, opts.promoteFromItemId],
+          const promotionScope = opts?.steerScope === "active-and-source";
+          if (promotionScope && (!opts.steer || !opts.promoteFromItemId)) {
+            throw new ValidationError("Promotion steering requires steer and promoteFromItemId.");
+          }
+          let lockedPending: QueueItem[] = [];
+          if (promotionScope) {
+            // Lock every runnable candidate before inserting the promoted
+            // head. A claim that won first is observed as running and gets
+            // superseded; a claim that lost waits, then sees the new head.
+            const pending = await tx.query(PROMOTION_PENDING_SQL, [sessionId, threadId]);
+            lockedPending = pending.rows.map((raw) =>
+              queueItemRowToItem(rawToQueueItemRow(raw)),
             );
-            const raw = source.rows[0];
-            const srcItem = raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+          }
+
+          if (opts?.promoteFromItemId) {
+            let srcItem: QueueItem | null | undefined;
+            if (promotionScope) {
+              srcItem = lockedPending.find(
+                (candidate) => candidate.id === opts.promoteFromItemId,
+              );
+            } else {
+              const source = await tx.query(
+                "SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2 FOR UPDATE",
+                [sessionId, opts.promoteFromItemId],
+              );
+              const raw = source.rows[0];
+              srcItem = raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+            }
             if (
               !srcItem ||
               srcItem.threadId !== threadId ||
@@ -850,12 +887,42 @@ export class PgSessionStore implements SessionStore {
             }
           }
 
-          await tx.query(INSERT_QUEUE_ITEM_SQL, queueItemInsertParams(sessionId, threadId, item));
+          const queuedCreatedAt = promotionScope
+            ? lockedPending
+                .filter((candidate) => candidate.status === "queued")
+                .map((candidate) => candidate.createdAt)
+            : [];
+          // Queue order is createdAt + id. Move the successor just ahead
+          // of the oldest queued sibling; the validated source guarantees a
+          // non-empty set.
+          const promotedCreatedAt = promotionScope
+            ? Math.min(...queuedCreatedAt) - 1
+            : item.createdAt;
+          const itemToInsert: QueueItem = { ...item, createdAt: promotedCreatedAt };
+          await tx.query(
+            INSERT_QUEUE_ITEM_SQL,
+            queueItemInsertParams(sessionId, threadId, itemToInsert),
+          );
 
           const superseded: string[] = [];
           if (opts?.steer) {
-            const candidates = await tx.query(STEER_CANDIDATES_SQL, [sessionId, threadId, item.id, item.createdAt]);
-            const ids = candidates.rows.map(rowId);
+            const ids = promotionScope
+              ? lockedPending
+                  .filter(
+                    (candidate) =>
+                      candidate.id === opts.promoteFromItemId ||
+                      candidate.status === "running" ||
+                      candidate.status === "blocked_on_decision_gate",
+                  )
+                  .map((candidate) => candidate.id)
+              : (
+                  await tx.query(STEER_CANDIDATES_SQL, [
+                    sessionId,
+                    threadId,
+                    itemToInsert.id,
+                    itemToInsert.createdAt,
+                  ])
+                ).rows.map(rowId);
             if (ids.length > 0) {
               await tx.query(
                 `UPDATE engine_queue_items SET superseded_by_item_id = $1, updated_at = $2 WHERE id = ANY($3::text[])`,
@@ -864,7 +931,7 @@ export class PgSessionStore implements SessionStore {
               superseded.push(...ids);
             }
           }
-          return { deduped: null, supersededItemIds: superseded };
+          return { deduped: null, admittedItem: itemToInsert, supersededItemIds: superseded };
         },
       ));
     } catch (err) {
@@ -894,7 +961,7 @@ export class PgSessionStore implements SessionStore {
     if (deduped) {
       return { item: deduped, admitted: false, supersededItemIds: [] };
     }
-    return { item: { ...item }, admitted: true, supersededItemIds };
+    return { item: { ...(admittedItem ?? item) }, admitted: true, supersededItemIds };
   }
 
   async claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null> {
