@@ -12,7 +12,13 @@ import { ArrowUp, Paperclip, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
-import { queueBusy, useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
+import {
+  queueBusy,
+  useStreamStore,
+  useQueueStateForThread,
+  type AgentStatus,
+  type StreamMessage,
+} from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { draftKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
@@ -79,7 +85,7 @@ const ACTION_LABEL: Record<SubmitAction, string> = {
  */
 const ACTION_HINT: Record<SubmitAction, string> = {
   send: "",
-  steer: "Queued. Press Enter again to interrupt the current turn.",
+  steer: "Queued. Press Enter again, or select Send now above.",
   queue: "The agent completes the current turn. Then it reads your message.",
 };
 
@@ -93,6 +99,7 @@ export function Composer({
   sessionId,
   threadId,
   agentStatus,
+  queuedMessages = [],
   replyTarget,
   onCancelReply,
 }: {
@@ -105,6 +112,8 @@ export function Composer({
    */
   threadId?: string;
   agentStatus: AgentStatus;
+  /** Pending user messages, ordered by queue admission. */
+  queuedMessages?: StreamMessage[];
   replyTarget?: MessageReplyReference;
   onCancelReply?: () => void;
 }) {
@@ -266,6 +275,7 @@ export function Composer({
   // (empty pending after POST) does not disarm Steer before the item lands.
   const followupSeenPendingRef = useRef<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [promotingItemId, setPromotingItemId] = useState<string | null>(null);
 
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
@@ -476,38 +486,42 @@ export function Composer({
     startUpload(key, reset);
   }
 
-  async function submit() {
-    if (send.isPending || !threadId || uploadsPending) return;
-
-    // Empty Enter after a self-queued followup promotes that item. Do not
-    // POST the same text again — that would write a second user entry.
-    if (action === "steer" && queuedFollowup) {
-      setSubmitError(null);
-      try {
-        const res = await send.mutateAsync({
-          text: "",
-          threadId,
-          promoteItemId: queuedFollowup.itemId,
-        });
-        if (res.messageId && res.messageId !== queuedFollowup.itemId) {
-          setMessageQueueItemId(sessionId, queuedFollowup.localId, res.messageId);
-        }
+  async function promoteQueuedItem(itemId: string, messageId: string) {
+    if (send.isPending || !threadId) return;
+    setSubmitError(null);
+    setPromotingItemId(itemId);
+    try {
+      const res = await send.mutateAsync({ text: "", threadId, promoteItemId: itemId });
+      if (res.messageId && res.messageId !== itemId) {
+        setMessageQueueItemId(sessionId, messageId, res.messageId);
+      }
+      if (queuedFollowup?.itemId === itemId) {
         setQueuedFollowupByThread((prev) => {
           if (!(threadId in prev)) return prev;
           const { [threadId]: _, ...rest } = prev;
           return rest;
         });
         delete followupSeenPendingRef.current[threadId];
-      } catch (err) {
-        // The optimistic bubble stays. Name the corrective action from
-        // the API so the user knows to send again or wait.
-        setSubmitError(
-          apiErrorDetail(
-            err,
-            "The promote did not complete. Send a new message, or wait for the current turn to finish.",
-          ),
-        );
       }
+    } catch (err) {
+      setSubmitError(
+        apiErrorDetail(
+          err,
+          "The message was not sent. Send a new message, or wait for the current turn to finish.",
+        ),
+      );
+    } finally {
+      setPromotingItemId(null);
+    }
+  }
+
+  async function submit() {
+    if (send.isPending || !threadId || uploadsPending) return;
+
+    // Empty Enter after a self-queued followup promotes that item. Do not
+    // POST the same text again — that would write a second user entry.
+    if (action === "steer" && queuedFollowup) {
+      await promoteQueuedItem(queuedFollowup.itemId, queuedFollowup.localId);
       return;
     }
 
@@ -772,10 +786,38 @@ export function Composer({
         dragActive && "ring-2 ring-inset ring-moss",
       )}
     >
-      <div className={cn(
-        "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
-        expanded ? "p-2" : "p-1",
-      )}>
+      {queuedMessages.length > 0 && (
+        <div className="mb-2 space-y-1.5" aria-label="Queued messages">
+          {queuedMessages.map((message) => {
+            const itemId = message.queueItemId;
+            if (!itemId) return null;
+            return (
+              <div
+                key={itemId}
+                className="flex items-center gap-2 rounded-xl border border-line bg-ink-wash px-3 py-2 text-xs"
+              >
+                <p className="min-w-0 flex-1 line-clamp-2 text-ink">{message.content}</p>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="shrink-0"
+                  disabled={send.isPending}
+                  onClick={() => void promoteQueuedItem(itemId, message.id)}
+                >
+                  {promotingItemId === itemId ? "Sending…" : "Send now"}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div
+        className={cn(
+          "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
+          expanded ? "p-2" : "p-1",
+        )}
+      >
         <QueueIndicator queueState={queueState} />
         {replyTarget && (
           <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2 text-xs">
@@ -944,9 +986,6 @@ function QueueIndicator({
 }) {
   if (!queueState) return null;
   const parts: string[] = [];
-  if (queueState.pendingIds.length > 0) {
-    parts.push(`${queueState.pendingIds.length} queued`);
-  }
   if (queueState.status === "paused") {
     parts.push("paused");
   }

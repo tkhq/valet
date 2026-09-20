@@ -1116,8 +1116,9 @@ export function buildChildStatusReader(deps: ChildrenDeps): ChildStatusReader {
  * is the durable edge the UI's child grouping and the child's approval-gate
  * routing resolve through, so the settlement lands on the thread that
  * commissioned the work even when the steer came from another thread.
- * `interrupt: true` admits with queue-mode steer, superseding the child's
- * in-flight work; the stale watcher on the superseded submission follows
+ * Sends steer by default, superseding the child's in-flight work. A caller
+ * can set `queue: true` to wait for the current turn. The legacy
+ * `interrupt` field keeps its true/false behavior. The stale watcher follows
  * the successor via the re-point guard in `ChildWatcher.attempt`.
  *
  * Re-opening a settled child re-enters the active-children population, so
@@ -1132,7 +1133,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
   const chains = new Map<string, Promise<{ queueItemId: string } | null>>();
 
   const send = async (
-    req: { childSessionId: string; message: string; interrupt?: boolean },
+    req: { childSessionId: string; message: string; queue?: boolean; interrupt?: boolean },
     ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
   ): Promise<{ queueItemId: string } | null> => {
     const watchRows = await deps.db
@@ -1198,7 +1199,10 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
     // No `author` — agent-composed text, same reasoning as the spawn path.
     const receipt = await childSession.prompt(req.message, {
-      queueMode: req.interrupt ? "steer" : "followup",
+      queueMode:
+        req.interrupt === true || (req.queue !== true && req.interrupt !== false)
+          ? "steer"
+          : "followup",
     });
 
     // Re-point BEFORE arming: the fresh watcher must find the row already

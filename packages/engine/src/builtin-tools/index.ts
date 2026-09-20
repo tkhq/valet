@@ -506,9 +506,9 @@ export const childSendTool = defineTool({
   name: "child_send",
   description:
     "Send a message to a child session this session spawned — steer it " +
-    "mid-run or follow up after it settled. By default the message queues " +
-    "behind the child's current work; set `interrupt: true` to supersede " +
-    "that work (use it when the child is heading the wrong direction). " +
+    "mid-run or follow up after it settled. By default the message supersedes " +
+    "the child's in-flight work. Set `queue: true` to deliver it after the " +
+    "current turn. The legacy `interrupt` field remains supported. " +
     "Either way the settlement watch re-arms: the child's next result " +
     "arrives as a fresh `child.settled` signal on the thread that spawned " +
     "the child.",
@@ -517,9 +517,14 @@ export const childSendTool = defineTool({
       description: "The child session to message, as returned by `task` or named in a child.settled signal.",
     }),
     message: Type.String({ minLength: 1, description: "The message to deliver to the child." }),
+    queue: Type.Optional(
+      Type.Boolean({
+        description: "Deliver after the child's current turn instead of superseding it. Default false.",
+      }),
+    ),
     interrupt: Type.Optional(
       Type.Boolean({
-        description: "Supersede the child's in-flight work instead of queueing behind it. Default false.",
+        description: "Legacy option. True supersedes in-flight work; false queues behind it.",
       }),
     ),
   }),
@@ -537,6 +542,7 @@ export const childSendTool = defineTool({
       {
         childSessionId: args.child_session_id,
         message: args.message,
+        ...(args.queue !== undefined ? { queue: args.queue } : {}),
         ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
       },
       { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
@@ -548,7 +554,8 @@ export const childSendTool = defineTool({
           `Use the child_session_id from a task result or a child.settled signal in this thread.`,
       };
     }
-    const mode = args.interrupt
+    const steers = args.interrupt === true || (args.queue !== true && args.interrupt !== false);
+    const mode = steers
       ? "superseding its in-flight work"
       : "queued behind its current work";
     return {

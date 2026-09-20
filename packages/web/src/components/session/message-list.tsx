@@ -51,7 +51,7 @@ export function MessageList({
    * token, and must not flash as a failure.
    */
   agentBusy?: boolean;
-  /** Engine queue item ids still waiting. Marks those user bubbles Queued. */
+  /** Engine queue item ids still waiting. These messages render above the composer. */
   pendingIds?: string[];
   /**
    * The signed-in user's id. A user message from someone else (a teammate
@@ -73,9 +73,13 @@ export function MessageList({
   const [scrolledAway, setScrolledAway] = useState(false);
 
   const visible = useMemo(() => {
-    if (!threadId) return messages;
-    return messages.filter((m) => m.threadId === threadId);
-  }, [messages, threadId]);
+    const pending = new Set(pendingIds ?? []);
+    return messages.filter(
+      (message) =>
+        (!threadId || message.threadId === threadId) &&
+        (!message.queueItemId || !pending.has(message.queueItemId)),
+    );
+  }, [messages, pendingIds, threadId]);
 
   // A thread switch starts at the bottom: the previous thread's scroll
   // position must not decide whether the new thread auto-scrolls or shows
@@ -173,7 +177,6 @@ export function MessageList({
                   key={m.id}
                   message={m}
                   suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
-                  queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
                   viewerId={viewerId}
                   onReply={onReply}
                 />

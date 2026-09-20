@@ -78,14 +78,14 @@ describe("child_send tool: no sender", () => {
 });
 
 describe("child_send tool: sender present", () => {
-  it("passes message/interrupt through, and ctx fields reach the sender", async () => {
-    let seenReq: { childSessionId: string; message: string; interrupt?: boolean } | undefined;
+  it("passes queue/interrupt through, and ctx fields reach the sender", async () => {
+    let seenReq: { childSessionId: string; message: string; queue?: boolean; interrupt?: boolean } | undefined;
     let seenCtx:
       | { parentSessionId: string; parentThreadId: string; actorUserId: string }
       | undefined;
     const sender = vi.fn(
       async (
-        req: { childSessionId: string; message: string; interrupt?: boolean },
+        req: { childSessionId: string; message: string; queue?: boolean; interrupt?: boolean },
         sendCtx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
       ) => {
         seenReq = req;
@@ -101,15 +101,15 @@ describe("child_send tool: sender present", () => {
     });
 
     const result = await childSendTool.execute(
-      { child_session_id: "child-1", message: "drop the fallback, fix the chart", interrupt: true },
+      { child_session_id: "child-1", message: "after this, update the docs", queue: true },
       ctx,
     );
 
     expect(sender).toHaveBeenCalledTimes(1);
     expect(seenReq).toEqual({
       childSessionId: "child-1",
-      message: "drop the fallback, fix the chart",
-      interrupt: true,
+      message: "after this, update the docs",
+      queue: true,
     });
     expect(seenCtx).toEqual({
       parentSessionId: "parent-session",

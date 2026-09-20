@@ -55,7 +55,6 @@ function MessageRating({ message }: { message: StreamMessage }) {
 export const MessageItem = memo(function MessageItem({
   message,
   suppressEmptyPlaceholder = false,
-  queued = false,
   viewerId,
   onReply,
 }: {
@@ -63,8 +62,6 @@ export const MessageItem = memo(function MessageItem({
   /** True for the last message while the agent is mid-turn — an empty
    *  assistant row is then a streaming placeholder, not a failed turn. */
   suppressEmptyPlaceholder?: boolean;
-  /** True while this user message is still waiting in the queue. */
-  queued?: boolean;
   /** The signed-in user's id — see `MessageList`'s prop doc. */
   viewerId?: string;
   /** Selects a completed assistant text message as the composer reply target. */
@@ -107,11 +104,6 @@ export const MessageItem = memo(function MessageItem({
                 title={message.model}
               >
                 {shortModelLabel(message.model)}
-              </span>
-            )}
-            {queued && !message.settledOutcome && (
-              <span className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-accent-500/10 text-accent-700 dark:text-accent-400">
-                Queued
               </span>
             )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}

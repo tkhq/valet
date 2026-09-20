@@ -2660,8 +2660,9 @@ export type ChildStatusReader = (
 /**
  * Sends a message into a child session on behalf of its parent — the
  * steering half of the child toolset (`task` spawns, `child_read` reads,
- * `child_send` redirects). `interrupt: true` supersedes the child's
- * in-flight work (queue-mode steer); the default queues behind it.
+ * `child_send` redirects). The default supersedes the child's in-flight
+ * work (queue-mode steer). `queue: true` waits for the current turn. The
+ * legacy `interrupt` field remains supported: true steers and false queues.
  *
  * The host re-points its settlement watch at the new submission, so the
  * parent's next `child.settled` signal reports the steered work, not the
@@ -2674,7 +2675,7 @@ export type ChildStatusReader = (
  * with the same "not yours" / "does not exist" ambiguity as `ChildReader`.
  */
 export type ChildSender = (
-  req: { childSessionId: string; message: string; interrupt?: boolean },
+  req: { childSessionId: string; message: string; queue?: boolean; interrupt?: boolean },
   ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
 ) => Promise<{ queueItemId: string } | null>;
 

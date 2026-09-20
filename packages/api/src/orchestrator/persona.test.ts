@@ -15,6 +15,12 @@ const OWNERS: Principal[] = [
 ];
 
 describe("orchestratorPersona", () => {
+  it("documents steer-by-default child sends and the queue opt-in", () => {
+    const persona = orchestratorPersona({ type: "user", id: "u1" });
+    expect(flat(persona)).toContain("child_send supersedes the current turn by default");
+    expect(flat(persona)).toContain("Set queue: true only when the message must wait");
+  });
+
   // TKAI-484. The agent used to write a personal file, copy it to the team,
   // then delete the original, because mem_write had no way to name a team.
   it("tells the agent to write a team directly instead of copying into it", () => {
