@@ -585,6 +585,23 @@ export class InMemorySessionStore implements SessionStore {
     }
   }
 
+  async requestAbortActiveSubmission(
+    sessionId: string,
+    threadId: string,
+  ): Promise<QueueItem | null> {
+    const r = this.row(sessionId);
+    const head = this.threadItemsInOrder(r, threadId).find(
+      (item) => item.status === "running" || item.status === "blocked_on_decision_gate",
+    );
+    if (!head) return null;
+    if (head.abortRequestedAt === undefined) {
+      const now = Date.now();
+      head.abortRequestedAt = now;
+      head.updatedAt = now;
+    }
+    return { ...head };
+  }
+
   /**
    * Shared lookup for the fenced lifecycle methods: enforce the fence via
    * checkFence, then resolve the target item, treating any identity mismatch

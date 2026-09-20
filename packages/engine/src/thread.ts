@@ -1277,11 +1277,21 @@ export class Thread {
   /** Interrupt the active submission and preserve queued work on this thread. */
   async interrupt(): Promise<void> {
     const runningItemId = this.runningItem?.id;
-    if (runningItemId === undefined) {
-      void this.kick();
+    if (runningItemId !== undefined) {
+      await this.abortSubmission(runningItemId);
       return;
     }
-    await this.abortSubmission(runningItemId);
+    // The durable claim can precede this.runningItem during claim and restore.
+    // Select and stamp it atomically so a successor cannot inherit the abort.
+    const active = await this.session.providers.store.requestAbortActiveSubmission(
+      this.session.id,
+      this.id,
+    );
+    if (active) {
+      await this.abortSubmission(active.id);
+      return;
+    }
+    void this.kick();
   }
 
   /** Cancel one submission without aborting other work on this thread. */

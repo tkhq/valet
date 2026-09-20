@@ -532,6 +532,54 @@ describe("queue: abort", () => {
     faux.unregister();
   });
 
+  it("interrupts a durable claim before the local running item is installed", async () => {
+    let markInserted!: () => void;
+    const markerInserted = new Promise<void>((resolve) => { markInserted = resolve; });
+    let releaseMarker!: () => void;
+    const markerBarrier = new Promise<void>((resolve) => { releaseMarker = resolve; });
+    class ClaimWindowStore extends InMemorySessionStore {
+      override async insertAttemptMarker(itemId: string, attemptId: string): Promise<void> {
+        await super.insertAttemptMarker(itemId, attemptId);
+        markInserted();
+        await markerBarrier;
+      }
+    }
+
+    const faux = registerFauxProvider({ provider: "interrupt-claim-window" });
+    faux.setResponses([fauxAssistantMessage("kept")]);
+    const store = new ClaimWindowStore();
+    const engine = new Engine({
+      providers: {
+        store,
+        stream: new InMemoryEventStream(),
+        sandboxProvider: new VirtualSandboxProvider(),
+      },
+    });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    const cancelled = await thread.submitPrompt("cancel", {});
+    await markerInserted;
+    const kept = await thread.submitPrompt("keep", {});
+
+    await thread.interrupt();
+
+    expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.abortRequestedAt).toBeDefined();
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
+    releaseMarker();
+    await expect(thread.awaitResult(cancelled.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "aborted",
+    });
+    await expect(thread.awaitResult(kept.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "completed",
+      text: "kept",
+    });
+    expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
+    await session.destroy();
+    faux.unregister();
+  });
+
   it("delivers every queued followup after interrupting the running submission", async () => {
     const faux = registerFauxProvider({ provider: "interrupt-many", tokensPerSecond: 20 });
     faux.setResponses([

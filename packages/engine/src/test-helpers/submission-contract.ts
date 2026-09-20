@@ -1308,6 +1308,60 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect((await store.getQueueItem(SESSION_ID, b.id))?.abortRequestedAt).toBeUndefined();
     });
 
+    it("requestAbortActiveSubmission stamps only the running item", async () => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100 });
+      const queued = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: active.id,
+        attemptId: "att-active-abort",
+        ownerId: "o",
+      });
+
+      const stamped = await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID);
+
+      expect(stamped?.id).toBe(active.id);
+      expect(stamped?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, active.id))?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.abortRequestedAt).toBeUndefined();
+    });
+
+    it("requestAbortActiveSubmission stamps a blocked durable head", async () => {
+      const blocked = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, blocked);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: blocked.id,
+        attemptId: "att-blocked-abort",
+        ownerId: "o",
+      });
+      await store.setSubmissionBlocked(
+        SESSION_ID,
+        THREAD_ID,
+        blocked.id,
+        true,
+        { itemId: blocked.id, attemptId: claimed!.attemptId! },
+      );
+
+      const stamped = await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID);
+
+      expect(stamped?.id).toBe(blocked.id);
+      expect(stamped?.status).toBe("blocked_on_decision_gate");
+      expect(stamped?.abortRequestedAt).toBeDefined();
+    });
+
+    it("requestAbortActiveSubmission ignores a queued head", async () => {
+      const queued = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+
+      expect(await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID)).toBeNull();
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.abortRequestedAt).toBeUndefined();
+    });
+
     it("requestAbort stamps abortRequestedAt on unsettled items in scope only; first write wins", async () => {
       const otherThreadId = "th-2";
       await store.saveThread(SESSION_ID, newThread(otherThreadId, "web:other"));

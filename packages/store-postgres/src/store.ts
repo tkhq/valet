@@ -197,6 +197,25 @@ const REPLACE_ATTEMPT_SQL = `
     AND attempt_id = $8
 `;
 
+// Select and stamp the durable active item in one statement. A queued
+// successor cannot enter the target set, so settlement and the next claim
+// cannot create a read-then-write race that stamps the successor.
+const ABORT_ACTIVE_SUBMISSION_SQL = `
+  UPDATE engine_queue_items
+  SET abort_requested_at = COALESCE(abort_requested_at, $1),
+      updated_at = CASE WHEN abort_requested_at IS NULL THEN $1 ELSE updated_at END
+  WHERE session_id = $2 AND thread_id = $3
+    AND status IN ('running', 'blocked_on_decision_gate')
+    AND id = (
+      SELECT id FROM engine_queue_items
+      WHERE session_id = $2 AND thread_id = $3
+        AND status IN ('running', 'blocked_on_decision_gate')
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1
+    )
+  RETURNING *
+`;
+
 // Pending-cap denominator (mirrors countPendingForCap's semantics applied to
 // an already-unsettled item list): unsettled, non-superseded items of the
 // thread. Read inside admitSubmission's own transaction (after the per-thread
@@ -1173,6 +1192,19 @@ export class PgSessionStore implements SessionStore {
         [now, now, sessionId],
       );
     }
+  }
+
+  async requestAbortActiveSubmission(
+    sessionId: string,
+    threadId: string,
+  ): Promise<QueueItem | null> {
+    const result = await this.db.query(ABORT_ACTIVE_SUBMISSION_SQL, [
+      Date.now(),
+      sessionId,
+      threadId,
+    ]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
 
   async reserveSettlement(

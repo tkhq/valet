@@ -1914,6 +1914,11 @@ export interface SessionStore {
   /** Stamp abortRequestedAt on unsettled submissions in scope. First write wins; NOT terminal. */
   /** With queueItemId, stamp only that item within the session/thread scope. */
   requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void>;
+  /**
+   * Atomically stamp and return the active durable submission for a thread.
+   * Only a running or blocked head can match. Queued successors never match.
+   */
+  requestAbortActiveSubmission(sessionId: string, threadId: string): Promise<QueueItem | null>;
   /** Fenced two-phase settlement for claimed turns: running|blocked→terminalizing, recording the outcome. */
   reserveSettlement(
     sessionId: string,
