@@ -77,11 +77,13 @@ describe("api client: colon-safe URL encoding", () => {
 
   it("abortThread encodes both the session id and the thread id", async () => {
     const fetchMock = stubFetchOk();
-    await api.abortThread(COLON_ID, "thread:1");
+    await api.abortThread(COLON_ID, "thread:1", { targetItemId: "item:1" });
     const url = fetchMock.mock.calls[0]?.[0] as string;
     expect(url).toBe(
       `/api/sessions/${encodeURIComponent(COLON_ID)}/threads/${encodeURIComponent("thread:1")}/abort`,
     );
+    const opts = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(opts.body).toBe(JSON.stringify({ targetItemId: "item:1" }));
   });
 });
 

@@ -41,15 +41,40 @@ async function createSession(baseUrl: string): Promise<string> {
   return id;
 }
 
+function abortTurn(baseUrl: string, sessionId: string, threadId: string, targetItemId: string) {
+  return fetch(`${baseUrl}/api/sessions/${sessionId}/threads/${threadId}/abort`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetItemId }),
+  });
+}
+
 describe("POST /threads/:threadId/abort", () => {
   it("404s for an unknown threadId", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
 
-    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/nope/abort`, {
-      method: "POST",
-    });
+    const res = await abortTurn(api.baseUrl, sessionId, "nope", "item-1");
     expect(res.status).toBe(404);
+  });
+
+  it("requires the queue item captured by the Stop gesture", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "targetItemId is required. Send the active queue item as targetItemId." });
   });
 
   it("is a no-op on an idle thread", async () => {
@@ -63,9 +88,7 @@ describe("POST /threads/:threadId/abort", () => {
     });
     const thread = await engineSession.ensureDefaultThread();
 
-    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
-      method: "POST",
-    });
+    const res = await abortTurn(api.baseUrl, sessionId, thread.id, "item-1");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
   });
@@ -83,9 +106,7 @@ describe("POST /threads/:threadId/abort", () => {
     await thread.pause();
     const receipt = await thread.submitPrompt("say hello", {});
 
-    const abortRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
-      method: "POST",
-    });
+    const abortRes = await abortTurn(api.baseUrl, sessionId, thread.id, receipt.queueItemId);
     expect(abortRes.status).toBe(200);
     expect(await abortRes.json()).toEqual({ ok: true });
 
@@ -128,9 +149,7 @@ describe("POST /threads/:threadId/abort", () => {
 
     // Abort thread B — a different, idle thread — should not touch A's
     // still-queued submission.
-    const abortRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${threadB!.id}/abort`, {
-      method: "POST",
-    });
+    const abortRes = await abortTurn(api.baseUrl, sessionId, threadB!.id, receiptA.queueItemId);
     expect(abortRes.status).toBe(200);
 
     const item = await api.providers.engineStore.getQueueItem(sessionId, receiptA.queueItemId);
@@ -177,9 +196,7 @@ describeIfKey("POST /threads/:threadId/abort (real turn)", () => {
         (await api!.providers.engineStore.getQueueItem(sessionId, messageId))?.status === "running"
       );
 
-      const abortRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
-        method: "POST",
-      });
+      const abortRes = await abortTurn(api.baseUrl, sessionId, thread.id, messageId);
       expect(abortRes.status).toBe(200);
       expect(await abortRes.json()).toEqual({ ok: true });
 

@@ -42,6 +42,7 @@ import type {
   PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
+  AbortThreadRequest,
   SendPromptRequest,
   SendPromptResponse,
   ThreadSummary,
@@ -954,9 +955,9 @@ messagesRouter.post("/:id/messages", async (c) => {
 // ── Thread abort ──────────────────────────────────────────────────────────
 //
 // Mirrors the engine-spec route table: `POST .../threads/:threadId/abort`
-// interrupts only the active turn. `Thread.interrupt()` stamps abort intent
-// on the active submission, withdraws its gates, and starts the next queued
-// submission. If no turn is active, it kicks the queue without aborting it.
+// interrupts only the turn named by the gesture target. `Thread.interrupt()`
+// stamps abort intent only if that item is still active, withdraws its gates,
+// and starts the next queued submission. A delayed retry cannot abort it.
 messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
@@ -966,7 +967,17 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const thread = engineSession.threadById(threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  await thread.interrupt();
+  let body: AbortThreadRequest;
+  try {
+    body = (await c.req.json()) as AbortThreadRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.targetItemId !== "string" || body.targetItemId.length === 0) {
+    return c.json({ error: "targetItemId is required. Send the active queue item as targetItemId." }, 400);
+  }
+
+  await thread.interrupt(body.targetItemId);
   return c.json({ ok: true });
 });
 

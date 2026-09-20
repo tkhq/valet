@@ -324,7 +324,7 @@ interface ThreadHandle {
   shell(command: string, opts?: ExecOpts): Promise<ExecResult>;
   readThread(key: string, opts?: MessageQuery): Promise<SessionEntry[]>;
   /** Stop the active turn and preserve queued submissions. */
-  interrupt(): Promise<void>;
+  interrupt(targetItemId: string): Promise<void>;
   /** Tear down the thread and settle all unsettled submissions aborted. */
   abort(): Promise<void>;
   pause(): Promise<void>;
@@ -498,7 +498,7 @@ The reachability graph is closed and authorized at call time: a thread may read 
 
 **Thread controls:**
 - `thread.prompt(text, opts)` — submit a prompt
-- `thread.interrupt()` — abort the active prompt and immediately start the next queued prompt unless the thread is paused
+- `thread.interrupt(targetItemId)` — abort the active prompt and immediately start the next queued prompt unless the thread is paused
 - `thread.abort()` — abort the active prompt and clear this thread's queue during teardown
 - `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
 - `thread.skill(name, opts)` — invoke a named skill
@@ -1175,7 +1175,7 @@ On restore, the engine reloads the blocked thread, reloads the decision gate, an
 **Persistence:** Every queue item is a durable submission (see Durable Execution below). Admission, claim, progress markers, and settlement are all persisted through SessionStore, so queue state survives process restarts, host replacement, and crashes mid-turn. On engine startup, reconciliation (not blind re-dispatch) decides what happens to each unsettled submission.
 
 **Controls:**
-- `thread.interrupt()` — abort only the active prompt and preserve this thread's queue; start its next prompt unless paused
+- `thread.interrupt(targetItemId)` — abort only the active prompt and preserve this thread's queue; start its next prompt unless paused
 - `thread.abort()` — abort all unsettled work on this thread during teardown
 - `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
 - `session.abort()` — abort all threads
@@ -2319,7 +2319,7 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `POST` | `/api/sessions/:sessionId/threads` | Create a thread |
 | `GET` | `/api/sessions/:sessionId/threads/:threadId` | Read thread metadata and entries |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/prompt` | Prompt a specific thread |
-| `POST` | `/api/sessions/:sessionId/threads/:threadId/abort` | Interrupt the active turn and preserve queued submissions |
+| `POST` | `/api/sessions/:sessionId/threads/:threadId/abort` | Interrupt the active turn named by `targetItemId` and preserve queued submissions |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/pause` | Pause this thread |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/resume` | Resume this thread |
 | `GET` | `/api/sessions/:sessionId/decision-gates` | List pending and recent terminal gates |

@@ -205,6 +205,7 @@ describe("Composer — compact layout", () => {
   });
 
   it("keeps its layout when focus moves from the input to an action", () => {
+    queueStateRef.current = queueState("followup");
     renderComposer("streaming");
     const input = screen.getByRole("textbox", { name: "Message" });
     const stop = screen.getByRole("button", { name: "Stop" });
@@ -218,6 +219,7 @@ describe("Composer — compact layout", () => {
   });
 
   it("focuses pointer-activated actions before the textarea can blur", () => {
+    queueStateRef.current = queueState("followup");
     renderComposer("streaming");
     const input = screen.getByRole("textbox", { name: "Message" });
     const stop = screen.getByRole("button", { name: "Stop" });
@@ -241,10 +243,12 @@ describe("Composer — compact layout", () => {
   });
 
   it("collapses when a focused action disappears after the agent stops", async () => {
+    queueStateRef.current = queueState("followup");
     const view = renderComposer("streaming");
     const input = screen.getByRole("textbox", { name: "Message" });
     act(() => input.focus());
     act(() => screen.getByRole("button", { name: "Stop" }).focus());
+    queueStateRef.current = undefined;
     view.rerenderComposer("idle");
     await waitFor(() => expect(input.closest("form")?.dataset.expanded).toBe("false"));
   });
@@ -308,6 +312,7 @@ describe("Composer — stop button", () => {
   it("shows Stop next to the submit button while the agent works, and aborts the active thread on click", async () => {
     useComposerPrefillStore.setState({ text: null });
     const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = queueState("followup");
     renderComposer("streaming");
 
     // "Send" is an idle-only label — a mid-turn message steers or queues.
@@ -316,7 +321,7 @@ describe("Composer — stop button", () => {
     expect(stopButton.disabled).toBe(false);
 
     await userEvent.click(stopButton);
-    expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
+    expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", targetItemId: "q-0" });
   });
 
   // The reload-mid-tool case: the live `status` events were missed (the
@@ -334,7 +339,7 @@ describe("Composer — stop button", () => {
     expect(stopButton.disabled).toBe(false);
 
     await userEvent.click(stopButton);
-    expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
+    expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", targetItemId: "q-0" });
   });
 
   it("shows Stop while the queue is blocked on a decision gate", () => {
@@ -359,10 +364,11 @@ describe("Composer — Escape interrupts the running turn", () => {
   });
 
   it("aborts the active thread on Escape while the agent is busy", () => {
+    queueStateRef.current = queueState("followup");
     renderComposer("streaming");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(abortMutate).toHaveBeenCalledTimes(1);
-    expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1" });
+    expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1", targetItemId: "q-0" });
   });
 
   it("does nothing on Escape while idle", () => {
@@ -379,10 +385,11 @@ describe("Composer — Escape interrupts the running turn", () => {
     renderComposer("idle");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(abortMutate).toHaveBeenCalledTimes(1);
-    expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1" });
+    expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1", targetItemId: "q-0" });
   });
 
   it("skips an Escape already claimed by another layer (defaultPrevented)", () => {
+    queueStateRef.current = queueState("followup");
     renderComposer("streaming");
     // Simulate a higher-priority dismissal (e.g. ChildPanel close) that
     // claims the event in the capture phase before the interrupt listener.
@@ -395,6 +402,7 @@ describe("Composer — Escape interrupts the running turn", () => {
 
   it("dismisses an open command popup instead of aborting", async () => {
     const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = queueState("followup");
     renderComposer("streaming");
     // Mid-turn the placeholder names the queue/steer action, not "Send a
     // message" — address the textarea by role so this stays about Escape.

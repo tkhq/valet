@@ -637,9 +637,10 @@ export function Composer({
   }
 
   async function stop() {
-    if (!threadId || abort.isPending) return;
+    const targetItemId = queueState?.activeItemId;
+    if (!threadId || !targetItemId || abort.isPending) return;
     try {
-      await abort.mutateAsync({ threadId });
+      await abort.mutateAsync({ threadId, targetItemId });
     } catch (err) {
       console.error("abort failed:", err);
     }
@@ -656,16 +657,17 @@ export function Composer({
   useEffect(() => {
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-      if (!working || !threadId || abortPending) return;
+      const targetItemId = queueState?.activeItemId;
+      if (!working || !threadId || !targetItemId || abortPending) return;
       e.preventDefault();
       abortMutate(
-        { threadId },
+        { threadId, targetItemId },
         { onError: (err) => console.error("abort failed:", err) },
       );
     }
     window.addEventListener("keydown", onEscape);
     return () => window.removeEventListener("keydown", onEscape);
-  }, [working, threadId, abortPending, abortMutate]);
+  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {
@@ -943,7 +945,7 @@ export function Composer({
                   expanded ? "px-3" : "w-11 p-0",
                 )}
                 onClick={() => void stop()}
-                disabled={!threadId || abort.isPending}
+                disabled={!threadId || !queueState?.activeItemId || abort.isPending}
                 aria-label="Stop"
                 title="Stop (Esc)"
               >

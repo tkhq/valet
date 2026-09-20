@@ -8,6 +8,7 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * auth lands we'll wire token storage here.
  */
 import type {
+  AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
   CreateAssistantRequest,
@@ -871,10 +872,11 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/messages`,
       body,
     ),
-  abortThread: (sessionId: string, threadId: string) =>
+  abortThread: (sessionId: string, threadId: string, body: AbortThreadRequest) =>
     request<{ ok: true }>(
       "POST",
       `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/abort`,
+      body,
     ),
 
   // slash commands

@@ -524,7 +524,7 @@ describe("queue: abort", () => {
     const cancelled = await thread.submitPrompt("cancel", {});
     await waitFor(async () => (await store.getQueueItem(session.id, cancelled.queueItemId))?.status === "running");
     const kept = await thread.submitPrompt("keep", {});
-    await thread.interrupt();
+    await thread.interrupt(cancelled.queueItemId);
     await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled", 10000);
     expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
     expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
@@ -563,7 +563,7 @@ describe("queue: abort", () => {
     await markerInserted;
     const kept = await thread.submitPrompt("keep", {});
 
-    await thread.interrupt();
+    await thread.interrupt(cancelled.queueItemId);
 
     expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.abortRequestedAt).toBeDefined();
     expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
@@ -576,6 +576,68 @@ describe("queue: abort", () => {
       text: "kept",
     });
     expect((await store.getQueueItem(session.id, kept.queueItemId))?.abortRequestedAt).toBeUndefined();
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("does not let a repeated targeted interrupt abort a claimed successor", async () => {
+    class ClaimBarrierStore extends InMemorySessionStore {
+      readonly barriers = new Map<string, { inserted: () => void; release: Promise<void> }>();
+
+      override async insertAttemptMarker(itemId: string, attemptId: string): Promise<void> {
+        await super.insertAttemptMarker(itemId, attemptId);
+        const barrier = this.barriers.get(itemId);
+        if (!barrier) return;
+        barrier.inserted();
+        await barrier.release;
+      }
+    }
+
+    let markFirstClaimed!: () => void;
+    const firstClaimed = new Promise<void>((resolve) => { markFirstClaimed = resolve; });
+    let releaseFirst!: () => void;
+    const firstBarrier = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let markSuccessorClaimed!: () => void;
+    const successorClaimed = new Promise<void>((resolve) => { markSuccessorClaimed = resolve; });
+    let releaseSuccessor!: () => void;
+    const successorBarrier = new Promise<void>((resolve) => { releaseSuccessor = resolve; });
+    const faux = registerFauxProvider({ provider: "interrupt-target-retry" });
+    const store = new ClaimBarrierStore();
+    const engine = new Engine({
+      providers: {
+        store,
+        stream: new InMemoryEventStream(),
+        sandboxProvider: new VirtualSandboxProvider(),
+      },
+    });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    await thread.pause();
+    const first = await thread.submitPrompt("first", {});
+    const successor = await thread.submitPrompt("successor", {});
+    store.barriers.set(first.queueItemId, { inserted: markFirstClaimed, release: firstBarrier });
+    store.barriers.set(successor.queueItemId, { inserted: markSuccessorClaimed, release: successorBarrier });
+
+    await thread.resume();
+    await firstClaimed;
+    await thread.interrupt(first.queueItemId);
+    releaseFirst();
+    await expect(thread.awaitResult(first.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "aborted",
+    });
+
+    await successorClaimed;
+    await thread.interrupt(first.queueItemId);
+    expect((await store.getQueueItem(session.id, successor.queueItemId))?.abortRequestedAt).toBeUndefined();
+
+    await thread.interrupt(successor.queueItemId);
+    expect((await store.getQueueItem(session.id, successor.queueItemId))?.abortRequestedAt).toBeDefined();
+    releaseSuccessor();
+    await expect(thread.awaitResult(successor.queueItemId, { timeoutMs: 2_000 })).resolves.toMatchObject({
+      outcome: "aborted",
+    });
     await session.destroy();
     faux.unregister();
   });
@@ -599,7 +661,7 @@ describe("queue: abort", () => {
     const second = await thread.submitPrompt("second", {});
     const third = await thread.submitPrompt("third", {});
 
-    await thread.interrupt();
+    await thread.interrupt(first.queueItemId);
     await waitFor(async () => {
       const queued = await Promise.all([
         store.getQueueItem(session.id, second.queueItemId),
@@ -628,7 +690,7 @@ describe("queue: abort", () => {
     await thread.pause();
     const queued = await thread.submitPrompt("queued", {});
 
-    await thread.interrupt();
+    await thread.interrupt(queued.queueItemId);
     const beforeResume = await store.getQueueItem(session.id, queued.queueItemId);
     expect(beforeResume?.status).toBe("queued");
     expect(beforeResume?.abortRequestedAt).toBeUndefined();

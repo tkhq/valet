@@ -1295,6 +1295,11 @@ export interface PromptFileAttachment {
   name: string;
 }
 
+export interface AbortThreadRequest {
+  /** Queue item that was active when the Stop gesture began. */
+  targetItemId: string;
+}
+
 export interface SendPromptRequest {
   /**
    * Prompt text. Required unless `promoteItemId` is set — a promote

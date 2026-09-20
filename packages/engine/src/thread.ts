@@ -1274,18 +1274,18 @@ export class Thread {
     }
   }
 
-  /** Interrupt the active submission and preserve queued work on this thread. */
-  async interrupt(): Promise<void> {
-    const runningItemId = this.runningItem?.id;
-    if (runningItemId !== undefined) {
-      await this.abortSubmission(runningItemId);
+  /** Interrupt one active submission and preserve queued work on this thread. */
+  async interrupt(targetItemId: string): Promise<void> {
+    if (this.runningItem?.id === targetItemId) {
+      await this.abortSubmission(targetItemId);
       return;
     }
     // The durable claim can precede this.runningItem during claim and restore.
-    // Select and stamp it atomically so a successor cannot inherit the abort.
+    // Match the gesture target atomically so a successor cannot inherit a retry.
     const active = await this.session.providers.store.requestAbortActiveSubmission(
       this.session.id,
       this.id,
+      targetItemId,
     );
     if (active) {
       await this.abortSubmission(active.id);

@@ -588,12 +588,12 @@ export class InMemorySessionStore implements SessionStore {
   async requestAbortActiveSubmission(
     sessionId: string,
     threadId: string,
+    queueItemId: string,
   ): Promise<QueueItem | null> {
     const r = this.row(sessionId);
-    const head = this.threadItemsInOrder(r, threadId).find(
-      (item) => item.status === "running" || item.status === "blocked_on_decision_gate",
-    );
-    if (!head) return null;
+    const head = r.queueItems.get(queueItemId);
+    if (head?.threadId !== threadId) return null;
+    if (head.status !== "running" && head.status !== "blocked_on_decision_gate") return null;
     if (head.abortRequestedAt === undefined) {
       const now = Date.now();
       head.abortRequestedAt = now;

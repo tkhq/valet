@@ -1918,7 +1918,11 @@ export interface SessionStore {
    * Atomically stamp and return the active durable submission for a thread.
    * Only a running or blocked head can match. Queued successors never match.
    */
-  requestAbortActiveSubmission(sessionId: string, threadId: string): Promise<QueueItem | null>;
+  requestAbortActiveSubmission(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<QueueItem | null>;
   /** Fenced two-phase settlement for claimed turns: running|blocked→terminalizing, recording the outcome. */
   reserveSettlement(
     sessionId: string,
