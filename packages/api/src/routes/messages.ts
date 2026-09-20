@@ -954,12 +954,9 @@ messagesRouter.post("/:id/messages", async (c) => {
 // ── Thread abort ──────────────────────────────────────────────────────────
 //
 // Mirrors the engine-spec route table: `POST .../threads/:threadId/abort`
-// aborts the current turn on this thread and clears its queue. Delegates to
-// `Session.abort({ threadId })`, which stamps `abortRequestedAt` durably and
-// lets the claim/reconcile settlement path record the terminal outcome —
-// see `packages/engine/src/session.ts` `abort()`. A thread with nothing
-// running/queued is a no-op: `Thread.abort()` withdraws no gates, aborts a
-// non-streaming agent (a safe no-op), and settles zero unclaimed items.
+// interrupts only the active turn. `Thread.interrupt()` stamps abort intent
+// on the active submission, withdraws its gates, and starts the next queued
+// submission. If no turn is active, it kicks the queue without aborting it.
 messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
@@ -969,7 +966,7 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const thread = engineSession.threadById(threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  await engineSession.abort({ threadId });
+  await thread.interrupt();
   return c.json({ ok: true });
 });
 

@@ -1,22 +1,15 @@
 /**
  * `POST /api/sessions/:id/threads/:threadId/abort` (engine-spec route
- * table). Delegates to `Session.abort({ threadId })`, which stamps
- * `abortRequestedAt` durably and lets the claim/reconcile settlement path
- * record the terminal outcome — see `packages/engine/src/session.ts`.
+ * table). Delegates to `Thread.interrupt()`, which aborts only the active
+ * submission and preserves queued submissions.
  *
  * Two tiers:
  *   - Unit-level, no key required: a 404 for an unknown thread, a no-op
- *     `{ ok: true }` on an idle thread (nothing queued/running), and that
- *     the route reaches `Thread.abort()` for the right thread by settling a
- *     still-queued submission `aborted` via the durable
- *     `Thread.awaitResult()` read (store-level assertion, no LLM call — the
- *     item never gets claimed because we call abort before yielding to the
- *     event loop that would let the claim loop run).
+ *     `{ ok: true }` on an idle thread, and preservation of a queued item
+ *     when no turn is active.
  *   - Key-gated (`ANTHROPIC_API_KEY`): drives one real turn and races the
- *     abort route against it, asserting the submission still settles
- *     `aborted` end-to-end through a live claim. Timing isn't pinned to a
- *     specific phase (pre-claim vs. mid-stream) — either is a legitimate
- *     exercise of the same settlement path.
+ *     abort route against it after the item is running, asserting the
+ *     submission settles `aborted` end-to-end through a live claim.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -28,6 +21,14 @@ afterEach(async () => {
   await api?.cleanup();
   api = undefined;
 });
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
+  const startedAt = Date.now();
+  while (!(await predicate())) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error("timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 async function createSession(baseUrl: string): Promise<string> {
   const res = await fetch(`${baseUrl}/api/sessions`, {
@@ -69,12 +70,7 @@ describe("POST /threads/:threadId/abort", () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
-  // Exercises the engine's queued-item abort path: with no ANTHROPIC_API_KEY the
-  // host resolver yields no usable key, so the claim loop releases the turn back
-  // to `queued` (never burning it `failed` on a keyless model call) and the
-  // abort settles the still-queued submission `aborted`. See
-  // `Thread.releaseSubmission`/`turnLackedCredentials` in packages/engine.
-  it("settles a still-queued submission aborted (store-level, no LLM call)", async () => {
+  it("preserves a queued submission when no submission is running", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
 
@@ -84,21 +80,19 @@ describe("POST /threads/:threadId/abort", () => {
       workspace: "/tmp",
     });
     const thread = await engineSession.ensureDefaultThread();
+    await thread.pause();
+    const receipt = await thread.submitPrompt("say hello", {});
 
-    // Submit without awaiting the claim loop, then immediately abort. The
-    // item is still `queued` at this point (nothing has yielded back to the
-    // event loop to let the thread's claim/run cycle start), so this
-    // exercises `Thread.abort()`'s settle-unclaimed-items path.
-    const receiptPromise = thread.submitPrompt("say hello", {});
     const abortRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
       method: "POST",
     });
     expect(abortRes.status).toBe(200);
     expect(await abortRes.json()).toEqual({ ok: true });
 
-    const receipt = await receiptPromise;
-    const result = await thread.awaitResult(receipt.queueItemId, { timeoutMs: 10_000 });
-    expect(result.outcome).toBe("aborted");
+    const item = await api.providers.engineStore.getQueueItem(sessionId, receipt.queueItemId);
+    expect(item?.status).toBe("queued");
+    expect(item?.abortRequestedAt).toBeUndefined();
+    await thread.abort();
   });
 
   // Aborting an idle sibling thread must not touch this thread's queued (again,
@@ -179,6 +173,9 @@ describeIfKey("POST /threads/:threadId/abort (real turn)", () => {
       const { messageId } = (await promptRes.json()) as SendPromptResponse;
       // A plain prompt always queues; null is the slash-command shape.
       if (messageId === null) throw new Error("prompt unexpectedly ran as a command");
+      await waitFor(async () =>
+        (await api!.providers.engineStore.getQueueItem(sessionId, messageId))?.status === "running"
+      );
 
       const abortRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
         method: "POST",

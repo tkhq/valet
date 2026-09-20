@@ -515,7 +515,7 @@ describe("queue: abort", () => {
     faux.unregister();
   });
 
-  it("cancels a running submission while allowing its queued successor to finish", async () => {
+  it("interrupts a running submission while allowing its queued successor to finish", async () => {
     const faux = registerFauxProvider({ provider: "abort-one-running", tokensPerSecond: 20 });
     faux.setResponses([fauxAssistantMessage("first response is deliberately slow and long"), fauxAssistantMessage("kept")]);
     const { engine, store } = makeEngine();
@@ -524,10 +524,72 @@ describe("queue: abort", () => {
     const cancelled = await thread.submitPrompt("cancel", {});
     await waitFor(async () => (await store.getQueueItem(session.id, cancelled.queueItemId))?.status === "running");
     const kept = await thread.submitPrompt("keep", {});
-    await thread.abortSubmission(cancelled.queueItemId);
+    await thread.interrupt();
     await waitFor(async () => (await store.getQueueItem(session.id, kept.queueItemId))?.status === "settled", 10000);
     expect((await store.getQueueItem(session.id, cancelled.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
     expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("delivers every queued followup after interrupting the running submission", async () => {
+    const faux = registerFauxProvider({ provider: "interrupt-many", tokensPerSecond: 20 });
+    faux.setResponses([
+      fauxAssistantMessage("first response is deliberately slow and long"),
+      fauxAssistantMessage("second-done"),
+      fauxAssistantMessage("third-done"),
+    ]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    const first = await thread.submitPrompt("first", {});
+    await waitFor(async () =>
+      (await store.getQueueItem(session.id, first.queueItemId))?.status === "running"
+    );
+    const second = await thread.submitPrompt("second", {});
+    const third = await thread.submitPrompt("third", {});
+
+    await thread.interrupt();
+    await waitFor(async () => {
+      const queued = await Promise.all([
+        store.getQueueItem(session.id, second.queueItemId),
+        store.getQueueItem(session.id, third.queueItemId),
+      ]);
+      return queued.every((item) => item?.status === "settled");
+    }, 10000);
+
+    expect((await store.getQueueItem(session.id, first.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(session.id, second.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    expect((await store.getQueueItem(session.id, third.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+    expect((await store.getQueueItem(session.id, second.queueItemId))?.abortRequestedAt).toBeUndefined();
+    expect((await store.getQueueItem(session.id, third.queueItemId))?.abortRequestedAt).toBeUndefined();
+    await session.destroy();
+    faux.unregister();
+  });
+
+  it("kicks a queued submission when no submission is running", async () => {
+    const faux = registerFauxProvider({ provider: "interrupt-idle" });
+    faux.setResponses([fauxAssistantMessage("queued-done")]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    await thread.pause();
+    const queued = await thread.submitPrompt("queued", {});
+
+    await thread.interrupt();
+    const beforeResume = await store.getQueueItem(session.id, queued.queueItemId);
+    expect(beforeResume?.status).toBe("queued");
+    expect(beforeResume?.abortRequestedAt).toBeUndefined();
+
+    await thread.resume();
+    await waitFor(async () =>
+      (await store.getQueueItem(session.id, queued.queueItemId))?.status === "settled"
+    );
+    expect((await store.getQueueItem(session.id, queued.queueItemId))?.outcome).toEqual({ outcome: "completed" });
     await session.destroy();
     faux.unregister();
   });
@@ -557,6 +619,34 @@ describe("queue: abort", () => {
     expect((await store.getQueueItem(session.id, kept.queueItemId))?.outcome).toEqual({ outcome: "completed" });
     expect(events.some(({ event }) => event.type === "decision_gate_withdrawn" && event.reason === "abort")).toBe(true);
     await session.destroy();
+    faux.unregister();
+  });
+
+  it("session destroy still settles queued submissions aborted", async () => {
+    class InspectableDestroyStore extends InMemorySessionStore {
+      override async deleteSession(_id: string): Promise<void> {}
+    }
+    const faux = registerFauxProvider({ provider: "destroy-queued" });
+    const store = new InspectableDestroyStore();
+    const engine = new Engine({
+      providers: {
+        store,
+        stream: new InMemoryEventStream(),
+        sandboxProvider: new VirtualSandboxProvider(),
+      },
+    });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+    });
+    const thread = session.thread();
+    await thread.pause();
+    const queued = await thread.submitPrompt("queued", {});
+
+    await session.destroy();
+
+    const item = await store.getQueueItem(session.id, queued.queueItemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome).toEqual({ outcome: "aborted" });
     faux.unregister();
   });
 

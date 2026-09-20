@@ -1274,6 +1274,16 @@ export class Thread {
     }
   }
 
+  /** Interrupt the active submission and preserve queued work on this thread. */
+  async interrupt(): Promise<void> {
+    const runningItemId = this.runningItem?.id;
+    if (runningItemId === undefined) {
+      void this.kick();
+      return;
+    }
+    await this.abortSubmission(runningItemId);
+  }
+
   /** Cancel one submission without aborting other work on this thread. */
   async abortSubmission(queueItemId: string): Promise<void> {
     const store = this.session.providers.store;
