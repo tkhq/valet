@@ -100,6 +100,7 @@ export function Composer({
   threadId,
   agentStatus,
   queuedMessages = [],
+  queuedItemCount = 0,
   replyTarget,
   onCancelReply,
 }: {
@@ -112,8 +113,10 @@ export function Composer({
    */
   threadId?: string;
   agentStatus: AgentStatus;
-  /** Pending user messages, ordered by queue admission. */
+  /** Pending user messages whose text is available, ordered by queue admission. */
   queuedMessages?: StreamMessage[];
+  /** Durable pending item count. It can exceed queuedMessages after reload. */
+  queuedItemCount?: number;
   replyTarget?: MessageReplyReference;
   onCancelReply?: () => void;
 }) {
@@ -276,6 +279,7 @@ export function Composer({
   const followupSeenPendingRef = useRef<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [promotingItemId, setPromotingItemId] = useState<string | null>(null);
+  const unresolvedQueuedCount = Math.max(0, queuedItemCount - queuedMessages.length);
 
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
@@ -786,7 +790,7 @@ export function Composer({
         dragActive && "ring-2 ring-inset ring-moss",
       )}
     >
-      {queuedMessages.length > 0 && (
+      {(queuedMessages.length > 0 || unresolvedQueuedCount > 0) && (
         <div className="mb-2 space-y-1.5" aria-label="Queued messages">
           {queuedMessages.map((message) => {
             const itemId = message.queueItemId;
@@ -810,6 +814,12 @@ export function Composer({
               </div>
             );
           })}
+          {unresolvedQueuedCount > 0 && (
+            <p className="px-1 text-xs text-muted" role="status">
+              {unresolvedQueuedCount} queued{" "}
+              {unresolvedQueuedCount === 1 ? "message is" : "messages are"} waiting.
+            </p>
+          )}
         </div>
       )}
       <div

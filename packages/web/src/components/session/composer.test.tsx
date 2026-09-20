@@ -98,6 +98,7 @@ import { Composer } from "./composer";
 function renderComposer(
   agentStatus: "idle" | "streaming" = "idle",
   queuedMessages: StreamMessage[] = [],
+  queuedItemCount = queuedMessages.length,
 ) {
   const queryClient = new QueryClient();
   const tree = (status: "idle" | "streaming") => (
@@ -107,6 +108,7 @@ function renderComposer(
         threadId="thread-1"
         agentStatus={status}
         queuedMessages={queuedMessages}
+        queuedItemCount={queuedItemCount}
       />
     </QueryClientProvider>
   );
@@ -179,6 +181,14 @@ describe("Composer queued-message stack", () => {
       "message-2",
       "q-3",
     );
+  });
+
+  it("keeps unresolved pending items visible after reload", () => {
+    queueStateRef.current = { ...queueState("followup"), pendingIds: ["q-1", "q-2"] };
+    renderComposer("streaming", [], 2);
+
+    expect(screen.getByRole("status").textContent).toBe("2 queued messages are waiting.");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });
 });
 

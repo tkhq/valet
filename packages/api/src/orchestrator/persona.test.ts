@@ -18,7 +18,8 @@ describe("orchestratorPersona", () => {
   it("documents steer-by-default child sends and the queue opt-in", () => {
     const persona = orchestratorPersona({ type: "user", id: "u1" });
     expect(flat(persona)).toContain("child_send supersedes the current turn by default");
-    expect(flat(persona)).toContain("Set queue: true only when the message must wait");
+    expect(flat(persona)).toContain("waiting on an approval withdraws that pending approval");
+    expect(flat(persona)).toContain("queue: true if the approval must remain actionable");
   });
 
   // TKAI-484. The agent used to write a personal file, copy it to the team,

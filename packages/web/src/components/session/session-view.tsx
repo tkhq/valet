@@ -292,6 +292,7 @@ export function SessionView({
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
             queuedMessages={queuedMessages}
+            queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
           />

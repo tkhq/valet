@@ -2254,26 +2254,6 @@ describe("buildChildSender", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
-  it("keeps interrupt true as an explicit steer", async () => {
-    api = await bootTestApi();
-    const deps = childrenDeps(api);
-    const { child, parentThread } = await seedChild(api, {
-      childId: "child-interrupt",
-      parentId: "parent-interrupt",
-      settled: false,
-      queueItemId: "qi-interrupt-orig",
-    });
-
-    const sender = buildChildSender(deps, new ChildWatcher(deps));
-    const res = await sender(
-      { childSessionId: "child-interrupt", message: "change course", interrupt: true },
-      { parentSessionId: "parent-interrupt", parentThreadId: parentThread.id, actorUserId: "local-user" },
-    );
-
-    expect(res).not.toBeNull();
-    expect((await child.thread().awaitResult("qi-interrupt-orig")).outcome).toBe("superseded");
-  });
-
   it("queues behind a running child with queue true: the original submission stays unsettled", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

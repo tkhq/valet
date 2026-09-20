@@ -507,8 +507,9 @@ export const childSendTool = defineTool({
   description:
     "Send a message to a child session this session spawned — steer it " +
     "mid-run or follow up after it settled. By default the message supersedes " +
-    "the child's in-flight work. Set `queue: true` to deliver it after the " +
-    "current turn. The legacy `interrupt` field remains supported. " +
+    "the child's in-flight work. Steering a child that is blocked on a decision " +
+    "gate withdraws its pending approval. Set `queue: true` if that approval " +
+    "must remain actionable or the message must wait for the current turn. " +
     "Either way the settlement watch re-arms: the child's next result " +
     "arrives as a fresh `child.settled` signal on the thread that spawned " +
     "the child.",
@@ -519,12 +520,8 @@ export const childSendTool = defineTool({
     message: Type.String({ minLength: 1, description: "The message to deliver to the child." }),
     queue: Type.Optional(
       Type.Boolean({
-        description: "Deliver after the child's current turn instead of superseding it. Default false.",
-      }),
-    ),
-    interrupt: Type.Optional(
-      Type.Boolean({
-        description: "Legacy option. True supersedes in-flight work; false queues behind it.",
+        description:
+          "Deliver after the child's current turn. Use this to keep a pending approval actionable. Default false.",
       }),
     ),
   }),
@@ -543,7 +540,6 @@ export const childSendTool = defineTool({
         childSessionId: args.child_session_id,
         message: args.message,
         ...(args.queue !== undefined ? { queue: args.queue } : {}),
-        ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
       },
       { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
     );
@@ -554,10 +550,9 @@ export const childSendTool = defineTool({
           `Use the child_session_id from a task result or a child.settled signal in this thread.`,
       };
     }
-    const steers = args.interrupt === true || (args.queue !== true && args.interrupt !== false);
-    const mode = steers
-      ? "superseding its in-flight work"
-      : "queued behind its current work";
+    const mode = args.queue === true
+      ? "queued behind its current work"
+      : "superseding its in-flight work";
     return {
       text:
         `sent to child ${args.child_session_id} (submission ${result.queueItemId}, ${mode}). ` +

@@ -68,8 +68,10 @@ delegate pushes, branches, and PRs to a child session.
    child.settled signal. Do not poll. Tool calls on the child mean it is working — do not
    interrupt because the run is long. child_status shows settled or running and when the queue
    last moved. child_read shows the transcript (the settled signal may be truncated). child_send
-   supersedes the current turn by default. Set queue: true only when the message must wait for the
-   current turn. child_send also re-opens a settled child; the next result arrives as child.settled.
+   supersedes the current turn by default. Steering a child that is waiting on an approval withdraws
+   that pending approval. Set queue: true if the approval must remain actionable or the message must
+   wait for the current turn. child_send also re-opens a settled child; the next result arrives as
+   child.settled.
 7. **Review drafting separately.** Separate code quality from drafting. For each code-change
    draft, run an independent review stage. Use an \`l\` or \`xl\` child to review requirements
    and code quality. An \`xl\` child reviews only. Tell every reviewer to report findings without
