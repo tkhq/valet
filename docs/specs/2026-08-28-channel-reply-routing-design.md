@@ -357,3 +357,12 @@ reviewable and the reply fix lands first:
 2. Reply mechanisms (1.4): explicit reply and reaction actions.
 3. Name resolution service (2.1) + name-aware filters (2.2, 2.3).
 4. The unified wizard (2.4).
+
+### Explicit GitHub references in Slack text
+
+The Slack mrkdwn formatter links `owner/repo#number` references to GitHub's
+`/issues/number` route, which also resolves pull requests. It leaves bare
+`#number` and ownerless references unchanged because they lack repository context.
+Code spans, fenced code, existing links, and URL fragments retain their content.
+This applies to complete mrkdwn messages and action text. Streamed Markdown
+chunks retain their existing formatting because references can span chunks.

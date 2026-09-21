@@ -30,6 +30,55 @@ describe("neutralizeSlackMentions", () => {
 });
 
 describe("markdownToSlackMrkdwn", () => {
+  describe("explicit GitHub references", () => {
+    it("links repository references without assuming that they are pull requests", () => {
+      expect(markdownToSlackMrkdwn("See tkhq/gitops#5169 and **tkhq/mono#8158**."))
+        .toBe("See <https://github.com/tkhq/gitops/issues/5169|tkhq/gitops#5169> and *<https://github.com/tkhq/mono/issues/8158|tkhq/mono#8158>*.");
+    });
+
+    it("leaves references without an explicit owner and repository unchanged", () => {
+      expect(markdownToSlackMrkdwn("gitops #5169, mono#8158, #123"))
+        .toBe("gitops #5169, mono#8158, #123");
+    });
+
+    it("preserves references in inline code and fenced code", () => {
+      expect(markdownToSlackMrkdwn("`tkhq/mono#8158`\n```ts\ntkhq/gitops#5169\n```"))
+        .toBe("`tkhq/mono#8158`\n```tkhq/gitops#5169```");
+    });
+
+    it("protects tilde fences, longer fences and multi-backtick spans", () => {
+      expect(markdownToSlackMrkdwn("~~~ts\ntkhq/mono#12\n~~~"))
+        .toBe("```tkhq/mono#12```");
+      const span = "``a ` tkhq/mono#12 ` b``";
+      expect(markdownToSlackMrkdwn(span)).toBe(span);
+      expect(markdownToSlackMrkdwn("````md\n```\ntkhq/mono#12\n```\n````"))
+        .not.toContain("https://github.com");
+      expect(markdownToSlackMrkdwn("~~~md\ntkhq/mono#12"))
+        .not.toContain("https://github.com");
+    });
+
+    it("resumes formatting after a CRLF code fence", () => {
+      expect(markdownToSlackMrkdwn("```ts\r\ntkhq/mono#12\r\n```\r\n**outside** tkhq/mono#13"))
+        .toBe("```tkhq/mono#12```\n*outside* <https://github.com/tkhq/mono/issues/13|tkhq/mono#13>");
+    });
+
+    it("preserves explicit links, URL fragments and deliberate Slack links", () => {
+      expect(markdownToSlackMrkdwn("[tkhq/mono#8158](https://example.com/custom) https://example.com/tkhq/mono#8158"))
+        .toBe("<https://example.com/custom|tkhq/mono#8158> https://example.com/tkhq/mono#8158");
+      const native = "<https://example.com/custom|tkhq/mono#8158>";
+      expect(markdownToSlackMrkdwn(native, { preserveSlackNativeSpans: true })).toBe(native);
+    });
+
+    it("keeps repository underscores literal and rejects partial references", () => {
+      expect(markdownToSlackMrkdwn("(tkhq/my__repo__name#12), path/tkhq/mono#12 tkhq/mono#12abc tkhq/mono#0"))
+        .toBe("(<https://github.com/tkhq/my__repo__name/issues/12|tkhq/my__repo__name#12>), path/tkhq/mono#12 tkhq/mono#12abc tkhq/mono#0");
+    });
+
+    it("keeps control sequences inert next to generated links", () => {
+      expect(markdownToSlackMrkdwn("<!channel> tkhq/mono#12"))
+        .toBe("&lt;!channel> <https://github.com/tkhq/mono/issues/12|tkhq/mono#12>");
+    });
+  });
   // ─── Bold ────────────────────────────────────────────────────────────
 
   it("converts **bold** to *bold*", () => {
