@@ -13,8 +13,10 @@
  * from a header or a cookie, so a leaked token is worth its remaining
  * lifetime for one session's principal and nothing else.
  */
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
+import { authorizeCredentialUseOperation, CredentialUseDeniedError } from "../authorization/credential-use-provider.js";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { onePasswordScopesFor } from "../services/credential-resolution.js";
@@ -161,25 +163,54 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // worked and the reference did not resolve, so the name is what to check.
   // The real SDK reports an unknown vault or item that way, and calling it a
   // refused token sent the reader to rotate a token that was fine.
-  let sdkRefused = false;
-  let teamRefused = false;
-  const values = await Promise.all(
-    references.map(async (reference): Promise<string | null> => {
-      for (const scope of scopes) {
-        try {
-          const value = await onePassword.resolveReference(scope, ctx, reference);
-          return Buffer.from(value, "utf8").toString("base64");
-        } catch (err) {
-          if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
-            teamRefused = true;
-            return null;
+  const owner = row?.ownerType === "team" && teamId
+    ? { type: "team" as const, id: teamId }
+    : row?.ownerType === "user" && ownerUserId && isOwnUserSession
+      ? { type: "user" as const, id: ownerUserId }
+      : { type: "org" as const, id: sandbox.orgId };
+  let result: { values: (string | null)[]; sdkRefused: boolean; teamRefused: boolean };
+  try {
+    result = await authorizeCredentialUseOperation({
+      db,
+      authorization: c.var.providers.canonicalAuthorizationService,
+      binding: {
+        organizationId: sandbox.orgId,
+        actorUserId: sandbox.userId,
+        principal: { type: "user", id: sandbox.userId },
+        owner,
+        service: "onepassword",
+        credentialClass: "reference",
+        actionId: "sandbox-secrets.resolve",
+        operation: "resolve",
+        sessionId: sandbox.sessionId,
+        invocationId: randomUUID(),
+      },
+    }, async () => {
+      let sdkRefused = false;
+      let teamRefused = false;
+      const values = await Promise.all(references.map(async (reference): Promise<string | null> => {
+        for (const scope of scopes) {
+          try {
+            const value = await onePassword.resolveReference(scope, ctx, reference);
+            return Buffer.from(value, "utf8").toString("base64");
+          } catch (err) {
+            if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
+              teamRefused = true;
+              return null;
+            }
+            if (err instanceof OnePasswordAuthError && err.kind === "sdk") sdkRefused = true;
           }
-          if (err instanceof OnePasswordAuthError && err.kind === "sdk") sdkRefused = true;
         }
-      }
-      return null;
-    }),
-  );
+        return null;
+      }));
+      return { values, sdkRefused, teamRefused };
+    }, ({ values }) => values.some((value) => value !== null));
+  } catch (error) {
+    if (!(error instanceof CredentialUseDeniedError)) throw error;
+    const status = error.code === "credential_provider_failed" ? 502 : error.code === "credential_use_denied" ? 403 : 409;
+    return c.json({ error: error.message }, status);
+  }
+  const { values, sdkRefused, teamRefused } = result;
 
   if (teamRefused) {
     return c.json({ error: "Team 1Password could not resolve the reference. Check the team token and its vault permissions." }, 502);
@@ -265,24 +296,54 @@ sandboxSecretsRouter.post("/find", async (c) => {
   if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
 
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
-  const lines: string[] = [];
-  for (const scope of narrowed.scopes) {
-    try {
-      for (const cand of await onePassword.findCandidates(scope, ctx, query)) {
-        const reference = `op://${cand.vault}/${cand.item}/${cand.field}`;
-        // Scope-tagged, because the same name can sit in an org vault and a
-        // personal one, and the resolver takes the org copy first. Seeing both
-        // is how a caller knows to pass --scope.
-        lines.push(`${scope}\t${reference}`);
+  const owner = row?.ownerType === "team" && teamId
+    ? { type: "team" as const, id: teamId }
+    : row?.ownerType === "user" && ownerUserId && isOwnUserSession
+      ? { type: "user" as const, id: ownerUserId }
+      : { type: "org" as const, id: sandbox.orgId };
+  let lines: string[];
+  try {
+    lines = await authorizeCredentialUseOperation({
+      db,
+      authorization: c.var.providers.canonicalAuthorizationService,
+      binding: {
+        organizationId: sandbox.orgId,
+        actorUserId: sandbox.userId,
+        principal: { type: "user", id: sandbox.userId },
+        owner,
+        service: "onepassword",
+        credentialClass: "reference",
+        actionId: "sandbox-secrets.find",
+        operation: "resolve",
+        sessionId: sandbox.sessionId,
+        invocationId: randomUUID(),
+      },
+    }, async () => {
+      const found: string[] = [];
+      for (const scope of narrowed.scopes) {
+        try {
+          for (const cand of await onePassword.findCandidates(scope, ctx, query)) {
+            const reference = `op://${cand.vault}/${cand.item}/${cand.field}`;
+            // Scope-tagged, because the same name can sit in an org vault and a
+            // personal one, and the resolver takes the org copy first. Seeing both
+            // is how a caller knows to pass --scope.
+            found.push(`${scope}\t${reference}`);
+          }
+          if (scope === "team") break;
+        } catch (err) {
+          if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
+            throw new CredentialUseDeniedError("credential_provider_failed", "Team 1Password discovery failed. Check the team token and its vault permissions.");
+          }
+          // A scope with no token, a disabled toggle, or an SDK refusal has
+          // nothing to contribute to a search; the next scope may.
+        }
       }
-      if (scope === "team") break;
-    } catch (err) {
-      if (scope === "team" && !(err instanceof OnePasswordAuthError && err.kind === "no_token")) {
-        return c.json({ error: "Team 1Password discovery failed. Check the team token and its vault permissions." }, 502);
-      }
-      // A scope with no token, a disabled toggle, or an SDK refusal has
-      // nothing to contribute to a search; the next scope may.
-    }
+      return found;
+    }, (found) => found.length > 0);
+  } catch (error) {
+    if (!(error instanceof CredentialUseDeniedError)) throw error;
+    const status = error.code === "credential_provider_failed" ? 502 : error.code === "credential_use_denied" ? 403 : 409;
+    return c.json({ error: error.message }, status);
   }
 
   return c.text(lines.join("\n"), 200, { "content-type": "text/plain; charset=utf-8" });
