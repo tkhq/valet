@@ -117,9 +117,13 @@ subscribes to `message_end`. It posts the first assistant message that has
 text. This message is the immediate reply or acknowledgement.
 
 **Later replies are explicit.** The host does not post later assistant messages
-or the final result. The agent uses `reply_to_origin` for progress updates
-and results. Slack also provides `reply_file_to_origin` for sandbox files.
-The `react_to_origin` action remains the explicit reaction path.
+or the final result. For an addressed request, the system prompt requires the
+agent to call `reply_to_origin` before it ends the turn with a final result.
+If work continues after the automatic immediate reply, the agent uses the same
+action for a meaningful progress update. The agent does not repeat a final
+result that `reply_to_origin` already delivered. Slack also provides
+`reply_file_to_origin` for sandbox files. The `react_to_origin` action remains
+the explicit reaction path.
 
 **One delivery.** The host evaluates origin-reply calls across every
 assistant entry in the submission, including text-less entries before the first

@@ -67,7 +67,10 @@ describe("orchestratorPersona", () => {
     const persona = flat(orchestratorPersona({ type: "team", id: "t1" }, "Platform"));
     expect(persona).toContain("the first eligible assistant text posts automatically");
     expect(persona).toContain("Later updates and the final result stay internal");
-    expect(persona).toContain("reply_to_origin action for later updates and results");
+    expect(persona).toContain("Channel delivery is required for an addressed request");
+    expect(persona).toContain("Before you end the turn, use it to send the final result");
+    expect(persona).toContain("Do not rely on automatic delivery for progress or the final result");
+    expect(persona).toContain("If reply_to_origin already sent the same final result, do not send it again");
     expect(persona).toContain("suppresses the automatic copy and keeps one delivery");
     expect(persona).toContain("Manual delivery prevents automatic posting");
     expect(persona).toContain("Stay silent by default for overheard content");

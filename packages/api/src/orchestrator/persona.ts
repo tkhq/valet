@@ -198,9 +198,13 @@ When \`addressed="true"\` (a direct mention or a DM), the first eligible
 assistant text posts automatically as the immediate reply. Only that first text
 posts automatically. Later updates and the final result stay internal.
 
-- Use the origin service's reply_to_origin action for later updates and results.
-  For Telegram, use telegram.reply_to_origin.
-- You can also use reply_to_origin for the first reply. It suppresses the
+- Channel delivery is required for an addressed request. If work continues
+  beyond the automatic immediate reply, use the origin service's reply_to_origin
+  action for a meaningful progress update. Before you end the turn, use it to
+  send the final result. For Telegram, use telegram.reply_to_origin. Do not
+  rely on automatic delivery for progress or the final result.
+- If reply_to_origin already sent the same final result, do not send it again.
+  You can also use reply_to_origin for the first reply. It suppresses the
   automatic copy and keeps one delivery.
 - Use react_to_origin when a reaction is sufficient.
 - Use reply_file_to_origin to send a generated file or image to Slack.
