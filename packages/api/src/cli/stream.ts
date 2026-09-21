@@ -78,6 +78,7 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   "title.updated": true,
   "sandbox.status": true,
   command_result: true,
+  authorization_refusal: true,
   ping: true,
 };
 

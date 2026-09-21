@@ -13,7 +13,7 @@ export interface CurrentPolicyMatcherV1 {
 
 export interface CurrentPolicyTargetV1 {
   /** Version 1 snapshots omit this field and canonicalize to tool.action. */
-  readonly authorizationKind?: "tool.action" | "tool.builtin";
+  readonly authorizationKind?: "tool.action" | "tool.builtin" | "api.route" | "resource.access";
   readonly service?: string;
   readonly actionId?: string;
   readonly riskLevel?: RiskLevel;
@@ -131,9 +131,11 @@ export interface CurrentApprovalResolutionSourceV1 {
   readonly originalDecisionDigest: string;
   readonly approverId: string;
   readonly verdict: "approved" | "rejected";
-  readonly appliesIn: "session" | "workflow";
+  readonly appliesIn: "session" | "workflow" | "route" | "resource";
   readonly sessionId?: string;
   readonly workflowExecutionId?: string;
+  readonly routeOperationId?: string;
+  readonly resourceOperationId?: string;
   readonly resolvedAtMs: number;
   readonly expiresAtMs: number;
   readonly resolutionVersion: 1;

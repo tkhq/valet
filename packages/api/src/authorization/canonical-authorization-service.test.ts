@@ -73,7 +73,7 @@ describe("CanonicalAuthorizationService", () => {
       }
       expect(rows.find((row) => row.effect === "allow")?.evidence).not.toHaveProperty("approvalReplay");
       expect(rows.find((row) => row.effect === "deny")?.evidence).not.toHaveProperty("approvalReplay");
-      expect(rows.find((row) => row.effect === "require_approval")?.evidence?.approvalReplay).toEqual({ evaluationTimeMs: 100 });
+      expect(rows.find((row) => row.effect === "require_approval")?.evidence?.approvalReplay).toEqual({ evaluationTimeMs: 100, actorUserId: "user-1" });
       for (const row of rows) expect(row.evidence).not.toHaveProperty("request");
     } finally { await manager.close(); }
   }, 120_000);

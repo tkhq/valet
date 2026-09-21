@@ -25,7 +25,7 @@ describe("PR 9 canonical authorization cutover", () => {
     const workflow = readFileSync(resolve(root, "packages/api/src/workflows/permissions.ts"), "utf8");
     expect(preview).toContain("canonicalAuthorizationService.preview(");
     expect(workflow).toContain("service.preview(");
-    expect(preview).not.toMatch(/\.authorize\(/);
+    expect(preview).not.toContain("canonicalAuthorizationService.authorize(");
     expect(workflow).not.toMatch(/\.authorize\(/);
   });
 

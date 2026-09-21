@@ -1,3 +1,4 @@
+import { allowArtifactAuthorization, ALLOW_RESOURCE_AUTHORIZATION, testWorkflowResourceContext } from "../test-helpers/resource-authorization.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { InMemoryCredentialStore } from "@valet/engine";
@@ -23,7 +24,7 @@ let deps: WorkflowServiceDeps;
 beforeEach(async () => {
   const boot = await freshTestPgDb();
   db = boot.appDb; cleanup = boot.cleanup;
-  deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: runHost, credentials: new InMemoryCredentialStore() };
+  deps = { db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: runHost, credentials: new InMemoryCredentialStore(), resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext };
   await db.insert(orgMembers).values({ orgId: "org1", userId: "u1", role: "member" });
   await db.insert(teams).values({ id: "team1", orgId: "org1", name: "Team", createdAt: 1 });
   await db.insert(teamMembers).values({ teamId: "team1", userId: "u1", role: "admin" });
@@ -203,18 +204,19 @@ describe("personal workflow copy to team", () => {
 
 describe("personal artifact copy to team", () => {
   it("copies exact content with a fresh link and rejects collisions and unauthorized sources", async () => {
-    const source = await publishArtifact(db, scope, { key: "source", content: "<h1>Exact</h1>", format: "html", orgId: "org1" });
+    const auth = allowArtifactAuthorization("org1", "u1");
+    const source = await publishArtifact(db, scope, { key: "source", content: "<h1>Exact</h1>", format: "html", orgId: "org1" }, auth);
     const input = { artifactId: source.id, teamId: "team1", key: "copy" };
-    const copy = await copyArtifactToTeam(db, scope, "org1", input);
+    const copy = await copyArtifactToTeam(db, scope, "org1", input, auth);
     expect(copy).toMatchObject({ ownerType: "team", ownerId: "team1", content: source.content,
       rendered: source.rendered, version: 1, visibility: "org", sourceSessionId: "", sharedVersion: null, publicBy: null });
     expect(copy.token).not.toBe(source.token);
     expect(copy.id).not.toBe(source.id);
     expect(await getArtifactById(db, source.id)).toEqual(source);
-    await expect(copyArtifactToTeam(db, scope, "org1", input)).rejects.toThrow(/another key/);
-    await expect(copyArtifactToTeam(db, { owner: { type: "user", id: "u2" }, actorUserId: "u2" }, "org1", input)).rejects.toThrow(/not found/);
-    await expect(copyArtifactToTeam(db, scope, "other-org", input)).rejects.toThrow(/not found/);
+    await expect(copyArtifactToTeam(db, scope, "org1", input, auth)).rejects.toThrow(/another key/);
+    await expect(copyArtifactToTeam(db, { owner: { type: "user", id: "u2" }, actorUserId: "u2" }, "org1", input, auth)).rejects.toThrow(/not found/);
+    await expect(copyArtifactToTeam(db, scope, "other-org", input, auth)).rejects.toThrow(/not found/);
     await db.delete(teamMembers);
-    await expect(copyArtifactToTeam(db, scope, "org1", { ...input, key: "denied" })).rejects.toThrow(/not found/);
+    await expect(copyArtifactToTeam(db, scope, "org1", { ...input, key: "denied" }, auth)).rejects.toThrow(/not found/);
   });
 });

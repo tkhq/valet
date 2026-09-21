@@ -29,6 +29,7 @@ import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js
 import { checkRepoExistence } from "../services/repo-existence.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import { requirePrincipal } from "../middleware/auth.js";
+import { authorizeDirectResource, newResourceDelivery } from "../authorization/resource-authorization.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import {
@@ -965,6 +966,7 @@ sessionsRouter.patch("/:id", async (c) => {
   if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
     return c.json({ error: "session not found" }, 404);
   }
+  await authorizeDirectResource(c.var.providers.resourceAuthorizationPort, { organizationId: row.orgId, actorUserId: c.var.user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }, "session", "update", { id: row.id, ownerType: row.ownerType as "user" | "team" | "org", ownerId: row.ownerId, version: row.updatedAt });
 
   let body: PatchSessionRequest;
   try {
@@ -1472,6 +1474,7 @@ sessionsRouter.delete("/:id", async (c) => {
   if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
     return c.json({ error: "session not found" }, 404);
   }
+  await authorizeDirectResource(c.var.providers.resourceAuthorizationPort, { organizationId: row.orgId, actorUserId: c.var.user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }, "session", "delete", { id: row.id, ownerType: row.ownerType as "user" | "team" | "org", ownerId: row.ownerId, version: row.updatedAt });
 
   // A user's own assistant session is not deletable (TKAI-253): deleting
   // it destroyed the orchestrator and every thread it held, and sandbox

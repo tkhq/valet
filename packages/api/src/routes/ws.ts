@@ -30,6 +30,10 @@ import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
 import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
+import { adaptApiRoute } from "@valet/engine/authorization";
+import { randomUUID } from "node:crypto";
+import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
+import { WS_OPERATION_DESCRIPTOR_SEEDS_V1 } from "../authorization/route-resource-policy.js";
 
 const PING_INTERVAL_MS = 30_000;
 /** Page size for durable replay reads on resume. */
@@ -69,6 +73,20 @@ export function createWsConnectionLifecycle() {
   };
 }
 
+export function createWsFrameGate(limit = 32) {
+  let pending = 0;
+  let tail = Promise.resolve();
+  return {
+    get pending() { return pending; },
+    enqueue(task: () => Promise<void>): boolean {
+      if (pending >= limit) return false;
+      pending += 1;
+      tail = tail.then(task, task).finally(() => { pending -= 1; });
+      return true;
+    },
+  };
+}
+
 export function registerWsRoutes(
   app: Hono<AppEnv>,
   upgradeWebSocket: UpgradeWebSocket,
@@ -87,6 +105,7 @@ export function registerWsRoutes(
 
       let seq = 0;
       const lifecycle = createWsConnectionLifecycle();
+      const frameGate = createWsFrameGate();
       // Track the most recent assistant messageId per thread so text_delta
       // events can be tagged with a real id (engine emits deltas without one).
       const activeMessageByThread = new Map<string, string>();
@@ -100,6 +119,16 @@ export function registerWsRoutes(
         }
       };
 
+      const authorizeWsOperation = async (operation: keyof typeof WS_OPERATION_DESCRIPTOR_SEEDS_V1) => {
+        // Each received operation is a new delivery. Only a transport-level
+        // replay can reuse a delivery identity, and this protocol has none.
+        const deliveryId = `ws:${randomUUID()}`;
+        const [service, actionId, , riskLevel] = WS_OPERATION_DESCRIPTOR_SEEDS_V1[operation];
+        const adapted = adaptApiRoute({ schemaVersion: 1, organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: caller, requestId: deliveryId, operationId: `${deliveryId}:${operation.replaceAll(".", "_")}`, evaluationTimeMs: Date.now(), descriptor: { schemaVersion: 1, service, actionId, method: "GET", routeTemplate: `/api/sessions/:id/ws#${operation}`, riskLevel } });
+        const envelope = await providers.canonicalAuthorizationService.authorize(adapted.request);
+        return { envelope, decisionId: canonicalDecisionId(c.var.user.orgId, adapted.request.idempotencyKey) };
+      };
+
       return {
         async onOpen(_evt, ws) {
           // Wrap the whole handshake in try/catch — any throw here would
@@ -107,6 +136,22 @@ export function registerWsRoutes(
           // process, killing every other live session. We instead emit an
           // error frame and close the socket gracefully.
           try {
+            for (const operation of ["session.stream.connect", "session.stream.subscribe"] as const) {
+              let wsAuthorization: Awaited<ReturnType<typeof authorizeWsOperation>>;
+              try {
+                wsAuthorization = await authorizeWsOperation(operation);
+              } catch {
+                send(ws, { type: "authorization_refusal", code: "authorization_indeterminate", message: "Authorization failed. Reconnect before you retry." });
+                ws.close(4411, "authorization indeterminate");
+                return;
+              }
+              if (wsAuthorization.envelope.decision.effect !== "allow") {
+                const approval = wsAuthorization.envelope.decision.effect === "require_approval";
+                send(ws, { type: "authorization_refusal", code: approval ? "authorization_approval_required" : "authorization_denied", message: approval ? "This stream requires approval. Resolve the decision over REST, then reconnect." : "Policy denied this session stream.", decisionId: wsAuthorization.decisionId });
+                ws.close(approval ? 4409 : 4403, "authorization refused");
+                return;
+              }
+            }
             // Verify view access before subscribing — direct ownership, or
             // team membership for a team's orchestrator session, or the
             // team principal itself (see `services/session-access.ts`).
@@ -310,8 +355,7 @@ export function registerWsRoutes(
           }
         },
 
-        onMessage(evt) {
-          // Best-effort parse; ignore unknowns.
+        onMessage(evt, ws) {
           let frame: ClientFrame;
           try {
             const data = typeof evt.data === "string" ? evt.data : evt.data.toString();
@@ -319,8 +363,31 @@ export function registerWsRoutes(
           } catch {
             return;
           }
-          // v1: subscribe is implicit on connect, pong is best-effort.
-          if (frame.type === "subscribe" || frame.type === "pong") return;
+          if (frame.type !== "subscribe" && frame.type !== "pong") return;
+          const accepted = frameGate.enqueue(async () => {
+            if (lifecycle.closed) return;
+            try {
+              const [row] = await providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+              if (lifecycle.closed) return;
+              if (!row || !(await canViewSession(providers.db, row, caller))) {
+                ws.close(4040, "session not found");
+                return;
+              }
+              if (lifecycle.closed) return;
+              const authorization = await authorizeWsOperation(frame.type === "subscribe" ? "session.stream.subscribe" : "session.stream.pong");
+              if (lifecycle.closed) return;
+              if (authorization.envelope.decision.effect !== "allow") {
+                const approval = authorization.envelope.decision.effect === "require_approval";
+                send(ws, { type: "authorization_refusal", code: approval ? "authorization_approval_required" : "authorization_denied", message: approval ? "This WebSocket operation requires approval. Resolve the decision over REST, then reconnect." : "Policy denied this WebSocket operation.", decisionId: authorization.decisionId });
+                ws.close(approval ? 4409 : 4403, "authorization refused");
+              }
+            } catch {
+              if (lifecycle.closed) return;
+              send(ws, { type: "authorization_refusal", code: "authorization_indeterminate", message: "Authorization failed. Reconnect before you retry." });
+              ws.close(4411, "authorization indeterminate");
+            }
+          });
+          if (!accepted) ws.close(4429, "too many pending frames");
         },
 
         onClose() {

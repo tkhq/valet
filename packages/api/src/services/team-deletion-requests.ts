@@ -10,7 +10,7 @@ import { canViewTeam, ConfigManagedTeamError, getTeamInOrg, IdpManagedTeamError,
 import { lockTeamDeletionAccess, type DeletionResourceType } from "./team-deletion-access.js";
 import { deleteSkill } from "./skills.js";
 import { deleteContentSource } from "./content-sources.js";
-import { deleteWorkflowDefinition, type WorkflowServiceDeps } from "../workflows/service.js";
+import { authorizeWorkflowResource, deleteWorkflowDefinitionInTransaction, type WorkflowServiceDeps } from "../workflows/service.js";
 import { deleteTeamApiKey, deleteTeamCredential, deleteTeamResourcesInTransaction } from "./team-resource-deletion.js";
 import { markAttentionNotificationsRead, routeAttention } from "../orchestrator/attention.js";
 
@@ -44,7 +44,10 @@ export const deletionResourceRegistry: Record<DeletionResourceType, ResourceAdap
       }
       return row.name;
     },
-    async delete(deps, a, id) { checkResult(await deleteWorkflowDefinition(deps, a, id)); return []; },
+    // The approval holds the team and request locks. Reuse that transaction:
+    // nesting PGlite transactions loses the locked workflow row and leaves
+    // later requests waiting for the outer transaction to close.
+    async delete(deps, a, id) { checkResult(await deleteWorkflowDefinitionInTransaction(deps, a, id, true)); return []; },
   },
   skill: {
     async read(db, a, id) {
@@ -163,11 +166,18 @@ export async function decideDeletionRequest(deps: WorkflowServiceDeps, a: Reques
     let sessions: string[] = [];
     if (decision === "approve") {
       try {
-        // A savepoint rolls back partial cascades while retaining the refusal on the request.
-        sessions = await tx.transaction(async (inner) => {
-          await deletionResourceRegistry[row.resourceType].read(inner, a, row.resourceId);
-          return deletionResourceRegistry[row.resourceType].delete({ ...deps, db: inner }, a, row.resourceId);
-        });
+        // Workflow deletion reads and writes through the team-locked transaction.
+        // A nested PGlite transaction cannot see the locked workflow row.
+        if (row.resourceType === "workflow") {
+          await deletionResourceRegistry.workflow.read(tx, a, row.resourceId);
+          sessions = await deletionResourceRegistry.workflow.delete({ ...deps, db: tx }, a, row.resourceId);
+        } else {
+          // A savepoint rolls back partial cascades while retaining the refusal on the request.
+          sessions = await tx.transaction(async (inner) => {
+            await deletionResourceRegistry[row.resourceType].read(inner, a, row.resourceId);
+            return deletionResourceRegistry[row.resourceType].delete({ ...deps, db: inner }, a, row.resourceId);
+          });
+        }
       } catch (err) {
         if (!(err instanceof Error)) throw err;
         // Only deliberate service refusals become user-visible request state.
@@ -182,12 +192,20 @@ export async function decideDeletionRequest(deps: WorkflowServiceDeps, a: Reques
     return { sessions, resourceType: row.resourceType };
   };
   if (decision === "approve") {
-    const [target] = await deps.db.select({ resourceType: teamDeletionRequests.resourceType })
+    const [target] = await deps.db.select({ resourceType: teamDeletionRequests.resourceType, resourceId: teamDeletionRequests.resourceId })
       .from(teamDeletionRequests).where(and(requestScope(a), eq(teamDeletionRequests.id, id))).limit(1);
     if (target?.resourceType === "team") {
       const manager = deps.canonicalPolicyManager;
       if (!manager) throw new Error("Canonical policy manager is unavailable.");
       return manager.mutateAndActivate(a.orgId, { actorId: a.userId, operation: "team_delete", idempotencyKey: id }, run);
+    }
+    if (target?.resourceType === "workflow") {
+      // Canonical policy reads use the root handle. Run that check before the
+      // team-locked PGlite transaction, then retain the ordinary service
+      // authorization and ownership checks while deleting under that lock.
+      const [workflow] = await deps.db.select({ id: workflowDefinitions.id, ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, updatedAt: workflowDefinitions.updatedAt })
+        .from(workflowDefinitions).where(and(eq(workflowDefinitions.id, target.resourceId), eq(workflowDefinitions.orgId, a.orgId))).limit(1);
+      if (workflow) await authorizeWorkflowResource(deps, a, "delete", { id: workflow.id, ownerType: workflow.ownerType, ownerId: workflow.ownerId, version: workflow.updatedAt });
     }
   }
   return deps.db.transaction(run);

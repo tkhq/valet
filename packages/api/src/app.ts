@@ -85,6 +85,8 @@ import { artifactsRouter, buildArtifactsPublicRouter } from "./routes/artifacts.
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
+import { buildApiRouteRegistry, routeResourcePolicyMiddleware, type ApiRouteDescriptorV1 } from "./authorization/route-resource-policy.js";
+import { routeApprovalRouter } from "./authorization/route-approval.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
@@ -303,7 +305,17 @@ export function createApp(
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
+  if (typeof providers.canonicalAuthorizationService?.authorize !== "function") {
+    throw new Error("Canonical authorization service is required for protected API routes.");
+  }
+  if (typeof providers.resourceAuthorizationPort?.authorize !== "function") {
+    throw new Error("Resource authorization service is required for protected API routes.");
+  }
+  let routePolicyRegistry: readonly ApiRouteDescriptorV1[] = [];
+  app.use("/api/*", routeResourcePolicyMiddleware(() => routePolicyRegistry));
+  const protectedRouteStart = app.routes.length;
 
+  app.route("/api/authorization", routeApprovalRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
@@ -393,6 +405,7 @@ export function createApp(
   // HTTP handler still answer everything else on that path.
   registerGatewayWsProxy(app, upgradeWebSocket);
   registerGatewayHttpProxy(app);
+  routePolicyRegistry = buildApiRouteRegistry(app.routes.slice(protectedRouteStart));
 
   // Web app static serving + SPA fallback — registered LAST (decision 3):
   // every real route above must get first crack at a request. No-op unless

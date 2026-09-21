@@ -3,6 +3,7 @@ import { BUILTIN_TOOL_NAMES, builtinAuthorization } from "@valet/engine";
 import { validateCurrentPolicyDynamicFactsV2, type CurrentPolicyDynamicFactsV2, type JsonValue } from "@valet/engine/authorization";
 import { CURRENT_POLICY_COMPLEXITY_LIMITS_V1, currentPolicyMatcherIssuesV1, currentPolicyTargetIssueV1, currentPolicyValueComplexityV1, isCurrentPolicyActionV1, isCurrentPolicyRiskV1, isCurrentPolicyServiceV1, parseCurrentPolicyMatcherPathV1 } from "./current-policy-input-contract.js";
 export { CURRENT_POLICY_COMPLEXITY_LIMITS_V1 } from "./current-policy-input-contract.js";
+import { API_ROUTE_DESCRIPTOR_SEEDS_V1, RESOURCE_ACCESS_REGISTRY } from "../route-resource-registry.js";
 import { grantPolicyKey } from "../../policies/service.js";
 import type { CanonicalSourceBundle } from "./types.js";
 import type {
@@ -18,6 +19,7 @@ const MODES = new Set(["allow", "require_approval", "deny"]);
 const APPLIES_IN = new Set(["any", "session", "workflow"]);
 const MATCHER_OPS = new Set(["eq", "neq", "regex", "in", "not_in", "gt", "gte", "lt", "lte", "exists", "not_exists"]);
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
+const ROUTE_ACTIONS = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[1])), ROUTE_SERVICES = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[0])), RESOURCE_ACTIONS = new Set(RESOURCE_ACCESS_REGISTRY.map((entry) => entry.actionId));
 const POLICY_PATH = "policies/current-action-policy.rego";
 const DATA_PATH = "data/current-action-policy.json";
 const PROVENANCE_PATH = "provenance/current-action-policy.json";
@@ -251,8 +253,10 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
   let matcherValueBytes = 0;
   let matcherValueNodes = 0;
   for (const row of liveRules) {
-    if (row.authorizationKind !== undefined && row.authorizationKind !== "tool.action" && row.authorizationKind !== "tool.builtin") fail("unknown_authorization_kind", `Rule ${row.id} has an unknown authorization kind.`);
+    if (row.authorizationKind !== undefined && row.authorizationKind !== "tool.action" && row.authorizationKind !== "tool.builtin" && row.authorizationKind !== "api.route" && row.authorizationKind !== "resource.access") fail("unknown_authorization_kind", `Rule ${row.id} has an unknown authorization kind.`);
     validateTarget(row.id, row);
+    if (row.authorizationKind === "api.route" && (row.paramMatchers.length || row.riskLevel !== undefined || (row.actionId !== undefined ? !ROUTE_ACTIONS.has(row.actionId) : row.service === undefined || !ROUTE_SERVICES.has(row.service)))) fail("unknown_route_descriptor", `Rule ${row.id} does not target a registered route action or service.`);
+    if (row.authorizationKind === "resource.access" && (row.paramMatchers.length || row.actionId === undefined || !RESOURCE_ACTIONS.has(row.actionId))) fail("unknown_resource_descriptor", `Rule ${row.id} does not target a registered resource operation.`);
     validateMode(row.id, row.mode);
     if ("appliesIn" in row) validatePolicySemantics(row);
     const valueComplexity = validateMatchers(row.id, row.paramMatchers);
@@ -355,6 +359,7 @@ function validateApproval(fact: CurrentApprovalResolutionSourceV1, organizationI
 function validateScope(id: string, appliesIn: string, sessionId: string | undefined, workflowId: string | undefined): void {
   if (appliesIn === "session" && nonBlank(sessionId) && workflowId === undefined) return;
   if (appliesIn === "workflow" && nonBlank(workflowId) && sessionId === undefined) return;
+  if ((appliesIn === "route" || appliesIn === "resource") && nonBlank(sessionId) && workflowId === undefined) return;
   fail("invalid_scope", `Fact ${id} has a scope that does not match appliesIn.`);
 }
 
@@ -519,7 +524,7 @@ function ruleConditions(row: NormalizedRule, rowIndex: number): string[] {
 
 function ruleApplicabilityConditions(row: NormalizedRule): string[] {
   return [
-    row.authorizationKind === "tool.action" ? `input.kind in {"tool.action","workflow.action"}` : `input.kind == "tool.builtin"`,
+    row.authorizationKind === "tool.action" ? `input.kind in {"tool.action","workflow.action"}` : `input.kind == ${canonicalJson(row.authorizationKind)}`,
     row.ownerType === "team" ? `input.subject.principal.type == "team"` : row.ownerType === "personal" ? `input.subject.principal.type == "user"` : undefined,
     row.ownerType === "organization" ? undefined : `input.subject.principal.id == ${canonicalJson(row.ownerId)}`,
     row.target.kind === "action" ? `input.action.id == ${canonicalJson(row.target.value)}` : row.target.kind === "service" ? `input.action.service == ${canonicalJson(row.target.value)}` : `input.action.riskLevel == ${canonicalJson(row.target.value)}`,
@@ -635,11 +640,15 @@ policy := data.valet.authz
 supported_kind if { input.kind == "tool.action" }
 supported_kind if { input.kind == "workflow.action" }
 supported_kind if { input.kind == "tool.builtin" }
+supported_kind if { input.kind == "api.route" }
+supported_kind if { input.kind == "resource.access" }
 action_context if { supported_kind }
 
 applies_in := "session" if { input.kind == "tool.action" }
 applies_in := "workflow" if { input.kind == "workflow.action" }
 applies_in := "session" if { input.kind == "tool.builtin" }
+applies_in := "route" if { input.kind == "api.route" }
+applies_in := "resource" if { input.kind == "resource.access" }
 
 input_valid if {
   input.schemaVersion == 1
@@ -661,6 +670,8 @@ scope_matches(fact) if { applies_in == "session"; fact[5] == "session"; fact[6] 
 scope_matches(fact) if { applies_in == "workflow"; fact[5] == "workflow"; fact[6] == input.subject.workflowExecutionId }
 approval_scope_matches if { applies_in == "session"; input.facts.currentPolicy.approvalBinding[2] == "session"; input.facts.currentPolicy.approvalBinding[3] == input.subject.sessionId }
 approval_scope_matches if { applies_in == "workflow"; input.facts.currentPolicy.approvalBinding[2] == "workflow"; input.facts.currentPolicy.approvalBinding[3] == input.subject.workflowExecutionId }
+approval_scope_matches if { applies_in == "route"; input.facts.currentPolicy.approvalBinding[2] == "route"; input.facts.currentPolicy.approvalBinding[3] == input.context.approvalScopeId }
+approval_scope_matches if { applies_in == "resource"; input.facts.currentPolicy.approvalBinding[2] == "resource"; input.facts.currentPolicy.approvalBinding[3] == input.context.approvalScopeId }
 `;
 
 const CURRENT_ACTION_POLICY_SUFFIX = `
@@ -687,7 +698,16 @@ static_layers := layers if {
   layers := {"org":org,"team":team,"override":override,"base":base}
 }
 static_layers := layers if {
-  input.kind != "tool.builtin"
+  input.kind in {"api.route","resource.access"}
+  org := org_winner
+  team := team_winner
+  override := override_winner
+  strict := strict_winner(org, team)
+  base := strict_winner(strict, {"id":"standard.authenticated_access","mode":"allow","modeRank":1,"source":"bundle"})
+  layers := {"org":org,"team":team,"override":override,"base":base}
+}
+static_layers := layers if {
+  input.kind in {"tool.action","workflow.action"}
   org := org_winner
   team := team_winner
   override := override_winner

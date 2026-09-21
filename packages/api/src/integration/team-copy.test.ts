@@ -1,3 +1,4 @@
+import { allowArtifactAuthorization } from "../test-helpers/resource-authorization.js";
 import { describe, expect, it } from "vitest";
 import { bootTestApi } from "./_setup.js";
 import { publishArtifact, getArtifactById } from "../services/artifacts.js";
@@ -68,7 +69,7 @@ describe("team copy HTTP endpoints", () => {
       expect((await post("mine", "{")).status).toBe(400);
       const source = await publishArtifact(api.providers.db, {
         owner: { type: "user", id: "local-user" }, actorUserId: "local-user",
-      }, { key: "source", content: "Exact artifact", format: "markdown", orgId: "local-org" });
+      }, { key: "source", content: "Exact artifact", format: "markdown", orgId: "local-org" }, allowArtifactAuthorization());
       const copyArtifact = () => fetch(`${api.baseUrl}/api/artifacts/copy-to-team`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ artifactId: source.id, teamId: team.id, key: "destination" }),

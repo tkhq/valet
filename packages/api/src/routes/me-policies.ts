@@ -21,6 +21,9 @@
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
+import type { Context } from "hono";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
+import { PolicyResourceAuthorization } from "../services/policy-resource-authorization.js";
 import {
   deleteOverrideByTarget,
   isApprovalMode,
@@ -48,6 +51,10 @@ import type {
 
 export const mePolicyOverridesRouter = new Hono<AppEnv>();
 export const meGrantsRouter = new Hono<AppEnv>();
+
+function policyResource(c: Context<AppEnv>): PolicyResourceAuthorization {
+  return new PolicyResourceAuthorization(c.var.providers.resourceAuthorizationPort, { organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) });
+}
 
 function toOverrideWire(row: ActionPolicyOverrideRow): ActionPolicyOverrideWire {
   return {
@@ -78,6 +85,7 @@ export function toGrantWire(row: RuntimeGrantRow): RuntimeGrantWire {
 mePolicyOverridesRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
+  await policyResource(c).authorize("list", { ownerType: "user", ownerId: user.id });
   const rows = await listMyOverrides(db, user.orgId, user.id);
   const resp: ListPolicyOverridesResponse = { overrides: rows.map(toOverrideWire) };
   return c.json(resp);
@@ -118,6 +126,7 @@ mePolicyOverridesRouter.put("/", async (c) => {
     return c.json({ error: (err as Error).message }, 400);
   }
 
+  await policyResource(c).authorize("update", { ownerType: "user", ownerId: user.id });
   const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
   const result = await canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: "override_upsert", idempotencyKey }, async (tx, context) => {
     const bounds = await canonicalAuthorizationService.validateOverrideBounds(user.orgId, user.id, body, body.mode, await context.overrideBoundsIdentity(), context.overrideBoundPolicyReferences());
@@ -154,6 +163,7 @@ mePolicyOverridesRouter.delete("/", async (c) => {
   const targetCheck = validateTarget(body);
   if (!targetCheck.ok) return c.json({ error: targetCheck.error }, 400);
 
+  await policyResource(c).authorize("delete", { ownerType: "user", ownerId: user.id });
   const idempotencyKey = c.req.header("Idempotency-Key") ?? crypto.randomUUID();
   const deleted = await canonicalPolicyManager.mutateAndActivate(user.orgId, { actorId: user.id, operation: "override_delete", idempotencyKey }, (tx) => deleteOverrideByTarget(tx, user.orgId, user.id, body));
   if (!deleted) return c.json({ error: "override not found" }, 404);
@@ -167,6 +177,7 @@ mePolicyOverridesRouter.delete("/", async (c) => {
 meGrantsRouter.get("/", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
+  await policyResource(c).authorize("list", { ownerType: "user", ownerId: user.id });
   const rows = await listMyGrants(db, user.orgId, user.id);
   const resp: ListGrantsResponse = { grants: rows.map(toGrantWire) };
   return c.json(resp);
@@ -197,6 +208,7 @@ meGrantsRouter.delete("/", async (c) => {
     return c.json({ error: "exactly one of sessionId, workflowExecutionId is required" }, 400);
   }
 
+  await policyResource(c).authorize("delete", { ownerType: "user", ownerId: user.id });
   const revoked = await revokeMyGrant(
     db,
     user.orgId,

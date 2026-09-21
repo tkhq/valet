@@ -54,7 +54,7 @@ describe("api serves web (static + SPA fallback)", () => {
     const res = await fetch(`${api.baseUrl}/api/nope`, {
       headers: { "x-valet-test-user-id": "local-user" },
     });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
     expect(res.headers.get("content-type")).toMatch(/json/);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBeTruthy();

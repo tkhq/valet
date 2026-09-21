@@ -291,16 +291,15 @@ export async function resolveOptionalIdentity(
  *
  * Internal-token bypass (decision 15): a request carrying a valid
  * `x-valet-internal` token (constant-time compared — see
- * `lib/internal-auth.ts`) skips every rung below it and falls straight
- * through to the route without `c.var.user`/`c.var.sandbox` set — only the
- * memory routes accept this header this phase, and they derive their owner
- * tuple from `x-valet-owner`/`x-valet-actor` headers instead.
+ * `lib/internal-auth.ts`) skips every rung below it without creating a user
+ * principal. Registered internal routes verify their session or owner headers.
  */
 export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHandler<AppEnv> {
   const { auth, db } = opts;
 
   return async (c, next) => {
-    // 1. Internal token — unconditional bypass.
+    // 1. A valid internal token bypasses the remaining credential checks.
+    // It never synthesizes a user principal from caller-controlled headers.
     if (isValidInternalToken(c.req.header("x-valet-internal"))) {
       await next();
       return;

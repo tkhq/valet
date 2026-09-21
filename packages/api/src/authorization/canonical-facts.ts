@@ -17,18 +17,20 @@ export interface CanonicalFactQuery {
 
 /** Loads only facts relevant to one exact request and rejects unbounded sets. */
 export async function loadCanonicalDynamicFacts(db: AppQueryable, query: CanonicalFactQuery): Promise<CurrentPolicyDynamicFactsV2> {
-  const scope = query.appliesIn === "session"
-    ? eq(runtimeGrants.sessionId, query.scopeId)
-    : eq(runtimeGrants.workflowExecutionId, query.scopeId);
+  const scope = query.appliesIn === "workflow"
+    ? eq(runtimeGrants.workflowExecutionId, query.scopeId)
+    : eq(runtimeGrants.sessionId, query.scopeId);
   const grants = await db.select().from(runtimeGrants).where(and(
     eq(runtimeGrants.orgId, query.organizationId), eq(runtimeGrants.policyKey, query.actionId), scope,
     isNull(runtimeGrants.revokedAt), gt(runtimeGrants.expiresAt, query.evaluationTimeMs),
   )).limit(9);
   if (grants.length > 8) throw new Error("Canonical authorization has more than eight relevant grants.");
 
-  const approvalScope = query.appliesIn === "session"
-    ? eq(canonicalApprovalResolutions.sessionId, query.scopeId)
-    : eq(canonicalApprovalResolutions.workflowExecutionId, query.scopeId);
+  const approvalScope = query.appliesIn === "workflow"
+    ? eq(canonicalApprovalResolutions.workflowExecutionId, query.scopeId)
+    : query.appliesIn === "session"
+      ? eq(canonicalApprovalResolutions.sessionId, query.scopeId)
+      : and(eq(canonicalApprovalResolutions.scopeKind, query.appliesIn), eq(canonicalApprovalResolutions.scopeId, query.scopeId));
   const approvals = query.requestSubjectDigest && query.originalDecisionDigest
     ? await db.select().from(canonicalApprovalResolutions).where(and(
         eq(canonicalApprovalResolutions.orgId, query.organizationId),

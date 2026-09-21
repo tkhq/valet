@@ -505,6 +505,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "authorization_refusal": {
+      next.sessionError = { code: ev.code, message: ev.message };
+      return next;
+    }
+
     case "error": {
       // Engine-originated errors name their thread; store the banner and
       // flip the badge for that thread only. A session-level error (no

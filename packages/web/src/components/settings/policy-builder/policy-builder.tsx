@@ -1,14 +1,14 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { AlertTriangle, Plus, RotateCcw, Trash2 } from "lucide-react";
-import { AUTHORIZATION_CONTEXT_KINDS, POLICY_CONTEXTS, createPreviewRequest, validatePolicyDraft, type AuthorizationKind, type ComparisonOperator, type JsonValue, type PolicyDraftV1, type PolicyPreviewProvider, type PolicyPreviewResultV1 } from "@valet/api/policy-builder";
+import { createPreviewRequest, validatePolicyDraft, type AuthorizationKind, type ComparisonOperator, type JsonValue, type PolicyDraftV1, type PolicyPreviewProvider, type PolicyContextRegistry, type PolicyPreviewResultV1 } from "@valet/api/policy-builder";
 import { Badge, Button, Input, Label } from "~/components/primitives";
 import { fixturePolicyPreviewProvider } from "./preview-provider";
 
 const SELECT = "h-9 w-full rounded border border-[--border] bg-[--bg] px-3 text-sm text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss";
 const safeId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-function emptyDraft(context: AuthorizationKind, owner: { kind: "org" | "team"; id: string }): PolicyDraftV1 {
-  const descriptor = POLICY_CONTEXTS[context];
-  const target = descriptor.fields.find((field) => field.location === "target" && field.sensitivity === "public");
+function emptyDraft(contexts: PolicyContextRegistry, context: AuthorizationKind, owner: { kind: "org" | "team"; id: string }): PolicyDraftV1 {
+  const descriptor = contexts[context];
+  const target = descriptor.fields.find((field) => field.location === "target" && field.sensitivity === "public"), option = descriptor.targets[0];
   const condition = descriptor.fields.find((field) => field.location !== "target" && field.sensitivity === "public");
   return {
     schemaVersion: 1,
@@ -20,8 +20,8 @@ function emptyDraft(context: AuthorizationKind, owner: { kind: "org" | "team"; i
         authority: owner.kind === "org" ? "organization" : "team",
         owner,
         subjects: [owner.kind],
-        target: target ? { [target.path]: "" } : {},
-        matcherGroups: [
+        target: option ? { "action.id": option.actionId } : target ? { [target.path]: "" } : {},
+        matcherGroups: descriptor.targets.length ? [] : [
           {
             id: safeId(),
             mode: "all",
@@ -48,14 +48,14 @@ function emptyDraft(context: AuthorizationKind, owner: { kind: "org" | "team"; i
   };
 }
 
-export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }: { owner: { kind: "org" | "team"; id: string }; provider?: PolicyPreviewProvider }) {
+export function PolicyBuilder({ contexts, owner, provider = fixturePolicyPreviewProvider }: { contexts: PolicyContextRegistry; owner: { kind: "org" | "team"; id: string }; provider?: PolicyPreviewProvider }) {
   const heading = useId(),
-    [draft, setDraft] = useState(() => emptyDraft("tool.action", owner));
+    [draft, setDraft] = useState(() => emptyDraft(contexts, "tool.action", owner));
   const [preview, setPreview] = useState<PolicyPreviewResultV1 | null>(null),
     [selectedRule, setSelectedRule] = useState<string | null>(null),
     firstField = useRef<HTMLInputElement>(null), request = useRef<{ epoch: number; controller?: AbortController }>({ epoch: 0 });
   const rule = draft.rules[0],
-    descriptor = POLICY_CONTEXTS[rule.context],
+    descriptor = contexts[rule.context],
     issues = useMemo(() => validatePolicyDraft(draft), [draft]);
   const invalidate = () => { request.current.epoch++; request.current.controller?.abort(); setPreview(null); setSelectedRule(null); };
   useEffect(() => () => { request.current.controller?.abort(); request.current.epoch++; }, []);
@@ -68,7 +68,7 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
   };
   const changeContext = (context: AuthorizationKind) => {
     invalidate();
-    setDraft(emptyDraft(context, owner));
+    setDraft(emptyDraft(contexts, context, owner));
     queueMicrotask(() => firstField.current?.focus());
   };
   const group = rule.matcherGroups[0];
@@ -115,11 +115,11 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
         <div className="space-y-5">
           <Field label="Authorization context" id="policy-context">
             <select id="policy-context" className={SELECT} value={rule.context} onChange={(event) => changeContext(event.target.value as AuthorizationKind)}>
-              {AUTHORIZATION_CONTEXT_KINDS.map((kind) => (
+              {Object.keys(contexts).map((value) => { const kind = value as AuthorizationKind; return (
                 <option key={kind} value={kind}>
-                  {POLICY_CONTEXTS[kind].label} ({kind}){POLICY_CONTEXTS[kind].publishable ? "" : " - preview unavailable"}
+                  {contexts[kind].label} ({kind}){contexts[kind].publishable ? "" : " - preview unavailable"}
                 </option>
-              ))}
+              ); })}
             </select>
           </Field>
           {!descriptor.publishable && (
@@ -138,28 +138,13 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
           </div>
           <fieldset className="space-y-3">
             <legend className="text-sm font-medium text-ink">Target</legend>
-            {descriptor.fields
-              .filter((field) => field.location === "target")
-              .map((field, index) => (
-                <Field key={field.path} label={`${field.label}${field.sensitivity === "public" ? "" : " (reference only)"}`} id={`target-${index}`}>
-                  <Input
-                    ref={index === 0 ? (firstField as Ref<HTMLInputElement>) : undefined}
-                    id={`target-${index}`}
-                    disabled={field.sensitivity !== "public"}
-                    placeholder={field.sensitivity === "public" ? field.type : "Sensitive value hidden"}
-                    value={String(rule.target[field.path] ?? "")}
-                    onChange={(event) =>
-                      update({
-                        target: updateTarget(rule.target, field.path, field.type === "number" && event.target.value !== "" ? Number(event.target.value) : event.target.value, descriptor.publishable),
-                      })
-                    }
-                  />
-                </Field>
-              ))}
+            {descriptor.targets.length ? <Field label="Registered target" id="policy-target"><select ref={firstField as Ref<HTMLSelectElement>} id="policy-target" className={SELECT} value={String(rule.target["action.id"] ?? "")} onChange={(event) => update({ target: { "action.id": event.target.value } })}>{descriptor.targets.map((option) => <option key={option.actionId} value={option.actionId}>{option.label} ({option.actionId})</option>)}</select><p className="text-xs text-muted">The saved identity is the canonical action ID. Route methods and templates are display only.</p></Field> : descriptor.fields.filter((field) => field.location === "target").map((field, index) => (
+              <Field key={field.path} label={`${field.label}${field.sensitivity === "public" ? "" : " (reference only)"}`} id={`target-${index}`}><Input ref={index === 0 ? (firstField as Ref<HTMLInputElement>) : undefined} id={`target-${index}`} disabled={field.sensitivity !== "public"} placeholder={field.sensitivity === "public" ? field.type : "Sensitive value hidden"} value={String(rule.target[field.path] ?? "")} onChange={(event) => update({ target: updateTarget(rule.target, field.path, field.type === "number" && event.target.value !== "" ? Number(event.target.value) : event.target.value, descriptor.publishable) })} /></Field>
+            ))}
           </fieldset>
           <fieldset className="space-y-3">
             <legend className="text-sm font-medium text-ink">Conditions</legend>
-            {group.matchers.map((matcher, index) => {
+            {descriptor.targets.length ? <p className="text-sm text-muted">Content conditions are not supported for this context. Select a registered target.</p> : group.matchers.map((matcher, index) => {
               const field = fieldFor(descriptor.fields, matcher.field), list = ["in", "not_in"].includes(matcher.operator) || field?.type === "string_set";
               return (
                 <div key={matcher.id} className="grid gap-2 sm:grid-cols-[1fr_10rem_1fr_auto]">
@@ -269,7 +254,7 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
                 </div>
               );
             })}
-            <Button
+            {!descriptor.targets.length && <Button
               variant="secondary"
               size="sm"
               onClick={() => {
@@ -295,7 +280,7 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
             >
               <Plus className="h-4 w-4" />
               Add condition
-            </Button>
+            </Button>}
           </fieldset>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Effect" id="policy-effect">
@@ -303,7 +288,7 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
                 id="policy-effect"
                 className={SELECT}
                 value={rule.effect}
-                onChange={(event) => { const effect = event.target.value as typeof rule.effect; update({ effect, approval: effect === "require_approval" && !descriptor.publishable ? { tier: "human", replay: "once" } : undefined }); }}
+                onChange={(event) => { const effect = event.target.value as typeof rule.effect; update({ effect, approval: effect === "require_approval" && (descriptor.targets.length || !descriptor.publishable) ? { tier: "human", replay: "once" } : undefined }); }}
               >
                 {descriptor.effects.map((effect) => (
                   <option key={effect}>{effect}</option>
@@ -329,7 +314,7 @@ export function PolicyBuilder({ owner, provider = fixturePolicyPreviewProvider }
               </Field>
             )}
           </div>
-          {rule.effect === "require_approval" && <p className="text-sm text-muted">Approval requirement: {rule.approval ? `${rule.approval.tier} / ${rule.approval.replay}` : "current policy mode"}</p>}
+          {rule.effect === "require_approval" && (descriptor.targets.length ? <div role="group" aria-label="Approval settings" className="grid gap-4 sm:grid-cols-2"><Field label="Approval tier" id="policy-approval-tier"><select id="policy-approval-tier" className={SELECT} value={rule.approval?.tier} disabled><option>human</option></select></Field><Field label="Approval replay" id="policy-approval-replay"><select id="policy-approval-replay" className={SELECT} value={rule.approval?.replay} disabled><option>once</option></select></Field></div> : <p className="text-sm text-muted">Approval requirement: {rule.approval ? `${rule.approval.tier} / ${rule.approval.replay}` : "current policy mode"}</p>)}
           <Field label="Expiry (UTC)" id="policy-expiry">
             <Input
               id="policy-expiry"

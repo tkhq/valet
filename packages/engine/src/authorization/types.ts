@@ -3,7 +3,7 @@ export type AuthorizationKind =
   | "workflow.action"
   | "tool.builtin"
   | "plugin.entitlement"
-  | "route.access"
+  | "api.route"
   | "resource.access"
   | "delegation.create"
   | "agent.signal"
@@ -81,7 +81,10 @@ export type Obligation =
   | { type: "credential_owner"; ownerType: string; ownerId: string }
   | { type: "egress_hosts"; hosts: string[] }
   | { type: "sandbox_capabilities"; capabilities: string[] }
-  | { type: "target_idempotency"; required: true };
+  | { type: "target_idempotency"; required: true }
+  | { type: "result_limit"; maximum: number }
+  | { type: "field_mask"; fields: string[] }
+  | { type: "read_only"; required: true };
 
 export interface RedactionDirective {
   target: "audit" | "explanation" | "user_output";

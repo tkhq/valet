@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { PolicyPreviewProvider } from "@valet/api/policy-builder";
+import { POLICY_CONTEXTS, type PolicyPreviewProvider } from "@valet/api/policy-builder";
 import { PolicyBuilder } from "./policy-builder";
 
 describe("canonical policy builder", () => {
-  it("uses labeled controls, resets context state, and fails unsupported contexts closed", async () => {
-    render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} />);
+  it("uses labeled controls and registered route targets", async () => {
+    render(<PolicyBuilder contexts={POLICY_CONTEXTS} owner={{ kind: "org", id: "org-1" }} />);
     expect(screen.getByLabelText("Authorization context").tagName).toBe("SELECT");
     expect(screen.getByRole("option", { name: "Tool and action (tool.builtin)" })).toBeTruthy();
     expect(screen.getByText(/not saved or active/i).textContent).toContain("not saved or active");
@@ -17,12 +17,15 @@ describe("canonical policy builder", () => {
       target: { value: "safe@example.com" },
     });
     fireEvent.change(screen.getByLabelText("Authorization context"), {
-      target: { value: "route.access" },
+      target: { value: "api.route" },
     });
     expect(screen.queryByDisplayValue("gmail.send_email")).toBeNull();
-    expect(screen.getByText(/Preview fails closed/).textContent).toContain("fails closed");
+    expect(screen.getByLabelText("Registered target").tagName).toBe("SELECT");
+    expect(screen.getByText(/display only/).textContent).toContain("display only");
+    fireEvent.change(screen.getByLabelText("Effect"), { target: { value: "require_approval" } });
+    expect((screen.getByLabelText("Approval tier") as HTMLSelectElement).value).toBe("human");
     fireEvent.click(screen.getByRole("button", { name: "Preview and validate" }));
-    expect((await screen.findByLabelText("Source preview")).textContent).toContain("Backend source support is not available");
+    expect((await screen.findByLabelText("Source preview")).textContent).toContain("Generated Rego v1");
   });
 
   it("sends normalized sanitized data to the provider and highlights declared ranges", async () => {
@@ -33,7 +36,7 @@ describe("canonical policy builder", () => {
       data: "{}",
       ranges: [{ ruleId: "rule-provider", startLine: 2, endLine: 2 }],
     }));
-    render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} provider={{ preview }} />);
+    render(<PolicyBuilder contexts={POLICY_CONTEXTS} owner={{ kind: "org", id: "org-1" }} provider={{ preview }} />);
     fireEvent.change(screen.getByLabelText("id"), {
       target: { value: "gmail.send_email" },
     });
@@ -54,7 +57,7 @@ describe("canonical policy builder", () => {
 
   it("never renders provider-external sensitive values", () => {
     const log = vi.spyOn(console, "log");
-    const { container } = render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} />);
+    const { container } = render(<PolicyBuilder contexts={POLICY_CONTEXTS} owner={{ kind: "org", id: "org-1" }} />);
     fireEvent.change(screen.getByLabelText("Authorization context"), {
       target: { value: "credential.use" },
     });
@@ -72,7 +75,7 @@ describe("canonical policy builder", () => {
   it("aborts stale previews and rejects malformed provider output", async () => {
     const pending: Array<(value: Awaited<ReturnType<PolicyPreviewProvider["preview"]>>) => void> = [], signals: AbortSignal[] = [];
     const preview = vi.fn<PolicyPreviewProvider["preview"]>((request, signal) => { signals.push(signal); return new Promise(resolve => pending.push(resolve)); });
-    render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} provider={{ preview }} />);
+    render(<PolicyBuilder contexts={POLICY_CONTEXTS} owner={{ kind: "org", id: "org-1" }} provider={{ preview }} />);
     const fill = (target: string) => { fireEvent.change(screen.getByLabelText("id"), { target: { value: target } }); fireEvent.change(screen.getByLabelText("Condition 1 value"), { target: { value: "safe@example.com" } }); };
     fill("gmail.first"); fireEvent.click(screen.getByRole("button", { name: "Preview and validate" }));
     await waitFor(() => expect(preview).toHaveBeenCalledTimes(1));
@@ -90,17 +93,17 @@ describe("canonical policy builder", () => {
 
   it("shows rejection errors and aborts on unmount", async () => {
     const rejected = vi.fn<PolicyPreviewProvider["preview"]>().mockRejectedValue(new Error("provider"));
-    const first = render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} provider={{ preview: rejected }} />);
+    const first = render(<PolicyBuilder contexts={POLICY_CONTEXTS} owner={{ kind: "org", id: "org-1" }} provider={{ preview: rejected }} />);
     fireEvent.change(screen.getByLabelText("id"), { target: { value: "gmail.send" } }); fireEvent.change(screen.getByLabelText("Condition 1 value"), { target: { value: "safe" } });
     fireEvent.click(screen.getByRole("button", { name: "Preview and validate" })); expect(await screen.findByText(/Preview failed/)).toBeTruthy(); first.unmount();
     let signal: AbortSignal | undefined; const pending = vi.fn<PolicyPreviewProvider["preview"]>((_request, value) => { signal = value; return new Promise(() => undefined); });
-    const second = render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} provider={{ preview: pending }} />);
+    const second = render(<PolicyBuilder contexts={POLICY_CONTEXTS} owner={{ kind: "org", id: "org-1" }} provider={{ preview: pending }} />);
     fireEvent.change(screen.getByLabelText("id"), { target: { value: "gmail.send" } }); fireEvent.change(screen.getByLabelText("Condition 1 value"), { target: { value: "safe" } }); fireEvent.click(screen.getByRole("button", { name: "Preview and validate" }));
     await waitFor(() => expect(pending).toHaveBeenCalled()); second.unmount(); expect(signal?.aborted).toBe(true);
   });
 
   it("keeps one target and resets typed operator values", () => {
-    render(<PolicyBuilder owner={{ kind: "org", id: "org-1" }} />);
+    render(<PolicyBuilder contexts={POLICY_CONTEXTS} owner={{ kind: "org", id: "org-1" }} />);
     fireEvent.change(screen.getByLabelText("id"), { target: { value: "gmail.send" } });
     fireEvent.change(screen.getByLabelText("service"), { target: { value: "gmail" } });
     expect(screen.queryByDisplayValue("gmail.send")).toBeNull();

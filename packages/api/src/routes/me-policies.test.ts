@@ -413,7 +413,7 @@ describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C
     expect(body.error).toContain("require_approval");
   });
 
-  it("a matcher-scoped session-only org policy blocks without persisting an authorization decision", async () => {
+  it("a matcher-scoped session-only org policy blocks before the override write", async () => {
     api = await bootTestApi({ plugins: PLUGINS });
     const orgRes = await putOrgPolicy({
       actionId: "github.create_issue",
@@ -422,6 +422,8 @@ describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C
       paramMatchers: [{ path: "repo", op: "eq", value: "prod" }],
     });
     expect(orgRes.status).toBe(201);
+    const decisionCount = (await api.providers.db.select().from(authorizationDecisions)).length;
+    const attemptCount = (await api.providers.db.select().from(authorizationExecutionAttempts)).length;
 
     const res = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
       method: "PUT",
@@ -429,8 +431,8 @@ describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C
       body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
     });
     expect(res.status).toBe(400);
-    expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(0);
-    expect(await api.providers.db.select().from(authorizationExecutionAttempts)).toHaveLength(0);
+    expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(decisionCount + 2);
+    expect(await api.providers.db.select().from(authorizationExecutionAttempts)).toHaveLength(attemptCount);
   });
 
   it("a matcher-scoped workflow-only org require_approval also blocks the allow override", async () => {

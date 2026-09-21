@@ -46,6 +46,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
+import { authorizeDirectResource, newResourceDelivery } from "../authorization/resource-authorization.js";
 import {
   agentSessions,
   assistants,
@@ -481,6 +482,7 @@ teamsRouter.patch("/:id", async (c) => {
   const team = await loadTeamInOrg(db, id, user.orgId);
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+  await authorizeDirectResource(c.var.providers.resourceAuthorizationPort, { organizationId: user.orgId, actorUserId: user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }, "team", "update", { id: team.id, ownerType: "org", ownerId: team.orgId, version: team.createdAt });
 
   let parsed: unknown;
   try {
@@ -560,6 +562,9 @@ teamsRouter.delete("/:id", async (c) => {
   const user = c.var.user;
   const id = c.req.param("id");
 
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  await authorizeDirectResource(c.var.providers.resourceAuthorizationPort, { organizationId: user.orgId, actorUserId: user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }, "team", "delete", { id: team.id, ownerType: "org", ownerId: team.orgId, version: team.createdAt });
   let sessionIds: string[];
   try {
     sessionIds = await deleteTeamResources(db, { orgId: user.orgId, userId: user.id }, id, canonicalPolicyManager);

@@ -46,12 +46,14 @@
  * control that filtered one page would answer about that page while claiming
  * to answer about the library.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { eq } from "drizzle-orm";
 import type { Principal, SkillSource, ValetPlugin } from "@valet/engine";
 import { matchesSearchQuery, NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { newResourceDelivery } from "../authorization/resource-authorization.js";
+import { authorizeRepositoryOperation } from "../repos/host.js";
 import { partitionByName } from "../plugins/assemble.js";
 import { readLimit } from "../lib/page-cursor.js";
 import {
@@ -164,6 +166,10 @@ function toStoredSummary(row: SkillRow, shadowed: boolean): StoredSkillSummary {
   };
 }
 
+
+function repositoryAuthorization(c: Context<AppEnv>) {
+  return { port: c.var.providers.resourceAuthorizationPort, context: { organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) } };
+}
 
 function owner(c: { var: { user: { id: string; orgId: string } } }): SkillOwner {
   return { userId: c.var.user.id, orgId: c.var.user.orgId };
@@ -606,6 +612,7 @@ skillsRouter.get("/sources", async (c) => {
     );
   }
 
+  await authorizeRepositoryOperation(repositoryAuthorization(c), "metadata", filter.scope ? { ownerType: filter.scope.type, ownerId: filter.scope.id } : undefined);
   const page = await listContentSources(db, caller, filter.scope, limit, cursor, {
     includeOrg: !excludeOrg,
   });
@@ -646,6 +653,7 @@ skillsRouter.post("/sources", async (c) => {
     }
   }
 
+  await authorizeRepositoryOperation(repositoryAuthorization(c), "link", { ownerType: body.ownerType === "org" ? "org" : body.teamId ? "team" : "user", ownerId: body.ownerType === "org" ? c.var.user.orgId : body.teamId ?? c.var.user.id });
   let sourceId: string;
   try {
     const row = await createContentSource(db, owner(c), {
@@ -679,6 +687,7 @@ skillsRouter.post("/sources/:id/sync", async (c) => {
   // catalogs fresh so a member does not need this button.
   const row = await ownedContentSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!row) return c.json({ error: "skill source not found" }, 404);
+  await authorizeRepositoryOperation(repositoryAuthorization(c), "import", { id: row.id, ownerType: row.ownerType, ownerId: row.ownerId, version: row.updatedAt });
 
   await markContentSourceDue(db, row.id);
   const outcome = await contentSync.syncOnce(row.id);
@@ -688,6 +697,9 @@ skillsRouter.post("/sources/:id/sync", async (c) => {
 skillsRouter.delete("/sources/:id", async (c) => {
   const { db } = c.var.providers;
   const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  const row = await ownedContentSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
+  if (!row) return c.json({ error: "skill source not found" }, 404);
+  await authorizeRepositoryOperation(repositoryAuthorization(c), "unlink", { id: row.id, ownerType: row.ownerType, ownerId: row.ownerId, version: row.updatedAt });
   const deleted = await deleteContentSource(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!deleted) return c.json({ error: "skill source not found" }, 404);
   const resp: DeleteSkillSourceResponse = { ok: true };

@@ -3,7 +3,7 @@
  * Valet use cases (engine sessions, orchestrator, workflows, proxy), from the
  * single `cost_entries` definition.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { getUsageBreakdown } from "../services/usage.js";
@@ -22,6 +22,7 @@ import type { DailyAgentActivityResponse, UsageBreakdownResponse, UsageDrillResp
 
 let api: TestApi | undefined;
 afterEach(async () => {
+  vi.restoreAllMocks();
   await api?.cleanup();
   api = undefined;
 });
@@ -565,6 +566,7 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
   });
 
   it("returns the metric only to team administrators and enforces team/org isolation", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(now);
     api = await bootTestApi();
     await seedActivity(api);
     const url = `${api.baseUrl}/api/usage/breakdown?scope=team&teamId=activity-team&window=7d`;

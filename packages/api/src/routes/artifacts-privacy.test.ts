@@ -1,3 +1,4 @@
+import { allowArtifactAuthorization } from "../test-helpers/resource-authorization.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { internalToken } from "../lib/internal-auth.js";
@@ -30,8 +31,8 @@ async function setup() {
     { teamId: "foreign-team", userId: "local-user", role: "member" },
   ]);
   const publish = (teamId: string, orgId: string) => publishArtifact(db, {
-    owner: { type: "team", id: teamId }, actorUserId: "local-user", principal: { type: "team", id: teamId },
-  }, { orgId, key: "private.html", content: "<h1>Team secret</h1>", format: "html" });
+    owner: { type: "team", id: teamId }, actorUserId: "local-user",
+  }, { orgId, key: "private.html", content: "<h1>Team secret</h1>", format: "html" }, allowArtifactAuthorization(orgId, "local-user", { type: "team", id: teamId }));
   const row = await publish("private-team", "local-org");
   const foreign = await publish("foreign-team", "foreign-org");
   const comment = await addArtifactComment(db, { artifactId: row.id, version: 1, body: "Private comment", authorUserId: "local-user" });
@@ -59,13 +60,18 @@ describe("team artifact privacy", () => {
   });
 
   it("keeps internal team tool publications team-owned without borrowing actor authority", async () => {
-    const { request } = await setup();
+    const { db, request } = await setup();
     if (!api) throw new Error("Test API is unavailable");
+    await db.insert(agentSessions).values({
+      id: "internal-team-session", userId: "test-admin", orgId: "local-org", workspace: "fixture",
+      ownerType: "team", ownerId: "private-team", createdAt: 1, updatedAt: 1,
+    });
     const response = await fetch(`${api.baseUrl}/api/artifacts/share`, {
       method: "POST",
       headers: {
         "content-type": "application/json", "x-valet-internal": internalToken(),
         "x-valet-owner": "team:private-team", "x-valet-actor": "test-admin",
+        "x-valet-session-id": "internal-team-session",
       },
       body: JSON.stringify({ key: "internal-tool.md", content: "Internal team publication" }),
     });
@@ -82,19 +88,21 @@ describe("team artifact privacy", () => {
     const owner = { type: "team", id: "private-team" } as const;
     for (const actorUserId of ["nonmember", "test-admin"]) {
       const scope = { owner, actorUserId };
-      await expect(publishArtifact(db, scope, { orgId: "local-org", key: "private.html", content: "Overwrite", format: "html" })).rejects.toThrow();
-      await expect(shareArtifact(db, scope, { orgId: "local-org", path: "private.html" })).rejects.toThrow();
-      await expect(revokeArtifactByPath(db, scope, "private.html", "local-org")).rejects.toThrow();
+      const auth = allowArtifactAuthorization("local-org", actorUserId);
+      await expect(publishArtifact(db, scope, { orgId: "local-org", key: "private.html", content: "Overwrite", format: "html" }, auth)).rejects.toThrow();
+      await expect(shareArtifact(db, scope, { orgId: "local-org", path: "private.html" }, auth)).rejects.toThrow();
+      await expect(revokeArtifactByPath(db, scope, "private.html", "local-org", auth)).rejects.toThrow();
     }
     // A verified team principal may publish for itself, with no actor fallback.
-    const own = { owner, actorUserId: "test-admin", principal: owner };
+    const own = { owner, actorUserId: "test-admin" };
     const borrowedActor = { ...own, owner: { type: "user", id: "test-admin" } } as const;
-    await expect(publishArtifact(db, borrowedActor, { orgId: "local-org", key: "borrowed.md", content: "Wrong owner", format: "markdown" })).rejects.toThrow();
-    await expect(shareArtifact(db, borrowedActor, { orgId: "local-org", path: "borrowed.md" })).rejects.toThrow();
-    await expect(revokeArtifactByPath(db, borrowedActor, "borrowed.md", "local-org")).rejects.toThrow();
-    const created = await publishArtifact(db, own, { orgId: "local-org", key: "internal.md", content: "Team tool", format: "markdown" });
-    await expect(publishArtifact(db, { ...own, principal: { type: "team", id: "foreign-team" } }, { orgId: "local-org", key: "private.html", content: "Wrong team", format: "html" })).rejects.toThrow();
-    await revokeArtifactByPath(db, own, created.sourceMemoryPath, "local-org");
+    const ownAuth = allowArtifactAuthorization("local-org", "test-admin", owner);
+    await expect(publishArtifact(db, borrowedActor, { orgId: "local-org", key: "borrowed.md", content: "Wrong owner", format: "markdown" }, ownAuth)).rejects.toThrow();
+    await expect(shareArtifact(db, borrowedActor, { orgId: "local-org", path: "borrowed.md" }, ownAuth)).rejects.toThrow();
+    await expect(revokeArtifactByPath(db, borrowedActor, "borrowed.md", "local-org", ownAuth)).rejects.toThrow();
+    const created = await publishArtifact(db, own, { orgId: "local-org", key: "internal.md", content: "Team tool", format: "markdown" }, ownAuth);
+    await expect(publishArtifact(db, own, { orgId: "local-org", key: "private.html", content: "Wrong team", format: "html" }, allowArtifactAuthorization("local-org", "test-admin", { type: "team", id: "foreign-team" }))).rejects.toThrow();
+    await revokeArtifactByPath(db, own, created.sourceMemoryPath, "local-org", ownAuth);
     expect(await getArtifactById(db, row.id)).toMatchObject({ version: 1, revokedAt: null });
   });
 
@@ -157,9 +165,10 @@ describe("team artifact privacy", () => {
         expect(await (await request(path, user)).json()).toMatchObject({ artifacts: [] });
       }
       const scope = { owner: { type: "team", id: "private-team" }, actorUserId: user } as const;
-      await expect(publishArtifact(db, scope, { orgId: "local-org", key: "private.html", content: "Overwrite", format: "html" })).rejects.toThrow();
-      await expect(shareArtifact(db, scope, { orgId: "local-org", path: "private.html" })).rejects.toThrow();
-      await expect(revokeArtifactByPath(db, scope, "private.html", "local-org")).rejects.toThrow();
+      const auth = allowArtifactAuthorization("local-org", user);
+      await expect(publishArtifact(db, scope, { orgId: "local-org", key: "private.html", content: "Overwrite", format: "html" }, auth)).rejects.toThrow();
+      await expect(shareArtifact(db, scope, { orgId: "local-org", path: "private.html" }, auth)).rejects.toThrow();
+      await expect(revokeArtifactByPath(db, scope, "private.html", "local-org", auth)).rejects.toThrow();
       for (const body of [{ key: "private.html", content: "Overwrite" }, { key: "private.html", revoke: true }, { path: "private.html" }]) {
         expect((await request("/share?ownerType=team&ownerId=private-team", user, "POST", body)).status).toBe(404);
       }
@@ -183,7 +192,7 @@ describe("team artifact privacy", () => {
     const { db, row, request } = await setup();
     await db.update(orgs).set({ allowPublicArtifacts: true }).where(eq(orgs.id, "local-org"));
     expect((await request(`/${row.id}`, "local-user", "PATCH", { visibility: "public", sharedVersion: 1 })).status).toBe(400);
-    await expect(setArtifactVisibility(db, row.id, "public", "local-user")).rejects.toThrow();
+    await expect(setArtifactVisibility(db, row, "public", "local-user", allowArtifactAuthorization("local-org", "local-user", { type: "team", id: "private-team" }))).rejects.toThrow();
     expect(await getArtifactById(db, row.id)).toMatchObject({ visibility: "org", sharedVersion: null });
     await db.update(artifacts).set({ visibility: "public" }).where(eq(artifacts.id, row.id));
     expect((await request(`/${row.token}`, "nonmember")).status).toBe(404);

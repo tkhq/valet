@@ -1,3 +1,4 @@
+import { allowArtifactAuthorization } from "../test-helpers/resource-authorization.js";
 /**
  * Unit tests for the artifact read-authorization matrix. Every branch of
  * `decideArtifactAccess` lives here because the HTTP layer cannot exercise
@@ -141,7 +142,7 @@ describe("shareArtifact", () => {
       description: "Weekly deploy metrics.",
     });
 
-    const row = await shareArtifact(db, scope, { path: "reports/deploys.md", orgId });
+    const row = await shareArtifact(db, scope, { path: "reports/deploys.md", orgId }, allowArtifactAuthorization());
     expect(row.description).toBe("Weekly deploy metrics.");
   });
 });

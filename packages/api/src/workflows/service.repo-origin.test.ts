@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testWorkflowResourceContext } from "../test-helpers/resource-authorization.js";
 /**
  * A workflow this deployment mirrors from a file is read-only in the product.
  * Editing the file is the edit, and deleting the file is the delete.
@@ -74,6 +75,7 @@ beforeAll(async () => {
     workflowStore: new PgWorkflowStore(boot.pgdb),
     workflowRunHost: stubRunHost,
     credentials: new InMemoryCredentialStore(),
+    resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext,
   };
 
   const now = Date.now();

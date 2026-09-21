@@ -1,3 +1,4 @@
+import { ALLOW_RESOURCE_AUTHORIZATION, testWorkflowResourceContext } from "../test-helpers/resource-authorization.js";
 /**
  * DB-backed tests for `addAggregateNode` — the explicit fan-in node. Uses
  * the same PGlite harness as the other workflow service tests.
@@ -46,6 +47,7 @@ beforeAll(async () => {
     workflowStore: new PgWorkflowStore(boot.pgdb),
     workflowRunHost: stubRunHost,
     credentials: new InMemoryCredentialStore(),
+    resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: testWorkflowResourceContext,
   };
 });
 

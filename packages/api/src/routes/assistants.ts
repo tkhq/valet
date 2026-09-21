@@ -40,6 +40,7 @@ import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
 import { isOrgAdminUser } from "./_org-admin.js";
+import { authorizeDirectResource, newResourceDelivery } from "../authorization/resource-authorization.js";
 import type {
   AssistantOwner,
   CreateAssistantRequest,
@@ -179,6 +180,7 @@ assistantsRouter.patch("/:id", async (c) => {
   if (!(await canAdministerAssistantOwner(db, assistantOwner(row), c.var.principal))) {
     return c.json({ error: "assistant not found" }, 404);
   }
+  await authorizeDirectResource(c.var.providers.resourceAuthorizationPort, { organizationId: user.orgId, actorUserId: user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }, "assistant", "update", { id: row.id, ownerType: row.ownerType, ownerId: row.ownerId, version: row.createdAt });
 
   // `patch` diverges from `body` only for `reasoning`: normalized (trim +
   // lowercase) before validation and storage, so "Medium" and "medium"
@@ -275,6 +277,7 @@ assistantsRouter.delete("/:id", async (c) => {
   if (!(await canAdministerAssistantOwner(db, assistantOwner(row), c.var.principal))) {
     return c.json({ error: "assistant not found" }, 404);
   }
+  await authorizeDirectResource(c.var.providers.resourceAuthorizationPort, { organizationId: user.orgId, actorUserId: user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }, "assistant", "delete", { id: row.id, ownerType: row.ownerType, ownerId: row.ownerId, version: row.createdAt });
 
   try {
     await archiveAssistant(db, row);

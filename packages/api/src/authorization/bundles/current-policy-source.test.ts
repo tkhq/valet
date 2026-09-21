@@ -116,8 +116,22 @@ describe("current policy source builder", () => {
       redactions: [],
       approvalRequirement: { tier: "human", approverType: "org", replay: "once" },
     });
-    const unsupported = await evaluate(snapshot(), request({ kind: "route.access" }));
-    expect(unsupported.decision).toMatchObject({ effect: "deny", reasonCode: "unsupported_authorization_context" });
+    const unsupported = await evaluate(snapshot(), request({ kind: "api.route" }));
+    expect(unsupported.decision).toMatchObject({ effect: "allow", reasonCode: "bundle_default", matchedRuleIds: ["standard.authenticated_access"] });
+  });
+
+  it("keeps route and resource policy kinds independent", async () => {
+    const source = snapshot({ organizationPolicies: [orgRule({ authorizationKind: "api.route", actionId: "api_sessions.post_sessions", mode: "deny" })] });
+    const common = { schemaVersion: 1 as const, requestId: "request-route", context: { evaluationTimeMs: NOW }, facts: {}, subject: { orgId: ORG, principal: { type: "user" as const, id: "user-1" }, actorUserId: "user-1", invocation: { type: "route" as const, id: "delivery-route" } } };
+    const route = await evaluate(source, { ...common, idempotencyKey: "route:delivery-route", kind: "api.route", action: { service: "api_sessions", id: "api_sessions.post_sessions", riskLevel: "medium", parameters: {} } });
+    expect(route.decision).toMatchObject({ effect: "deny", reasonCode: "organization_policy" });
+    const resource = await evaluate(source, { ...common, requestId: "request-resource", idempotencyKey: "resource:delivery-resource", kind: "resource.access", subject: { ...common.subject, invocation: { type: "resource", id: "delivery-resource" } }, action: { service: "resource_session", id: "resource_session.create", riskLevel: "medium", parameters: {} }, resource: { type: "session" } });
+    expect(resource.decision).toMatchObject({ effect: "allow", reasonCode: "bundle_default" });
+  });
+
+  it("rejects unknown route and resource source descriptors", () => {
+    expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "api.route", actionId: "api_sessions.unknown" })] }))).toThrow(expect.objectContaining({ code: "unknown_route_descriptor" }));
+    expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "resource.access", actionId: "resource_session.create" })] }))).toThrow(expect.objectContaining({ code: "unknown_resource_descriptor" }));
   });
 
   it("canonicalizes a PR 9 version 1 action-only snapshot", async () => {
