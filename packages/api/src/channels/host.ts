@@ -360,6 +360,8 @@ export class ChannelHost {
   private outboundGeneration = 0;
   /** Final fallback sends in progress, including sends that began before a restart. */
   private finalDeliverySends = new Map<string, { owner: symbol; settled: Promise<void>; controller: AbortController }>();
+  /** First-reply sends in progress, including sends that began before a restart. */
+  private firstReplySends = new Map<string, { owner: symbol; settled: Promise<void>; controller: AbortController }>();
   /** Bounded retries for final fallback sends that fail at the transport. */
   private finalRetryAttempts = new Map<string, number>();
   private finalRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -757,11 +759,13 @@ export class ChannelHost {
     if (!queueItemId) return;
     const dedupeKey = `${sessionId}:first-reply:${queueItemId}`;
     if (trigger.reason === "error" || trigger.reason === "abort") {
+      this.clearFirstReplyRetry(dedupeKey);
       if (trigger.reason === "abort") this.markDelivered(dedupeKey);
       return;
     }
     const queueItem = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
     if (queueItem?.abortRequestedAt !== undefined || queueItem?.outcome?.outcome === "aborted") {
+      this.clearFirstReplyRetry(dedupeKey);
       this.markDelivered(dedupeKey);
       return;
     }
@@ -773,28 +777,67 @@ export class ChannelHost {
         entry.queueItemId === queueItemId &&
         Boolean(entry.content),
     );
-    if (!first || first.type !== "message" || !first.content) return;
+    if (!first || first.type !== "message" || !first.content) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
     const origin = turnOrigin(entries, queueItemId);
-    if (!origin || origin.reply === "manual") return;
+    if (!origin || origin.reply === "manual") {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
 
     const explicit = originReplyState(entries, queueItemId);
-    if (explicit === "pending" || explicit === "succeeded") return;
+    if (explicit === "pending" || explicit === "succeeded") {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
 
     const target = this.channelThreadFor(origin.threadKey);
-    if (!target || !this.outboundIsActive(generation)) return;
+    if (!target) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
+    if (!this.outboundIsActive(generation)) return;
     if (this.delivered.has(dedupeKey)) {
       this.clearFirstReplyRetry(dedupeKey);
       return;
     }
+    const inFlight = this.firstReplySends.get(dedupeKey);
+    if (inFlight) {
+      const settled = await this.waitForFinalDeliverySend(inFlight);
+      if (!settled && this.firstReplySends.get(dedupeKey) === inFlight) {
+        inFlight.controller.abort();
+        await inFlight.settled;
+      }
+      if (!this.outboundIsActive(generation)) return;
+      await this.deliverFirstAssistantReply(sessionId, threadId, trigger, generation);
+      return;
+    }
     const transport = this.transports.get(target.channelType);
-    if (!transport) return;
+    if (!transport) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
     const sender = await this.assistantSenderIdentity(sessionId);
-    await transport.send(target.conversationKey, {
+    if (!this.outboundIsActive(generation)) return;
+    const controller = new AbortController();
+    const send = Promise.resolve().then(() => transport.send(target.conversationKey, {
       markdown: first.content,
       ...(sender !== undefined ? { sender } : {}),
-    });
+    }, { signal: controller.signal }));
+    const inFlightSend = { owner: Symbol(dedupeKey), settled: send.then(() => undefined, () => undefined), controller };
+    this.firstReplySends.set(dedupeKey, inFlightSend);
+    try {
+      await send;
+    } catch (err) {
+      if (this.firstReplySends.get(dedupeKey) === inFlightSend) this.firstReplySends.delete(dedupeKey);
+      throw err;
+    }
+    if (this.firstReplySends.get(dedupeKey) !== inFlightSend) return;
     this.markDelivered(dedupeKey);
     this.clearFirstReplyRetry(dedupeKey);
+    this.firstReplySends.delete(dedupeKey);
   }
 
   private scheduleFirstReplyRetry(
@@ -820,6 +863,7 @@ export class ChannelHost {
         try {
           await this.deliverFirstAssistantReply(sessionId, threadId, { queueItemId }, generation);
         } catch (err) {
+          this.scheduleFirstReplyRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
           console.error("[channels] outbound delivery failed", err);
         }
       });
@@ -945,7 +989,9 @@ export class ChannelHost {
     if (first.id === final.id) {
       const firstDedupeKey = `${sessionId}:first-reply:${queueItemId}`;
       this.clearFinalDeliveryRetry(dedupeKey);
-      if (explicit !== "pending" && explicit !== "succeeded" && !this.delivered.has(firstDedupeKey)) {
+      if (explicit === "pending" || explicit === "succeeded") {
+        this.clearFirstReplyRetry(firstDedupeKey);
+      } else if (!this.delivered.has(firstDedupeKey)) {
         this.scheduleFirstReplyRetry(sessionId, threadId, queueItemId, firstDedupeKey, generation);
       }
       return;

@@ -162,8 +162,9 @@ confirmation. The host logs and clears retry state after the retry limit.
 Stopping outbound delivery invalidates queued retries and ordinary outbound
 work. An in-flight failed send cannot schedule a retry. An in-flight successful
 send records final delivery after restart, so current-generation work does not
-post a duplicate. Current work waits briefly for a pre-restart send. If it
-stalls, the host aborts the provider request and waits for its settlement
+post a duplicate. This rule applies to first replies and later fallback sends.
+Current work waits briefly for a pre-restart send. If it stalls, the host aborts
+the provider request and waits for its settlement
 before another send can start. Slack also aborts a pending `Retry-After` delay.
 A transport that cannot cancel keeps the only owner until it settles. The guard
 never posts a one-message answer twice, a successful explicit final, or a
