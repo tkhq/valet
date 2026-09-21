@@ -1782,8 +1782,8 @@ interface SessionStore {
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /** Stamp abortRequestedAt on all unsettled submissions in scope. First write wins; not terminal. */
   requestAbort(sessionId: string, threadId?: string): Promise<void>;
-  /** Atomically stamp and return the thread's running or blocked submission. */
-  requestAbortActiveSubmission(sessionId: string, threadId: string): Promise<QueueItem | null>;
+  /** Atomically stamp abort intent on the specified item only if it is currently running or blocked on a decision gate in this session and thread. Otherwise, return null. */
+  requestAbortActiveSubmission(sessionId: string, threadId: string, queueItemId: string): Promise<QueueItem | null>;
   /** Two-phase settlement: reserve records the exact terminal outcome (running|blocked→terminalizing). Fenced. */
   reserveSettlement(sessionId: string, threadId: string, itemId: string, outcome: SubmissionOutcome, fence: WriteFence): Promise<void>;
   /** Finalize terminalizing→settled. Idempotent; safe to re-run after a crash. Fenced. */

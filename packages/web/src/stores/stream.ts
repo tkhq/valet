@@ -1168,8 +1168,8 @@ export function useQueueStateForThread(
  * interrupt alongside `agentStatus`: the queue state comes from durable
  * rows (seeded by the WS handshake), so it stays correct across reconnects
  * and page loads that would miss the live `status` transition events.
- * Everything it reports true for is abortable — `Thread.abort` interrupts a
- * running turn, withdraws pending gates, and settles queued items.
+ * A true result does not mean interactive Stop can abort work. Stop targets
+ * only the active running or gate-blocked item and preserves queued work.
  */
 export function queueBusy(state: WireQueueState | undefined): boolean {
   if (!state) return false;
@@ -1189,6 +1189,6 @@ export function queueBusy(state: WireQueueState | undefined): boolean {
   if (state.status === "paused" && state.activeItemId !== undefined) return true;
   // Waiting submissions are busy whatever the status says: collect-buffer
   // items ride an `idle` status until their window flushes, and a paused
-  // queue holds its pending items. Both are abortable.
+  // queue holds its pending items. Both states are busy but not active Stop targets.
   return state.pendingIds.length > 0 || state.collectingIds.length > 0;
 }
