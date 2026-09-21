@@ -85,7 +85,7 @@ describe("delegated execution adapters", () => {
   it("keeps credential metadata separate from secret material", () => {
     const use = adaptCredentialUse({ ...common, sessionId: "session_1", service: "github", credentialClass: "installation", owner: common.principal, operation: "plugin", actionId: "github.list_repos", target: { sessionId: "session_1" }, resource: { type: "repository", id: "repo_1" } });
     const delegated = adaptCredentialDelegate({ ...common, sessionId: "session_1", service: "github", credentialClass: "installation", owner: common.principal, delegatorSessionId: "session_1", delegateeSessionId: "child_1", operations: ["github.list_repos"], expiresAtMs: 1_000, transitive: false });
-    const prebuild = adaptCredentialUse({ ...common, service: "github", credentialClass: "installation", owner: { type: "org", id: common.organizationId }, operation: "repository", actionId: "prebuild.resolve_token", target: {}, resource: { type: "image_source", id: "source_1" } });
+    const prebuild = adaptCredentialUse({ ...common, service: "github", credentialClass: "installation", owner: { type: "org", id: common.organizationId }, operation: "repository", actionId: "prebuild.resolve_token", target: {}, resource: { type: "repository", id: "acme/widgets" } });
     expect(use.request.kind).toBe("credential.use");
     expect(prebuild.request.kind).toBe("credential.use");
     expect(delegated.request.kind).toBe("credential.delegate");
