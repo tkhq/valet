@@ -62,7 +62,7 @@ routeApprovalRouter.post("/decisions/:decisionId/resolve", async (c) => {
       const response: ResolveRouteApprovalResponseV1 = { schemaVersion: 1, decisionId, resolutionId, verdict: body.verdict };
       return c.json(response);
     }
-    return c.json({ error: "This approval already has a terminal resolution.", code: "authorization_resolution_conflict", existing: { resolutionId: existing.resolutionId, verdict: existing.verdict } }, 409);
+    return c.json({ error: "This approval already has a terminal resolution.", code: "authorization_resolution_conflict", existing: resolutionMetadata(existing) }, 409);
   }
 
   const now = Date.now();
@@ -80,11 +80,15 @@ routeApprovalRouter.post("/decisions/:decisionId/resolve", async (c) => {
   )).limit(1))[0];
   if (!stored) return c.json({ error: "Approval resolution could not be persisted. Retry the same resolution." }, 503);
   if (stored.resolutionId !== resolutionId || stored.approverId !== user.id || stored.verdict !== body.verdict) {
-    return c.json({ error: "This approval already has a terminal resolution.", code: "authorization_resolution_conflict", existing: { resolutionId: stored.resolutionId, verdict: stored.verdict } }, 409);
+    return c.json({ error: "This approval already has a terminal resolution.", code: "authorization_resolution_conflict", existing: resolutionMetadata(stored) }, 409);
   }
   const response: ResolveRouteApprovalResponseV1 = { schemaVersion: 1, decisionId, resolutionId, verdict: body.verdict };
   return c.json(response);
 });
+
+function resolutionMetadata(row: typeof canonicalApprovalResolutions.$inferSelect) {
+  return { resolutionId: row.resolutionId, approverId: row.approverId, verdict: row.verdict, resolvedAt: row.resolvedAt };
+}
 
 function isRouteApproval(row: AuthorizationDecisionRow | undefined): row is AuthorizationDecisionRow & { approvalRequirement: ApprovalRequirement; evidence: NonNullable<AuthorizationDecisionRow["evidence"]> } {
   return row !== undefined && row.effect === "require_approval" && row.approvalRequirement !== null && row.evidence !== null && row.idempotencyKey.startsWith("route:");
