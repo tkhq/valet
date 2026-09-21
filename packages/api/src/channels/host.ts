@@ -100,6 +100,7 @@ const DELIVERED_CAP = 2048;
 const VERIFY_FAILED_LOG_COOLDOWN_MS = 60_000;
 export const FINAL_DELIVERY_RETRY_DELAY_MS = 50;
 export const MAX_FINAL_DELIVERY_RETRIES = 2;
+export const FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS = 150;
 
 /** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️.
  * `resolvedByName` (the resolver's display name, when known) turns the line
@@ -357,7 +358,7 @@ export class ChannelHost {
   /** Invalidates queued retry work when outbound delivery stops or restarts. */
   private outboundGeneration = 0;
   /** Final fallback sends in progress, including sends that began before a restart. */
-  private finalDeliverySends = new Map<string, Promise<void>>();
+  private finalDeliverySends = new Map<string, { owner: symbol; settled: Promise<void> }>();
   /** Bounded retries for final fallback sends that fail at the transport. */
   private finalRetryAttempts = new Map<string, number>();
   private finalRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -818,6 +819,16 @@ export class ChannelHost {
     this.finalRetryAttempts.delete(dedupeKey);
   }
 
+  private async waitForFinalDeliverySend(send: { settled: Promise<void> }): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS);
+      void send.settled.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }
+
   /**
    * Backstop final delivery for addressed turns. The first-response path
    * intentionally posts only an acknowledgement. When a later terminal result
@@ -881,7 +892,10 @@ export class ChannelHost {
     if (this.delivered.has(dedupeKey)) return;
     const inFlight = this.finalDeliverySends.get(dedupeKey);
     if (inFlight) {
-      await inFlight;
+      const settled = await this.waitForFinalDeliverySend(inFlight);
+      if (!settled && this.finalDeliverySends.get(dedupeKey) === inFlight) {
+        this.finalDeliverySends.delete(dedupeKey);
+      }
       if (!this.outboundIsActive(generation)) return;
       await this.deliverFinalAssistantReply(sessionId, threadId, trigger, generation);
       return;
@@ -894,18 +908,20 @@ export class ChannelHost {
       markdown: final.content,
       ...(sender !== undefined ? { sender } : {}),
     }));
-    const settled = send.then(() => undefined, () => undefined);
-    this.finalDeliverySends.set(dedupeKey, settled);
+    const inFlightSend = { owner: Symbol(dedupeKey), settled: send.then(() => undefined, () => undefined) };
+    this.finalDeliverySends.set(dedupeKey, inFlightSend);
     try {
       await send;
     } catch (err) {
+      if (this.finalDeliverySends.get(dedupeKey) === inFlightSend) this.finalDeliverySends.delete(dedupeKey);
       this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
       throw err;
-    } finally {
-      if (this.finalDeliverySends.get(dedupeKey) === settled) this.finalDeliverySends.delete(dedupeKey);
     }
+    // A timed-out successor took ownership. Its delivery result is authoritative.
+    if (this.finalDeliverySends.get(dedupeKey) !== inFlightSend) return;
     this.markDelivered(dedupeKey);
     this.clearFinalDeliveryRetry(dedupeKey);
+    this.finalDeliverySends.delete(dedupeKey);
   }
 
   /**

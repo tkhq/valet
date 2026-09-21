@@ -37,6 +37,7 @@ import type { AttentionEvent } from "../orchestrator/attention.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import {
   ChannelHost,
+  FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS,
   FINAL_DELIVERY_RETRY_DELAY_MS,
   MAX_FINAL_DELIVERY_RETRIES,
   type ChannelHostDeps,
@@ -54,6 +55,7 @@ class FakeTransport implements ChannelTransport {
   sendFailures = 0;
   sendAttempts = 0;
   sendBlock: Promise<void> | undefined;
+  sendBlocks = new Map<number, Promise<void>>();
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   deliveries: Array<{ type: "message"; markdown: string } | { type: "gate"; gateId: string }> = [];
   media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
@@ -70,8 +72,11 @@ class FakeTransport implements ChannelTransport {
   }
   async send(conversationKey: string, message: OutboundChannelMessage) {
     this.sendAttempts += 1;
+    const attempt = this.sendAttempts;
     if (this.sendDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
     if (this.sendBlock) await this.sendBlock;
+    const sendBlock = this.sendBlocks.get(attempt);
+    if (sendBlock) await sendBlock;
     if (this.sendFailures > 0) {
       this.sendFailures -= 1;
       throw new Error("send failed");
@@ -654,6 +659,42 @@ describe("ChannelHost outbound delivery", () => {
     await eventStream.append(terminalEvent, `final-restart-after-success-${randomUUID()}`);
     await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS * 3));
     expect(fakeTransport.sendAttempts).toBe(1);
+  });
+
+  it("takes over a stalled pre-restart final send after its wait limit", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-final-stalled-restart";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
+      { type: "message", id: "final-stalled-ack", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-stalled-ack", reason: "end_turn" } },
+      `final-stalled-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: "final-stalled-result", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+    }]);
+
+    fakeTransport.sendAttempts = 0;
+    fakeTransport.sendBlocks.set(1, new Promise<void>(() => {}));
+    const terminalEvent = {
+      sessionId: session.id, threadId, queueItemId, timestamp: Date.now(),
+      event: { type: "message_end" as const, threadId, messageId: "final-stalled-result", reason: "end_turn" as const },
+    };
+    await eventStream.append(terminalEvent, `final-stalled-old-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sendAttempts).toBe(1));
+    host.stopOutbound();
+    host.startOutbound();
+    await eventStream.append(terminalEvent, `final-stalled-current-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am checking",
+      "The work is complete",
+    ]), { timeout: FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS * 3 });
+    expect(fakeTransport.sendAttempts).toBe(2);
   });
 
   it("stops retrying final fallback after the retry limit", async () => {
