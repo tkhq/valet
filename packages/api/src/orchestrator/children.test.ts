@@ -41,6 +41,8 @@ import {
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 import { agentSessions, bakes, childWatches, delegationEnvelopes, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
+import type { DelegationEnvelopeV1 } from "@valet/engine/authorization";
+import type { AppDb } from "../lib/drizzle.js";
 import { SignalEdgeDeniedError } from "./signals.js";
 
 let api: TestApi | undefined;
@@ -72,6 +74,27 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000): Pr
     await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error("waitFor: timed out");
+}
+
+async function seedDelegationEnvelope(db: AppDb, edge: { childSessionId: string; parentSessionId: string; parentThreadId: string; actorUserId: string; orgId: string }): Promise<void> {
+  const envelope: DelegationEnvelopeV1 = {
+    schemaVersion: 1,
+    organizationId: edge.orgId,
+    parentSessionId: edge.parentSessionId,
+    parentThreadId: edge.parentThreadId,
+    childSessionId: edge.childSessionId,
+    actorUserId: edge.actorUserId,
+    owner: { type: "user", id: edge.actorUserId },
+    depth: 1,
+    parentRootCapable: true,
+    constraints: {},
+    capabilities: ["agent.signal"],
+    policyDigest: "test-policy",
+    sourceBundleDigest: "test-source",
+    evaluatorKind: "local_valet",
+    engineDigest: "test-engine",
+  };
+  await db.insert(delegationEnvelopes).values({ childSessionId: edge.childSessionId, orgId: edge.orgId, parentSessionId: edge.parentSessionId, envelope, decisionId: `test-decision:${edge.childSessionId}`, createdAt: Date.now() }).onConflictDoNothing();
 }
 
 function queuedItem(id: string, threadId: string, prompt: string): QueueItem {
@@ -926,6 +949,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     // Double-fire: direct arm AND a rearm() pass over the unsettled row.
@@ -994,6 +1018,7 @@ describe("ChildWatcher", () => {
     // The row a spawn from a Slack-addressed turn writes: origin captured at
     // spawn time, durable so the boot rearm() path inherits it too.
     const origin = { channelType: "slack", threadKey: "slack:C1:1.2" };
+    await seedDelegationEnvelope(db, { childSessionId: "child-o", parentSessionId: "parent-o", parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org" });
     await db.insert(childWatches).values({
       childSessionId: "child-o",
       queueItemId: itemId,
@@ -1047,6 +1072,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1112,6 +1138,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1194,6 +1221,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1265,6 +1293,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1330,6 +1359,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1386,6 +1416,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1963,6 +1994,7 @@ describe("buildChildSender", () => {
       createdAt: now,
       updatedAt: now,
     });
+    await seedDelegationEnvelope(db, { childSessionId: opts.childId, parentSessionId: opts.parentId, parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org" });
     await db.insert(childWatches).values({
       childSessionId: opts.childId,
       queueItemId: opts.queueItemId,
@@ -2419,6 +2451,7 @@ describe("child sandbox retention", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: now });
     return { watch, child, childThread };
   }

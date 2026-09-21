@@ -290,6 +290,17 @@ async function authorizeAgentSignal(deps: ChildrenDeps, input: { parentSessionId
   const parent = await deps.engineStore.getSession(input.parentSessionId);
   const identity = parent ?? input.fallback;
   if (!identity) throw new DelegationPolicyDeniedError("authorization_denied");
+  const [edgeRows, parentRows] = await Promise.all([
+    deps.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, input.childSessionId)).limit(1),
+    deps.db.select({ envelope: delegationEnvelopes.envelope }).from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, input.parentSessionId)).limit(1),
+  ]);
+  const edge = edgeRows[0];
+  try {
+    if (!edge || edge.orgId !== identity.orgId || edge.parentSessionId !== input.parentSessionId || edge.envelope.parentThreadId !== input.parentThreadId || edge.envelope.childSessionId !== input.childSessionId) throw new Error("invalid delegation edge");
+    assertOneLevelDelegationEnvelope(edge.envelope, parentRows[0]?.envelope);
+  } catch {
+    throw new DelegationPolicyDeniedError("authorization_denied");
+  }
   const actorUserId = input.actorUserId ?? identity.userId;
   const adapted = adaptAgentSignal({ schemaVersion: 1, organizationId: identity.orgId, actorUserId, principal: identity.owner, requestId: `signal:${randomUUID()}`, operationId: `${input.operation}:${randomUUID()}`, evaluationTimeMs: Date.now(), parentSessionId: input.parentSessionId, parentThreadId: input.parentThreadId, childSessionId: input.childSessionId, operation: input.operation, relationship: "parent_child" });
   const envelope = await deps.canonicalAuthorizationService.authorize(adapted.request);
