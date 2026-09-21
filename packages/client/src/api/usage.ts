@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from './client';
 import type { UsageStatsResponse } from './types';
 
-export type UsageScope = 'personal' | 'team' | 'org';
+export type UsageScope = 'personal' | 'org';
 export type UsagePeriod =
   | { periodType: 'lookback'; period: 1 | 24 | 168 | 720 | 8760 }
   | { periodType: 'month'; month: string }
@@ -48,7 +48,8 @@ export async function downloadUsageCsv(selection: UsageSelection, asOf?: string)
   }
   const blob = await response.blob();
   const disposition = response.headers.get('Content-Disposition') ?? '';
-  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'valet-usage.csv';
+  const filename = (disposition.match(/filename="([^"]+)"/)?.[1] ?? 'valet-usage.csv')
+    .replace(/[^a-zA-Z0-9._-]/g, '-');
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;

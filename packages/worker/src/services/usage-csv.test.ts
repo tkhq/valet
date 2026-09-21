@@ -25,6 +25,16 @@ describe('usageReportToCsv', () => {
     expect(csv.trim().split('\n')).toHaveLength(7);
   });
 
+  it('includes sandbox cost in sandbox-only daily totals', () => {
+    const csv = usageReportToCsv({
+      ...report,
+      costByDay: [{ date: '2024-02-02', cost: null, inputTokens: 0, outputTokens: 0, sandboxCost: 0.25, sandboxActiveSeconds: 30 }],
+    });
+    const day = csv.split('\n').find((line) => line.includes('"day","2024-02-02"'));
+    expect(day).toContain('"0.25"');
+    expect(day).toContain('"0.25","30"');
+  });
+
   it('neutralizes spreadsheet formulas in text dimensions', () => {
     const csv = usageReportToCsv({
       ...report,

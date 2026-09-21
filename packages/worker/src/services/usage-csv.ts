@@ -44,7 +44,7 @@ export function usageReportToCsv(report: UsageStatsResponse): string {
   for (const row of report.costByDay) rows.push({
     ...common, breakdown: 'day', dimension: row.date,
     input_tokens: row.inputTokens, output_tokens: row.outputTokens,
-    total_cost_usd: row.cost == null ? null : row.cost + row.sandboxCost,
+    total_cost_usd: row.cost == null ? (row.sandboxCost > 0 ? row.sandboxCost : null) : row.cost + row.sandboxCost,
     sandbox_cost_usd: row.sandboxCost, sandbox_active_seconds: row.sandboxActiveSeconds,
   });
   for (const row of report.byPurpose) rows.push({

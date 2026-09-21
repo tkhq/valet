@@ -163,6 +163,12 @@ function usageWindowBindings(periodStart: string, periodEnd?: string, userId?: s
   return [periodStart, ...(periodEnd ? [periodEnd] : []), ...(userId ? [userId] : [])];
 }
 
+// sessions.created_at uses SQLite's `YYYY-MM-DD HH:MM:SS` default in production,
+// while report bounds are ISO timestamps. Normalize both sides before comparing.
+function sandboxWindowSql(alias: string, periodEnd?: string, userId?: string): string {
+  return `${periodEnd ? `AND datetime(${alias}.created_at) < datetime(?)` : ''} ${userId ? `AND ${alias}.user_id = ?` : ''}`;
+}
+
 // ─── Billing / Usage Aggregate Queries ──────────────────────────────────────
 
 export interface UsageHeroStats {
@@ -499,8 +505,8 @@ export async function getSandboxHeroStats(
     .prepare(`
       SELECT COALESCE(SUM(active_seconds), 0) as total_active_seconds
       FROM sessions
-      WHERE created_at >= ?
-        ${usageWindowSql('sessions', periodEnd, userId)}
+      WHERE datetime(created_at) >= datetime(?)
+        ${sandboxWindowSql('sessions', periodEnd, userId)}
     `)
     .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .first<{ total_active_seconds: number }>();
@@ -527,8 +533,8 @@ export async function getSandboxByDay(
         date(created_at) as date,
         SUM(active_seconds) as active_seconds
       FROM sessions
-      WHERE created_at >= ?
-        ${usageWindowSql('sessions', periodEnd, userId)}
+      WHERE datetime(created_at) >= datetime(?)
+        ${sandboxWindowSql('sessions', periodEnd, userId)}
       GROUP BY date(created_at)
       ORDER BY date ASC
     `)
@@ -563,8 +569,8 @@ export async function getSandboxByUser(
         u.sandbox_memory_mib
       FROM sessions s
       LEFT JOIN users u ON u.id = s.user_id
-      WHERE s.created_at >= ?
-        ${usageWindowSql('s', periodEnd, userId)}
+      WHERE datetime(s.created_at) >= datetime(?)
+        ${sandboxWindowSql('s', periodEnd, userId)}
         AND s.user_id IS NOT NULL
       GROUP BY s.user_id
     `)

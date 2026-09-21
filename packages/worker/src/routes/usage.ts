@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import type { Env, Variables } from '../env.js';
 import type { UsageStatsResponse } from '@valet/shared';
 import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getUsageByUserModel, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxHeroStats, getSandboxByDay, getSandboxByUser, billableInputTokens, billableOutputTokens } from '../lib/db/analytics.js';
@@ -8,20 +8,22 @@ import { getDb } from '../lib/drizzle.js';
 import { parseUsageScope, resolveUsagePeriod, UsagePeriodError, type ResolvedUsagePeriod, type UsageScope } from '../services/usage-period.js';
 import { usageReportToCsv } from '../services/usage-csv.js';
 
+type UsageContext = Context<{ Bindings: Env; Variables: Variables }>;
+
 export const usageRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-function resolveRequest(c: any): { period: ResolvedUsagePeriod; scope: UsageScope; userFilter?: string } {
+function resolveRequest(c: UsageContext): { period: ResolvedUsagePeriod; scope: UsageScope; userFilter?: string } {
   const user = c.get('user');
   if (!user) throw new UsagePeriodError('Authentication required');
   const url = new URL(c.req.url);
   const scope = parseUsageScope(url.searchParams.get('scope') ?? undefined);
   if (scope !== 'personal' && user.role !== 'admin') {
-    throw new UsagePeriodError('Admin access required for team and org scope');
+    throw new UsagePeriodError('Admin access required for org scope');
   }
   return { period: resolveUsagePeriod(url.searchParams), scope, userFilter: scope === 'personal' ? user.id : undefined };
 }
 
-async function buildUsageResponse(c: any, period: ResolvedUsagePeriod, scope: UsageScope, userFilter?: string): Promise<UsageStatsResponse> {
+async function buildUsageResponse(c: UsageContext, period: ResolvedUsagePeriod, scope: UsageScope, userFilter?: string): Promise<UsageStatsResponse> {
   const db = c.env.DB;
   const appDb = getDb(db);
 
@@ -52,12 +54,6 @@ async function buildUsageResponse(c: any, period: ResolvedUsagePeriod, scope: Us
   // Compute hero sandbox cost
   const heroSandboxCost = computeSandboxCost(sandboxHero.totalActiveSeconds);
   const heroTotalCost = heroLlmCost !== null ? heroLlmCost + heroSandboxCost : heroSandboxCost > 0 ? heroSandboxCost : null;
-
-  // Build sandbox-by-day lookup
-  const sandboxDayMap = new Map<string, number>();
-  for (const row of sandboxByDay) {
-    sandboxDayMap.set(row.date, row.activeSeconds);
-  }
 
   // Aggregate cost by day (collapse model-level rows into day-level)
   const dayMap = new Map<string, { cost: number | null; inputTokens: number; outputTokens: number; sandboxCost: number; sandboxActiveSeconds: number }>();
@@ -220,14 +216,18 @@ async function buildUsageResponse(c: any, period: ResolvedUsagePeriod, scope: Us
   return response;
 }
 
-async function withUsageReport(c: any, format: 'json' | 'csv') {
+function exportFilename(scope: UsageScope, label: string): string {
+  return `valet-usage-${scope}-${label}.csv`.replace(/[^a-zA-Z0-9._-]/g, '-');
+}
+
+async function withUsageReport(c: UsageContext, format: 'json' | 'csv') {
   try {
     const { period, scope, userFilter } = resolveRequest(c);
     const response = await buildUsageResponse(c, period, scope, userFilter);
     if (format === 'csv') {
       return c.body(usageReportToCsv(response), 200, {
         'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="valet-usage-${scope}-${period.label}.csv"`,
+        'Content-Disposition': `attachment; filename="${exportFilename(scope, period.label)}"`,
       });
     }
     return c.json(response);

@@ -30,7 +30,7 @@ interface UsageReportControlsProps {
   scopes?: UsageScope[];
 }
 
-export function UsageReportControls({ value, onChange, onExport, exporting, scopes = ['personal', 'team', 'org'] }: UsageReportControlsProps) {
+export function UsageReportControls({ value, onChange, onExport, exporting, scopes = ['personal', 'org'] }: UsageReportControlsProps) {
   const buttonClass = (active: boolean) => cn(
     'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
     active ? 'bg-white text-neutral-900 shadow-sm dark:bg-surface-3 dark:text-neutral-100' : 'text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200',

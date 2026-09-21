@@ -7,10 +7,10 @@ import { usageSearchParams, type UsageSelection } from './usage';
 describe('usageSearchParams', () => {
   it.each<UsageSelection>([
     { scope: 'personal', periodType: 'lookback', period: 24 },
-    { scope: 'team', periodType: 'lookback', period: 168 },
+    { scope: 'personal', periodType: 'lookback', period: 168 },
     { scope: 'org', periodType: 'lookback', period: 720 },
     { scope: 'org', periodType: 'month', month: '2024-02' },
-    { scope: 'team', periodType: 'range', start: '2023-12-31', end: '2024-02-01' },
+    { scope: 'org', periodType: 'range', start: '2023-12-31', end: '2024-02-01' },
   ])('serializes scope and period without falling back: %o', (selection) => {
     const params = new URLSearchParams(usageSearchParams(selection));
     expect(params.get('scope')).toBe(selection.scope);

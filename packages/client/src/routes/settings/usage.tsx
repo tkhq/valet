@@ -75,7 +75,7 @@ function BillingContent({ selection, onSelectionChange, isAdmin }: { selection: 
     setExporting(true);
     setExportError(null);
     try {
-      await downloadUsageCsv(selection, data?.report.end);
+      await downloadUsageCsv(selection, data?.report?.end);
     } catch (cause) {
       setExportError(cause instanceof Error ? cause.message : 'Usage export failed');
     } finally {
@@ -96,7 +96,7 @@ function BillingContent({ selection, onSelectionChange, isAdmin }: { selection: 
         <div className="flex h-64 items-center justify-center text-sm text-neutral-400">No usage data available</div>
       )}
       {data && <>
-        <p className="text-xs text-neutral-400">{data.report.label} · {data.report.start} to {data.report.end}</p>
+        {data.report && <p className="text-xs text-neutral-400">{data.report.label} · {data.report.start} to {data.report.end}</p>}
       <UsageHeroMetrics
         totalCost={data.hero.totalCost}
         totalInputTokens={data.hero.totalInputTokens}

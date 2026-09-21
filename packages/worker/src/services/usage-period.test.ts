@@ -18,6 +18,13 @@ describe('resolveUsagePeriod', () => {
     });
   });
 
+  it('tolerates small client/server clock skew for rolling exports', () => {
+    expect(resolveUsagePeriod(params('period=24&asOf=2024-03-15T12%3A30%3A30.000Z'), NOW).end)
+      .toBe('2024-03-15T12:30:30.000Z');
+    expect(() => resolveUsagePeriod(params('period=24&asOf=2024-03-15T12%3A31%3A01.000Z'), NOW))
+      .toThrow('asOf cannot be in the future');
+  });
+
   it('resolves leap February and variable months to exact boundaries', () => {
     expect(resolveUsagePeriod(params('periodType=month&month=2024-02'), NOW)).toMatchObject({
       start: '2024-02-01T00:00:00.000Z', end: '2024-03-01T00:00:00.000Z',
@@ -47,7 +54,7 @@ describe('resolveUsagePeriod', () => {
   });
 
   it('validates all supported scopes', () => {
-    expect(['personal', 'team', 'org'].map((scope) => parseUsageScope(scope))).toEqual(['personal', 'team', 'org']);
-    expect(() => parseUsageScope('other')).toThrow('scope must be personal, team, or org');
+    expect(['personal', 'org'].map((scope) => parseUsageScope(scope))).toEqual(['personal', 'org']);
+    expect(() => parseUsageScope('team')).toThrow('scope must be personal or org');
   });
 });

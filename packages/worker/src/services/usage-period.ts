@@ -1,7 +1,7 @@
 export const USAGE_REPORTING_TIMEZONE = 'UTC' as const;
 export const USAGE_LOOKBACK_HOURS = [1, 24, 168, 720, 8760] as const;
 
-export type UsageScope = 'personal' | 'team' | 'org';
+export type UsageScope = 'personal' | 'org';
 export type UsagePeriodSelection =
   | { kind: 'lookback'; hours: (typeof USAGE_LOOKBACK_HOURS)[number] }
   | { kind: 'month'; month: string }
@@ -45,8 +45,8 @@ function parseMonth(value: string): Date {
 
 export function parseUsageScope(value: string | undefined): UsageScope {
   const scope = value ?? 'org';
-  if (scope !== 'personal' && scope !== 'team' && scope !== 'org') {
-    throw new UsagePeriodError('scope must be personal, team, or org');
+  if (scope !== 'personal' && scope !== 'org') {
+    throw new UsagePeriodError('scope must be personal or org');
   }
   return scope;
 }
@@ -67,7 +67,7 @@ export function resolveUsagePeriod(params: URLSearchParams, now = new Date()): R
     if (!Number.isFinite(endDate.getTime()) || (asOf !== null && endDate.toISOString() !== asOf)) {
       throw new UsagePeriodError('asOf must be an ISO 8601 UTC timestamp');
     }
-    if (endDate > now) throw new UsagePeriodError('asOf cannot be in the future');
+    if (endDate.getTime() > now.getTime() + 60_000) throw new UsagePeriodError('asOf cannot be in the future');
     const end = endDate.toISOString();
     const start = new Date(endDate.getTime() - hours * 3_600_000).toISOString();
     return {

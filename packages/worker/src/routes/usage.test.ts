@@ -54,10 +54,20 @@ describe('usage report API', () => {
     expect(body.report).toMatchObject({ scope: 'personal', boundary: 'start-inclusive/end-exclusive' });
   });
 
-  it('preserves authorization for team and org scope', async () => {
-    expect((await app('member').request('/stats?scope=team&period=24', {}, { DB: {} } as Env)).status).toBe(403);
+  it('preserves org authorization and rejects unenforceable team scope', async () => {
     expect((await app('member').request('/stats?scope=org&period=24', {}, { DB: {} } as Env)).status).toBe(403);
-    expect((await app('admin').request('/stats?scope=team&period=24', {}, { DB: {} } as Env)).status).toBe(200);
+    expect((await app('admin').request('/stats?scope=org&period=24', {}, { DB: {} } as Env)).status).toBe(200);
+    expect((await app('admin').request('/stats?scope=team&period=24', {}, { DB: {} } as Env)).status).toBe(400);
+  });
+
+  it('keeps assembled sandbox-only daily totals consistent in CSV exports', async () => {
+    mocks.sandboxHero.mockResolvedValue({ totalActiveSeconds: 30 });
+    mocks.sandboxDay.mockResolvedValue([{ date: '2024-02-29', activeSeconds: 30 }]);
+
+    const response = await app().request('/export.csv?scope=org&periodType=month&month=2024-02', {}, { DB: {} } as Env);
+    const dayRow = (await response.text()).split('\n').find((line) => line.includes('"day","2024-02-29"'));
+
+    expect(dayRow).toContain('"0.0019755","","","0.0019755","30"');
   });
 
   it('returns deterministic validation and empty CSV output', async () => {
@@ -65,6 +75,9 @@ describe('usage report API', () => {
     const csv = await app().request('/export.csv?scope=org&periodType=month&month=2024-02', {}, { DB: {} } as Env);
     expect(csv.status).toBe(200);
     expect(csv.headers.get('content-type')).toContain('text/csv');
+    expect(csv.headers.get('content-disposition')).toBe('attachment; filename="valet-usage-org-calendar-month_2024-02_UTC.csv"');
     expect(await csv.text()).toContain('"total","all"');
+    const rolling = await app().request('/export.csv?scope=org&period=24&asOf=2024-03-15T12%3A30%3A00.000Z', {}, { DB: {} } as Env);
+    expect(rolling.headers.get('content-disposition')).not.toContain(':');
   });
 });
