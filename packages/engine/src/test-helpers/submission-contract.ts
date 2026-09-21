@@ -1308,6 +1308,99 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect((await store.getQueueItem(SESSION_ID, b.id))?.abortRequestedAt).toBeUndefined();
     });
 
+    it("requestAbortActiveSubmission stamps only the running item", async () => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100 });
+      const queued = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: active.id,
+        attemptId: "att-active-abort",
+        ownerId: "o",
+      });
+
+      const stamped = await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, active.id);
+
+      expect(stamped?.id).toBe(active.id);
+      expect(stamped?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, active.id))?.abortRequestedAt).toBeDefined();
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.abortRequestedAt).toBeUndefined();
+    });
+
+    it("keeps a repeated targeted abort from stamping a running successor", async () => {
+      const first = makeItem({ createdAt: 100, updatedAt: 100 });
+      const successor = makeItem({ createdAt: 200, updatedAt: 200 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, first);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, successor);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: first.id,
+        attemptId: "att-first-targeted-abort",
+        ownerId: "o",
+      });
+
+      expect(
+        (await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, first.id))?.id,
+      ).toBe(first.id);
+      await store.forceSettle(SESSION_ID, first.id, "aborted");
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: successor.id,
+        attemptId: "att-successor-targeted-abort",
+        ownerId: "o",
+      });
+
+      expect(
+        await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, first.id),
+      ).toBeNull();
+      expect(
+        (await store.getQueueItem(SESSION_ID, successor.id))?.abortRequestedAt,
+      ).toBeUndefined();
+      expect(
+        (await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, successor.id))?.id,
+      ).toBe(successor.id);
+      expect(
+        (await store.getQueueItem(SESSION_ID, successor.id))?.abortRequestedAt,
+      ).toBeDefined();
+    });
+
+    it("requestAbortActiveSubmission stamps a blocked durable head", async () => {
+      const blocked = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, blocked);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: blocked.id,
+        attemptId: "att-blocked-abort",
+        ownerId: "o",
+      });
+      await store.setSubmissionBlocked(
+        SESSION_ID,
+        THREAD_ID,
+        blocked.id,
+        true,
+        { itemId: blocked.id, attemptId: claimed!.attemptId! },
+      );
+
+      const stamped = await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, blocked.id);
+
+      expect(stamped?.id).toBe(blocked.id);
+      expect(stamped?.status).toBe("blocked_on_decision_gate");
+      expect(stamped?.abortRequestedAt).toBeDefined();
+    });
+
+    it("requestAbortActiveSubmission ignores a queued head", async () => {
+      const queued = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, queued);
+
+      expect(await store.requestAbortActiveSubmission(SESSION_ID, THREAD_ID, queued.id)).toBeNull();
+      expect((await store.getQueueItem(SESSION_ID, queued.id))?.abortRequestedAt).toBeUndefined();
+    });
+
     it("requestAbort stamps abortRequestedAt on unsettled items in scope only; first write wins", async () => {
       const otherThreadId = "th-2";
       await store.saveThread(SESSION_ID, newThread(otherThreadId, "web:other"));

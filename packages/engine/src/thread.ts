@@ -1274,6 +1274,26 @@ export class Thread {
     }
   }
 
+  /** Interrupt one active submission and preserve queued work on this thread. */
+  async interrupt(targetItemId: string): Promise<void> {
+    if (this.runningItem?.id === targetItemId) {
+      await this.abortSubmission(targetItemId);
+      return;
+    }
+    // The durable claim can precede this.runningItem during claim and restore.
+    // Match the gesture target atomically so a successor cannot inherit a retry.
+    const active = await this.session.providers.store.requestAbortActiveSubmission(
+      this.session.id,
+      this.id,
+      targetItemId,
+    );
+    if (active) {
+      await this.abortSubmission(active.id);
+      return;
+    }
+    void this.kick();
+  }
+
   /** Cancel one submission without aborting other work on this thread. */
   async abortSubmission(queueItemId: string): Promise<void> {
     const store = this.session.providers.store;
@@ -1342,10 +1362,13 @@ export class Thread {
   }
 
   async resume(): Promise<void> {
-    if (!this.paused) return;
-    this.paused = false;
-    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
-    await this.emitQueueState();
+    if (this.paused) {
+      this.paused = false;
+      await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
+      await this.emitQueueState();
+    }
+    // Resume is also the explicit recovery control for a durable queued item
+    // with no local claim (for example, after credential release).
     void this.kick();
   }
 

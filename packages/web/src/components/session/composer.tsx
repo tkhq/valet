@@ -8,9 +8,9 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { ArrowUp, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, Paperclip, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
-import { useAbortThread, useSendPrompt } from "~/api/queries";
+import { useAbortThread, useResumeThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
 import {
   queueBusy,
@@ -256,6 +256,7 @@ export function Composer({
   }, [prefillNonce]);
   const send = useSendPrompt(sessionId);
   const abort = useAbortThread(sessionId);
+  const resume = useResumeThread(sessionId);
   // The textarea disables while a send is in flight, which drops focus to
   // <body>. Refocus when the send settles so the user can type the next
   // message or command immediately (covers Enter sends and Send clicks).
@@ -637,11 +638,22 @@ export function Composer({
   }
 
   async function stop() {
-    if (!threadId || abort.isPending) return;
+    const targetItemId = queueState?.activeItemId;
+    if (!threadId || !targetItemId || abort.isPending) return;
     try {
-      await abort.mutateAsync({ threadId });
+      await abort.mutateAsync({ threadId, targetItemId });
     } catch (err) {
       console.error("abort failed:", err);
+    }
+  }
+
+  async function runQueue() {
+    if (!threadId || resume.isPending) return;
+    setSubmitError(null);
+    try {
+      await resume.mutateAsync({ threadId });
+    } catch (err) {
+      setSubmitError(apiErrorDetail(err, "The queue did not start. Try again."));
     }
   }
 
@@ -656,16 +668,17 @@ export function Composer({
   useEffect(() => {
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-      if (!working || !threadId || abortPending) return;
+      const targetItemId = queueState?.activeItemId;
+      if (!working || !threadId || !targetItemId || abortPending) return;
       e.preventDefault();
       abortMutate(
-        { threadId },
+        { threadId, targetItemId },
         { onError: (err) => console.error("abort failed:", err) },
       );
     }
     window.addEventListener("keydown", onEscape);
     return () => window.removeEventListener("keydown", onEscape);
-  }, [working, threadId, abortPending, abortMutate]);
+  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {
@@ -933,7 +946,7 @@ export function Composer({
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
               </span>
             </span>
-            {working && (
+            {working && queueState?.activeItemId && (
               <Button
                 type="button"
                 variant="secondary"
@@ -949,6 +962,21 @@ export function Composer({
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
                 <span className={cn(!expanded && "sr-only")}>Stop</span>
+              </Button>
+            )}
+            {working && !queueState?.activeItemId && (queueState?.pendingIds.length ?? 0) > 0 && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="lg"
+                className={cn("h-11 shrink-0 rounded-full", expanded ? "px-3" : "w-11 p-0")}
+                onClick={() => void runQueue()}
+                disabled={!threadId || resume.isPending}
+                aria-label="Run queued messages"
+                title="Run queued messages"
+              >
+                <Play className="h-3.5 w-3.5 fill-current" aria-hidden />
+                <span className={cn(!expanded && "sr-only")}>Run queue</span>
               </Button>
             )}
             <Button
@@ -994,13 +1022,36 @@ function QueueIndicator({
 }: {
   queueState: ReturnType<typeof useQueueStateForThread>;
 }) {
+  const collecting = (queueState?.collectingIds.length ?? 0) > 0;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!collecting) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [collecting]);
+
   if (!queueState) return null;
   const parts: string[] = [];
+  if (collecting) {
+    const count = queueState.collectingIds.length;
+    const messages = count === 1 ? "message" : "messages";
+    const deadline = queueState.collectDeadline;
+    const seconds = deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now) / 1_000));
+    const wait = seconds === undefined ? "when the collection window ends" : `in about ${seconds} seconds`;
+    const canStopActive = queueState.activeItemId !== undefined;
+    parts.push(
+      canStopActive
+        ? `Collecting ${count} ${messages}; they run together ${wait}. Stop affects only the active message.`
+        : `Collecting ${count} ${messages}; they run together ${wait}. The collection cannot be stopped.`,
+    );
+  }
   if (queueState.status === "paused") {
-    parts.push("paused");
+    parts.push("Paused");
   }
   if (parts.length === 0) return null;
   return (
-    <div className="mb-2 text-xs text-muted">{parts.join(" • ")}</div>
+    <div role="status" className="mb-2 text-xs text-muted">{parts.join(" • ")}</div>
   );
 }

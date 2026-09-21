@@ -197,6 +197,17 @@ const REPLACE_ATTEMPT_SQL = `
     AND attempt_id = $8
 `;
 
+// Stamp the gesture's durable target in one statement. Status and identity
+// matching prevent a delayed retry from stamping a queued successor.
+const ABORT_ACTIVE_SUBMISSION_SQL = `
+  UPDATE engine_queue_items
+  SET abort_requested_at = COALESCE(abort_requested_at, $1),
+      updated_at = CASE WHEN abort_requested_at IS NULL THEN $1 ELSE updated_at END
+  WHERE session_id = $2 AND thread_id = $3 AND id = $4
+    AND status IN ('running', 'blocked_on_decision_gate')
+  RETURNING *
+`;
+
 // Pending-cap denominator (mirrors countPendingForCap's semantics applied to
 // an already-unsettled item list): unsettled, non-superseded items of the
 // thread. Read inside admitSubmission's own transaction (after the per-thread
@@ -1173,6 +1184,21 @@ export class PgSessionStore implements SessionStore {
         [now, now, sessionId],
       );
     }
+  }
+
+  async requestAbortActiveSubmission(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<QueueItem | null> {
+    const result = await this.db.query(ABORT_ACTIVE_SUBMISSION_SQL, [
+      Date.now(),
+      sessionId,
+      threadId,
+      queueItemId,
+    ]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
 
   async reserveSettlement(

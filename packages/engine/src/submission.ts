@@ -262,6 +262,9 @@ export function deriveQueueState(
   const blocked = threadItems.some((i) => i.status === "blocked_on_decision_gate");
   const pending = threadItems.filter((i) => i.status === "queued" && !i.supersededByItemId);
   const collectBuffer = threadItems.filter((i) => i.status === "collecting");
+  const collectDeadlines = collectBuffer
+    .map((i) => i.metadata?.collectDeadline)
+    .filter((deadline): deadline is number => typeof deadline === "number" && Number.isFinite(deadline));
 
   let status: QueueStatus;
   if (paused) status = "paused";
@@ -277,6 +280,7 @@ export function deriveQueueState(
     activeItemId: running?.id,
     pending,
     collectBuffer: collectBuffer.length > 0 ? collectBuffer : undefined,
+    collectDeadline: collectDeadlines.length > 0 ? Math.min(...collectDeadlines) : undefined,
     blockedGateId,
   };
 }

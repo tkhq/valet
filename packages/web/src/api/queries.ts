@@ -503,11 +503,18 @@ export function useSandboxJwt(sessionId: string) {
 }
 
 export function useAbortThread(sessionId: string) {
-  return useMutation<{ ok: true }, Error, { threadId: string }>({
-    mutationFn: ({ threadId }) => api.abortThread(sessionId, threadId),
+  return useMutation<{ ok: true }, Error, { threadId: string; targetItemId: string }>({
+    mutationFn: ({ threadId, targetItemId }) =>
+      api.abortThread(sessionId, threadId, { targetItemId }),
     // No invalidation — the abort's terminal state (submission settled
     // `aborted`, thread status back to idle) arrives via the WS stream,
     // same as every other engine-driven state transition.
+  });
+}
+
+export function useResumeThread(sessionId: string) {
+  return useMutation<{ ok: true }, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => api.resumeThread(sessionId, threadId),
   });
 }
 

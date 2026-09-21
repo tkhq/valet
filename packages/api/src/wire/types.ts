@@ -1295,6 +1295,11 @@ export interface PromptFileAttachment {
   name: string;
 }
 
+export interface AbortThreadRequest {
+  /** Queue item that was active when the Stop gesture began. */
+  targetItemId: string;
+}
+
 export interface SendPromptRequest {
   /**
    * Prompt text. Required unless `promoteItemId` is set — a promote
@@ -1629,6 +1634,8 @@ export interface WireQueueState {
   activeItemId?: string;
   pendingIds: string[];
   collectingIds: string[];
+  /** Earliest server timestamp when the collected messages will be merged. */
+  collectDeadline?: number;
   blockedGateId?: string;
 }
 

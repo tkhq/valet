@@ -42,6 +42,7 @@ import type {
   PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
+  AbortThreadRequest,
   SendPromptRequest,
   SendPromptResponse,
   ThreadSummary,
@@ -954,12 +955,9 @@ messagesRouter.post("/:id/messages", async (c) => {
 // ── Thread abort ──────────────────────────────────────────────────────────
 //
 // Mirrors the engine-spec route table: `POST .../threads/:threadId/abort`
-// aborts the current turn on this thread and clears its queue. Delegates to
-// `Session.abort({ threadId })`, which stamps `abortRequestedAt` durably and
-// lets the claim/reconcile settlement path record the terminal outcome —
-// see `packages/engine/src/session.ts` `abort()`. A thread with nothing
-// running/queued is a no-op: `Thread.abort()` withdraws no gates, aborts a
-// non-streaming agent (a safe no-op), and settles zero unclaimed items.
+// interrupts only the turn named by the gesture target. `Thread.interrupt()`
+// stamps abort intent only if that item is still active, withdraws its gates,
+// and starts the next queued submission. A delayed retry cannot abort it.
 messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
@@ -969,7 +967,60 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const thread = engineSession.threadById(threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
-  await engineSession.abort({ threadId });
+  const rawBody = await c.req.text();
+  if (rawBody.trim().length === 0) {
+    // Clients loaded before target-bound Stop cannot identify the turn that
+    // the gesture saw. Never guess: a delayed bodyless retry could otherwise
+    // abort the queued successor. The durable error event gives those tabs a
+    // visible reload instruction instead of only a rejected fetch in console.
+    await engineSession.emit({
+      type: "error",
+      threadId,
+      code: "client_update_required",
+      error: "Valet was updated. Reload this page, then select Stop again.",
+      recoverable: true,
+    });
+    return c.json(
+      {
+        error: "This Stop request came from an older client.",
+        corrective: "Reload this page, then select Stop again.",
+      },
+      409,
+    );
+  }
+
+  let body: AbortThreadRequest;
+  try {
+    body = JSON.parse(rawBody) as AbortThreadRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (
+    body === null ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    typeof body.targetItemId !== "string" ||
+    body.targetItemId.length === 0
+  ) {
+    return c.json({ error: "targetItemId is required. Send the active queue item as targetItemId." }, 400);
+  }
+
+  await thread.interrupt(body.targetItemId);
+  return c.json({ ok: true });
+});
+
+// A queue can be busy without an active Stop target while paused or between
+// durable claims. This control resumes a paused queue and kicks an unpaused
+// queue without stamping abort intent on any submission.
+messagesRouter.post("/:id/threads/:threadId/resume", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { engineSession } = result;
+
+  const threadId = c.req.param("threadId");
+  if (!engineSession.threadById(threadId)) return c.json({ error: "thread not found" }, 404);
+
+  await engineSession.resume({ threadId });
   return c.json({ ok: true });
 });
 

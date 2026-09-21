@@ -323,6 +323,9 @@ interface ThreadHandle {
   skill(name: string, opts?: SkillInvokeOptions): Promise<PromptReceipt>;
   shell(command: string, opts?: ExecOpts): Promise<ExecResult>;
   readThread(key: string, opts?: MessageQuery): Promise<SessionEntry[]>;
+  /** Stop the active turn and preserve queued submissions. */
+  interrupt(targetItemId: string): Promise<void>;
+  /** Tear down the thread and settle all unsettled submissions aborted. */
   abort(): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -495,8 +498,9 @@ The reachability graph is closed and authorized at call time: a thread may read 
 
 **Thread controls:**
 - `thread.prompt(text, opts)` — submit a prompt
-- `thread.abort()` — abort current prompt, clear this thread's queue
-- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
+- `thread.interrupt(targetItemId)` — abort the active prompt and immediately start the next queued prompt unless the thread is paused
+- `thread.abort()` — abort the active prompt and clear this thread's queue during teardown
+- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue; `resume()` also retries an unpaused queue with no local claim
 - `thread.skill(name, opts)` — invoke a named skill
 - `thread.shell(command)` — execute a shell command (recorded in history)
 - `thread.readThread(key)` — read messages from a sibling thread
@@ -1171,8 +1175,9 @@ On restore, the engine reloads the blocked thread, reloads the decision gate, an
 **Persistence:** Every queue item is a durable submission (see Durable Execution below). Admission, claim, progress markers, and settlement are all persisted through SessionStore, so queue state survives process restarts, host replacement, and crashes mid-turn. On engine startup, reconciliation (not blind re-dispatch) decides what happens to each unsettled submission.
 
 **Controls:**
-- `thread.abort()` — abort current prompt on this thread, clear this thread's queue
-- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
+- `thread.interrupt(targetItemId)` — abort only the active prompt and preserve this thread's queue; start its next prompt unless paused
+- `thread.abort()` — abort all unsettled work on this thread during teardown
+- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue; `resume()` also retries an unpaused queue with no local claim
 - `session.abort()` — abort all threads
 - `session.pause()` / `session.resume()` — freeze/unfreeze all thread queues
 - Session-wide idle = all threads idle
@@ -1777,6 +1782,8 @@ interface SessionStore {
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /** Stamp abortRequestedAt on all unsettled submissions in scope. First write wins; not terminal. */
   requestAbort(sessionId: string, threadId?: string): Promise<void>;
+  /** Atomically stamp abort intent on the specified item only if it is currently running or blocked on a decision gate in this session and thread. Otherwise, return null. */
+  requestAbortActiveSubmission(sessionId: string, threadId: string, queueItemId: string): Promise<QueueItem | null>;
   /** Two-phase settlement: reserve records the exact terminal outcome (running|blocked→terminalizing). Fenced. */
   reserveSettlement(sessionId: string, threadId: string, itemId: string, outcome: SubmissionOutcome, fence: WriteFence): Promise<void>;
   /** Finalize terminalizing→settled. Idempotent; safe to re-run after a crash. Fenced. */
@@ -1887,8 +1894,11 @@ interface ThreadData {
 /**
  * QueueState is a DERIVED view, not a stored entity: computed from durable
  * queue items plus ThreadData.paused. `collectBuffer` is the items with
- * status 'collecting'; `blockedGateId` derives from the suspended turn.
- * This is the shape used in `queue_state` events and API payloads.
+ * status 'collecting'; `collectDeadline` is the earliest durable deadline in
+ * that buffer. The web composer uses it to show how long a collection-only
+ * buffer waits. It does not expose Stop for that buffer because it has no
+ * active submission to abort. `blockedGateId` derives from the suspended
+ * turn. This is the shape used in `queue_state` events and API payloads.
  */
 interface QueueState {
   threadId: string;
@@ -1897,6 +1907,7 @@ interface QueueState {
   activeItemId?: string;
   pending: QueueItem[];
   collectBuffer?: QueueItem[];
+  collectDeadline?: number;
   blockedGateId?: string;
 }
 
@@ -2312,9 +2323,9 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `POST` | `/api/sessions/:sessionId/threads` | Create a thread |
 | `GET` | `/api/sessions/:sessionId/threads/:threadId` | Read thread metadata and entries |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/prompt` | Prompt a specific thread |
-| `POST` | `/api/sessions/:sessionId/threads/:threadId/abort` | Abort current turn and clear this thread queue |
+| `POST` | `/api/sessions/:sessionId/threads/:threadId/abort` | Interrupt the active turn named by `targetItemId` and preserve queued submissions |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/pause` | Pause this thread |
-| `POST` | `/api/sessions/:sessionId/threads/:threadId/resume` | Resume this thread |
+| `POST` | `/api/sessions/:sessionId/threads/:threadId/resume` | Resume this thread and retry its durable queue |
 | `GET` | `/api/sessions/:sessionId/decision-gates` | List pending and recent terminal gates |
 | `POST` | `/api/sessions/:sessionId/decision-gates/:gateId/resolve` | Resolve a pending gate |
 | `POST` | `/api/sessions/:sessionId/decision-gates/:gateId/withdraw` | Withdraw a pending gate |
@@ -2326,6 +2337,10 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `GET`/`POST` | `/api/admin/submissions...` | Operator surface (required for V1): list submissions with lifecycle state, force-settle a wedged submission, inspect leases |
 
 Prompt routes accept the same `PromptOptions` shape as the engine API. WebSocket prompt/control messages are optional conveniences over the same route semantics; they must not define separate behavior.
+
+The thread abort request contains the `targetItemId` that was active when the user selected Stop. The engine stamps abort intent only when that item is still `running` or `blocked_on_decision_gate`. A delayed retry cannot target a successor. During a rolling deploy, a bodyless request from an older client returns `409` and emits `client_update_required`. The client must reload before it selects Stop again. The server must not infer a target for a bodyless request.
+
+The thread resume route clears a paused state and starts the durable queue. It also retries an unpaused queue that has no local claim. This recovery action does not stamp abort intent on queued or collecting items.
 
 ### Cloudflare Adapter (`packages/adapter-cloudflare/`)
 
