@@ -152,8 +152,9 @@ sets `final: true`; its text can differ from the terminal wrap-up. A legacy
 reply owns delivery only when its text matches the terminal wrap-up. An
 unmarked, text-less reply can be progress, so it does not suppress a missing,
 failed, or pending final reply. An action with `details.ok=false` falls back to
-the terminal result when its tool ends. The guard never posts a one-message answer
-twice, a successful explicit final, or a manual-delivery
+the terminal result when its tool ends. The guard records fallback delivery only
+after the transport accepts the post, so a redelivery retries a failed send. The
+guard never posts a one-message answer twice, a successful explicit final, or a manual-delivery
 turn. Decision-gate cards, command results, attention
 messages, link-flow messages, and other explicit host control messages keep
 their existing delivery behavior.

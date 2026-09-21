@@ -45,6 +45,8 @@ class FakeTransport implements ChannelTransport {
   readonly channelType: string = "fake";
   /** Artificial latency on send(), to make delivery-order races observable. */
   sendDelayMs = 0;
+  /** Number of the next sends that fail before any message is recorded. */
+  sendFailures = 0;
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   deliveries: Array<{ type: "message"; markdown: string } | { type: "gate"; gateId: string }> = [];
   media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
@@ -61,6 +63,10 @@ class FakeTransport implements ChannelTransport {
   }
   async send(conversationKey: string, message: OutboundChannelMessage) {
     if (this.sendDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
+    if (this.sendFailures > 0) {
+      this.sendFailures -= 1;
+      throw new Error("send failed");
+    }
     this.sent.push({ conversationKey, message });
     this.deliveries.push({ type: "message", markdown: message.markdown });
     return { conversationKey, messageId: String(this.nextMessageId++) };
@@ -492,6 +498,58 @@ describe("ChannelHost outbound delivery", () => {
     await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(2));
     expect(keyedTransport.sent.map((sent) => sent.message.markdown)).toEqual([
       "I am on it",
+      "The work is complete",
+    ]);
+  });
+
+  it("retries final fallback after a transport failure and then deduplicates", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-final-retry";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } },
+      }),
+      {
+        type: "message", id: "final-retry-ack", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId,
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-retry-ack", reason: "end_turn" } },
+      `final-retry-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: "final-retry-result", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+    }]);
+
+    fakeTransport.sendFailures = 1;
+    const finalEvent = {
+      sessionId: session.id,
+      threadId,
+      queueItemId,
+      timestamp: Date.now(),
+      event: { type: "message_end" as const, threadId, messageId: "final-retry-result", reason: "end_turn" as const },
+    };
+    await eventStream.append(finalEvent, `final-retry-failure-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
+
+    await eventStream.append(finalEvent, `final-retry-success-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am checking",
+      "The work is complete",
+    ]));
+
+    await eventStream.append(finalEvent, `final-retry-redelivery-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am checking",
       "The work is complete",
     ]);
   });

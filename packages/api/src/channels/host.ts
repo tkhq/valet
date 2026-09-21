@@ -810,7 +810,6 @@ export class ChannelHost {
     if (!target) return;
     const dedupeKey = `${sessionId}:final-reply:${queueItemId}`;
     if (this.delivered.has(dedupeKey)) return;
-    this.markDelivered(dedupeKey);
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.assistantSenderIdentity(sessionId);
@@ -818,6 +817,7 @@ export class ChannelHost {
       markdown: final.content,
       ...(sender !== undefined ? { sender } : {}),
     });
+    this.markDelivered(dedupeKey);
   }
 
   /**
