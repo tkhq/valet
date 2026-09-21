@@ -119,6 +119,7 @@ function teamKey(overrides: Partial<TeamApiKeySummary> = {}): TeamApiKeySummary 
     createdAt: Date.UTC(2026, 8, 1),
     lastRequest: null,
     createdBy: "user_dana",
+    proxyOnly: false,
     ...overrides,
   };
 }
@@ -158,8 +159,10 @@ describe("ApiKeysSection — team workspace", () => {
   it("creates and revokes team keys as a non-admin member", () => {
     teamCallerRole = "member";
     orgCallerRole = "member";
-    teamKeys = [teamKey()];
+    teamKeys = [teamKey({ proxyOnly: true })];
     render(<ApiKeysSection />);
+    expect(screen.getByText("Proxy only")).toBeTruthy();
+    expect(screen.getByText("Keys created by members work only with the inference proxy.")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Member CI" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createTeamKeyMutate).toHaveBeenCalledWith("Member CI", expect.objectContaining({ onSuccess: expect.any(Function) }));

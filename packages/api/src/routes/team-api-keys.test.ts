@@ -113,6 +113,7 @@ describe("team API keys", () => {
     expect(createRes.status).toBe(201);
     const created = (await createRes.json()) as CreateTeamApiKeyResponse;
     expect(created.key.startsWith("vlt_")).toBe(true);
+    expect(created.proxyOnly).toBe(false);
     expect(created.createdBy).toBeTruthy();
     // The indexed column is what the list filters on; it must agree with
     // the metadata the auth ladder reads.
@@ -184,7 +185,7 @@ describe("team API keys", () => {
     expect(dead.status).toBe(401);
   });
 
-  it("allows a non-admin member to create and revoke a team key", async () => {
+  it("restricts member-created keys to the proxy and refuses scope tampering", async () => {
     api = await bootTestApi({ auth: true });
     const { baseUrl, providers: { db } } = api;
     const adminCookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin");
@@ -193,19 +194,57 @@ describe("team API keys", () => {
     const memberId = await userIdByEmail(api, "member@nowhere.test");
     await db.insert(teamMembers).values({ teamId, userId: memberId, role: "member" });
 
-    const createdResponse = await createTeamKey(baseUrl, memberCookie, teamId);
+    const createdResponse = await fetch(`${baseUrl}/api/teams/${teamId}/api-keys`, {
+      method: "POST", headers: { "content-type": "application/json", cookie: memberCookie },
+      body: JSON.stringify({ name: "proxy-key", proxyOnly: false, metadata: { proxyOnly: false } }),
+    });
     expect(createdResponse.status).toBe(201);
     const created = (await createdResponse.json()) as CreateTeamApiKeyResponse;
     expect(created.createdBy).toBe(memberId);
+    expect(created.proxyOnly).toBe(true);
     expect((await db.select().from(apikey).where(eq(apikey.teamId, teamId))).map((key) => key.id)).toContain(created.id);
 
-    const teamSession = await fetch(`${baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": created.key },
-      body: JSON.stringify({ workspace: await mkdtemp(join(tmpdir(), "valet-member-team-key-")) }),
+    // Use an existing admin-created session as the attack target.
+    const targetResponse = await fetch(`${baseUrl}/api/sessions`, {
+      method: "POST", headers: { "content-type": "application/json", cookie: adminCookie },
+      body: JSON.stringify({ teamId, workspace: await mkdtemp(join(tmpdir(), "valet-member-team-key-")) }),
     });
-    expect(teamSession.status).toBe(201);
-    expect(((await teamSession.json()) as SessionDetail).owner).toEqual({ type: "team", id: teamId });
+    expect(targetResponse.status).toBe(201);
+    const target: unknown = await targetResponse.json();
+    if (!target || typeof target !== "object" || !("id" in target) || typeof target.id !== "string") {
+      throw new Error("Expected a session id");
+    }
+    expect((await fetch(`${baseUrl}/api/sessions/${target.id}`, {
+      method: "DELETE", headers: { cookie: memberCookie },
+    })).status).toBe(404);
+    const forbidden = [
+      ["DELETE", `/api/sessions/${target.id}`],
+      ["PATCH", `/api/sessions/${target.id}`],
+      ["POST", `/api/sessions/${target.id}/pause`],
+      ["POST", `/api/sessions/${target.id}/sandbox-jwt`],
+      ["POST", "/api/sessions"],
+      ["GET", "/api/workflows"],
+      ["GET", "/api/me"],
+    ];
+    for (const [method, path] of forbidden) {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method, headers: { "content-type": "application/json", "x-api-key": created.key },
+        ...(method === "POST" || method === "PATCH" ? { body: JSON.stringify({ model: "changed" }) } : {}),
+      });
+      expect(response.status, `${method} ${path}`).toBe(401);
+    }
+    expect((await fetch(`${baseUrl}/api/sessions/${target.id}`, { headers: { cookie: adminCookie } })).status).toBe(200);
+    const listed = await fetch(`${baseUrl}/api/teams/${teamId}/api-keys`, { headers: { cookie: memberCookie } });
+    expect(await listed.json()).toMatchObject({ keys: [expect.objectContaining({ id: created.id, proxyOnly: true })] });
+
+    // Personal key updates cannot clear the server-owned restriction.
+    for (const metadata of [{ proxyOnly: false }, {}, { teamId, proxyOnly: false }]) {
+      expect((await fetch(`${baseUrl}/api/auth/api-key/update`, {
+        method: "POST", headers: { "content-type": "application/json", cookie: memberCookie },
+        body: JSON.stringify({ keyId: created.id, metadata }),
+      })).status).toBe(403);
+    }
+    expect((await fetch(`${baseUrl}/api/me`, { headers: { "x-api-key": created.key } })).status).toBe(401);
 
     const personalResponse = await fetch(`${baseUrl}/api/auth/api-key/create`, {
       method: "POST",
@@ -375,6 +414,38 @@ describe("team API keys", () => {
 
     const dead = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
     expect(dead.status).toBe(401);
+  });
+
+  it("uses the locked role after a creator is demoted during mint", async () => {
+    let demote: () => Promise<void> = async () => {};
+    const buildAuth = authModule.buildAuth;
+    vi.spyOn(authModule, "buildAuth").mockImplementation((opts) => {
+      const auth = buildAuth(opts);
+      const mint = auth.api.createApiKey;
+      vi.spyOn(auth.api, "createApiKey").mockImplementation(async (input) => {
+        const key = await mint(input);
+        await demote();
+        return key;
+      });
+      return auth;
+    });
+    api = await bootTestApi({ auth: true });
+    const { baseUrl, providers: { db } } = api;
+    const cookie = await signUp(baseUrl, "demoted@example.test", "Admin");
+    const teamId = await createTeam(baseUrl, cookie, "Team");
+    const userId = await userIdByEmail(api, "demoted@example.test");
+    demote = async () => {
+      await db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.userId, userId));
+      await db.update(teamMembers).set({ role: "member" }).where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)));
+    };
+    const response = await createTeamKey(baseUrl, cookie, teamId);
+    expect(response.status).toBe(201);
+    const created: unknown = await response.json();
+    expect(created).toMatchObject({ proxyOnly: true });
+    if (!created || typeof created !== "object" || !("key" in created) || typeof created.key !== "string") {
+      throw new Error("Expected a created key");
+    }
+    expect((await fetch(`${baseUrl}/api/me`, { headers: { "x-api-key": created.key } })).status).toBe(401);
   });
 
   it.each(["team deleted", "membership removed", "key missing", "pin throws"] as const)(

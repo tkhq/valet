@@ -9,6 +9,7 @@ import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
 import {
+  isProxyOnlyApiKey,
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
   userPrincipal,
@@ -146,6 +147,9 @@ async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Prom
     return undefined;
   }
   if (!result.valid || !result.key) return undefined;
+  // This resolver also serves public artifacts. Refuse proxy credentials
+  // before constructing either a user or team identity on any API surface.
+  if (isProxyOnlyApiKey(result.key.metadata)) return undefined;
   const rows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;

@@ -363,4 +363,6 @@ The workspace controls key ownership. In a personal workspace, every signed-in u
 
 A team key records proxy traffic with its `team_id` and a null `user_id`. A personal key records traffic with its `user_id` and a null `team_id`. The proxy must not attribute either type of traffic to the member who created a different key.
 
+Keys created by ordinary team members work only with the inference proxy. They cannot authenticate to Valet session or workflow APIs. Keys created by team or organization admins retain general team API access.
+
 The UI keeps proxy governance read-only for team members. Key management is independent of governance, so a member can create a key without permission to change gateway settings.

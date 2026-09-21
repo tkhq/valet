@@ -29,7 +29,9 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
 4. **Create, list, and revoke follow the workspace switcher.** Settings → API keys is the page. `CreateScopeLine` states the active workspace. Personal keys stay on personal scope. Team keys appear when the switcher is a team. Do not add an `OwnerPicker`. Do not bury the form under Organization → Teams: that page is not the switcher, and a create that used the switcher there would lie about the place.
 
-5. **Authority is limited to team session and workflow routes.** A team key may read, run, and change its team-owned sessions and workflows, and delete sessions, subject to route and resource guards. Deleting a workflow definition requires a human team or organization admin; a team key receives 403 (TKAI-430). It is not a read-only key. It cannot change org settings, other teams, or personal resources. The middleware allowlist is GET `/api/me`, `/api/sessions` and paths below it, `/api/workflows` and paths below it, and POST `/api/teams/:id/orchestrator` for the key's own team. The match is on path segments, so `/api/sessionsX` is refused.
+5. **Member-created keys are proxy-only.** The create transaction stamps `metadata.proxyOnly` from the locked membership roles. Members receive `true`; team and organization admins receive `false`. The general API identity resolver rejects proxy-only keys before constructing a principal, including on optional-auth artifact routes. The inference proxy still attributes these keys to the team. Personal key updates cannot remove the restriction. List and create responses expose `proxyOnly` so settings can label each key. Legacy admin-created keys without this field retain their authority. A role change after mint does not change a key's scope; revoke and recreate it when needed.
+
+   **Admin-created key authority is limited to team session and workflow routes.** A team key may read, run, and change its team-owned sessions and workflows, and delete sessions, subject to route and resource guards. Deleting a workflow definition requires a human team or organization admin; a team key receives 403 (TKAI-430). It is not a read-only key. It cannot change org settings, other teams, or personal resources. The middleware allowlist is GET `/api/me`, `/api/sessions` and paths below it, `/api/workflows` and paths below it, and POST `/api/teams/:id/orchestrator` for the key's own team. The match is on path segments, so `/api/sessionsX` is refused.
 
    `valet send` without `--session` targets the caller's default assistant. For a team key that is the team's, reached through `POST /api/teams/:id/orchestrator` with no membership check on the creating member. The CLI reads `GET /api/me` once per command and posts the team route when the answer has `role: "team"`; a personal credential keeps posting `/api/orchestrator`.
 
@@ -82,7 +84,7 @@ If review prefers "key dies when the creating member leaves," invert decision 2 
 
 ## Done when
 
-A `vlt_` key created in a team workspace starts a team-owned session. A personal key cannot. Revoke from the team workspace kills the key. The creating member can leave the team and the key still works until a team member revokes it. A signed-in user cannot mint a team principal through `/api/auth/api-key/create`. The key reads nothing outside its team: not the creating member's sessions, workflows, triggers, memory or artifacts, and not another team's orchestrator. `valet send` with the key and no `--session` prompts the team's default assistant.
+An admin-created `vlt_` key in a team workspace starts a team-owned session. A personal key cannot create a team session. A member-created team key works only with the inference proxy and cannot authenticate to session or workflow APIs. Revoke from the team workspace kills the key. The creating member can leave the team and the key still works until a team member revokes it. A signed-in user cannot mint a team principal through `/api/auth/api-key/create`. The key reads nothing outside its team: not the creating member's sessions, workflows, triggers, memory or artifacts, and not another team's orchestrator. `valet send` with the key and no `--session` prompts the team's default assistant.
 
 ## Deviations from this design (recorded at implementation)
 
@@ -111,8 +113,8 @@ Team key controls discard drafts and revealed secrets after access errors or los
 
 ### Member API key management
 
-A team API key is a shared credential for scripts that call the Valet API. Every team member with a live organization membership can create, list, and revoke keys for that team. An organization admin retains the same access when they are not a team member. A user outside the team receives a 404.
+A team API key is a shared credential. Member-created keys work only with the inference proxy. Admin-created keys can also call the Valet API. Every team member with a live organization membership can create, list, and revoke keys for that team. An organization admin retains the same access when they are not a team member. A user outside the team receives a 404.
 
-The workspace switcher selects the owner. A key created in the personal workspace creates user-owned sessions. A key created in the team workspace creates team-owned sessions. The API must preserve this split even when the same non-admin member creates both keys.
+The workspace switcher selects the owner. A key created in the personal workspace creates user-owned sessions. An admin-created key in the team workspace creates team-owned sessions. A member-created team key records proxy usage against the team without gaining session administration rights.
 
 The create route rechecks organization and team membership after it mints a key and before it pins the key to the team. The route holds the caller's membership and organization rows while it makes this check. If removal or deletion wins, the route deletes the minted key and returns no secret.

@@ -10,14 +10,15 @@ import { deleteTeamApiKey } from "../services/team-resource-deletion.js";
  * a row delete so a later team member can kill a key after its creator leaves.
  */
 import { Hono } from "hono";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { requireActingUser } from "../middleware/auth.js";
-import { apikey, orgMembers, teamMembers } from "../schema/index.js";
-import { getTeamInOrg, isTeamMember, lockTeamForOwnership } from "../services/teams.js";
+import { apikey } from "../schema/index.js";
+import { getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
 import { isOrgAdmin, isOrgMember } from "../services/org.js";
-import { parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
+import { isProxyOnlyApiKey, parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import type { CreateTeamApiKeyResponse, ListTeamApiKeysResponse, TeamApiKeySummary } from "../wire/types.js";
 
 export const teamApiKeysRouter = new Hono<AppEnv>();
@@ -42,28 +43,6 @@ async function teamKeyAccess(
   if (!team || !(await isOrgMember(db, orgId, userId))) return "hidden";
   if (await isOrgAdmin(db, orgId, userId)) return "allowed";
   return (await isTeamMember(db, teamId, userId)) ? "allowed" : "hidden";
-}
-
-/**
- * Hold the membership rows the access check reads. A membership removal or
- * organization-role change then waits until the team key is pinned.
- */
-async function holdCallerAccess(
-  tx: AppQueryable,
-  orgId: string,
-  teamId: string,
-  userId: string,
-): Promise<void> {
-  await tx
-    .select({ role: teamMembers.role })
-    .from(teamMembers)
-    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
-    .for("share");
-  await tx
-    .select({ role: orgMembers.role })
-    .from(orgMembers)
-    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
-    .for("share");
 }
 
 async function canViewTeamKeys(
@@ -110,6 +89,7 @@ function toSummary(row: SummaryRow): TeamApiKeySummary {
     createdAt: row.createdAt.getTime(),
     lastRequest: row.lastRequest ? row.lastRequest.getTime() : null,
     createdBy: createdByFromMetadata(metadata),
+    proxyOnly: isProxyOnlyApiKey(metadata),
   };
 }
 
@@ -164,18 +144,17 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   if (!created?.key) {
     return c.json({ error: "Couldn't create the API key. Sign in again and retry." }, 500);
   }
-  let pinResult: "pinned" | "not-found" | "failed" = "failed";
+  let pinResult: "pinned" | "failed" = "failed";
+  let proxyOnly = true;
   try {
     pinResult = await db.transaction(async (tx) => {
       // Serialize the final pin with deleteTeam. All reads use tx: an outer
       // database call here would deadlock PGlite's single writer.
-      await lockTeamForOwnership(tx, teamId);
-      await holdCallerAccess(tx, user.orgId, teamId, user.id);
-      if ((await teamKeyAccess(tx, user.orgId, teamId, user.id)) === "hidden") {
-        return "not-found";
-      }
-
-      const pin = JSON.stringify({ teamId, createdBy: user.id });
+      // Use the locked membership snapshot for both authorization and scope.
+      // A demotion before mint completion must never produce a full API key.
+      const admin = await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, teamId);
+      proxyOnly = !admin;
+      const pin = JSON.stringify({ teamId, createdBy: user.id, proxyOnly });
       await tx.update(apikey).set({ metadata: pin, teamId }).where(eq(apikey.id, created.id));
       const stamped = await tx
         .select({ metadata: apikey.metadata, teamId: apikey.teamId })
@@ -183,7 +162,8 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
         .where(eq(apikey.id, created.id))
         .limit(1);
       return stamped[0]?.teamId === teamId &&
-        teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId
+        teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId &&
+        isProxyOnlyApiKey(stamped[0].metadata) === proxyOnly
         ? "pinned"
         : "failed";
     });
@@ -194,7 +174,6 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
       await db.delete(apikey).where(eq(apikey.id, created.id));
     }
   }
-  if (pinResult === "not-found") return c.json({ error: "team not found" }, 404);
   if (pinResult === "failed") {
     return c.json({ error: "Couldn't pin the API key to this team. Retry the create." }, 500);
   }
@@ -206,6 +185,7 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
     createdAt: created.createdAt.getTime(),
     key: created.key,
     createdBy: user.id,
+    proxyOnly,
   };
   return c.json(resp, 201);
 });

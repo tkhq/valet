@@ -1820,6 +1820,7 @@ export interface TeamApiKeySummary {
   createdAt: number;
   lastRequest: number | null;
   createdBy: string | null;
+  proxyOnly: boolean;
 }
 
 export interface ListTeamApiKeysResponse {
@@ -1838,6 +1839,7 @@ export interface CreateTeamApiKeyResponse {
   createdAt: number;
   key: string;
   createdBy: string;
+  proxyOnly: boolean;
 }
 
 // ── REST: notifications ──────────────────────────────────────────────────

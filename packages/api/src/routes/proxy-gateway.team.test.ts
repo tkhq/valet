@@ -58,6 +58,7 @@ describe("shared team proxy key", () => {
     });
     expect(keyResponse.status).toBe(201);
     const keyBody = await keyResponse.json();
+    expect(keyBody).toMatchObject({ proxyOnly: true });
     if (!keyBody || typeof keyBody !== "object"
       || !("id" in keyBody) || typeof keyBody.id !== "string"
       || !("key" in keyBody) || typeof keyBody.key !== "string"
@@ -118,7 +119,7 @@ describe("shared team proxy key", () => {
     // A shared key must not inherit its creating admin's governance authority.
     expect((await fetch(`${baseUrl}/api/proxy/settings`, {
       method: "PUT", headers: { "x-api-key": key.key, "content-type": "application/json" }, body: JSON.stringify({ enabled: false }),
-    })).status).toBe(403);
+    })).status).toBe(401);
     if (!key.createdBy) throw new Error("Expected key creator");
     await providers.db.delete(orgMembers).where(and(eq(orgMembers.orgId, team.orgId), eq(orgMembers.userId, key.createdBy)));
     expect((await proxy(key.key, "approved-provider-key")).status).toBe(200);
