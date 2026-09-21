@@ -2,7 +2,8 @@
 import { and, eq } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { apikey, assistants, credentials } from "../schema/index.js";
+import { apikey, assistants, credentials, teamDeletionRequests } from "../schema/index.js";
+import { markAttentionNotificationsRead } from "../orchestrator/attention.js";
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { deleteTeam } from "./teams.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
@@ -29,6 +30,18 @@ export async function deleteTeamApiKey(db: AppDb, actor: Actor, teamId: string, 
     const [row] = await tx.select({ id: apikey.id }).from(apikey).where(where).limit(1);
     if (!row) throw new NotFoundError("api key", keyId);
     await tx.delete(apikey).where(where);
+    // A member can revoke a shared key directly. Settle any review request for
+    // the key in this transaction so an admin never approves a deleted key.
+    const settled = await tx.update(teamDeletionRequests).set({
+      status: "approved", decidedBy: actor.userId, decidedAt: Date.now(),
+      decisionNote: "API key was revoked directly.", lastRefusal: null,
+    }).where(and(
+      eq(teamDeletionRequests.teamId, teamId),
+      eq(teamDeletionRequests.resourceType, "api_key"),
+      eq(teamDeletionRequests.resourceId, keyId),
+      eq(teamDeletionRequests.status, "pending"),
+    )).returning({ id: teamDeletionRequests.id });
+    for (const request of settled) await markAttentionNotificationsRead(tx, "review", request.id);
   });
 }
 /** Returns sessions for teardown only after the enclosing transaction commits. */

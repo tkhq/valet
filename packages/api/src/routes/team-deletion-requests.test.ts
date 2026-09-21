@@ -150,8 +150,16 @@ describe("team deletion requests", () => {
     expect((await call(path, "DELETE", undefined, "outsider")).status).toBe(404);
     const now = new Date();
     await api.providers.db.insert(apikey).values({ id: "delete_key", teamId, name: "Test key", key: "sentinel-key-hash", referenceId: admin, createdAt: now, updatedAt: now });
+    const apiKeyRequestId = await submit("api_key", "delete_key");
+    const [notice] = await api.providers.db.select().from(notifications).where(eq(notifications.title, "Review deletion of Test key"));
+    expect(notice.readAt).toBeNull();
     expect((await call(`/teams/${teamId}/api-keys/delete_key`, "DELETE")).status).toBe(200);
     expect(await api.providers.db.select().from(apikey).where(eq(apikey.id, "delete_key"))).toEqual([]);
+    const [request] = await api.providers.db.select().from(teamDeletionRequests).where(eq(teamDeletionRequests.id, apiKeyRequestId));
+    expect(request).toMatchObject({ status: "approved", decidedBy: member, decisionNote: "API key was revoked directly." });
+    const [settledNotice] = await api.providers.db.select().from(notifications).where(eq(notifications.id, notice.id));
+    expect(settledNotice.readAt).not.toBeNull();
+    expect((await call(`${requests()}/${apiKeyRequestId}/approve`, "POST", {}, admin)).status).toBe(409);
     const targets = await (await call(`${requests()}/targets`)).text();
     expect(targets).not.toContain("sentinel");
     const requestId = await submit("credential", "linear");
