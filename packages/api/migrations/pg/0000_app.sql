@@ -247,6 +247,26 @@ CREATE INDEX "agent_sessions_user" ON "agent_sessions" ("user_id");
 --> statement-breakpoint
 CREATE INDEX "agent_sessions_status" ON "agent_sessions" ("status");
 --> statement-breakpoint
+CREATE TABLE "delegation_envelopes" (
+	"child_session_id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"parent_session_id" text NOT NULL,
+	"envelope" jsonb NOT NULL,
+	"decision_id" text NOT NULL UNIQUE,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "delegation_envelopes_parent" ON "delegation_envelopes" ("org_id", "parent_session_id");
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION reject_delegation_envelope_update() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'delegation_envelopes rows are immutable';
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER delegation_envelopes_immutable BEFORE UPDATE ON delegation_envelopes
+FOR EACH ROW EXECUTE FUNCTION reject_delegation_envelope_update();
+--> statement-breakpoint
 CREATE TABLE "session_threads" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,

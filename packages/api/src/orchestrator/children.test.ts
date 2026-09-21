@@ -30,6 +30,7 @@ import {
   buildChildStatusReader,
   ChildWatcher,
   ChildLimitError,
+  NestedDelegationUnsupportedError,
   classifyWatcherError,
   resolveChildSettlement,
   type ChildrenDeps,
@@ -38,7 +39,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, bakes, childWatches, delegationEnvelopes, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -57,6 +58,7 @@ function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): Childr
     db: a.providers.db,
     engineHost: a.providers.engineHost,
     engineStore: a.providers.engineStore,
+    canonicalAuthorizationService: a.providers.canonicalAuthorizationService,
     prebuildService: a.providers.prebuildService,
     workspaceRoot: mkdtempSync(join(tmpdir(), "valet-children-test-")),
     ...overrides,
@@ -240,6 +242,19 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
+  });
+
+  it("rejects a child attempting nested delegation before side effects", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("root-nested", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const first = await spawner({ prompt: "first level" }, { parentSessionId: parent.id, parentThreadId: parent.thread().id, actorUserId: "local-user", owner: { type: "user", id: "local-user" } });
+    const create = vi.spyOn(api.providers.engineHost, "childSessionFor");
+    const before = await api.providers.db.select().from(delegationEnvelopes);
+    await expect(spawner({ prompt: "forbidden nested" }, { parentSessionId: first.childSessionId, parentThreadId: "web:default", actorUserId: "local-user", owner: { type: "user", id: "local-user" } })).rejects.toBeInstanceOf(NestedDelegationUnsupportedError);
+    expect(create).not.toHaveBeenCalled();
+    expect(await api.providers.db.select().from(delegationEnvelopes)).toHaveLength(before.length);
   });
 
   // A team orchestrator from before owner-mode resolution keeps resolving
@@ -656,6 +671,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
 
+    await api.providers.canonicalPolicyManager.provisionOrganization("org-release-test", "Release Test");
     await api.providers.engineHost.sessionFor("parent-release", {
       userId: "local-user",
       orgId: "org-release-test",
@@ -707,6 +723,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
 
+    await api.providers.canonicalPolicyManager.provisionOrganization("org-parked-test", "Parked Test");
     await api.providers.engineHost.sessionFor("parent-parked", {
       userId: "local-user",
       orgId: "org-parked-test",
@@ -748,6 +765,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
 
+    await api.providers.canonicalPolicyManager.provisionOrganization("org-single-count", "Single Count Test");
     await api.providers.engineHost.sessionFor("parent-single-count", {
       userId: "local-user",
       orgId: "org-single-count",

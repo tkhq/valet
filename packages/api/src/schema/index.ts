@@ -17,6 +17,7 @@ import {
 import { sql } from "drizzle-orm";
 import type { NormalizedPolicyDraftV1, PolicyAuthoringDocument, PolicyValidationSummary } from "../authorization/builder/types.js";
 import type { CanonicalSourceBundle } from "../authorization/bundles/types.js";
+import type { DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import type { ParamMatcher } from "../policies/matchers.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 import type {
@@ -428,6 +429,21 @@ export const agentSessions = pgTable(
 
 // Threads — the UI groups messages by thread. The engine has its own thread
 // concept too; here we mirror just the fields the chat list needs.
+// Immutable authority delegated to a child. Writers insert this row once at
+// the canonical execution reservation boundary and never update it. Keeping
+// the envelope separate from mutable session metadata prevents lifecycle
+// updates from accidentally replacing delegated authority.
+export const delegationEnvelopes = pgTable("delegation_envelopes", {
+  childSessionId: text("child_session_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  parentSessionId: text("parent_session_id").notNull(),
+  envelope: jsonb("envelope").$type<DelegationEnvelopeV1>().notNull(),
+  decisionId: text("decision_id").notNull().unique(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  index("delegation_envelopes_parent").on(t.orgId, t.parentSessionId),
+]);
+
 export const sessionThreads = pgTable(
   "session_threads",
   {
@@ -2336,6 +2352,7 @@ export type InviteRow = typeof invites.$inferSelect;
 export type SandboxTokenRow = typeof sandboxTokens.$inferSelect;
 export type OrgMemberRow = typeof orgMembers.$inferSelect;
 export type AgentSessionRow = typeof agentSessions.$inferSelect;
+export type DelegationEnvelopeRow = typeof delegationEnvelopes.$inferSelect;
 export type SessionThreadRow = typeof sessionThreads.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type TeamRow = typeof teams.$inferSelect;

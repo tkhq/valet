@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { ApprovalMode, RiskLevel } from "@valet/engine";
-import { adaptInteractiveAction, adaptWorkflowAction, assertEnvelope, buildActionObligationPlan, buildRouteResourceObligationPlan, canonicalAuthorizationJson, decisionDigestOf, obligationDigestOf, requestSubjectDigest, type AuthorizationRequest, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { adaptInteractiveAction, adaptWorkflowAction, assertEnvelope, buildActionObligationPlan, buildDelegatedExecutionObligationPlan, buildRouteResourceObligationPlan, canonicalAuthorizationJson, decisionDigestOf, DELEGATED_EXECUTION_KINDS, obligationDigestOf, requestSubjectDigest, type AuthorizationRequest, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { actionProjection } from "./action-projections.js";
 import type { AppDb, AppTx } from "../lib/drizzle.js";
 import { authorizationDecisions, type AuthorizationDecisionRow } from "../schema/index.js";
@@ -72,6 +72,7 @@ export class CanonicalAuthorizationService implements AuthorizationService {
   async preview(request: AuthorizationRequest): Promise<PolicyDecisionEnvelope> {
     const envelope = assertEnvelope(request, await this.evaluator.evaluate(request));
     if (request.kind === "api.route" || request.kind === "resource.access") buildRouteResourceObligationPlan(envelope.decision);
+    else if ((DELEGATED_EXECUTION_KINDS as readonly string[]).includes(request.kind)) buildDelegatedExecutionObligationPlan(envelope.decision);
     else buildActionObligationPlan(envelope.decision);
     return envelope;
   }

@@ -415,7 +415,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
-  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children") };
+  const childrenDeps = { db, engineHost, engineStore, canonicalAuthorizationService, prebuildService, workspaceRoot: join(blobsRoot, "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);

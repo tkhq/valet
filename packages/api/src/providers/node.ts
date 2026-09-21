@@ -518,6 +518,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     engineHost,
     engineStore,
+    canonicalAuthorizationService,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
