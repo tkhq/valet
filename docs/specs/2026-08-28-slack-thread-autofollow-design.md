@@ -321,3 +321,16 @@ Thread hydration and overheard digests share the engine's `formatTranscriptText`
 The helper scans whitespace runs in linear time, including long runs with no line break.
 Runs containing CR, LF, VT, FF, NEL, LS, or PS become one visible `⏎` separator.
 It preserves internal whitespace without line breaks and trims outer whitespace. Legitimate multiline lists retain visible boundaries between steps.
+
+### Sender authority on followed messages
+
+A followed thread does not delegate its binding actor's authority to participants.
+Each live message requires a linked Slack identity and current organization membership.
+Personal assistants accept their owner's messages. Team assistants also require the
+binding rule's current invocation audience. Organization assistants accept current
+members of their owning organization. Unknown owner types fail closed.
+
+The delivery uses the authorized sender as its actor and message author. Missing,
+unlinked, or unauthorized senders do not trigger a turn, normalization, or history fetch.
+The existing binding membership check remains in effect. Historical messages remain
+explicitly labeled context only; they do not establish authority for a live delivery.

@@ -7,6 +7,7 @@ import { eventSubscriptions, teams, teamMembers, orgMembers } from "../schema/in
 import { identityForExternal } from "../channels/identity-links.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { resolvePath, subscriptionMatchesEvent } from "./match.js";
+import { isOrgMember } from "../services/org.js";
 
 /**
  * Who may invoke a team assistant by mention. `team` is the owning team's
@@ -177,4 +178,19 @@ export async function followBindingAuthorized(
   return audience === "organization"
     ? isCurrentOrgActor(db, follow, follow.createdBy)
     : isCurrentTeamActor(db, follow, follow.createdBy);
+}
+
+/** A binding grants no authority to other participants in its Slack thread. */
+export async function followedMessageActor(
+  db: AppDb,
+  follow: { orgId: string; ownerType: string; ownerId: string; subscriptionId?: string | null },
+  externalId: string | undefined,
+): Promise<string | null> {
+  if (!externalId) return null;
+  const identity = await identityForExternal(db, "slack", externalId);
+  if (!identity || !(await isOrgMember(db, follow.orgId, identity.userId))) return null;
+  if (follow.ownerType === "user") return identity.userId === follow.ownerId ? identity.userId : null;
+  if (follow.ownerType === "org") return follow.ownerId === follow.orgId ? identity.userId : null;
+  if (follow.ownerType !== "team") return null;
+  return await followBindingAuthorized(db, { ...follow, createdBy: identity.userId }) ? identity.userId : null;
 }
