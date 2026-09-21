@@ -356,6 +356,8 @@ export class ChannelHost {
   private outboundChains = new Map<string, Promise<void>>();
   /** Invalidates queued retry work when outbound delivery stops or restarts. */
   private outboundGeneration = 0;
+  /** Final fallback sends in progress, including sends that began before a restart. */
+  private finalDeliverySends = new Map<string, Promise<void>>();
   /** Bounded retries for final fallback sends that fail at the transport. */
   private finalRetryAttempts = new Map<string, number>();
   private finalRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -877,20 +879,31 @@ export class ChannelHost {
     const target = this.channelThreadFor(origin.threadKey);
     if (!target) return;
     if (this.delivered.has(dedupeKey)) return;
+    const inFlight = this.finalDeliverySends.get(dedupeKey);
+    if (inFlight) {
+      await inFlight;
+      if (!this.outboundIsActive(generation)) return;
+      await this.deliverFinalAssistantReply(sessionId, threadId, trigger, generation);
+      return;
+    }
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.assistantSenderIdentity(sessionId);
     if (!this.outboundIsActive(generation)) return;
+    const send = Promise.resolve().then(() => transport.send(target.conversationKey, {
+      markdown: final.content,
+      ...(sender !== undefined ? { sender } : {}),
+    }));
+    const settled = send.then(() => undefined, () => undefined);
+    this.finalDeliverySends.set(dedupeKey, settled);
     try {
-      await transport.send(target.conversationKey, {
-        markdown: final.content,
-        ...(sender !== undefined ? { sender } : {}),
-      });
+      await send;
     } catch (err) {
       this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
       throw err;
+    } finally {
+      if (this.finalDeliverySends.get(dedupeKey) === settled) this.finalDeliverySends.delete(dedupeKey);
     }
-    if (!this.outboundIsActive(generation)) return;
     this.markDelivered(dedupeKey);
     this.clearFinalDeliveryRetry(dedupeKey);
   }

@@ -156,7 +156,9 @@ the terminal result when its tool ends. The guard records fallback delivery only
 after the transport accepts the post. A failed fallback retries twice with an
 increasing short delay. The host logs and clears retry state after the retry limit.
 Stopping outbound delivery invalidates queued retries and ordinary outbound
-work. An in-flight failed send cannot schedule a retry. The guard never posts a one-message answer
+work. An in-flight failed send cannot schedule a retry. An in-flight successful
+send records final delivery after restart, so current-generation work does not
+post a duplicate. The guard never posts a one-message answer
 twice, a successful explicit final, or a manual-delivery
 turn. Decision-gate cards, command results, attention
 messages, link-flow messages, and other explicit host control messages keep

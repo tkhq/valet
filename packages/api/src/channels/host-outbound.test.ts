@@ -643,11 +643,15 @@ describe("ChannelHost outbound delivery", () => {
     await eventStream.append(terminalEvent, `final-restart-queued-${randomUUID()}`);
     host.stopOutbound();
     host.startOutbound();
+    await eventStream.append(terminalEvent, `final-restart-current-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS));
+    expect(fakeTransport.sendAttempts).toBe(1);
     releaseSend?.();
     await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
       "I am checking",
       "The work is complete",
     ]));
+    await eventStream.append(terminalEvent, `final-restart-after-success-${randomUUID()}`);
     await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS * 3));
     expect(fakeTransport.sendAttempts).toBe(1);
   });
