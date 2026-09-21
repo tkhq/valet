@@ -180,6 +180,14 @@ function isGatePromptRef(value: unknown): value is GatePromptRef {
 
 type OriginReplyState = "none" | "pending" | "succeeded" | "failed";
 
+function replyText(
+  part: NonNullable<Extract<SessionEntry, { type: "message" }>["parts"]>[number],
+): string | undefined {
+  if (part.type !== "tool_call" || !isRecord(part.args) || !isRecord(part.args.params)) return undefined;
+  const text = part.args.params.text;
+  return typeof text === "string" ? text : undefined;
+}
+
 /** Classify explicit origin delivery across every assistant entry in a submission. */
 function originReplyState(entries: SessionEntry[], queueItemId: string): OriginReplyState {
   const calls = entries.flatMap((entry) => {
@@ -224,6 +232,32 @@ function terminalAssistantResult(entries: SessionEntry[], queueItemId: string): 
     }
   }
   return undefined;
+}
+
+/** Find the explicit reply that delivered this terminal result. A tool-use
+ * entry precedes the terminal entry in the engine transcript, so the action's
+ * text must match the final text before it can suppress the fallback. */
+function finalOriginReplyState(
+  entries: SessionEntry[],
+  queueItemId: string,
+  final: Extract<SessionEntry, { type: "message" }>,
+): OriginReplyState {
+  const finalIndex = entries.findIndex((entry) => entry.id === final.id);
+  if (finalIndex === -1) return "none";
+  for (let index = finalIndex; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type !== "message" || entry.role !== "assistant" || entry.queueItemId !== queueItemId) continue;
+    const calls = (entry.parts ?? []).filter(
+      (part) =>
+        part.type === "tool_call" &&
+        isRecord(part.args) &&
+        typeof part.args.tool_id === "string" &&
+        part.args.tool_id.endsWith(".reply_to_origin") &&
+        (index === finalIndex || replyText(part)?.trim() === final.content.trim()),
+    );
+    if (calls.length > 0) return originReplyState([{ ...entry, parts: calls }], queueItemId);
+  }
+  return "none";
 }
 
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
@@ -755,10 +789,7 @@ export class ChannelHost {
     // A one-message answer is the automatic first reply, not a second post.
     if (!first || first.type !== "message" || !final || first.id === final.id) return;
 
-    // The engine can persist reply_to_origin in a tool-use entry before it
-    // writes the terminal wrap-up. Delivery belongs to the submission, not
-    // only to the terminal entry, so a successful preceding action owns it.
-    const explicit = originReplyState(entries, queueItemId);
+    const explicit = finalOriginReplyState(entries, queueItemId, final);
     if (explicit === "pending" || explicit === "succeeded") return;
 
     const target = this.channelThreadFor(origin.threadKey);

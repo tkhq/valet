@@ -610,6 +610,65 @@ describe("ChannelHost outbound delivery", () => {
     ]);
   });
 
+  it.each([
+    { finalState: "missing", expected: ["I am checking", "The work is complete"] },
+    { finalState: "failed", expected: ["I am checking", "The work is complete"] },
+    { finalState: "pending", expected: ["I am checking"] },
+  ] as const)("does not let successful progress suppress a $finalState final reply", async ({ finalState, expected }) => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = `qi-progress-${finalState}`;
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } },
+      }),
+      {
+        type: "message", id: `progress-ack-${finalState}`, sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId,
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: `progress-ack-${finalState}`, reason: "end_turn" } },
+      `progress-ack-${finalState}-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: `progress-${finalState}`, sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "Progress update", queueItemId,
+      parts: [{
+        type: "tool_call", callId: `tc-progress-${finalState}`, toolName: "call_tool", status: "completed",
+        args: { tool_id: "fake.reply_to_origin", params: { text: "Progress update" } },
+        result: { details: { ok: true }, text: "sent" },
+      }],
+    }]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: `progress-${finalState}`, reason: "tool_use" } },
+      `progress-message-${finalState}-${randomUUID()}`,
+    );
+
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: `progress-final-${finalState}`, sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 2, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+      ...(finalState === "missing" ? {} : {
+        parts: [{
+          type: "tool_call", callId: `tc-final-${finalState}`, toolName: "call_tool",
+          status: finalState === "pending" ? "running" : "completed",
+          args: { tool_id: "fake.reply_to_origin", params: { text: "The work is complete" } },
+          ...(finalState === "failed" ? { result: { details: { ok: false }, text: "failed" } } : {}),
+        }],
+      }),
+    }]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: `progress-final-${finalState}`, reason: "end_turn" } },
+      `progress-final-${finalState}-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(expected));
+  });
+
   it("keeps an unaddressed response silent", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("events").id;
@@ -787,7 +846,7 @@ describe("ChannelHost outbound delivery", () => {
     const call: SessionEntry = {
       type: "message", id: "bare-success", sessionId: session.id, threadId, parentId: null,
       createdAt: Date.now(), role: "assistant", content: "", queueItemId: "qi-bare-success",
-      parts: [{ type: "tool_call", callId: "tc-bare-success", toolName: "call_tool", status: "running", args: { tool_id: "slack.reply_to_origin" } }],
+      parts: [{ type: "tool_call", callId: "tc-bare-success", toolName: "call_tool", status: "running", args: { tool_id: "slack.reply_to_origin", params: { text: "internal wrap-up" } } }],
     };
     await engineStore.appendEntries(session.id, threadId, [
       userEntry({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
