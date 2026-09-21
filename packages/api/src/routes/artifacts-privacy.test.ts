@@ -187,7 +187,7 @@ describe("team artifact privacy", () => {
     const { db, row, request } = await setup();
     await db.update(orgs).set({ allowPublicArtifacts: true }).where(eq(orgs.id, "local-org"));
     expect((await request(`/${row.id}`, "local-user", "PATCH", { visibility: "public", sharedVersion: 1 })).status).toBe(400);
-    await expect(setArtifactVisibility(db, row.id, "public", "local-user")).rejects.toThrow();
+    await expect(setArtifactVisibility(db, row, "public", "local-user", allowArtifactAuthorization("local-org", "local-user", { type: "team", id: "private-team" }))).rejects.toThrow();
     expect(await getArtifactById(db, row.id)).toMatchObject({ visibility: "org", sharedVersion: null });
     await db.update(artifacts).set({ visibility: "public" }).where(eq(artifacts.id, row.id));
     expect((await request(`/${row.token}`, "nonmember")).status).toBe(404);

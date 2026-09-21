@@ -39,6 +39,29 @@ describe("auth middleware ladder — stub-mode boots", () => {
     expect(res.status).toBe(200);
   });
 
+  it("an internal session header cannot impersonate its owner on other routes", async () => {
+    api = await bootTestApi({ auth: true });
+    const signUp = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Session Owner", email: "owner@nowhere.test", password: "correct-horse-battery" }),
+    });
+    expect(signUp.status).toBe(200);
+    const cookie = extractSessionCookie(signUp.headers.get("set-cookie"));
+    const created = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie },
+      body: JSON.stringify({ workspace: "/tmp" }),
+    });
+    expect(created.status).toBe(201);
+    const sessionId = ((await created.json()) as { id: string }).id;
+
+    const response = await fetch(`${api.baseUrl}/api/me`, {
+      headers: { "x-valet-internal": internalToken(), "x-valet-session-id": sessionId },
+    });
+    expect(response.status).toBe(401);
+  });
+
   it("a sandbox token reaches memory routes and the owner derives from the token, not headers", async () => {
     api = await bootTestApi();
     const { db } = api.providers;

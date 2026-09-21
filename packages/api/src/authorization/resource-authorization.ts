@@ -54,7 +54,9 @@ export class CanonicalResourceAuthorizationService implements ResourceAuthorizat
   async authorize(input: ResourceAuthorizationInput): Promise<RouteResourceObligationPlanV1> {
     const descriptor = RESOURCE_ACCESS_REGISTRY.find((entry) => entry.resourceKind === input.resourceKind && entry.operation === input.operation);
     if (!descriptor) throw new ResourceAuthorizationError("deny");
-    const delivery = `resource:${input.deliveryId}:${input.resourceKind}:${input.operation}`;
+    // Resource authorization is always a fresh decision. The caller's
+    // delivery ID can identify execution replay, but it cannot pin an allow.
+    const delivery = `resource:${randomUUID()}:${input.resourceKind}:${input.operation}`;
     const resource = input.resource ?? {};
     try {
       const adapted = adaptResourceAccess({

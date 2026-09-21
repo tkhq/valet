@@ -479,6 +479,11 @@ function artifactAuthorization(c: Context<AppEnv>, orgId: string, scope: Artifac
   };
 }
 
+function managedArtifactScope(row: ArtifactRow, actorUserId: string): ArtifactScope {
+  if (row.ownerType !== "user" && row.ownerType !== "team") throw new Error("Artifact owner type is unsupported.");
+  return { owner: { type: row.ownerType, id: row.ownerId }, actorUserId };
+}
+
 artifactsRouter.post("/copy-to-team", async (c) => {
   try {
     const scope = await resolveScope(c, "read");
@@ -743,11 +748,13 @@ artifactsRouter.patch("/:id", async (c) => {
 
   try {
     let row = loaded.row;
+    const scope = managedArtifactScope(row, user.id);
+    const authorization = artifactAuthorization(c, user.orgId, scope);
     if (hasVisibility) {
-      row = await setArtifactVisibility(db, row.id, body.visibility!, user.id);
+      row = await setArtifactVisibility(db, row, body.visibility!, user.id, authorization);
     }
     if (hasSharedVersion) {
-      row = await setArtifactSharedVersion(db, row.id, body.sharedVersion ?? null);
+      row = await setArtifactSharedVersion(db, row, body.sharedVersion ?? null, authorization);
     }
     return c.json(toListItem(c, row));
   } catch (err) {
@@ -765,6 +772,7 @@ artifactsRouter.delete("/:id", async (c) => {
   if ("error" in loaded) return loaded.error;
 
   const { db } = c.var.providers;
-  await revokeArtifactById(db, loaded.row.id);
+  const scope = managedArtifactScope(loaded.row, user.id);
+  await revokeArtifactById(db, loaded.row, artifactAuthorization(c, user.orgId, scope));
   return c.json({ ok: true });
 });

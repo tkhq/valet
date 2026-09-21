@@ -104,10 +104,12 @@ export function registerWsRoutes(
         }
       };
 
-      const wsDeliveryId = `ws:${randomUUID()}`;
       const authorizeWsOperation = async (operation: keyof typeof WS_OPERATION_DESCRIPTOR_SEEDS_V1) => {
+        // Each received operation is a new delivery. Only a transport-level
+        // replay can reuse a delivery identity, and this protocol has none.
+        const deliveryId = `ws:${randomUUID()}`;
         const [service, actionId, , riskLevel] = WS_OPERATION_DESCRIPTOR_SEEDS_V1[operation];
-        const adapted = adaptApiRoute({ schemaVersion: 1, organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: caller, requestId: wsDeliveryId, operationId: `${wsDeliveryId}:${operation.replaceAll(".", "_")}`, evaluationTimeMs: Date.now(), descriptor: { schemaVersion: 1, service, actionId, method: "GET", routeTemplate: `/api/sessions/:id/ws#${operation}`, riskLevel } });
+        const adapted = adaptApiRoute({ schemaVersion: 1, organizationId: c.var.user.orgId, actorUserId: c.var.user.id, principal: caller, requestId: deliveryId, operationId: `${deliveryId}:${operation.replaceAll(".", "_")}`, evaluationTimeMs: Date.now(), descriptor: { schemaVersion: 1, service, actionId, method: "GET", routeTemplate: `/api/sessions/:id/ws#${operation}`, riskLevel } });
         const envelope = await providers.canonicalAuthorizationService.authorize(adapted.request);
         return { envelope, decisionId: canonicalDecisionId(c.var.user.orgId, adapted.request.idempotencyKey) };
       };
@@ -350,13 +352,20 @@ export function registerWsRoutes(
           // Subscribe is implicit. Policy still audits each typed operation.
           if (frame.type === "subscribe" || frame.type === "pong") {
             try {
+              const [row] = await providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+              if (!row || !(await canViewSession(providers.db, row, caller))) {
+                ws.close(4040, "session not found");
+                return;
+              }
               const authorization = await authorizeWsOperation(frame.type === "subscribe" ? "session.stream.subscribe" : "session.stream.pong");
               if (authorization.envelope.decision.effect !== "allow") {
                 const approval = authorization.envelope.decision.effect === "require_approval";
-                send(ws, { type: "authorization_refusal", code: approval ? "authorization_approval_required" : "authorization_denied", message: approval ? "This WebSocket operation requires approval. Resolve the decision over REST." : "Policy denied this WebSocket operation.", decisionId: authorization.decisionId });
+                send(ws, { type: "authorization_refusal", code: approval ? "authorization_approval_required" : "authorization_denied", message: approval ? "This WebSocket operation requires approval. Resolve the decision over REST, then reconnect." : "Policy denied this WebSocket operation.", decisionId: authorization.decisionId });
+                ws.close(approval ? 4409 : 4403, "authorization refused");
               }
             } catch {
               send(ws, { type: "authorization_refusal", code: "authorization_indeterminate", message: "Authorization failed. Reconnect before you retry." });
+              ws.close(4411, "authorization indeterminate");
             }
           }
         },

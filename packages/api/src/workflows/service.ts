@@ -1113,7 +1113,9 @@ export async function deleteWorkflowDefinition(
   owner: WorkflowOwner,
   id: string,
 ): Promise<DeleteWorkflowResult> {
-  const metadata = await workflowResourceMetadata(deps, owner, id);
+  // Keep the tenant filter authoritative, but do not apply the team roster
+  // before the deletion authority can admit an organization administrator.
+  const [metadata] = await deps.db.select({ id: workflowDefinitions.id, ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, updatedAt: workflowDefinitions.updatedAt }).from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
   if (!metadata) return "not_found";
   await authorizeWorkflowResource(deps, owner, "delete", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   return deps.db.transaction((tx) => deleteWorkflowDefinitionInTransaction({ ...deps, db: tx }, owner, id, true));

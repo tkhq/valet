@@ -24,7 +24,7 @@ export interface DecisionAuditEvidenceV1 {
   readonly contractDigest: string;
   readonly decisionDigest: string;
   readonly obligationDigest: string;
-  readonly approvalReplay?: { readonly evaluationTimeMs: number };
+  readonly approvalReplay?: { readonly evaluationTimeMs: number; readonly actorUserId?: string };
 }
 export interface DecisionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationDecisionRow; readonly evidence: DecisionAuditEvidenceV1 }
 
@@ -52,7 +52,7 @@ export function buildDecisionAuditPlan(input: {
   if (envelope.decision.effect === "require_approval") {
     const evaluationTimeMs = request.context.evaluationTimeMs;
     timestamp(evaluationTimeMs);
-    approvalReplay = { evaluationTimeMs };
+    approvalReplay = { evaluationTimeMs, ...(request.subject.actorUserId ? { actorUserId: request.subject.actorUserId } : {}) };
   }
   const tvc = envelope.evaluator.kind === "tvc_attested";
   if (tvc !== Boolean(envelope.proof) || tvc !== Boolean(input.proofVerification)) fail("invalid_proof");

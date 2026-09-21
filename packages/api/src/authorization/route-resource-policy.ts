@@ -26,7 +26,7 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
       if (isInternalSecurityRoute(c.req.method, matched.descriptor.template, c.req.header("x-valet-internal")) || isInternalArtifactRoute(c.req.method, c.req.path, c.req.header("x-valet-internal"), c.req.header("x-valet-owner"), c.req.header("x-valet-actor"))) { await next(); return; }
       return c.json({ error: "Authorization identity is unavailable. Authenticate again.", code: "authorization_identity_missing" }, 401);
     }
-    const delivery = deliveryIdentity(c.req.header("Idempotency-Key"));
+    const delivery = deliveryIdentity(c.req.method, c.req.header("Idempotency-Key"));
     let obligationPlan: RouteResourceObligationPlanV1;
     let executionAttemptId: string | undefined;
     let executionDecisionId: string | undefined;
@@ -112,8 +112,9 @@ export async function loadApprovedRouteReplay(db: AppDb, initial: AuthorizationR
   return { verdict: resolution.verdict, operationId: `approved:${createHash("sha256").update(`${scopeId}\0${resolutionId}`).digest("hex")}`, facts, binding };
 }
 
-function deliveryIdentity(value: string | undefined): string {
-  const source = value === undefined ? randomUUID() : `retry:${value}`;
+function deliveryIdentity(method: string, value: string | undefined): string {
+  const read = ["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+  const source = read || value === undefined ? randomUUID() : `mutation:${value}`;
   return `http:${createHash("sha256").update(source).digest("hex")}`;
 }
 

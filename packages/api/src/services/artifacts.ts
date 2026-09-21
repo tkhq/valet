@@ -49,8 +49,13 @@ export interface ArtifactAuthorization {
   context: ResourceAuthorizationContext;
 }
 
-async function authorizeArtifactResource(auth: ArtifactAuthorization, scope: ArtifactScope, operation: "share" | "publish" | "delete" | "copy"): Promise<void> {
-  const plan = await auth.port.authorize({ ...auth.context, resourceKind: "artifact", operation, resource: { ownerType: scope.owner.type, ownerId: scope.owner.id } });
+function artifactScope(row: Pick<ArtifactRow, "ownerType" | "ownerId">, actorUserId: string): ArtifactScope {
+  if (row.ownerType !== "user" && row.ownerType !== "team") throw new NotFoundError("artifact", row.ownerId);
+  return { owner: { type: row.ownerType, id: row.ownerId }, actorUserId };
+}
+
+async function authorizeArtifactResource(auth: ArtifactAuthorization, scope: ArtifactScope, operation: "share" | "publish" | "delete" | "copy", resource?: Pick<ArtifactRow, "id" | "version">): Promise<void> {
+  const plan = await auth.port.authorize({ ...auth.context, resourceKind: "artifact", operation, resource: { ...(resource ? { id: resource.id, version: resource.version } : {}), ownerType: scope.owner.type, ownerId: scope.owner.id } });
   if (plan.resultLimit !== undefined || plan.fieldMask !== undefined || plan.redactions.length > 0 || plan.readOnly) throw new Error("Artifact service cannot enforce the required resource obligation.");
 }
 
@@ -447,14 +452,16 @@ export async function listArtifactVersions(db: AppDb, artifactId: string): Promi
  */
 export async function setArtifactSharedVersion(
   db: AppDb,
-  id: string,
+  artifact: ArtifactRow,
   sharedVersion: number | null,
+  auth: ArtifactAuthorization,
 ): Promise<ArtifactRow> {
+  await authorizeArtifactResource(auth, artifactScope(artifact, auth.context.actorUserId), "publish", artifact);
   if (sharedVersion !== null) {
     const rows = await db
       .select({ version: artifactVersions.version })
       .from(artifactVersions)
-      .where(and(eq(artifactVersions.artifactId, id), eq(artifactVersions.version, sharedVersion)))
+      .where(and(eq(artifactVersions.artifactId, artifact.id), eq(artifactVersions.version, sharedVersion)))
       .limit(1);
     if (!rows[0]) {
       throw new ValidationError(`Version ${sharedVersion} does not exist for this artifact.`);
@@ -463,9 +470,9 @@ export async function setArtifactSharedVersion(
   const [row] = await db
     .update(artifacts)
     .set({ sharedVersion, updatedAt: Date.now() })
-    .where(eq(artifacts.id, id))
+    .where(eq(artifacts.id, artifact.id))
     .returning();
-  if (!row) throw new NotFoundError("artifact", id);
+  if (!row) throw new NotFoundError("artifact", artifact.id);
   return row;
 }
 
@@ -562,10 +569,12 @@ export async function listArtifactsForOwner(
 
 export async function setArtifactVisibility(
   db: AppDb,
-  id: string,
+  artifact: ArtifactRow,
   visibility: ArtifactVisibility,
   actorUserId: string,
+  auth: ArtifactAuthorization,
 ): Promise<ArtifactRow> {
+  await authorizeArtifactResource(auth, artifactScope(artifact, auth.context.actorUserId), "publish", artifact);
   const [row] = await db
     .update(artifacts)
     .set({
@@ -576,14 +585,15 @@ export async function setArtifactVisibility(
       updatedAt: Date.now(),
     })
     // No existing grant mechanism authorizes an audience outside a team.
-    .where(and(eq(artifacts.id, id), visibility === "public" ? ne(artifacts.ownerType, "team") : undefined))
+    .where(and(eq(artifacts.id, artifact.id), visibility === "public" ? ne(artifacts.ownerType, "team") : undefined))
     .returning();
-  if (!row) throw new NotFoundError("artifact", id);
+  if (!row) throw new NotFoundError("artifact", artifact.id);
   return row;
 }
 
-export async function revokeArtifactById(db: AppDb, id: string): Promise<void> {
-  await db.update(artifacts).set({ revokedAt: Date.now() }).where(eq(artifacts.id, id));
+export async function revokeArtifactById(db: AppDb, artifact: ArtifactRow, auth: ArtifactAuthorization): Promise<void> {
+  await authorizeArtifactResource(auth, artifactScope(artifact, auth.context.actorUserId), "delete", artifact);
+  await db.update(artifacts).set({ revokedAt: Date.now() }).where(eq(artifacts.id, artifact.id));
 }
 
 export async function getAllowPublicArtifacts(db: AppDb, orgId: string): Promise<boolean> {

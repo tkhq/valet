@@ -47,8 +47,24 @@ routeApprovalRouter.post("/decisions/:decisionId/resolve", async (c) => {
   if (!(await mayResolve(db, user.id, user.orgId, original.approvalRequirement))) {
     return c.json({ error: "This approval requires a different approver. Ask an authorized administrator." }, 403);
   }
+  if (original.evidence.approvalReplay?.actorUserId === user.id) {
+    return c.json({ error: "The requester cannot resolve this high-risk approval. Ask another authorized administrator.", code: "authorization_self_approval_denied" }, 403);
+  }
 
   const resolutionId = routeApprovalResolutionId(original, user.id, body.verdict);
+  const existing = (await db.select().from(canonicalApprovalResolutions).where(and(
+    eq(canonicalApprovalResolutions.orgId, original.orgId),
+    eq(canonicalApprovalResolutions.gateId, original.decisionId),
+    eq(canonicalApprovalResolutions.resolutionVersion, 1),
+  )).limit(1))[0];
+  if (existing) {
+    if (existing.resolutionId === resolutionId && existing.approverId === user.id && existing.verdict === body.verdict) {
+      const response: ResolveRouteApprovalResponseV1 = { schemaVersion: 1, decisionId, resolutionId, verdict: body.verdict };
+      return c.json(response);
+    }
+    return c.json({ error: "This approval already has a terminal resolution.", code: "authorization_resolution_conflict", existing: { resolutionId: existing.resolutionId, verdict: existing.verdict } }, 409);
+  }
+
   const now = Date.now();
   await db.insert(canonicalApprovalResolutions).values({
     resolutionId, approvalId: original.decisionId, gateId: original.decisionId, orgId: original.orgId,
@@ -57,9 +73,14 @@ routeApprovalRouter.post("/decisions/:decisionId/resolve", async (c) => {
     resolvedAt: now, expiresAt: original.approvalRequirement.expiresAtMs ?? now + 72 * 60 * 60 * 1000,
     resolutionVersion: 1,
   }).onConflictDoNothing();
-  const stored = (await db.select().from(canonicalApprovalResolutions).where(eq(canonicalApprovalResolutions.resolutionId, resolutionId)).limit(1))[0];
-  if (!stored || stored.approvalId !== original.decisionId || stored.approverId !== user.id || stored.verdict !== body.verdict) {
-    return c.json({ error: "Approval resolution could not be persisted. Retry the same resolution." }, 503);
+  const stored = (await db.select().from(canonicalApprovalResolutions).where(and(
+    eq(canonicalApprovalResolutions.orgId, original.orgId),
+    eq(canonicalApprovalResolutions.gateId, original.decisionId),
+    eq(canonicalApprovalResolutions.resolutionVersion, 1),
+  )).limit(1))[0];
+  if (!stored) return c.json({ error: "Approval resolution could not be persisted. Retry the same resolution." }, 503);
+  if (stored.resolutionId !== resolutionId || stored.approverId !== user.id || stored.verdict !== body.verdict) {
+    return c.json({ error: "This approval already has a terminal resolution.", code: "authorization_resolution_conflict", existing: { resolutionId: stored.resolutionId, verdict: stored.verdict } }, 409);
   }
   const response: ResolveRouteApprovalResponseV1 = { schemaVersion: 1, decisionId, resolutionId, verdict: body.verdict };
   return c.json(response);
