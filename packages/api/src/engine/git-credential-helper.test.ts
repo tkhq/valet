@@ -7,6 +7,10 @@
  * `$VALET_SANDBOX_TOKEN` environment variable as a fallback. The only
  * interpolated value is `apiUrl`, which is not secret.
  */
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 
@@ -39,7 +43,7 @@ case "$path" in
   */*) repo=\${path#*/}; repo=\${repo%%/*}; repo=\${repo%.git} ;;
 esac
 [ -n "$owner" ] || exit 0
-tok=$(cat /etc/valet/creds/token 2>/dev/null)
+tok=$(cat /etc/valet/creds/token 2>/dev/null) || tok=
 [ -n "$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}
 # Degraded paths warn on stderr (git shows credential-helper stderr) but
 # still exit 0 so PUBLIC repos keep working anonymously. Without the
@@ -134,7 +138,7 @@ fi
 if [ -n "\${GH_TOKEN:-}" ] || [ -n "\${GITHUB_TOKEN:-}" ]; then exec "$real" "$@"; fi
 if [ -f "\${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml" ]; then exec "$real" "$@"; fi
 
-tok=$(cat /etc/valet/creds/token 2>/dev/null)
+tok=$(cat /etc/valet/creds/token 2>/dev/null) || tok=
 [ -n "$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}
 token=
 if [ -n "$tok" ]; then
@@ -195,5 +199,61 @@ exec "$real" "$@"
     expect(script).toContain("VALET_SANDBOX_TOKEN");
     expect(script).not.toMatch(/st_[0-9a-f]/);
     expect(script).not.toMatch(/gh[pousr]_/);
+  });
+});
+
+
+describe("git credential helper execution", () => {
+  function runHelper(mountToken: string, mountFails: boolean, envToken: string, expectedToken: string) {
+    const dir = mkdtempSync(join(tmpdir(), "valet-git-helper-"));
+    try {
+      // Simulate the mount without reading or changing the host's /etc directory.
+      writeFileSync(join(dir, "cat"), `#!/bin/sh
+[ "$TEST_MOUNT_FAILS" = "false" ] || exit 1
+printf '%s' "$TEST_MOUNT_TOKEN"
+`, { mode: 0o755 });
+      writeFileSync(join(dir, "curl"), `#!/bin/sh
+for arg do
+  if [ "$arg" = "x-valet-sandbox: $TEST_EXPECTED_TOKEN" ]; then
+    printf '%s' '{"username":"x-access-token","password":"fake-installation-token"}'
+    exit 0
+  fi
+done
+exit 1
+`, { mode: 0o755 });
+      const helper = join(dir, "helper.sh");
+      writeFileSync(helper, gitCredentialHelperScript(API_URL));
+      return spawnSync("/bin/sh", [helper, "get"], {
+        encoding: "utf8",
+        input: "protocol=https\nhost=github.com\npath=tkhq/docs.git\n\n",
+        env: {
+          PATH: `${dir}:/usr/bin:/bin`,
+          VALET_SANDBOX_TOKEN: envToken,
+          TEST_MOUNT_TOKEN: mountToken,
+          TEST_MOUNT_FAILS: String(mountFails),
+          TEST_EXPECTED_TOKEN: expectedToken,
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.each([
+    { label: "missing or unreadable mount", mountToken: "", mountFails: true, envToken: "fake-env-token", expected: "fake-env-token" },
+    { label: "empty mount", mountToken: "", mountFails: false, envToken: "fake-env-token", expected: "fake-env-token" },
+    { label: "mounted token takes precedence", mountToken: "fake-mounted-token", mountFails: false, envToken: "fake-env-token", expected: "fake-mounted-token" },
+  ])("authenticates with $label", ({ mountToken, mountFails, envToken, expected }) => {
+    const result = runHelper(mountToken, mountFails, envToken, expected);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("username=x-access-token\npassword=fake-installation-token\n");
+    expect(result.stderr).toBe("");
+  });
+
+  it("warns and continues anonymously when neither token source is available", () => {
+    const result = runHelper("", true, "", "must-not-call-credential-api");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("git-credential-valet: no sandbox token found");
   });
 });
