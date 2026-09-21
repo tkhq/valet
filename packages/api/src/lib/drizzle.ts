@@ -225,6 +225,23 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "delegation envelopes parent index", probe: { kind: "index", index: "delegation_envelopes_parent" }, sql: 'CREATE INDEX IF NOT EXISTS "delegation_envelopes_parent" ON "delegation_envelopes" ("org_id","parent_session_id")' },
   { describe: "delegation envelope immutability function", probe: { kind: "function", function: "reject_delegation_envelope_update" }, sql: "CREATE FUNCTION reject_delegation_envelope_update() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'delegation_envelopes rows are immutable'; END; $$ LANGUAGE plpgsql" },
   { describe: "delegation envelope immutability trigger", probe: { kind: "trigger", trigger: "delegation_envelopes_immutable" }, sql: "CREATE TRIGGER delegation_envelopes_immutable BEFORE UPDATE ON delegation_envelopes FOR EACH ROW EXECUTE FUNCTION reject_delegation_envelope_update()" },
+  {
+    describe: "credential delegations table",
+    probe: { kind: "table", table: "credential_delegations" },
+    sql: `CREATE TABLE IF NOT EXISTS "credential_delegations" (
+      "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL,
+      "parent_session_id" text NOT NULL, "parent_thread_id" text NOT NULL,
+      "parent_queue_item_id" text NOT NULL, "child_session_id" text NOT NULL,
+      "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+      "repo_host" text NOT NULL, "repo_owner" text NOT NULL, "repo_name" text NOT NULL,
+      "credential_kind" text NOT NULL, "credential_id" text NOT NULL,
+      "credential_version" bigint NOT NULL, "operations" jsonb NOT NULL,
+      "expires_at" bigint NOT NULL, "revoked_at" bigint,
+      "decision_id" text NOT NULL UNIQUE, "created_at" bigint NOT NULL
+    )`,
+  },
+  { describe: "credential delegations child repo index", probe: { kind: "index", index: "credential_delegations_child_repo" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "credential_delegations_child_repo" ON "credential_delegations" ("child_session_id","repo_host","repo_owner","repo_name")' },
+  { describe: "credential delegations parent index", probe: { kind: "index", index: "credential_delegations_parent" }, sql: 'CREATE INDEX IF NOT EXISTS "credential_delegations_parent" ON "credential_delegations" ("org_id","parent_session_id")' },
   { describe: "action policies authorization kind", probe: { kind: "column", table: "action_policies", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policies\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
   { describe: "action policy overrides authorization kind", probe: { kind: "column", table: "action_policy_overrides", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policy_overrides\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
   { describe: "runtime grants service", probe: { kind: "column", table: "runtime_grants", column: "service" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "service" text' },

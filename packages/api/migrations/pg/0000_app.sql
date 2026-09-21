@@ -267,6 +267,20 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER delegation_envelopes_immutable BEFORE UPDATE ON delegation_envelopes
 FOR EACH ROW EXECUTE FUNCTION reject_delegation_envelope_update();
 --> statement-breakpoint
+CREATE TABLE "credential_delegations" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL,
+  "parent_session_id" text NOT NULL, "parent_thread_id" text NOT NULL, "parent_queue_item_id" text NOT NULL,
+  "child_session_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "repo_host" text NOT NULL, "repo_owner" text NOT NULL, "repo_name" text NOT NULL,
+  "credential_kind" text NOT NULL, "credential_id" text NOT NULL, "credential_version" bigint NOT NULL,
+  "operations" jsonb NOT NULL, "expires_at" bigint NOT NULL, "revoked_at" bigint,
+  "decision_id" text NOT NULL UNIQUE, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "credential_delegations_child_repo" ON "credential_delegations" ("child_session_id","repo_host","repo_owner","repo_name");
+--> statement-breakpoint
+CREATE INDEX "credential_delegations_parent" ON "credential_delegations" ("org_id","parent_session_id");
+--> statement-breakpoint
 CREATE TABLE "session_threads" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,

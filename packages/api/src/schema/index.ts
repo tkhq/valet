@@ -444,6 +444,31 @@ export const delegationEnvelopes = pgTable("delegation_envelopes", {
   index("delegation_envelopes_parent").on(t.orgId, t.parentSessionId),
 ]);
 
+export const credentialDelegations = pgTable("credential_delegations", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  parentSessionId: text("parent_session_id").notNull(),
+  parentThreadId: text("parent_thread_id").notNull(),
+  parentQueueItemId: text("parent_queue_item_id").notNull(),
+  childSessionId: text("child_session_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  repoHost: text("repo_host").notNull(),
+  repoOwner: text("repo_owner").notNull(),
+  repoName: text("repo_name").notNull(),
+  credentialKind: text("credential_kind").notNull(),
+  credentialId: text("credential_id").notNull(),
+  credentialVersion: bigint("credential_version", { mode: "number" }).notNull(),
+  operations: jsonb("operations").$type<string[]>().notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  revokedAt: bigint("revoked_at", { mode: "number" }),
+  decisionId: text("decision_id").notNull().unique(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  uniqueIndex("credential_delegations_child_repo").on(t.childSessionId, t.repoHost, t.repoOwner, t.repoName),
+  index("credential_delegations_parent").on(t.orgId, t.parentSessionId),
+]);
+
 export const sessionThreads = pgTable(
   "session_threads",
   {
