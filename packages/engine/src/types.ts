@@ -1885,8 +1885,10 @@ export interface SessionStore {
    * `QueueItem` elsewhere (always accessed via an already-known sessionId),
    * these carry `sessionId` explicitly since callers have no other way to
    * tell which session each cross-session result belongs to.
+   * Pass authorized session IDs to restrict a user-facing list. An empty
+   * list returns no rows; omit it only for the operator-wide surface.
    */
-  listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]>;
+  listAllUnsettledSubmissions(sessionIds?: readonly string[]): Promise<(QueueItem & { sessionId: string })[]>;
   /**
    * Operator escape hatch: CAS any non-settled status → settled with the given
    * outcome; deletes attempt markers. Throws ConflictError if already settled,
@@ -1994,7 +1996,8 @@ export interface SessionStore {
     threadId: string,
     opts?: MessageQuery,
   ): Promise<SessionEntry[]>;
-  listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]>;
+  /** Filter status in the store so periodic sweeps do not load settled gates. */
+  listDecisionGates(sessionId: string, threadId?: string, status?: DecisionGate["status"]): Promise<DecisionGate[]>;
   getDecisionGate(sessionId: string, gateId: string): Promise<DecisionGate | null>;
   /** Latest gate (any status) for a (queueItemId, resumeKey) pair, or null. */
   getLatestGateForResume(

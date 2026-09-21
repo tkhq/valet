@@ -144,13 +144,21 @@ export function missingClientEnv(
  * services (`decl.service ?? plugin.name`), the same key the credential
  * store and `gateUnavailableActions`'s join use.
  */
-export async function unavailableServiceInventory(params: AvailabilityContext): Promise<{
+export async function unavailableServiceInventory(params: AvailabilityContext & { actionService?: string }): Promise<{
   unavailable: Set<string>;
   failures: Array<{ service: string; reason: string }>;
 }> {
+  // An action service may use a differently named credential declaration.
+  // Preserve every matching prerequisite while skipping unrelated services.
+  const credentialServices = params.actionService === undefined ? undefined : new Set([
+    params.actionService,
+    ...params.plugins.flatMap((plugin) => (plugin.actions ?? [])
+      .filter((action) => action.service === params.actionService)
+      .map((action) => action.credentialService ?? action.service)),
+  ]);
   const declarations = params.plugins.flatMap((plugin) =>
     (plugin.credentials ?? []).map((decl) => ({ decl, service: decl.service ?? plugin.name })),
-  );
+  ).filter(({ service }) => credentialServices === undefined || credentialServices.has(service));
   const results = await Promise.allSettled(
     declarations.map(async ({ decl, service }) => ({
       service,

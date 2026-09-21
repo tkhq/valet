@@ -10,7 +10,7 @@ import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { markAttentionNotificationsRead } from "../orchestrator/attention.js";
 import { teamDeletionRequests } from "../schema/index.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
@@ -45,6 +45,29 @@ import {
 } from "./content-sources.js";
 
 export type TeamRole = "admin" | "member";
+
+/** Aggregate only authorized teams; never materialize their full memberships. */
+export async function teamMembershipSummaries(
+  db: AppDb,
+  orgId: string,
+  teamIds: readonly string[],
+  callerUserId: string,
+): Promise<Map<string, { memberCount: number; callerRole: TeamRole | null }>> {
+  const summaries = new Map<string, { memberCount: number; callerRole: TeamRole | null }>();
+  const ids = [...new Set(teamIds)];
+  for (let offset = 0; offset < ids.length; offset += 1_000) {
+    const rows = await db.select({
+      teamId: teamMembers.teamId,
+      memberCount: count(),
+      callerRole: sql<TeamRole | null>`max(case when ${teamMembers.userId} = ${callerUserId} then ${teamMembers.role} end)`,
+    }).from(teamMembers)
+      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+      .where(and(eq(teams.orgId, orgId), inArray(teamMembers.teamId, ids.slice(offset, offset + 1_000))))
+      .groupBy(teamMembers.teamId);
+    for (const row of rows) summaries.set(row.teamId, { memberCount: row.memberCount, callerRole: row.callerRole });
+  }
+  return summaries;
+}
 
 /** Thrown when creating a team whose name is already taken within the org. */
 export class TeamNameConflictError extends Error {

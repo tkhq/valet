@@ -1395,13 +1395,14 @@ export class EngineHost {
       reason: "this assistant's behavior excludes the service",
       fix: `This assistant's configuration excludes ${service}; edit the assistant's Integrations settings on its editor page (/assistants/$assistantId).`,
     }));
-    const resolveServiceAvailability = async (): Promise<ServiceAvailability[]> => {
+    const resolveServiceAvailability = async (actionService?: string): Promise<ServiceAvailability[]> => {
       const inventory = await unavailableServiceInventory({
         plugins: entitled,
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
         owner,
+        actionService,
       });
       const unavailable = inventory.unavailable;
       const availabilityFailures = inventory.failures.map(({ service, reason }) => ({

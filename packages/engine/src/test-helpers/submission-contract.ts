@@ -1346,6 +1346,13 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       const other = all.find((i) => i.id === unsettledOther.id);
       expect(here?.sessionId).toBe(SESSION_ID);
       expect(other?.sessionId).toBe(OTHER);
+      expect((await store.listAllUnsettledSubmissions([SESSION_ID])).map((i) => i.id)).toEqual([unsettledHere.id]);
+      expect(await store.listAllUnsettledSubmissions([])).toEqual([]);
+      expect(await store.listAllUnsettledSubmissions(["missing"])).toEqual([]);
+      const scoped = await store.listAllUnsettledSubmissions([
+        ...Array.from({ length: 1_001 }, (_, i) => `missing-${i}`), OTHER, OTHER,
+      ]);
+      expect(scoped.map((i) => i.id)).toEqual([unsettledOther.id]);
     });
 
     it("forceSettle on a running item settles it, clears markers, and fences off the old attempt", async () => {

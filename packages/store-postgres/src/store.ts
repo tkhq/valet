@@ -695,13 +695,18 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
-  async listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]> {
-    const result = threadId
-      ? await this.db.query("SELECT * FROM engine_decision_gates WHERE session_id = $1 AND thread_id = $2", [
-          sessionId,
-          threadId,
-        ])
-      : await this.db.query("SELECT * FROM engine_decision_gates WHERE session_id = $1", [sessionId]);
+  async listDecisionGates(sessionId: string, threadId?: string, status?: DecisionGate["status"]): Promise<DecisionGate[]> {
+    const params = [sessionId];
+    const conditions = ["session_id = $1"];
+    if (threadId !== undefined) {
+      params.push(threadId);
+      conditions.push(`thread_id = $${params.length}`);
+    }
+    if (status !== undefined) {
+      params.push(status);
+      conditions.push(`status = $${params.length}`);
+    }
+    const result = await this.db.query(`SELECT * FROM engine_decision_gates WHERE ${conditions.join(" AND ")}`, params);
     return result.rows.map((r) => rowToGate(rawToGateRow(r)));
   }
 
@@ -1021,7 +1026,23 @@ export class PgSessionStore implements SessionStore {
     return toNumOrNull(result.rows[0]?.latest, "latest");
   }
 
-  async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
+  async listAllUnsettledSubmissions(sessionIds?: readonly string[]): Promise<(QueueItem & { sessionId: string })[]> {
+    if (sessionIds !== undefined) {
+      const items: (QueueItem & { sessionId: string })[] = [];
+      const ids = [...new Set(sessionIds)];
+      for (let offset = 0; offset < ids.length; offset += 1_000) {
+        const batch = ids.slice(offset, offset + 1_000);
+        const result = await this.db.query(
+          `SELECT * FROM engine_queue_items WHERE status != 'settled' AND session_id IN (${batch.map((_, i) => `$${i + 1}`).join(",")})`,
+          batch,
+        );
+        for (const r of result.rows) {
+          const row = rawToQueueItemRow(r);
+          items.push({ ...queueItemRowToItem(row), sessionId: row.sessionId });
+        }
+      }
+      return items;
+    }
     const result = await this.db.query("SELECT * FROM engine_queue_items WHERE status != 'settled'");
     return result.rows.map((r) => {
       const row = rawToQueueItemRow(r);

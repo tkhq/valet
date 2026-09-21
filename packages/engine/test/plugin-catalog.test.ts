@@ -1,5 +1,5 @@
 import { decode } from "@toon-format/toon";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ObjectOptions, Type } from "typebox";
 import type { TObject } from "typebox";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -36,6 +36,26 @@ import {
   type SessionEntry,
   type ToolContext,
 } from "../src/index.js";
+
+it("scopes live availability reads for actions and filtered discovery", async () => {
+  const plugin: ActionPlugin = {
+    service: "one",
+    actions: [{ id: "one.run", name: "Run", description: "Run", riskLevel: "low",
+      parameters: Type.Object({}), execute: async () => ({ success: true }) }],
+  };
+  const resolveServiceAvailability = vi.fn(() => []);
+  const [listTool] = pluginCatalogTools({ plugins: [plugin], resolveServiceAvailability });
+  await listTool.execute({ service: "one" }, makeCtx());
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith("one");
+  await listTool.execute({}, makeCtx());
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith(undefined);
+  await listTool.execute({ service: "" }, makeCtx());
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith(undefined);
+  const result = await invokeAction(buildPluginCatalog([plugin], undefined, { resolveServiceAvailability }),
+    "one.run", {}, makeCtx(), "run");
+  expect(result.kind).toBe("ok");
+  expect(resolveServiceAvailability).toHaveBeenLastCalledWith("one");
+});
 
 function makeMockPlugin(): {
   plugin: ActionPlugin;

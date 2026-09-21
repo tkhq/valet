@@ -299,3 +299,9 @@ the UI renders token entry instead of a 503ing Connect button. This design
 replaces that fallback with `"unconfigured"`: the manual path cannot
 produce a refreshable Google credential, so offering it was misleading.
 The prior spec carries a pointer to this document.
+
+## Scoped live checks
+
+An action invocation or service-filtered discovery checks only the requested action service and its declared credential aliases.
+An unfiltered catalog request checks all declarations. Each check reads current credentials; no permission or credential result is cached.
+Post-approval checks use the same scope and remain mandatory. A failure in an unrelated credential store does not block a scoped check.

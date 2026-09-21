@@ -183,8 +183,8 @@ export interface ServiceAvailability {
 export interface PluginCatalogAvailabilityOptions {
   /** Build-time snapshot used only for the compact tool description. */
   serviceAvailability?: readonly ServiceAvailability[];
-  /** Live inventory read before listing or invoking an action. */
-  resolveServiceAvailability?: () =>
+  /** Live inventory read. A service narrows the check without caching permissions. */
+  resolveServiceAvailability?: (service?: string) =>
     | readonly ServiceAvailability[]
     | Promise<readonly ServiceAvailability[]>;
 }
@@ -807,7 +807,7 @@ async function checkServiceAvailability(
 ): Promise<ServiceAvailabilityCheck> {
   try {
     const availability = catalog.resolveServiceAvailability
-      ? await catalog.resolveServiceAvailability()
+      ? await catalog.resolveServiceAvailability(service)
       : catalog.serviceAvailability;
     return {
       unavailable: availability.find((item) => item.service === service && item.state !== "available"),
@@ -972,7 +972,7 @@ function makeListTool(
       let availability = catalog.serviceAvailability;
       try {
         availability = catalog.resolveServiceAvailability
-          ? await catalog.resolveServiceAvailability()
+          ? await catalog.resolveServiceAvailability(a.service || undefined)
           : catalog.serviceAvailability;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

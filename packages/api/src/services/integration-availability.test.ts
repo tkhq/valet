@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import {
   InMemoryCredentialStore,
@@ -13,9 +13,38 @@ import {
   missingClientEnv,
   orgProvidedServiceSet,
   unavailableServiceSet,
+  unavailableServiceInventory,
 } from "./integration-availability.js";
 
 const ORG = "org-1";
+
+it("checks only the requested action's credential aliases and refreshes changed credentials", async () => {
+  const credentials = new InMemoryCredentialStore();
+  const plugins = [
+    makePlugin("slack-plugin", {
+      actions: [{ ...makeActionPlugin("slack_admin"), credentialService: "slack" }],
+      credentials: [{ service: "slack", type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }),
+    makePlugin("telegram", {
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    }),
+  ];
+  const get = credentials.get.bind(credentials);
+  const reads = vi.spyOn(credentials, "get").mockImplementation(async (owner, service) => {
+    if (service === "telegram") throw new Error("unrelated service unavailable");
+    return get(owner, service);
+  });
+  const context = { plugins, credentials, orgId: ORG, env: {} };
+  const missing = await unavailableServiceInventory({ ...context, actionService: "slack_admin" });
+  expect(missing.unavailable).toEqual(new Set(["slack"]));
+  expect(missing.failures).toEqual([]);
+  expect(reads).toHaveBeenCalledExactlyOnceWith({ type: "org", id: ORG }, "slack");
+  await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "new-token" });
+  expect((await unavailableServiceInventory({ ...context, actionService: "slack_admin" })).unavailable.size).toBe(0);
+  expect((await unavailableServiceInventory(context)).failures).toEqual([
+    { service: "telegram", reason: "unrelated service unavailable" },
+  ]);
+});
 
 function makeAction(id: string): PluginAction {
   return {

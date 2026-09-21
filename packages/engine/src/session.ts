@@ -72,6 +72,16 @@ function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
 }
 
+function submissionsByThread(items: readonly QueueItem[]): Map<string, QueueItem[]> {
+  const grouped = new Map<string, QueueItem[]>();
+  for (const item of items) {
+    const threadItems = grouped.get(item.threadId) ?? [];
+    threadItems.push(item);
+    grouped.set(item.threadId, threadItems);
+  }
+  return grouped;
+}
+
 /**
  * Extract the plain leading text of a prompt for slash-command detection.
  * String content is itself; object content uses its `text`; a `SignalContent`
@@ -280,6 +290,8 @@ export class Session {
   private destroyed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private sweepInFlight: Promise<void> | undefined;
+  private heartbeatInFlight: Promise<void> | undefined;
   /**
    * The `PolicySandbox` wrapper when the session's sandbox was constructed via
    * the engine's normal materialization path. `null` when the session was
@@ -424,7 +436,15 @@ export class Session {
   }
 
   /** Renew leases for every submission this instance is currently running. */
-  async heartbeatOnce(): Promise<void> {
+  heartbeatOnce(): Promise<void> {
+    if (this.heartbeatInFlight) return this.heartbeatInFlight;
+    this.heartbeatInFlight = this.renewRunningLeases().finally(() => {
+      this.heartbeatInFlight = undefined;
+    });
+    return this.heartbeatInFlight;
+  }
+
+  private async renewRunningLeases(): Promise<void> {
     const ids = this.runningItemIds();
     if (ids.length === 0) return;
     await this.providers.store.renewLeases(this.ownerId, ids);
@@ -435,7 +455,15 @@ export class Session {
    * passed (safety net for a missed/never-armed in-process timer), then
    * re-kick every thread so missed wakeups can't strand queued work.
    */
-  async sweepOnce(): Promise<void> {
+  sweepOnce(): Promise<void> {
+    if (this.sweepInFlight) return this.sweepInFlight;
+    this.sweepInFlight = this.sweepThreads().finally(() => {
+      this.sweepInFlight = undefined;
+    });
+    return this.sweepInFlight;
+  }
+
+  private async sweepThreads(): Promise<void> {
     // Reclaim expired leases: any running/blocked item of this session whose
     // lease has lapsed is reconciled through the tree (Task 5 lease-expiry
     // reclaim). QueueItem carries no sessionId, so we scan this session's own
@@ -443,22 +471,38 @@ export class Session {
     // listExpiredSubmissions scan — equivalent for one session, and avoids
     // touching other sessions' work.
     const now = Date.now();
-    const mine = await this.providers.store.listUnsettledSubmissions(this.id);
+    let mine = await this.providers.store.listUnsettledSubmissions(this.id);
+    let reconciled = false;
     for (const item of mine) {
       const claimed = item.status === "running" || item.status === "blocked_on_decision_gate";
       const leaseExpired = item.leaseExpiresAt !== undefined && item.leaseExpiresAt < now;
       if (claimed && leaseExpired) {
         await this.reconcileItem(item);
+        reconciled = true;
       }
     }
-    for (const t of this.threads.values()) {
+    if (reconciled) mine = await this.providers.store.listUnsettledSubmissions(this.id);
+    // Share one snapshot across threads. Idle history needs no per-thread reads.
+    const byThread = submissionsByThread(mine);
+    const gatesByThread = new Map<string, DecisionGate[]>();
+    for (const gate of await this.providers.store.listDecisionGates(this.id, undefined, "pending")) {
+      const gates = gatesByThread.get(gate.threadId) ?? [];
+      gates.push(gate);
+      gatesByThread.set(gate.threadId, gates);
+    }
+    for (const threadId of new Set([...byThread.keys(), ...gatesByThread.keys()])) {
+      const t = this.threads.get(threadId);
+      if (!t) continue;
       // Durable expiry backstop for pending decision gates whose in-process
       // timer was lost (e.g. across restart). Runs before the kick so an
       // expired gate terminalizes and unblocks the thread's queued work.
-      await t.sweepExpiredGates();
-      await t.checkCollectDeadline();
-      await t.repairOverheardDigests();
-      await t.kick();
+      await t.sweepExpiredGates(gatesByThread.get(threadId) ?? []);
+      const items = byThread.get(threadId) ?? [];
+      await t.checkCollectDeadline(items);
+      await t.repairOverheardDigests(items);
+      // A drive can wait for a model or approval. It must not hold the
+      // sweep open and prevent the next pass from repairing other threads.
+      void t.kick();
     }
   }
 
@@ -561,8 +605,9 @@ export class Session {
     // retry backoff.
     // Settle a crashed coalesce's leftover constituents BEFORE the kick below
     // can claim one (see Thread.repairOverheardDigests).
-    for (const t of this.threads.values()) {
-      await t.repairOverheardDigests();
+    const repairItems = await this.providers.store.listUnsettledSubmissions(this.id);
+    for (const [threadId, threadItems] of submissionsByThread(repairItems)) {
+      await this.threads.get(threadId)?.repairOverheardDigests(threadItems);
     }
     const remaining = await this.providers.store.listUnsettledSubmissions(this.id);
     const queuedThreadIds = new Set(
