@@ -755,7 +755,10 @@ export class ChannelHost {
     // A one-message answer is the automatic first reply, not a second post.
     if (!first || first.type !== "message" || !final || first.id === final.id) return;
 
-    const explicit = originReplyState([final], queueItemId);
+    // The engine can persist reply_to_origin in a tool-use entry before it
+    // writes the terminal wrap-up. Delivery belongs to the submission, not
+    // only to the terminal entry, so a successful preceding action owns it.
+    const explicit = originReplyState(entries, queueItemId);
     if (explicit === "pending" || explicit === "succeeded") return;
 
     const target = this.channelThreadFor(origin.threadKey);

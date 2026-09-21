@@ -791,9 +791,17 @@ describe("ChannelHost outbound delivery", () => {
     };
     await engineStore.appendEntries(session.id, threadId, [
       userEntry({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
-      call,
+      {
+        type: "message", id: "bare-success-ack", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId: "qi-bare-success",
+      },
     ]);
-    await eventStream.append({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "bare-success", reason: "end_turn" } }, `bare-success-message-${randomUUID()}`);
+    await eventStream.append({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "bare-success-ack", reason: "end_turn" } }, `bare-success-ack-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    // The engine stores tool-use messages without stopReason, then appends a
+    // separate terminal wrap-up after the reply action completes.
+    await engineStore.appendEntries(session.id, threadId, [call]);
+    await eventStream.append({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "bare-success", reason: "tool_use" } }, `bare-success-message-${randomUUID()}`);
     const part = call.type === "message" ? call.parts?.[0] : undefined;
     if (!part || part.type !== "tool_call") throw new Error("missing reply call");
     part.status = "completed";
@@ -807,7 +815,7 @@ describe("ChannelHost outbound delivery", () => {
     await eventStream.append({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "bare-success-wrap", reason: "end_turn" } }, `bare-success-wrap-${randomUUID()}`);
 
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent).toHaveLength(0);
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
   });
 
   it("defers later text while an earlier text-less origin reply is pending", async () => {
