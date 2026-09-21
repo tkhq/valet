@@ -98,7 +98,7 @@ const DEDUP_CAP = 2048;
 const UNLINKED_REPLY_COOLDOWN_MS = 60 * 60_000;
 const DELIVERED_CAP = 2048;
 const VERIFY_FAILED_LOG_COOLDOWN_MS = 60_000;
-export const FINAL_DELIVERY_RETRY_DELAY_MS = 50;
+export const FINAL_DELIVERY_RETRY_DELAY_MS = 1_000;
 export const MAX_FINAL_DELIVERY_RETRIES = 2;
 export const FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS = 150;
 
@@ -259,6 +259,7 @@ function finalOriginReplyState(
 ): OriginReplyState {
   const finalIndex = entries.findIndex((entry) => entry.id === final.id);
   if (finalIndex === -1) return "none";
+  const matchingEntries: SessionEntry[] = [];
   for (let index = finalIndex; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.type !== "message" || entry.role !== "assistant" || entry.queueItemId !== queueItemId) continue;
@@ -272,9 +273,9 @@ function finalOriginReplyState(
           isFinalReply(part) ||
           replyText(part)?.trim() === final.content.trim()),
     );
-    if (calls.length > 0) return originReplyState([{ ...entry, parts: calls }], queueItemId);
+    if (calls.length > 0) matchingEntries.push({ ...entry, parts: calls });
   }
-  return "none";
+  return originReplyState(matchingEntries, queueItemId);
 }
 
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
@@ -879,7 +880,10 @@ export class ChannelHost {
     );
     const final = terminalAssistantResult(entries, queueItemId);
     // A one-message answer is the automatic first reply, not a second post.
-    if (!first || first.type !== "message" || !final || first.id === final.id) return;
+    if (!first || first.type !== "message" || !final || first.id === final.id) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
 
     const explicit = finalOriginReplyState(entries, queueItemId, final);
     if (explicit === "pending" || explicit === "succeeded") {
@@ -888,8 +892,14 @@ export class ChannelHost {
     }
 
     const target = this.channelThreadFor(origin.threadKey);
-    if (!target) return;
-    if (this.delivered.has(dedupeKey)) return;
+    if (!target) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+    if (this.delivered.has(dedupeKey)) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
     const inFlight = this.finalDeliverySends.get(dedupeKey);
     if (inFlight) {
       const settled = await this.waitForFinalDeliverySend(inFlight);
@@ -901,7 +911,10 @@ export class ChannelHost {
       return;
     }
     const transport = this.transports.get(target.channelType);
-    if (!transport) return;
+    if (!transport) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
     const sender = await this.assistantSenderIdentity(sessionId);
     if (!this.outboundIsActive(generation)) return;
     const send = Promise.resolve().then(() => transport.send(target.conversationKey, {

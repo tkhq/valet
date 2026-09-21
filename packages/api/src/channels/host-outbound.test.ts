@@ -649,7 +649,7 @@ describe("ChannelHost outbound delivery", () => {
     host.stopOutbound();
     host.startOutbound();
     await eventStream.append(terminalEvent, `final-restart-current-${randomUUID()}`);
-    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fakeTransport.sendAttempts).toBe(1);
     releaseSend?.();
     await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
@@ -1118,6 +1118,37 @@ describe("ChannelHost outbound delivery", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(expected);
+  });
+
+  it("keeps a successful marked final when the terminal reply action fails", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-marked-success";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
+      { type: "message", id: "marked-success-ack", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "marked-success-ack", reason: "end_turn" } },
+      `marked-success-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message", id: "marked-success", sessionId: session.id, threadId, parentId: null, createdAt: Date.now() + 1, role: "assistant", content: "",
+        queueItemId, parts: [{ type: "tool_call", callId: "tc-marked-success", toolName: "call_tool", status: "completed", args: { tool_id: "fake.reply_to_origin", params: { text: "Detailed final", final: true } }, result: { details: { ok: true }, text: "sent" } }],
+      },
+      {
+        type: "message", id: "marked-success-terminal", sessionId: session.id, threadId, parentId: null, createdAt: Date.now() + 2, role: "assistant", content: "Done.", queueItemId, stopReason: "end_turn",
+        parts: [{ type: "tool_call", callId: "tc-terminal-failed", toolName: "call_tool", status: "completed", args: { tool_id: "fake.reply_to_origin", params: { text: "Done.", final: true } }, result: { details: { ok: false }, text: "failed" } }],
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "marked-success-terminal", reason: "end_turn" } },
+      `marked-success-terminal-${randomUUID()}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
   });
 
   it("defers later text while an earlier text-less origin reply is pending", async () => {

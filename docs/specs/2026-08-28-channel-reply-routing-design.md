@@ -153,8 +153,9 @@ reply owns delivery only when its text matches the terminal wrap-up. An
 unmarked, text-less reply can be progress, so it does not suppress a missing,
 failed, or pending final reply. An action with `details.ok=false` falls back to
 the terminal result when its tool ends. The guard records fallback delivery only
-after the transport accepts the post. A failed fallback retries twice with an
-increasing short delay. The host logs and clears retry state after the retry limit.
+after the transport accepts the post. A failed fallback retries twice after one
+and two seconds. This is bounded best-effort delivery, not durable provider
+confirmation. The host logs and clears retry state after the retry limit.
 Stopping outbound delivery invalidates queued retries and ordinary outbound
 work. An in-flight failed send cannot schedule a retry. An in-flight successful
 send records final delivery after restart, so current-generation work does not
