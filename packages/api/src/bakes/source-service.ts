@@ -66,6 +66,8 @@ import { pushRefFor } from "../prebuilds/k8s-builder.js";
 import { headRegistryManifest, parseRegistryImageRef } from "../prebuilds/registry.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { measureBakeSize } from "../prebuilds/bake-size.js";
+import { authorizeCredentialUseOperation } from "../authorization/credential-use-provider.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import {
   logPrebuildEvent,
   recordPrebuildCleanup,
@@ -705,6 +707,7 @@ export interface SourceServiceDeps {
   db: AppDb;
   builder: ImageBuilder | null;
   githubTokenDeps: GitHubTokenDeps;
+  credentialAuthorization?: Pick<CanonicalAuthorizationService, "authorize">;
   now?: () => number;
   newId?: () => string;
   pollIntervalMs?: number;
@@ -724,6 +727,7 @@ export class SourceService {
   private readonly db: AppDb;
   private readonly builder: ImageBuilder | null;
   private readonly githubTokenDeps: GitHubTokenDeps;
+  private readonly credentialAuthorization: Pick<CanonicalAuthorizationService, "authorize"> | undefined;
   private readonly now: () => number;
   private readonly newId: () => string;
   private readonly pollIntervalMs: number;
@@ -762,6 +766,7 @@ export class SourceService {
     this.registryFetch = deps.registryFetch ?? fetch;
     this.builder = deps.builder;
     this.githubTokenDeps = deps.githubTokenDeps;
+    this.credentialAuthorization = deps.credentialAuthorization;
     this.now = deps.now ?? Date.now;
     this.newId = deps.newId ?? randomUUID;
     this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
@@ -1288,11 +1293,54 @@ export class SourceService {
     }
   }
 
+  private authorizeRepositoryCredential<T>(
+    orgId: string,
+    resource: { type: string; id: string },
+    actionId: string,
+    execute: () => Promise<T>,
+    found: (value: T) => boolean,
+  ): Promise<T> {
+    if (!this.credentialAuthorization) return execute();
+    return authorizeCredentialUseOperation({
+      db: this.db,
+      authorization: this.credentialAuthorization,
+      binding: {
+        organizationId: orgId,
+        actorUserId: "service:prebuild",
+        principal: { type: "org", id: orgId },
+        owner: { type: "org", id: orgId },
+        service: "github",
+        credentialClass: "installation_or_pat",
+        actionId,
+        operation: "repository",
+        resource,
+        invocationId: randomUUID(),
+      },
+    }, execute, found);
+  }
+
+  private async repoApiToken(source: ImageSourceRow): Promise<string | null> {
+    const repoFullName = source.repoFullName ?? "";
+    return this.authorizeRepositoryCredential(
+      source.orgId,
+      { type: "image_source", id: source.id },
+      "prebuild.resolve_api_token",
+      () => resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, ownerOf(repoFullName), repoOf(repoFullName)),
+      (token) => token !== null,
+    );
+  }
+
   private async repoBakeToken(source: ImageSourceRow): Promise<ResolvedGitHubToken> {
-    const token = await resolveGitHubToken(this.githubTokenDeps, {
-      orgId: source.orgId, purpose: "git",
-      repo: { owner: ownerOf(source.repoFullName ?? ""), name: repoOf(source.repoFullName ?? "") },
-    });
+    const token = await this.authorizeRepositoryCredential(
+      source.orgId,
+      { type: "image_source", id: source.id },
+      "prebuild.resolve_git_token",
+      () => resolveGitHubToken(this.githubTokenDeps, {
+        orgId: source.orgId, purpose: "git",
+        repo: { owner: ownerOf(source.repoFullName ?? ""), name: repoOf(source.repoFullName ?? "") },
+      }),
+      (resolved) => resolved.token !== null,
+    );
     await this.assertRepoBakeAllowed(source.orgId, token.token);
     return token;
   }
@@ -1306,7 +1354,7 @@ export class SourceService {
 
     const gitToken = await this.repoBakeToken(source);
 
-    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
+    const apiToken = await this.repoApiToken(source);
     const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
     const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
     source = await this.ensureRepoBaseLayer(source, resolved.baseSetup);
@@ -1716,7 +1764,7 @@ export class SourceService {
         await this.repoBakeToken(child);
         const owner = ownerOf(child.repoFullName ?? "");
         const repo = repoOf(child.repoFullName ?? "");
-        const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, child.orgId, owner, repo);
+        const apiToken = await this.repoApiToken(child);
         const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
         const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
         const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
@@ -1839,7 +1887,7 @@ export class SourceService {
     await this.repoBakeToken(source);
     const owner = ownerOf(repoFullName);
     const repo = repoOf(repoFullName);
-    const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
+    const apiToken = await this.repoApiToken(source);
     const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
     const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
     const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
@@ -1891,10 +1939,16 @@ export class SourceService {
     repo: { host: string; fullName: string; cloneUrl: string },
   ): Promise<void> {
     try {
-      const result = await checkRepoExistence(this.githubTokenDeps, {
-        orgId, host: repo.host, fullName: repo.fullName,
-        allowAnonymous: await this.anonymousImageBakesAllowed(orgId),
-      });
+      const allowAnonymous = await this.anonymousImageBakesAllowed(orgId);
+      const result = await this.authorizeRepositoryCredential(
+        orgId,
+        { type: "repository", id: repo.fullName },
+        "prebuild.verify_repository",
+        () => checkRepoExistence(this.githubTokenDeps, {
+          orgId, host: repo.host, fullName: repo.fullName, allowAnonymous,
+        }),
+        (value) => value.kind === "found",
+      );
       if (result.kind !== "found") {
         if (result.kind === "not-found") console.warn(`ensureRepoSource: ${result.error}`);
         return;

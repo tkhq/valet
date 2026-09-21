@@ -511,6 +511,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     builder: imageBuilder,
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+    credentialAuthorization: canonicalAuthorizationService,
   });
 
   const childrenDeps = {

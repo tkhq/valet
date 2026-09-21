@@ -411,6 +411,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     builder: opts.imageBuilder ?? null,
     githubTokenDeps,
+    credentialAuthorization: canonicalAuthorizationService,
   });
 
   // Child workspaces under the test tmp dir (cleaned up with it) instead of

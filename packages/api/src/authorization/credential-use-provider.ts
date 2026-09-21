@@ -35,6 +35,7 @@ export interface CredentialUseBinding {
   sessionId?: string;
   childSessionId?: string;
   workflowExecutionId?: string;
+  resource?: { type: string; id?: string };
   invocationId: string;
 }
 
@@ -77,6 +78,7 @@ function operationId(binding: CredentialUseBinding, service: string): string {
     sessionId: binding.sessionId,
     childSessionId: binding.childSessionId,
     workflowExecutionId: binding.workflowExecutionId,
+    resource: binding.resource,
   })).digest("hex")}`;
 }
 
@@ -108,6 +110,7 @@ export async function authorizeCredentialUseOperation<T>(
       ...(deps.binding.childSessionId ? { childSessionId: deps.binding.childSessionId } : {}),
       ...(deps.binding.workflowExecutionId ? { workflowExecutionId: deps.binding.workflowExecutionId } : {}),
     },
+    ...(deps.binding.resource ? { resource: deps.binding.resource } : {}),
   });
   const envelope = await deps.authorization.authorize(adapted.request);
   const plan = buildDelegatedExecutionObligationPlan(envelope.decision);

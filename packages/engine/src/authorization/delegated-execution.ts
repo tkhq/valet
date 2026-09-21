@@ -161,8 +161,10 @@ export function adaptSandboxCapability(input: SandboxCapabilityAdapterInputV1): 
 export function adaptCredentialUse(input: CredentialUseAdapterInputV1): DelegatedExecutionAdapterOutputV1 {
   common(input); for (const value of [input.service, input.credentialClass, input.owner.id, input.operation, input.actionId]) validId(value);
   if (!ACTION.test(input.actionId) || input.owner.type === "user" && input.owner.id !== input.actorUserId || input.owner.type === "org" && input.owner.id !== input.organizationId) fail("invalid_credential_scope");
-  const target = cleanTarget(input.target); if (Object.keys(target).length === 0) fail("invalid_credential_scope");
-  const parameters: JsonObject = { service: input.service, credentialClass: input.credentialClass, owner: { type: input.owner.type, id: input.owner.id }, operation: input.operation, target, ...(input.resource === undefined ? {} : { resource: cleanResource(input.resource) }) };
+  const target = cleanTarget(input.target);
+  const resource = input.resource === undefined ? undefined : cleanResource(input.resource);
+  if (Object.keys(target).length === 0 && resource === undefined) fail("invalid_credential_scope");
+  const parameters: JsonObject = { service: input.service, credentialClass: input.credentialClass, owner: { type: input.owner.type, id: input.owner.id }, operation: input.operation, target, ...(resource === undefined ? {} : { resource }) };
   return output(input, "credential.use", `credential.${input.operation}`, "credential", "high", parameters);
 }
 
