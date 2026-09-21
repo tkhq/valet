@@ -602,6 +602,56 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
   });
 
+  it("does not run queued terminal delivery after outbound restarts", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-final-retry-restart";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } },
+      }),
+      {
+        type: "message", id: "final-restart-ack", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId,
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-restart-ack", reason: "end_turn" } },
+      `final-restart-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: "final-restart-result", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+    }]);
+
+    let releaseSend: (() => void) | undefined;
+    fakeTransport.sendAttempts = 0;
+    fakeTransport.sendBlock = new Promise<void>((resolve) => { releaseSend = resolve; });
+    const terminalEvent = {
+      sessionId: session.id,
+      threadId,
+      queueItemId,
+      timestamp: Date.now(),
+      event: { type: "message_end" as const, threadId, messageId: "final-restart-result", reason: "end_turn" as const },
+    };
+    await eventStream.append(terminalEvent, `final-restart-first-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sendAttempts).toBe(1));
+    await eventStream.append(terminalEvent, `final-restart-queued-${randomUUID()}`);
+    host.stopOutbound();
+    host.startOutbound();
+    releaseSend?.();
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am checking",
+      "The work is complete",
+    ]));
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS * 3));
+    expect(fakeTransport.sendAttempts).toBe(1);
+  });
+
   it("stops retrying final fallback after the retry limit", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;

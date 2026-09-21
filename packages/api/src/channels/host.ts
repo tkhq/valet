@@ -645,18 +645,18 @@ export class ChannelHost {
           "command_result",
         ],
       },
-      (event) => this.enqueueOutboundEvent(event),
+      (event) => this.enqueueOutboundEvent(event, this.outboundGeneration),
     );
   }
 
-  private enqueueOutboundEvent(event: DeliveredBusEvent): void {
+  private enqueueOutboundEvent(event: DeliveredBusEvent, generation: number): void {
     const e = event.event;
     const threadId = "threadId" in e ? e.threadId : undefined;
     if (threadId === undefined) {
-      void this.handleOutboundEvent(event);
+      void this.handleOutboundEvent(event, generation);
       return;
     }
-    this.enqueueOutbound(event.sessionId, threadId, () => this.handleOutboundEvent(event));
+    this.enqueueOutbound(event.sessionId, threadId, () => this.handleOutboundEvent(event, generation));
   }
 
   /** Serialize event delivery and retry work for one session thread. */
@@ -682,7 +682,8 @@ export class ChannelHost {
   }
 
   /** Rule 5: every callback body try/caught — errors logged, never thrown into the stream. */
-  private async handleOutboundEvent(event: DeliveredBusEvent): Promise<void> {
+  private async handleOutboundEvent(event: DeliveredBusEvent, generation: number): Promise<void> {
+    if (!this.outboundIsActive(generation)) return;
     try {
       const e = event.event;
       if (e.type === "message_end") {
@@ -691,12 +692,12 @@ export class ChannelHost {
           queueItemId: event.queueItemId,
           reason: e.reason,
         };
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger);
-        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger);
+        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger, generation);
       } else if (e.type === "tool_end" && event.queueItemId !== undefined) {
         const trigger = { queueItemId: event.queueItemId };
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger);
-        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger);
+        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger, generation);
       } else if (e.type === "decision_gate") {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
@@ -722,7 +723,9 @@ export class ChannelHost {
       queueItemId?: string;
       reason?: "end_turn" | "tool_use" | "error" | "abort";
     },
+    generation: number,
   ): Promise<void> {
+    if (!this.outboundIsActive(generation)) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
@@ -760,7 +763,7 @@ export class ChannelHost {
     if (explicit === "pending" || explicit === "succeeded") return;
 
     const target = this.channelThreadFor(origin.threadKey);
-    if (!target) return;
+    if (!target || !this.outboundIsActive(generation)) return;
     if (this.delivered.has(dedupeKey)) return;
     this.markDelivered(dedupeKey);
     const transport = this.transports.get(target.channelType);
