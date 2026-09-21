@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, and, sql } from "drizzle-orm";
 import type {
+  ChannelOrigin,
   QueueItem,
   Sandbox,
   SandboxCapabilities,
@@ -1104,7 +1105,7 @@ describe("ChildWatcher", () => {
     },
   );
 
-  it("child.settled inherits the channel route as manual across a rearm", async () => {
+  it.each([undefined, "auto", "manual"] satisfies ChannelOrigin["reply"][])("child.settled preserves reply policy %s across a rearm", async (reply) => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -1134,7 +1135,7 @@ describe("ChildWatcher", () => {
 
     // The row a spawn from a Slack-addressed turn writes: origin captured at
     // spawn time, durable so the boot rearm() path inherits it too.
-    const origin = { channelType: "slack", threadKey: "slack:C1:1.2" };
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", ...(reply !== undefined ? { reply } : {}) };
     await db.insert(childWatches).values({
       childSessionId: "child-o",
       queueItemId: itemId,
@@ -1165,7 +1166,11 @@ describe("ChildWatcher", () => {
         (i.content as SignalContent).signalType === "child.settled",
     );
     expect(settledSignals).toHaveLength(1);
-    expect((settledSignals[0]?.content as SignalContent).origin).toEqual({ ...origin, reply: "manual" });
+    const content = settledSignals[0]?.content;
+    if (typeof content !== "object" || content === null || !("kind" in content) || content.kind !== "signal") {
+      throw new Error("Expected a child settlement signal");
+    }
+    expect(content.origin).toEqual(origin);
   });
 
   it("leaves an un-diagnosable (retryable) failure UNSETTLED after exhausting in-process retries, relying on rearm() as the backstop", async () => {
@@ -2286,7 +2291,7 @@ describe("buildChildSender", () => {
     expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
   });
 
-  it("re-opens a settled child: the send un-settles the watch and its next settlement reaches the parent", async () => {
+  it.each([undefined, "auto", "manual"] satisfies ChannelOrigin["reply"][])("re-opens a settled child and preserves reply policy %s", async (reply) => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -2299,10 +2304,11 @@ describe("buildChildSender", () => {
       queueItemId: "qi-done",
     });
 
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", ...(reply !== undefined ? { reply } : {}) };
     // The user dismissed the settled child; a re-open must resurface it.
     await db
       .update(childWatches)
-      .set({ dismissedAt: Date.now() })
+      .set({ dismissedAt: Date.now(), originJson: JSON.stringify(origin) })
       .where(eq(childWatches.childSessionId, "child-again"));
 
     const sender = buildChildSender(deps, watcher);
@@ -2330,6 +2336,11 @@ describe("buildChildSender", () => {
     expect(signals).toHaveLength(1);
     expect(signals[0]?.dispatchId).toBe(`child-again:settled:child-again:${res?.queueItemId}`);
     expect(signals[0]?.threadId).toBe(parentThread.id);
+    const content = signals[0]?.content;
+    if (typeof content !== "object" || content === null || !("kind" in content) || content.kind !== "signal") {
+      throw new Error("Expected a child settlement signal");
+    }
+    expect(content.origin).toEqual(origin);
   });
 
   it("self-heals a steer whose sender died before the re-point: the watch follows the successor", async () => {

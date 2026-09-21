@@ -287,9 +287,12 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
 ## Deviations (Part 1, as built)
 
 - **Only the first addressed response posts automatically.** Final-message fallback delivery remains removed. A successful explicit origin reply anywhere in the submission suppresses the automatic copy. A pending call anywhere in the submission defers it. When all calls fail, the host falls back to the original first text.
-- **`child.settled` inherits the spawning submission's origin.** The parent
-  can post the child result with `reply_to_origin`. The settlement itself does
-  not post.
+- **`child.settled` preserves the spawning submission's origin and reply policy.**
+  For an automatic origin, the parent's first response to the settlement posts
+  to the original channel thread. A manual origin still requires
+  `reply_to_origin`. The child result itself does not post directly.
+  `child_send` and restart recovery retain the stored origin, even when a
+  follow-up comes from another parent thread.
 - **Telegram has an explicit text reply action.** `telegram.reply_to_origin`
   sends text to the origin DM through the organization bot credential.
 - **Slack text uses the CommonMark converter.** The channel transport,

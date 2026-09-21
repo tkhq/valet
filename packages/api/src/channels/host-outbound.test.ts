@@ -567,7 +567,7 @@ describe("ChannelHost outbound delivery", () => {
     expect(keyedTransport.sent).toHaveLength(0);
   });
 
-  it("does not auto-post a child.settled turn with an inherited manual origin", async () => {
+  it.each(["auto", "manual"] as const)("delivers child.settled according to inherited %s reply policy", async (reply) => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     await engineStore.appendEntries(session.id, threadId, [
@@ -578,7 +578,7 @@ describe("ChannelHost outbound delivery", () => {
         signal: {
           signalType: "child.settled",
           tagName: "signal",
-          origin: { channelType: "fake", threadKey: "fake:99", reply: "manual" },
+          origin: { channelType: "fake", threadKey: "fake:99", reply },
         },
       }),
       {
@@ -592,7 +592,10 @@ describe("ChannelHost outbound delivery", () => {
     );
 
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(reply === "auto" ? 1 : 0);
+    if (reply === "auto") {
+      expect(fakeTransport.sent[0]?.message.markdown).toBe("internal child result");
+    }
   });
 
   it("a web-UI submission's gate card stays off the channel (TKAI-323)", async () => {

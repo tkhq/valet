@@ -720,9 +720,8 @@ export class ChildWatcher {
             ? { continuation_checkpoint_entry_id: continuationCheckpoint.id }
             : {}),
         },
-        // Preserve the route but make settlement explicit-only. The parent can
-        // use reply_to_origin, but settlement does not trigger a first auto-reply.
-        ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
+        // Preserve the spawning turn's route and reply policy for the parent's update.
+        ...(watch.origin !== undefined ? { origin: watch.origin } : {}),
       },
       dispatchId: `settled:${watch.childSessionId}:${watch.queueItemId}`,
     });
@@ -1224,6 +1223,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       parentThreadId: watchRow.parentThreadId,
       actorUserId: ctx.actorUserId,
       orgId: watchRow.orgId,
+      origin: parseOriginJson(watchRow.originJson),
     });
 
     return { queueItemId: receipt.queueItemId };
