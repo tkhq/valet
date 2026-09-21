@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -26,6 +26,7 @@ import {
   isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
+  teamMembershipSummaries,
   listTeamsForOrg,
   listTeamsForUser,
   NotOrgMemberError,
@@ -54,6 +55,38 @@ describe("teams service", () => {
     await seedUser(db, "u1", orgId);
     await seedUser(db, "u2", orgId);
     await seedUser(db, "u3", orgId);
+  });
+
+  it("aggregates membership in bounded batches without including another org", async () => {
+    await db.insert(orgs).values({ id: "other-org", name: "Other", createdAt: Date.now() });
+    await db.insert(teams).values([
+      { id: "one", orgId, name: "One", createdAt: 1 },
+      { id: "two", orgId, name: "Two", createdAt: 1 },
+      { id: "empty", orgId, name: "Empty", createdAt: 1 },
+      { id: "foreign", orgId: "other-org", name: "Foreign", createdAt: 1 },
+    ]);
+    await db.insert(teamMembers).values([
+      { teamId: "one", userId: "u1", role: "admin" },
+      { teamId: "one", userId: "u2", role: "member" },
+      { teamId: "two", userId: "u2", role: "admin" },
+      { teamId: "foreign", userId: "u1", role: "admin" },
+    ]);
+    const reads = vi.spyOn(db, "select");
+    try {
+      expect(await teamMembershipSummaries(db, orgId, [], "u1")).toEqual(new Map());
+      expect(reads).not.toHaveBeenCalled();
+      const result = await teamMembershipSummaries(db, orgId, [
+        "one", "foreign", "empty", ...Array.from({ length: 1_001 }, (_, i) => `absent-${i}`), "two",
+      ], "u1");
+      expect(result).toEqual(new Map([
+        ["one", { memberCount: 2, callerRole: "admin" }],
+        ["two", { memberCount: 1, callerRole: null }],
+      ]));
+      expect(reads).toHaveBeenCalledTimes(2);
+      expect((await teamMembershipSummaries(db, orgId, ["one"], "u2")).get("one")?.callerRole).toBe("member");
+    } finally {
+      reads.mockRestore();
+    }
   });
 
   // Teams written before the seed shipped have no default assistant, and a
