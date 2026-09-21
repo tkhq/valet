@@ -43,7 +43,7 @@ describe("route and resource policy registries", () => {
   });
 
   it("selects the most specific mounted route descriptor", () => {
-    const base = { schemaVersion: 1, method: "GET", service: "api_admin", operation: "list", riskLevel: "low", approvalSupported: false, safeProjection: "none", obligations: [], audit: { group: "admin" } } as const;
+    const base = { schemaVersion: 1, method: "GET", service: "api_admin", operation: "list", riskLevel: "low", approvalSupported: false, safeProjection: { kind: "unsupported" }, obligations: [], audit: { group: "admin" } } as const;
     const registry = [
       { ...base, template: "/api/admin/*", actionId: "api_admin.get_admin_item" },
       { ...base, template: "/api/admin/submissions", actionId: "api_admin.get_admin_submissions" },
@@ -58,7 +58,7 @@ describe("route and resource policy registries", () => {
     ]);
     const pairs = new Set(RESOURCE_ACCESS_REGISTRY.map((entry) => `${entry.resourceKind}.${entry.operation}`));
     for (const pair of ["repository.import", "secret.update", "policy.publish", "workflow.execute", "artifact.share"]) expect(pairs.has(pair)).toBe(true);
-    for (const unsupported of ["secret.use", "workflow.approve", "session.execute", "assistant.update", "team.approve"]) expect(pairs.has(unsupported)).toBe(false);
+    for (const unsupported of ["secret.use", "workflow.approve", "session.execute", "assistant.read", "team.approve"]) expect(pairs.has(unsupported)).toBe(false);
     expect(pairs.size).toBe(RESOURCE_ACCESS_REGISTRY.length);
   });
 });

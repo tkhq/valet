@@ -15,9 +15,12 @@ export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readon
   "team.update": ["medium"], "team.delete": ["high"],
 });
 export const RESOURCE_ACCESS_REGISTRY: readonly ResourceAccessDescriptorV1[] = Object.freeze(Object.entries(RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1).map(([key, [riskLevel]]) => { const split = key.indexOf("."); const resourceKind = key.slice(0, split) as ResourceKind, operation = key.slice(split + 1) as ResourceOperation; return Object.freeze({ schemaVersion: 1 as const, resourceKind, operation, service: `resource_${resourceKind}`, actionId: `resource_${resourceKind}.${operation}`, riskLevel, safeMetadata: ["resourceId", "ownerType", "ownerId", "version"] as const }); }));
-export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: "none"; readonly obligations: readonly []; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
+export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: { readonly kind: "no_body" } | { readonly kind: "json_fields"; readonly fields: readonly string[] } | { readonly kind: "unsupported" }; readonly obligations: readonly []; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
 export interface BoundaryExclusionV1 { readonly schemaVersion: 1; readonly key: string; readonly classification: "public" | "pr12_owned"; readonly rationale: string; }
 type Seed = readonly [service: string, actionId: string, operation: ResourceOperation, risk: PolicyRisk, resourceKind?: ResourceKind];
+const SAFE_ROUTE_PROJECTIONS_V1: Readonly<Record<string, ApiRouteDescriptorV1["safeProjection"]>> = Object.freeze({
+  "POST /api/sessions": { kind: "json_fields", fields: ["workspace", "title", "teamId", "kind", "model", "profile", "docker", "preset", "paths", "rescanOf"] },
+});
 export function mergeApiRouteDescriptorMapsV1(...maps: readonly Readonly<Record<string, Seed>>[]): Readonly<Record<string, Seed>> {
   const merged: Record<string, Seed> = {};
   for (const map of maps) for (const [key, descriptor] of Object.entries(map)) {
@@ -400,7 +403,8 @@ export function buildApiRouteRegistry(routes: readonly Pick<RouterRoute, "method
     const group = service.slice(4);
     return Object.freeze({
       schemaVersion: 1 as const, method, template, service, actionId, operation, riskLevel,
-      approvalSupported: !["list", "read", "metadata"].includes(operation), safeProjection: "none" as const,
+      safeProjection: SAFE_ROUTE_PROJECTIONS_V1[key] ?? (method === "DELETE" ? { kind: "no_body" as const } : { kind: "unsupported" as const }),
+      approvalSupported: (SAFE_ROUTE_PROJECTIONS_V1[key] !== undefined || method === "DELETE"),
       obligations: [] as const, audit: { group },
       ...(resourceKind === undefined ? {} : { resourceKind }),
     });

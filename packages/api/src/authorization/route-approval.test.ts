@@ -14,11 +14,11 @@ const descriptor = {
   method: "GET", routeTemplate: "/api/sessions/:id", riskLevel: "low",
 };
 
-function initial(action = descriptor, requestId = "http-request-1", operationId = "http-delivery-1", requestDigest = "a".repeat(64)) {
+function initial(action = descriptor, requestId = "http-request-1", operationId = "http-delivery-1", safeRequestFingerprint = "a".repeat(64)) {
   return adaptApiRoute({
     schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1",
     principal: { type: "user", id: "user-1" }, requestId,
-    operationId, evaluationTimeMs: 100, descriptor: action, safeMetadata: { requestDigest },
+    operationId, evaluationTimeMs: 100, descriptor: action, safeMetadata: { safeRequestFingerprint },
   });
 }
 
@@ -53,7 +53,7 @@ describe("durable route approval replay", () => {
         schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" },
         requestId: "http-request-approved", operationId: replay!.operationId, evaluationTimeMs: 200, descriptor,
         dynamicFacts: { currentPolicy: replay!.facts }, approvalBindingContext: replay!.binding,
-        approvalScopeId: replay!.scopeId, safeMetadata: { requestDigest: "a".repeat(64) },
+        approvalScopeId: replay!.scopeId, safeMetadata: { safeRequestFingerprint: "a".repeat(64) },
       });
       expect((await service.authorize(post.request)).decision).toMatchObject({ effect: "allow", reasonCode: "dynamic_grant" });
       expect(canonicalDecisionId("org-1", first.request.idempotencyKey)).toBe(row.decisionId);

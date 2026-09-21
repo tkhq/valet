@@ -111,12 +111,14 @@ describe("api integration: artifacts", () => {
   it("internal token + owner/actor headers share on behalf of a session (mem_share path)", async () => {
     const api = await bootTestApi();
     try {
+      const created = await fetch(`${api.baseUrl}/api/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace: "/tmp" }) });
+      const sessionId = ((await created.json()) as { id: string }).id;
       const headers = {
         "Content-Type": "application/json",
         "x-valet-internal": internalToken(),
         "x-valet-owner": "user:local-user",
         "x-valet-actor": "local-user",
-        "x-valet-session-id": "sess-123",
+        "x-valet-session-id": sessionId,
       };
       const put = await fetch(`${api.baseUrl}/api/memory`, {
         method: "PUT",

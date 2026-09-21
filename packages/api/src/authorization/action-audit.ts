@@ -55,7 +55,7 @@ export function buildDecisionAuditPlan(input: {
     const parameters = request.action.parameters as Record<string, unknown> | undefined;
     const metadata = parameters?.metadata as Record<string, unknown> | undefined;
     const route = request.kind === "api.route" && typeof parameters?.method === "string" && typeof parameters?.template === "string" && typeof parameters?.actionId === "string"
-      ? { method: parameters!.method as string, template: parameters!.template as string, actionId: parameters!.actionId as string, ...(metadata && typeof metadata === "object" && !Array.isArray(metadata) && typeof metadata.requestDigest === "string" ? { requestDigest: metadata.requestDigest } : {}) }
+      ? { method: parameters!.method as string, template: parameters!.template as string, actionId: parameters!.actionId as string, ...(metadata && typeof metadata === "object" && !Array.isArray(metadata) && typeof metadata.safeRequestFingerprint === "string" ? { safeRequestFingerprint: metadata.safeRequestFingerprint } : {}) }
       : undefined;
     approvalReplay = { evaluationTimeMs, ...(request.subject.actorUserId ? { actorUserId: request.subject.actorUserId } : {}), ...(route ? { route } : {}) };
   }

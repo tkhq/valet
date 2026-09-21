@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import { and, eq } from "drizzle-orm";
-import { adaptApiRoute, buildRouteResourceObligationPlan, inputDigestOf, requestSubjectDigest, type AuthorizationRequest, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope, type RouteResourceObligationPlanV1 } from "@valet/engine/authorization";
+import { adaptApiRoute, buildRouteResourceObligationPlan, canonicalAuthorizationJson, inputDigestOf, requestSubjectDigest, type AuthorizationRequest, type CurrentPolicyDynamicFactsV2, type PolicyDecisionEnvelope, type RouteResourceObligationPlanV1 } from "@valet/engine/authorization";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import { authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions } from "../schema/index.js";
+import { agentSessions, authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions } from "../schema/index.js";
 import { loadCanonicalDynamicFacts } from "./canonical-facts.js";
 import { canonicalDecisionId } from "./canonical-authorization-service.js";
 import { requirePrincipal, requireUser } from "../middleware/auth.js";
@@ -23,34 +23,36 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
     if (!matched) return c.json({ error: "This API route has no authorization descriptor. Contact an administrator.", code: "authorization_descriptor_missing" }, 403);
     const user = requireUser(c), principal = requirePrincipal(c);
     if (!user || !principal) {
-      if (isInternalSecurityRoute(c.req.method, matched.descriptor.template, c.req.header("x-valet-internal")) || isInternalArtifactRoute(c.req.method, c.req.path, c.req.header("x-valet-internal"), c.req.header("x-valet-owner"), c.req.header("x-valet-actor"))) { await next(); return; }
+      if (isInternalSecurityRoute(c.req.method, matched.descriptor.template, c.req.header("x-valet-internal")) || await isInternalArtifactRoute(c.var.providers.db, c.req.method, c.req.path, c.req.header("x-valet-internal"), c.req.header("x-valet-owner"), c.req.header("x-valet-actor"), c.req.header("x-valet-session-id"))) { await next(); return; }
       return c.json({ error: "Authorization identity is unavailable. Authenticate again.", code: "authorization_identity_missing" }, 401);
     }
     const delivery = deliveryIdentity();
     const mutationKey = c.req.header("Idempotency-Key");
-    const executionDigest = ["GET", "HEAD", "OPTIONS"].includes(c.req.method) ? undefined : await requestExecutionDigest(c.req.raw, matched.descriptor.actionId);
+    const safeFingerprint = ["GET", "HEAD", "OPTIONS"].includes(c.req.method) ? undefined : await safeRequestFingerprint(c.req.raw, matched.descriptor);
     let obligationPlan: RouteResourceObligationPlanV1;
     let executionAttemptId: string | undefined;
     let executionDecisionId: string | undefined;
     try {
       const evaluationTimeMs = Date.now();
       const descriptor = { schemaVersion: 1 as const, service: matched.descriptor.service, actionId: matched.descriptor.actionId, method: matched.descriptor.method, routeTemplate: matched.descriptor.template, riskLevel: matched.descriptor.riskLevel };
-      const initial = adaptApiRoute({ schemaVersion: 1, organizationId: user.orgId, actorUserId: user.id, principal, requestId: delivery, operationId: `${delivery}:route`, evaluationTimeMs, descriptor, ...(executionDigest === undefined ? {} : { safeMetadata: { requestDigest: executionDigest } }) });
+      const initial = adaptApiRoute({ schemaVersion: 1, organizationId: user.orgId, actorUserId: user.id, principal, requestId: delivery, operationId: `${delivery}:route`, evaluationTimeMs, descriptor, ...(safeFingerprint === undefined ? {} : { safeMetadata: { safeRequestFingerprint: safeFingerprint } }) });
       const replay = await loadApprovedRouteReplay(c.var.providers.db, initial.request, c.req.header("X-Valet-Approval-Resolution"), evaluationTimeMs, (row) => c.var.providers.canonicalAuthorizationService.verifyPersistedDecision(row));
       if (replay?.verdict === "rejected") return c.json({ error: "The approval was rejected. Ask an administrator to review access.", code: "authorization_approval_rejected" }, 403);
-      const routeRequest = replay === undefined ? initial.request : adaptApiRoute({ schemaVersion: 1, organizationId: user.orgId, actorUserId: user.id, principal, requestId: `${delivery}:approved`, operationId: replay.operationId, evaluationTimeMs, descriptor, dynamicFacts: { currentPolicy: replay.facts }, approvalBindingContext: replay.binding, approvalScopeId: replay.scopeId, ...(executionDigest === undefined ? {} : { safeMetadata: { requestDigest: executionDigest } }) }).request;
+      const routeRequest = replay === undefined ? initial.request : adaptApiRoute({ schemaVersion: 1, organizationId: user.orgId, actorUserId: user.id, principal, requestId: `${delivery}:approved`, operationId: replay.operationId, evaluationTimeMs, descriptor, dynamicFacts: { currentPolicy: replay.facts }, approvalBindingContext: replay.binding, approvalScopeId: replay.scopeId, ...(safeFingerprint === undefined ? {} : { safeMetadata: { safeRequestFingerprint: safeFingerprint } }) }).request;
       const routeDecision = await c.var.providers.canonicalAuthorizationService.authorize(routeRequest);
       obligationPlan = buildRouteResourceObligationPlan(routeDecision.decision);
       if (routeDecision.decision.effect === "require_approval" && matched.descriptor.actionId === "api_authorization.post_authorization_decisions_item_resolve") {
         return c.json({ error: "Approval resolution cannot require another approval. Ask an organization administrator to change the route policy.", code: "authorization_recursive_approval" }, 403);
       }
+      if (routeDecision.decision.effect === "require_approval" && !matched.descriptor.approvalSupported) return c.json({ error: "This route cannot represent the request safely for approval. Complete the operation directly or ask an administrator to change the policy.", code: "approval_unsupported" }, 422);
       if (routeDecision.decision.effect === "require_approval" && c.req.header("Idempotency-Key") === undefined) return c.json({ error: "Send an Idempotency-Key before requesting approval.", code: "authorization_idempotency_required" }, 428);
       const routeRefusal = refusal(routeDecision, canonicalDecisionId(user.orgId, routeRequest.idempotencyKey));
       if (routeRefusal) return c.json(routeRefusal.body, routeRefusal.status);
       if (obligationPlan.readOnly && !["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return c.json({ error: "Policy permits read-only access. Use a read operation or ask an administrator to change access.", code: "authorization_read_only" }, 403);
       if (obligationPlan.resultLimit !== undefined || obligationPlan.fieldMask !== undefined || obligationPlan.redactions.length > 0) return c.json({ error: "This route does not support the required policy obligation. Ask an administrator to change the policy.", code: "authorization_obligation_unsupported" }, 403);
       if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
-        const reserved = await reserveRouteExecution(c.var.providers.db, canonicalDecisionId(user.orgId, routeRequest.idempotencyKey), { orgId: user.orgId, actorId: user.id, actionId: matched.descriptor.actionId, key: mutationKey ?? delivery, digest: executionDigest! }, evaluationTimeMs);
+        const reserved = safeFingerprint === undefined ? undefined : await reserveRouteExecution(c.var.providers.db, canonicalDecisionId(user.orgId, routeRequest.idempotencyKey), { orgId: user.orgId, actorId: user.id, actionId: matched.descriptor.actionId, key: mutationKey ?? delivery, digest: safeFingerprint }, evaluationTimeMs);
+        if (!reserved) { await next(); return; }
         if (reserved.kind === "completed") return replayRouteResponse(reserved.output);
         if (reserved.kind === "indeterminate") return c.json({ error: "The operation may have completed. Inspect its state before you retry.", code: "authorization_indeterminate" }, 409);
         executionAttemptId = reserved.attemptId;
@@ -62,7 +64,7 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
     }
     try {
       await next();
-      if (executionAttemptId && executionDecisionId) await settleRouteExecution(c.var.providers.db, executionAttemptId, executionDecisionId, await boundedRouteResponse(c.res), "completed", Date.now());
+      if (executionAttemptId && executionDecisionId) { const output = await boundedRouteResponse(c.res); await settleRouteExecution(c.var.providers.db, executionAttemptId, executionDecisionId, output, output.status >= 400 ? "failed" : "completed", Date.now()); }
     } catch (error) {
       if (executionAttemptId && executionDecisionId) await settleRouteExecution(c.var.providers.db, executionAttemptId, executionDecisionId, undefined, "indeterminate", Date.now());
       throw error;
@@ -76,8 +78,10 @@ function isInternalSecurityRoute(method: string, template: string, token: string
     && isValidInternalToken(token);
 }
 
-function isInternalArtifactRoute(method: string, path: string, token: string | undefined, owner: string | undefined, actor: string | undefined): boolean {
-  return method.toUpperCase() === "POST" && path === "/api/artifacts/share" && owner !== undefined && actor !== undefined && isValidInternalToken(token);
+async function isInternalArtifactRoute(db: AppDb, method: string, path: string, token: string | undefined, owner: string | undefined, actor: string | undefined, sessionId: string | undefined): Promise<boolean> {
+  if (method.toUpperCase() !== "POST" || path !== "/api/artifacts/share" || !isValidInternalToken(token) || !sessionId) return false;
+  const row = (await db.select({ orgId: agentSessions.orgId, userId: agentSessions.userId, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1))[0];
+  return row !== undefined && row.status !== "deleted" && owner === `${row.ownerType}:${row.ownerId}` && actor === row.userId;
 }
 
 export function resolveRouteDescriptor(registry: readonly ApiRouteDescriptorV1[], method: string, path: string): { descriptor: ApiRouteDescriptorV1; resourceId?: string } | undefined {
@@ -110,8 +114,15 @@ export async function loadApprovedRouteReplay(db: AppDb, initial: AuthorizationR
   const route = replay?.route;
   const parameters = initial.action.parameters as Record<string, unknown> | undefined;
   const metadata = parameters?.metadata as Record<string, unknown> | undefined;
-  const requestDigest = metadata && typeof metadata === "object" && !Array.isArray(metadata) && typeof metadata.requestDigest === "string" ? metadata.requestDigest : undefined;
-  if (!original?.evidence || original.effect !== "require_approval" || replay?.actorUserId !== initial.subject.actorUserId || !route || route.method !== parameters?.method || route.template !== parameters?.template || route.actionId !== initial.action.id || route.requestDigest !== requestDigest) throw new Error("Route approval does not match this request.");
+  const safeRequestFingerprint = metadata && typeof metadata === "object" && !Array.isArray(metadata) && typeof metadata.safeRequestFingerprint === "string" ? metadata.safeRequestFingerprint : undefined;
+  if (!original?.evidence || original.effect !== "require_approval" || replay?.actorUserId !== initial.subject.actorUserId || !route || route.method !== parameters?.method || route.template !== parameters?.template || route.actionId !== initial.action.id || route.safeRequestFingerprint !== safeRequestFingerprint) throw new Error("Route approval does not match this request.");
+  const immutable = adaptApiRoute({
+    schemaVersion: 1, organizationId: initial.subject.orgId, actorUserId: initial.subject.actorUserId!, principal: initial.subject.principal,
+    requestId: original.requestId, operationId: resolution.scopeId, evaluationTimeMs: replay.evaluationTimeMs,
+    descriptor: { schemaVersion: 1, service: initial.action.service!, actionId: initial.action.id, method: route.method, routeTemplate: route.template, riskLevel: initial.action.riskLevel! },
+    ...(safeRequestFingerprint === undefined ? {} : { safeMetadata: { safeRequestFingerprint } }),
+  }).request;
+  if (immutable.idempotencyKey !== original.idempotencyKey || requestSubjectDigest(immutable) !== original.requestSubjectDigest || inputDigestOf(immutable) !== original.inputDigest) throw new Error("Route approval original evidence is invalid.");
   verifyDecision?.(original);
   if (resolution.requestSubjectDigest !== original.requestSubjectDigest || resolution.originalDecisionDigest !== original.evidence.decisionDigest || resolution.scopeId !== original.idempotencyKey.slice("route:".length)) throw new Error("Route approval does not match this request.");
   const binding = { requestSubjectDigest: original.requestSubjectDigest, originalDecisionDigest: original.evidence.decisionDigest };
@@ -145,10 +156,25 @@ type RouteExecutionReservation =
 
 class RouteExecutionConflict extends Error {}
 
-async function requestExecutionDigest(request: Request, actionId: string): Promise<string> {
+async function safeRequestFingerprint(request: Request, descriptor: ApiRouteDescriptorV1): Promise<string | undefined> {
+  const projection = descriptor.safeProjection;
+  if (projection.kind === "unsupported") return undefined;
   const url = new URL(request.url);
-  const body = await request.clone().arrayBuffer();
-  return createHash("sha256").update(actionId).update("\0").update(request.method).update("\0").update(url.pathname).update("\0").update(url.search).update("\0").update(new Uint8Array(body)).digest("hex");
+  if (url.search !== "") return undefined;
+  const bytes = new Uint8Array(await request.clone().arrayBuffer());
+  let body: unknown = null;
+  if (projection.kind === "no_body") {
+    if (bytes.byteLength !== 0) return undefined;
+  } else {
+    if (bytes.byteLength > 65_536) return undefined;
+    try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { return undefined; }
+    if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+    const record = body as Record<string, unknown>;
+    if (Object.keys(record).some((key) => !projection.fields.includes(key))) return undefined;
+    body = Object.fromEntries(projection.fields.filter((key) => key in record).map((key) => [key, record[key]]));
+  }
+  const safe = canonicalAuthorizationJson({ schemaVersion: 1, actionId: descriptor.actionId, method: request.method, path: url.pathname, body });
+  return createHash("sha256").update(safe).digest("hex");
 }
 
 async function reserveRouteExecution(db: AppDb, decisionId: string, identity: { orgId: string; actorId: string; actionId: string; key: string; digest: string }, now: number): Promise<RouteExecutionReservation> {
@@ -160,11 +186,11 @@ async function reserveRouteExecution(db: AppDb, decisionId: string, identity: { 
   const prior = (await db.select().from(authorizationExecutionAttempts).where(eq(authorizationExecutionAttempts.attemptId, attemptId)).limit(1))[0];
   if (!prior || prior.targetIdempotencyKey !== identity.key || prior.externalOperationIds.length !== 1 || prior.externalOperationIds[0] !== binding) throw new RouteExecutionConflict();
   const output = storedRouteResponse(prior.redactedResult);
-  if (prior.outcome === "completed" && output) return { kind: "completed", output };
+  if ((prior.outcome === "completed" || prior.outcome === "failed") && output) return { kind: "completed", output };
   return { kind: "indeterminate" };
 }
 
-async function settleRouteExecution(db: AppDb, attemptId: string, decisionId: string, output: StoredRouteResponse | undefined, outcome: "completed" | "indeterminate", now: number): Promise<void> {
+async function settleRouteExecution(db: AppDb, attemptId: string, decisionId: string, output: StoredRouteResponse | undefined, outcome: "completed" | "failed" | "indeterminate", now: number): Promise<void> {
   await db.update(authorizationExecutionAttempts).set({ outcome, redactedResult: output ?? null, redactedError: outcome === "indeterminate" ? "The handler did not return a response." : null, finishedAt: now }).where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.decisionId, decisionId), eq(authorizationExecutionAttempts.outcome, "started")));
 }
 

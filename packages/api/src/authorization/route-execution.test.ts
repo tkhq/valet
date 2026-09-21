@@ -38,6 +38,18 @@ describe("route execution reservation", () => {
     expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(2);
   });
 
+  it("replays a handled error with its original status", async () => {
+    api = await bootTestApi();
+    const first = await create("route-mutation-error", "relative");
+    expect(first.status).toBe(400);
+    const body = await first.json();
+    const replay = await create("route-mutation-error", "relative");
+    expect(replay.status).toBe(400);
+    expect(replay.headers.get("x-valet-execution-replay")).toBe("true");
+    await expect(replay.json()).resolves.toEqual(body);
+    expect((await api.providers.db.select().from(authorizationExecutionAttempts))[0]).toMatchObject({ outcome: "failed", redactedResult: { status: 400 } });
+  });
+
   it("returns an indeterminate replay and never reserves reads", async () => {
     api = await bootTestApi();
     expect((await create("route-mutation-2")).status).toBe(201);
