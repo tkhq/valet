@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
+import { POLICY_CONTEXTS } from "./builder/contexts.js";
 import {
   API_ROUTE_DESCRIPTOR_SEEDS_V1,
+  API_ROUTE_REGISTRY_V1,
   RESOURCE_ACCESS_REGISTRY,
   ROUTE_BOUNDARY_EXCLUSIONS_V1,
   WS_OPERATION_DESCRIPTOR_SEEDS_V1,
@@ -43,13 +45,25 @@ describe("route and resource policy registries", () => {
   });
 
   it("selects the most specific mounted route descriptor", () => {
-    const base = { schemaVersion: 1, method: "GET", service: "api_admin", operation: "list", riskLevel: "low", approvalSupported: false, safeProjection: { kind: "unsupported" }, obligations: [], audit: { group: "admin" } } as const;
+    const base = { schemaVersion: 1, method: "GET", service: "api_admin", operation: "list", riskLevel: "low", approvalSupported: false, safeProjection: { kind: "unsupported" }, replayStatuses: [], obligations: [], audit: { group: "admin" } } as const;
     const registry = [
       { ...base, template: "/api/admin/*", actionId: "api_admin.get_admin_item" },
       { ...base, template: "/api/admin/submissions", actionId: "api_admin.get_admin_submissions" },
     ];
     expect(resolveRouteDescriptor(registry, "GET", "/api/admin/submissions")?.descriptor.actionId).toBe("api_admin.get_admin_submissions");
     expect(resolveRouteDescriptor(registry, "GET", "/api/admin/other")?.descriptor.actionId).toBe("api_admin.get_admin_item");
+  });
+
+  it("keeps builder approval support equal to redeemable runtime support", () => {
+    const routeOptions = new Map(POLICY_CONTEXTS["api.route"].targets.map((target) => [target.actionId, target.approvalSupported]));
+    expect(routeOptions.size).toBe(API_ROUTE_REGISTRY_V1.length);
+    for (const route of API_ROUTE_REGISTRY_V1) {
+      expect(routeOptions.get(route.actionId)).toBe(route.approvalSupported);
+      expect(route.approvalSupported).toBe(route.safeProjection.kind !== "unsupported");
+    }
+    expect(POLICY_CONTEXTS["resource.access"].targets).toHaveLength(RESOURCE_ACCESS_REGISTRY.length);
+    expect(POLICY_CONTEXTS["resource.access"].targets.every((target) => !target.approvalSupported)).toBe(true);
+    expect(new Set(RESOURCE_ACCESS_REGISTRY.map((entry) => entry.resourceKind)).size).toBe(8);
   });
 
   it("registers explicit WebSocket and enforced resource operations", () => {

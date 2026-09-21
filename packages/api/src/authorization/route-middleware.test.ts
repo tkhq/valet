@@ -24,13 +24,13 @@ async function postSession(): Promise<Response> {
 describe("route authorization middleware", () => {
   it.each([
     ["deny", 403, "authorization_denied"],
-    ["require_approval", 428, "authorization_idempotency_required"],
+    ["require_approval", 409, "authorization_approval_required"],
     ["throw", 503, "authorization_indeterminate"],
   ] as const)("blocks %s before the handler", async (result, status, code) => {
     api = await bootTestApi();
-    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request) => {
+    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request, beforePersist) => {
       if (result === "throw") throw new Error("evaluator unavailable");
-      return envelope(request, result);
+      const resultEnvelope = envelope(request, result); beforePersist?.(resultEnvelope); return resultEnvelope;
     });
     const response = await postSession();
     expect(response.status).toBe(status);
@@ -41,9 +41,9 @@ describe("route authorization middleware", () => {
   it("denies recursive approval on the resolution endpoint", async () => {
     api = await bootTestApi();
     const seen: string[] = [];
-    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request) => {
+    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request, beforePersist) => {
       seen.push(request.action.id);
-      return envelope(request, "require_approval");
+      const resultEnvelope = envelope(request, "require_approval"); beforePersist?.(resultEnvelope); return resultEnvelope;
     });
     const response = await fetch(`${api.baseUrl}/api/authorization/decisions/missing/resolve`, {
       method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ schemaVersion: 1, verdict: "approved" }),
@@ -62,14 +62,17 @@ describe("route authorization middleware", () => {
   ] as const)("composes route %s and resource %s independently", async (routeEffect, resourceEffect, created) => {
     api = await bootTestApi();
     const original = api.providers.canonicalAuthorizationService.authorize.bind(api.providers.canonicalAuthorizationService);
-    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request) => routeEffect === "allow" ? original(request) : envelope(request, routeEffect));
+    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request, beforePersist) => {
+      if (routeEffect === "allow") return original(request, beforePersist);
+      const resultEnvelope = envelope(request, routeEffect); beforePersist?.(resultEnvelope); return resultEnvelope;
+    });
     vi.spyOn(api.providers.resourceAuthorizationPort, "authorize").mockImplementation(async () => {
       if (resourceEffect !== "allow") throw new ResourceAuthorizationError(resourceEffect);
       return { schemaVersion: 1, readOnly: false, redactions: [] };
     });
     const response = await fetch(`${api.baseUrl}/api/workflows`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "Composed", definition: { version: "dag/v1", nodes: [{ id: "start", type: "trigger" }], edges: [] } }),
     });
     expect(response.ok).toBe(created);

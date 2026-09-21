@@ -15,11 +15,15 @@ export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readon
   "team.update": ["medium"], "team.delete": ["high"],
 });
 export const RESOURCE_ACCESS_REGISTRY: readonly ResourceAccessDescriptorV1[] = Object.freeze(Object.entries(RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1).map(([key, [riskLevel]]) => { const split = key.indexOf("."); const resourceKind = key.slice(0, split) as ResourceKind, operation = key.slice(split + 1) as ResourceOperation; return Object.freeze({ schemaVersion: 1 as const, resourceKind, operation, service: `resource_${resourceKind}`, actionId: `resource_${resourceKind}.${operation}`, riskLevel, safeMetadata: ["resourceId", "ownerType", "ownerId", "version"] as const }); }));
-export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: { readonly kind: "no_body" } | { readonly kind: "json_fields"; readonly fields: readonly string[] } | { readonly kind: "unsupported" }; readonly obligations: readonly []; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
+export type SafeRouteProjectionV1 =
+  | { readonly kind: "no_body"; readonly query: readonly string[] }
+  | { readonly kind: "json_fields"; readonly fields: readonly string[]; readonly query: readonly string[] }
+  | { readonly kind: "unsupported" };
+export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: SafeRouteProjectionV1; readonly replayStatuses: readonly number[]; readonly obligations: readonly []; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
 export interface BoundaryExclusionV1 { readonly schemaVersion: 1; readonly key: string; readonly classification: "public" | "pr12_owned"; readonly rationale: string; }
 type Seed = readonly [service: string, actionId: string, operation: ResourceOperation, risk: PolicyRisk, resourceKind?: ResourceKind];
-const SAFE_ROUTE_PROJECTIONS_V1: Readonly<Record<string, ApiRouteDescriptorV1["safeProjection"]>> = Object.freeze({
-  "POST /api/sessions": { kind: "json_fields", fields: ["workspace", "title", "teamId", "kind", "model", "profile", "docker", "preset", "paths", "rescanOf"] },
+const SAFE_ROUTE_PROJECTIONS_V1: Readonly<Record<string, SafeRouteProjectionV1>> = Object.freeze({
+  "POST /api/sessions": { kind: "json_fields", fields: ["workspace", "title", "teamId", "kind", "model", "profile", "docker", "preset", "paths", "rescanOf"], query: [] },
 });
 export function mergeApiRouteDescriptorMapsV1(...maps: readonly Readonly<Record<string, Seed>>[]): Readonly<Record<string, Seed>> {
   const merged: Record<string, Seed> = {};
@@ -390,25 +394,22 @@ export const ROUTE_BOUNDARY_EXCLUSIONS_V1: readonly BoundaryExclusionV1[] = Obje
 ]);
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"] as const;
 const protectedExclusions = new Set(ROUTE_BOUNDARY_EXCLUSIONS_V1.filter((entry) => entry.classification === "pr12_owned").map((entry) => entry.key));
+export const API_ROUTE_REGISTRY_V1: readonly ApiRouteDescriptorV1[] = Object.freeze(Object.entries(API_ROUTE_DESCRIPTOR_SEEDS_V1).map(([key, seed]) => {
+  const split = key.indexOf(" "), method = key.slice(0, split), template = key.slice(split + 1);
+  const [service, actionId, operation, riskLevel, resourceKind] = seed;
+  const safeProjection = SAFE_ROUTE_PROJECTIONS_V1[key] ?? (method === "DELETE" ? { kind: "no_body" as const, query: [] } : { kind: "unsupported" as const });
+  const replayStatuses = key === "POST /api/sessions" ? [201, 400, 409, 422] : method === "DELETE" ? [200, 202, 204, 400, 404, 409] : [];
+  return Object.freeze({ schemaVersion: 1 as const, method, template, service, actionId, operation, riskLevel, safeProjection, replayStatuses,
+    approvalSupported: safeProjection.kind !== "unsupported", obligations: [] as const, audit: { group: service.slice(4) },
+    ...(resourceKind === undefined ? {} : { resourceKind }) });
+}).sort((a, b) => `${a.method} ${a.template}`.localeCompare(`${b.method} ${b.template}`)));
 export function buildApiRouteRegistry(routes: readonly Pick<RouterRoute, "method" | "path">[]): readonly ApiRouteDescriptorV1[] {
   const actual = new Set<string>();
   for (const route of routes) for (const method of route.method === "ALL" ? HTTP_METHODS : [route.method.toUpperCase()]) actual.add(`${method} ${canonicalTemplate(route.path)}`);
   const expected = new Set([...Object.keys(API_ROUTE_DESCRIPTOR_SEEDS_V1), ...protectedExclusions]);
   const missing = [...expected].filter((key) => !actual.has(key)); const unknown = [...actual].filter((key) => !expected.has(key));
   if (missing.length || unknown.length) throw new Error(`Protected route inventory mismatch. Missing: ${missing.join(", ") || "none"}. Unknown: ${unknown.join(", ") || "none"}.`);
-  return Object.freeze(Object.entries(API_ROUTE_DESCRIPTOR_SEEDS_V1).map(([key, seed]) => {
-    const split = key.indexOf(" ");
-    const method = key.slice(0, split), template = key.slice(split + 1);
-    const [service, actionId, operation, riskLevel, resourceKind] = seed;
-    const group = service.slice(4);
-    return Object.freeze({
-      schemaVersion: 1 as const, method, template, service, actionId, operation, riskLevel,
-      safeProjection: SAFE_ROUTE_PROJECTIONS_V1[key] ?? (method === "DELETE" ? { kind: "no_body" as const } : { kind: "unsupported" as const }),
-      approvalSupported: (SAFE_ROUTE_PROJECTIONS_V1[key] !== undefined || method === "DELETE"),
-      obligations: [] as const, audit: { group },
-      ...(resourceKind === undefined ? {} : { resourceKind }),
-    });
-  }).sort((a, b) => `${a.method} ${a.template}`.localeCompare(`${b.method} ${b.template}`)));
+  return API_ROUTE_REGISTRY_V1;
 }
 export function isProtectedBoundaryExclusion(method: string, path: string): boolean {
   const actualMethod = method.toUpperCase();

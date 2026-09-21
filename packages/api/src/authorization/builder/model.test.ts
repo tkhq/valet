@@ -159,7 +159,8 @@ describe("policy draft validation", () => {
     expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(4);
   });
 
-  it.each(["api.route", "resource.access"] as const)("binds %s drafts to exact descriptors", (context) => {
+  it("binds route drafts to exact approval-capable descriptors", () => {
+    const context = "api.route" as const;
     const option = POLICY_CONTEXTS[context].targets.find((target) => target.approvalSupported)!;
     const value = draft(), rule = { ...value.rules[0], context, target: { "action.id": option.actionId }, matcherGroups: [], appliesIn: undefined, effect: "require_approval" as const, approval: { tier: "human", replay: "once" as const } };
     expect(validatePolicyDraft({ ...value, rules: [rule] })).toEqual([]);
@@ -167,6 +168,12 @@ describe("policy draft validation", () => {
     for (const target of [{ "action.id": "unknown.operation" }, { "route.id": "/api/raw" }, { "action.id": POLICY_CONTEXTS[context === "api.route" ? "resource.access" : "api.route"].targets[0].actionId }]) expect(validatePolicyDraft({ ...value, rules: [{ ...rule, target }] }).map((issue) => issue.code)).toContain("unknown_descriptor");
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: draft().rules[0].matcherGroups }] }).map((issue) => issue.code)).toContain("unsupported_content_matcher");
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, obligations: [{ type: "redact" }] }] }).map((issue) => issue.code)).toContain("unsupported_obligation");
+  });
+
+  it("rejects resource approvals before publication", () => {
+    const value = draft(), option = POLICY_CONTEXTS["resource.access"].targets[0];
+    const rule = { ...value.rules[0], context: "resource.access" as const, target: { "action.id": option.actionId }, matcherGroups: [], appliesIn: undefined, effect: "require_approval" as const, approval: { tier: "human", replay: "once" as const } };
+    expect(validatePolicyDraft({ ...value, rules: [rule] }).map((issue) => issue.code)).toContain("unsupported_approval");
   });
 
 });

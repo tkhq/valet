@@ -1117,6 +1117,11 @@ export async function deleteWorkflowDefinition(
   // before the deletion authority can admit an organization administrator.
   const [metadata] = await deps.db.select({ id: workflowDefinitions.id, ownerType: workflowDefinitions.ownerType, ownerId: workflowDefinitions.ownerId, updatedAt: workflowDefinitions.updatedAt }).from(workflowDefinitions).where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).limit(1);
   if (!metadata) return "not_found";
+  const admin = owner.principal?.type !== "team" && await isOrgAdmin(deps.db, owner.orgId, owner.userId);
+  const reachable = metadata.ownerType === "user" ? metadata.ownerId === owner.userId
+    : metadata.ownerType === "team" ? (owner.principal?.type === "team" ? owner.principal.id === metadata.ownerId : await isTeamMember(deps.db, metadata.ownerId, owner.userId))
+    : false;
+  if (!admin && !reachable) return "not_found";
   await authorizeWorkflowResource(deps, owner, "delete", { id: metadata.id, ownerType: metadata.ownerType, ownerId: metadata.ownerId, version: metadata.updatedAt });
   return deps.db.transaction((tx) => deleteWorkflowDefinitionInTransaction({ ...deps, db: tx }, owner, id, true));
 }
