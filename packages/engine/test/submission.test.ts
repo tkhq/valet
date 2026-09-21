@@ -101,8 +101,24 @@ describe("deriveQueueState (pure)", () => {
     ];
     const state = deriveQueueState(THREAD, items, "collect", false);
     expect(state.collectBuffer?.map((i) => i.id)).toEqual(["a", "b"]);
+    expect(state.collectDeadline).toBeUndefined();
     const none = deriveQueueState(THREAD, [item({ id: "c", status: "queued" })], "collect", false);
     expect(none.collectBuffer).toBeUndefined();
+    expect(none.collectDeadline).toBeUndefined();
+  });
+
+  it("uses the earliest valid collect deadline", () => {
+    const state = deriveQueueState(
+      THREAD,
+      [
+        item({ id: "a", status: "collecting", metadata: { collectDeadline: 3_000 } }),
+        item({ id: "b", status: "collecting", metadata: { collectDeadline: 2_000 } }),
+        item({ id: "c", status: "collecting", metadata: { collectDeadline: "invalid" } }),
+      ],
+      "collect",
+      false,
+    );
+    expect(state.collectDeadline).toBe(2_000);
   });
 
   it("activeItemId is the running or blocked item; undefined otherwise", () => {

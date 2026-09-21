@@ -376,11 +376,44 @@ describe("Composer — stop button", () => {
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
     const run = screen.getByRole("button", { name: "Run queued messages" }) as HTMLButtonElement;
     expect(run.disabled).toBe(false);
-    expect(screen.getByRole("status").textContent).toContain("1 queued");
 
     await userEvent.click(run);
     expect(resumeMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
     expect(abortMutateAsync).not.toHaveBeenCalled();
+  });
+  it("explains that a collecting-only buffer waits and cannot be stopped", () => {
+    queueStateRef.current = {
+      mode: "collect",
+      status: "idle",
+      activeItemId: undefined,
+      pendingIds: [],
+      collectingIds: ["q-collect"],
+      collectDeadline: Date.now() + 5_000,
+    };
+    renderComposer("idle");
+
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Run queued messages" })).toBeNull();
+    expect(screen.getByRole("status").textContent).toMatch(
+      /Collecting 1 message; they run together in about \d+ seconds\. The collection cannot be stopped\./,
+    );
+  });
+
+  it("says Stop affects only the active message when collecting alongside it", () => {
+    queueStateRef.current = {
+      mode: "collect",
+      status: "running",
+      activeItemId: "q-active",
+      pendingIds: [],
+      collectingIds: ["q-collect"],
+      collectDeadline: Date.now() + 5_000,
+    };
+    renderComposer("idle");
+
+    expect(screen.getByRole("button", { name: "Stop" })).toBeDefined();
+    expect(screen.getByRole("status").textContent).toMatch(
+      /Collecting 1 message; they run together in about \d+ seconds\. Stop affects only the active message\./,
+    );
   });
 });
 

@@ -114,6 +114,32 @@ describe("POST /threads/:threadId/abort", () => {
     expect(await res.json()).toEqual({ error: "targetItemId is required. Send the active queue item as targetItemId." });
   });
 
+  it.each([
+    ["JSON null", "null"],
+    ["a JSON array", "[]"],
+    ["a JSON number", "5"],
+    ["a JSON string", "\"x\""],
+    ["a JSON boolean", "true"],
+  ])("requires a target object for %s", async (_name, body) => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "targetItemId is required. Send the active queue item as targetItemId." });
+  });
+
   it("is a no-op on an idle thread", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);

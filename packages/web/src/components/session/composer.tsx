@@ -1022,17 +1022,31 @@ function QueueIndicator({
 }: {
   queueState: ReturnType<typeof useQueueStateForThread>;
 }) {
+  const collecting = (queueState?.collectingIds.length ?? 0) > 0;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!collecting) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [collecting]);
+
   if (!queueState) return null;
   const parts: string[] = [];
-<<<<<<< HEAD
-=======
-  if (queueState.pendingIds.length > 0) {
-    parts.push(`${queueState.pendingIds.length} queued`);
+  if (collecting) {
+    const count = queueState.collectingIds.length;
+    const messages = count === 1 ? "message" : "messages";
+    const deadline = queueState.collectDeadline;
+    const seconds = deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now) / 1_000));
+    const wait = seconds === undefined ? "when the collection window ends" : `in about ${seconds} seconds`;
+    const canStopActive = queueState.activeItemId !== undefined;
+    parts.push(
+      canStopActive
+        ? `Collecting ${count} ${messages}; they run together ${wait}. Stop affects only the active message.`
+        : `Collecting ${count} ${messages}; they run together ${wait}. The collection cannot be stopped.`,
+    );
   }
-  if (queueState.collectingIds.length > 0) {
-    parts.push("Collecting messages");
-  }
->>>>>>> 9d9662b5d (fix: recover queued work without unsafe stop fallback)
   if (queueState.status === "paused") {
     parts.push("Paused");
   }

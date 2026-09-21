@@ -1634,6 +1634,8 @@ export interface WireQueueState {
   activeItemId?: string;
   pendingIds: string[];
   collectingIds: string[];
+  /** Earliest server timestamp when the collected messages will be merged. */
+  collectDeadline?: number;
   blockedGateId?: string;
 }
 

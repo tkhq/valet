@@ -995,7 +995,13 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (typeof body.targetItemId !== "string" || body.targetItemId.length === 0) {
+  if (
+    body === null ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    typeof body.targetItemId !== "string" ||
+    body.targetItemId.length === 0
+  ) {
     return c.json({ error: "targetItemId is required. Send the active queue item as targetItemId." }, 400);
   }
 

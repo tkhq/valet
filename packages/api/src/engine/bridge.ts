@@ -205,6 +205,7 @@ export function queueStateToWire(
       activeItemId: state.activeItemId,
       pendingIds: state.pending.map((i) => i.id),
       collectingIds: (state.collectBuffer ?? []).map((i) => i.id),
+      collectDeadline: state.collectDeadline,
       blockedGateId: state.blockedGateId,
     },
   };

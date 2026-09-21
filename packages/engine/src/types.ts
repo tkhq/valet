@@ -127,6 +127,8 @@ export interface QueueState {
   activeItemId?: string;
   pending: QueueItem[];
   collectBuffer?: QueueItem[];
+  /** Earliest durable deadline for the current collect window. */
+  collectDeadline?: number;
   blockedGateId?: string;
 }
 

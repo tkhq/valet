@@ -1894,8 +1894,11 @@ interface ThreadData {
 /**
  * QueueState is a DERIVED view, not a stored entity: computed from durable
  * queue items plus ThreadData.paused. `collectBuffer` is the items with
- * status 'collecting'; `blockedGateId` derives from the suspended turn.
- * This is the shape used in `queue_state` events and API payloads.
+ * status 'collecting'; `collectDeadline` is the earliest durable deadline in
+ * that buffer. The web composer uses it to show how long a collection-only
+ * buffer waits. It does not expose Stop for that buffer because it has no
+ * active submission to abort. `blockedGateId` derives from the suspended
+ * turn. This is the shape used in `queue_state` events and API payloads.
  */
 interface QueueState {
   threadId: string;
@@ -1904,6 +1907,7 @@ interface QueueState {
   activeItemId?: string;
   pending: QueueItem[];
   collectBuffer?: QueueItem[];
+  collectDeadline?: number;
   blockedGateId?: string;
 }
 
