@@ -10,7 +10,7 @@ import type {
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
-import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
+import { buildContentBlocks, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn } from "../transport/format.js";
@@ -317,10 +317,10 @@ async function openAndSendDM(
   const formattedText = markdownToSlackMrkdwn(text, { preserveSlackNativeSpans: true });
   const body: Record<string, unknown> = { channel: openData.channel.id, text: formattedText, mrkdwn: true };
 
-  // For long messages, use blocks so Slack doesn't split into separate threads.
-  // Prefers markdown blocks (native table/formatting support), falls back to
+  // Use blocks for tables and long messages.
+  // Prefer Markdown blocks for table rendering. Fall back to
   // section blocks for very long messages (> 12K).
-  if (text.length > SLACK_TEXT_LIMIT) {
+  if (needsContentBlocks(text)) {
     body.blocks = buildContentBlocks(text, formattedText);
     body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
@@ -1042,9 +1042,9 @@ const sendMessage = action(Type.Object({
     // transport's attribution context block on agent-authored replies).
     const ownerSlackId = ownerSlackUserId(cred);
     const hasAttribution = Boolean(ownerSlackId) && !channelId.startsWith('D');
-    const needsLongBlocks = !userBlocks && p.text.length > SLACK_TEXT_LIMIT;
+    const needsGeneratedBlocks = !userBlocks && needsContentBlocks(p.text);
 
-    if (hasAttribution || needsLongBlocks) {
+    if (hasAttribution || needsGeneratedBlocks) {
       const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
       const contentBlocks = userBlocks
         ? userBlocks.slice(0, blockBudget)
@@ -1053,7 +1053,7 @@ const sendMessage = action(Type.Object({
         contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
       }
       body.blocks = contentBlocks;
-      if (needsLongBlocks) {
+      if (needsGeneratedBlocks) {
         body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
       }
     } else if (userBlocks) {
@@ -1217,7 +1217,7 @@ const updateMessage = action(Type.Object({
       text: formattedText,
       parse: 'none',
     };
-    if (args.text.length > SLACK_TEXT_LIMIT) {
+    if (needsContentBlocks(args.text)) {
       body.blocks = buildContentBlocks(args.text, formattedText);
       body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
     } else {

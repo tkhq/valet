@@ -30,6 +30,19 @@ export const SLACK_HEADER_LIMIT = 150;
 /** Max fields in a single section block. */
 export const SLACK_SECTION_FIELD_LIMIT = 10;
 
+/** Short tables also need blocks: Slack mrkdwn cannot render pipe tables. */
+export function needsContentBlocks(text: string): boolean {
+  if (text.length > SLACK_TEXT_LIMIT) return true;
+
+  // A delimiter row is enough to choose Markdown rendering. This also preserves
+  // table examples inside code fences without parsing untrusted Markdown here.
+  return text.split(/\r?\n/).some((line) => {
+    if (!line.includes('|')) return false;
+    const cells = line.trim().replace(/^\||\|$/g, '').split('|');
+    return cells.every((cell) => /^[ \t]*:?-{3,}:?[ \t]*$/.test(cell));
+  });
+}
+
 /**
  * Split text into chunks at paragraph boundaries, keeping each chunk under maxLen.
  * Falls back to single-newline splits, then hard-splits at maxLen.
@@ -87,7 +100,9 @@ export function buildContentBlocks(
   maxBlocks: number = SLACK_MAX_BLOCKS,
 ): Record<string, unknown>[] {
   if (text.length <= SLACK_MARKDOWN_LIMIT) {
-    const markdown = linkGitHubReferencesInMarkdown(text);
+    // Action input can contain deliberate user mentions, but never broadcasts.
+    const safeText = text.replace(/<!(here|channel|everyone)(\|[^>]*)?>/g, '&lt;!$1$2>');
+    const markdown = linkGitHubReferencesInMarkdown(safeText);
     if (markdown.length <= SLACK_MARKDOWN_LIMIT) {
       return [{ type: 'markdown', text: markdown }];
     }
