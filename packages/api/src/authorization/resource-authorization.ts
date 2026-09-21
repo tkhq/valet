@@ -81,6 +81,17 @@ export class CanonicalResourceAuthorizationService implements ResourceAuthorizat
   }
 }
 
+export async function authorizeDirectResource(
+  port: ResourceAuthorizationPort,
+  context: ResourceAuthorizationContext,
+  resourceKind: Extract<ResourceKind, "session" | "assistant" | "team">,
+  operation: Extract<ResourceOperation, "update" | "delete">,
+  resource: NonNullable<ResourceAuthorizationInput["resource"]>,
+): Promise<void> {
+  const plan = await port.authorize({ ...context, resourceKind, operation, resource });
+  if (plan.resultLimit !== undefined || plan.fieldMask !== undefined || plan.redactions.length > 0 || plan.readOnly) throw new ResourceAuthorizationError("deny");
+}
+
 export function newResourceDelivery(idempotencyKey?: string): string {
   return idempotencyKey ?? randomUUID();
 }

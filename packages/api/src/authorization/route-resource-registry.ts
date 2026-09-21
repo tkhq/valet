@@ -10,6 +10,9 @@ export const RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1: Readonly<Record<string, readon
   "policy.list": ["low"], "policy.read": ["low"], "policy.create": ["medium"], "policy.update": ["medium"], "policy.delete": ["high"], "policy.approve": ["high"], "policy.publish": ["high"],
   "workflow.list": ["low"], "workflow.read": ["low"], "workflow.create": ["medium"], "workflow.update": ["medium"], "workflow.delete": ["high"], "workflow.execute": ["medium"],
   "artifact.delete": ["high"], "artifact.share": ["medium"], "artifact.publish": ["high"], "artifact.copy": ["low"],
+  "session.update": ["medium"], "session.delete": ["high"],
+  "assistant.update": ["medium"], "assistant.delete": ["high"],
+  "team.update": ["medium"], "team.delete": ["high"],
 });
 export const RESOURCE_ACCESS_REGISTRY: readonly ResourceAccessDescriptorV1[] = Object.freeze(Object.entries(RESOURCE_ACCESS_DESCRIPTOR_SEEDS_V1).map(([key, [riskLevel]]) => { const split = key.indexOf("."); const resourceKind = key.slice(0, split) as ResourceKind, operation = key.slice(split + 1) as ResourceOperation; return Object.freeze({ schemaVersion: 1 as const, resourceKind, operation, service: `resource_${resourceKind}`, actionId: `resource_${resourceKind}.${operation}`, riskLevel, safeMetadata: ["resourceId", "ownerType", "ownerId", "version"] as const }); }));
 export interface ApiRouteDescriptorV1 { readonly schemaVersion: 1; readonly method: string; readonly template: string; readonly service: string; readonly actionId: string; readonly operation: ResourceOperation; readonly riskLevel: PolicyRisk; readonly approvalSupported: boolean; readonly safeProjection: "none"; readonly obligations: readonly []; readonly audit: { readonly group: string }; readonly resourceKind?: ResourceKind; }
