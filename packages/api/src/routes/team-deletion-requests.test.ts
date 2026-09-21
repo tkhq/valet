@@ -143,22 +143,20 @@ describe("team deletion requests", () => {
     }
   });
 
-  it("gates credentials and API keys and exposes no secret fields in targets", async () => {
+  it("gates credentials, lets members revoke API keys, and hides secrets", async () => {
     await api.providers.engineCredentials.save({ type: "team", id: teamId }, "linear", { type: "api_key", apiKey: "sentinel-do-not-expose" });
     const path = `/credentials/linear?scope=team&teamId=${teamId}`;
     expect((await call(path, "DELETE")).status).toBe(403);
     expect((await call(path, "DELETE", undefined, "outsider")).status).toBe(404);
     const now = new Date();
     await api.providers.db.insert(apikey).values({ id: "delete_key", teamId, name: "Test key", key: "sentinel-key-hash", referenceId: admin, createdAt: now, updatedAt: now });
-    expect((await call(`/teams/${teamId}/api-keys/delete_key`, "DELETE")).status).toBe(403);
+    expect((await call(`/teams/${teamId}/api-keys/delete_key`, "DELETE")).status).toBe(200);
+    expect(await api.providers.db.select().from(apikey).where(eq(apikey.id, "delete_key"))).toEqual([]);
     const targets = await (await call(`${requests()}/targets`)).text();
     expect(targets).not.toContain("sentinel");
-    for (const [kind, id] of [["credential", "linear"], ["api_key", "delete_key"]]) {
-      const requestId = await submit(kind, id);
-      expect((await call(`${requests()}/${requestId}/approve`, "POST", {}, admin)).status).toBe(200);
-    }
+    const requestId = await submit("credential", "linear");
+    expect((await call(`${requests()}/${requestId}/approve`, "POST", {}, admin)).status).toBe(200);
   });
-
   it("retires every request notification when an admin deletes a team directly", async () => {
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Direct deletion", creatorUserId: admin });
     await addMember(api.providers.db, { teamId: team.id, userId: member, role: "member" });

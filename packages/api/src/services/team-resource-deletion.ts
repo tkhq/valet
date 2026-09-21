@@ -22,11 +22,12 @@ export async function deleteTeamCredential(db: AppDb, actor: Actor, teamId: stri
 }
 export async function deleteTeamApiKey(db: AppDb, actor: Actor, teamId: string, keyId: string) {
   return db.transaction(async (tx) => {
-    const admin = await lockTeamDeletionAccess(tx, actor, teamId);
+    // Team API keys are shared credentials. lockTeamDeletionAccess verifies
+    // that the caller is an organization admin or a member of this team.
+    await lockTeamDeletionAccess(tx, actor, teamId);
     const where = and(eq(apikey.teamId, teamId), eq(apikey.id, keyId));
     const [row] = await tx.select({ id: apikey.id }).from(apikey).where(where).limit(1);
     if (!row) throw new NotFoundError("api key", keyId);
-    if (!admin) throw new TeamAdminRequiredError(teamId, "api_key", keyId);
     await tx.delete(apikey).where(where);
   });
 }

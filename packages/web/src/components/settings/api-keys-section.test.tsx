@@ -16,6 +16,7 @@ import type { OrgDirectoryResponse, TeamApiKeySummary } from "@valet/api/wire";
 const createTeamKeyMutate = vi.fn();
 const createTeamKeyTarget = vi.fn();
 const createPersonalKeyMutate = vi.fn();
+const revokeTeamKeyMutate = vi.fn();
 
 /** The fields `PersonalApiKeyRow` reads off a better-auth key summary. */
 type PersonalKeyStub = {
@@ -30,6 +31,8 @@ let scope: { key: string; teamId: string | undefined } = { key: "team_1", teamId
 let teamKeys: TeamApiKeySummary[] = [];
 let personalKeys: PersonalKeyStub[] = [];
 let directory: OrgDirectoryResponse | undefined = { users: [] };
+let teamCallerRole: "admin" | "member" | null = "admin";
+let orgCallerRole: "admin" | "member" = "admin";
 
 vi.mock("~/lib/workspace-scope", () => ({
   PERSONAL: "user",
@@ -53,7 +56,7 @@ vi.mock("~/api/settings", () => ({
           externalId: null,
           createdAt: 1,
           memberCount: 2,
-          callerRole: "admin",
+          callerRole: teamCallerRole,
           defaultModel: null,
         },
         {
@@ -66,7 +69,7 @@ vi.mock("~/api/settings", () => ({
     error: null,
   }),
   useOrg: () => ({
-    data: { callerRole: "admin", features: { organizations: true } },
+    data: { callerRole: orgCallerRole, features: { organizations: true } },
     isLoading: false,
     error: null,
   }),
@@ -86,7 +89,7 @@ vi.mock("~/api/api-keys", () => ({
     isPending: false,
     error: null,
   }),
-  useRevokeTeamApiKey: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useRevokeTeamApiKey: () => ({ mutate: revokeTeamKeyMutate, isPending: false, error: null }),
 }));
 
 vi.mock("~/lib/use-copy", () => ({
@@ -123,10 +126,13 @@ function teamKey(overrides: Partial<TeamApiKeySummary> = {}): TeamApiKeySummary 
 describe("ApiKeysSection — team workspace", () => {
   beforeEach(() => {
     createTeamKeyMutate.mockClear();
+    revokeTeamKeyMutate.mockClear();
     scope = { key: "team_1", teamId: "team_1" };
     teamKeys = [];
     personalKeys = [];
     directory = { users: [] };
+    teamCallerRole = "admin";
+    orgCallerRole = "admin";
   });
 
   it("states the workspace and has no owner picker", () => {
@@ -147,6 +153,19 @@ describe("ApiKeysSection — team workspace", () => {
     fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "CI" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createTeamKeyMutate).toHaveBeenCalledWith("CI", expect.objectContaining({ onSuccess: expect.any(Function) }));
+  });
+
+  it("creates and revokes team keys as a non-admin member", () => {
+    teamCallerRole = "member";
+    orgCallerRole = "member";
+    teamKeys = [teamKey()];
+    render(<ApiKeysSection />);
+    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Member CI" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(createTeamKeyMutate).toHaveBeenCalledWith("Member CI", expect.objectContaining({ onSuccess: expect.any(Function) }));
+    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
+    expect(revokeTeamKeyMutate).toHaveBeenCalledWith("key_1", expect.objectContaining({ onSuccess: expect.any(Function) }));
   });
 
   it("names the member who created a team key", () => {

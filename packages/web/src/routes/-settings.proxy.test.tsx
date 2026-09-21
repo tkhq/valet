@@ -196,20 +196,16 @@ describe("shared personal and team onboarding", () => {
     expect(screen.getByRole("button", { name: "Create proxy key" })).toBeTruthy();
   });
 
-  it("keeps members read-only and org governance read-only even for admins", () => {
+  it("lets a non-admin member create a team proxy key", () => {
     teamId = "team-1";
     teamRole = "member";
     orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
-    const { rerender } = render(<SettingsProxyPage />);
-    expect(screen.getByRole("button", { name: "Create proxy key" }).getAttribute("aria-disabled")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    expect(teamCreate).not.toHaveBeenCalled();
+    render(<SettingsProxyPage />);
+    const button = screen.getByRole("button", { name: "Create proxy key" });
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(button);
+    expect(teamCreate).toHaveBeenCalledWith("team-1", "proxy-key", expect.anything());
     expect(personalKeyHook).not.toHaveBeenCalled();
-    expect(screen.getByText(/Only a team admin or an organization admin can create a shared key/)).toBeTruthy();
-    expect(screen.queryByRole("switch")).toBeNull();
-    orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
-    rerender(<SettingsProxyPage />);
-    expect(screen.getByRole("button", { name: "Create proxy key" }).getAttribute("aria-disabled")).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
   });
 
@@ -253,7 +249,7 @@ describe("shared personal and team onboarding", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
     const success = teamCreate.mock.calls[0][2].onSuccess;
     act(() => success({ name: "proxy-key", key: "vlt_secret" }));
-    if (failure === "role") teamRole = "member";
+    if (failure === "role") teamRole = null;
     if (failure === "keys") keysError = new Error("Denied");
     if (failure === "teams") teamError = new Error("Denied");
     if (failure === "org") orgData.error = new Error("Denied");
@@ -334,38 +330,12 @@ describe("who may create a proxy key", () => {
     expect(teamCreate).toHaveBeenCalledWith("team-1", "proxy-key", expect.anything());
   });
 
-  it("names the two admin roles and the personal route when the team member is blocked", () => {
-    teamId = "team-1";
-    teamRole = "member";
-    render(<SettingsProxyPage />);
-    const button = screen.getByRole("button", { name: "Create proxy key" });
-    // Inert, not disabled: a disabled button leaves the tab order, so a
-    // keyboard reader never lands on it and never hears the explanation.
-    expect(button).toHaveProperty("disabled", false);
-    expect(button.getAttribute("aria-disabled")).toBe("true");
-    fireEvent.click(button);
-    expect(teamCreate).not.toHaveBeenCalled();
-    const helpId = button.getAttribute("aria-describedby");
-    expect(helpId).toBeTruthy();
-    const help = document.getElementById(helpId ?? "");
-    expect(help).toBeTruthy();
-    // Who can do it, and the two actions open to the reader.
-    expect(help?.textContent).toContain("Only a team admin or an organization admin can create a shared key for this team.");
-    expect(help?.textContent).toContain("Ask an admin of this team to create the key.");
-    expect(help?.textContent).toContain("set the workspace switcher to Personal");
-    expect(screen.getByRole("link", { name: "Settings → API keys" }).getAttribute("href")).toBe("/settings/api-keys");
-  });
-
-  it("tells a blocked member that pass-through mode needs their own provider key", () => {
+  it("a non-admin member creates a shared key in pass-through mode", () => {
     teamId = "team-1";
     teamRole = "member";
     settingsResult = { data: { enabled: true, mode: "passthrough" }, isLoading: false };
     render(<SettingsProxyPage />);
-    const helpId = screen
-      .getByRole("button", { name: "Create proxy key" })
-      .getAttribute("aria-describedby");
-    const help = document.getElementById(helpId ?? "");
-    expect(help?.textContent).toContain("pass-through mode");
-    expect(help?.textContent).toContain("you must also supply your own provider key");
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    expect(teamCreate).toHaveBeenCalledWith("team-1", "proxy-key", expect.anything());
   });
 });

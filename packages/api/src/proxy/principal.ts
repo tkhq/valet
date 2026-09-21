@@ -69,7 +69,7 @@ export interface PrincipalDeps {
  * Response on any failure so the harness shows a clean message.
  *
  * Team ownership comes from the live team and the key's stored team pin.
- * The creating admin is audit data, never the billing identity.
+ * The creating member is audit data, never the billing identity.
  */
 export async function resolveProxyPrincipal(
   headers: Headers, kind: ProviderKind, deps: PrincipalDeps,
@@ -80,7 +80,7 @@ export async function resolveProxyPrincipal(
   if (!result.valid || !result.key) return wireError(kind, 401, "Invalid API key. Create a proxy key in valet Settings.");
   if (result.key.teamId !== undefined) {
     const orgId = await deps.teamOrg(result.key.teamId, result.key.id);
-    if (!orgId) return wireError(kind, 401, "Team API key is no longer valid. Ask a team admin to create a new key.");
+    if (!orgId) return wireError(kind, 401, "Team API key is no longer valid. Ask a team member to create a new key.");
     return { userId: null, teamId: result.key.teamId, orgId, keyId: result.key.id };
   }
   const orgId = await deps.userOrg(result.key.userId);

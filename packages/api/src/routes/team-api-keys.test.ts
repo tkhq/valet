@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as authModule from "../auth/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { TEAM_KEY_ADMIN_REQUIRED } from "./team-api-keys.js";
 import { isTeamMember } from "../services/teams.js";
 import { apikey, orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import type {
@@ -153,7 +152,7 @@ describe("team API keys", () => {
     expect(refusedBody.error).toContain("personal API key");
   });
 
-  it("list and revoke are admin-gated; revoke stops the key", async () => {
+  it("list and revoke stop the key", async () => {
     api = await bootTestApi({ auth: true });
     const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
@@ -185,58 +184,58 @@ describe("team API keys", () => {
     expect(dead.status).toBe(401);
   });
 
-  it("creation answers a team member with the admin rule, and admits both admin kinds", async () => {
+  it("allows a non-admin member to create and revoke a team key", async () => {
     api = await bootTestApi({ auth: true });
     const { baseUrl, providers: { db } } = api;
     const adminCookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin");
     const teamId = await createTeam(baseUrl, adminCookie, "Platform");
-
-    // 1. A plain org member who belongs to the team.
     const memberCookie = await inviteAndSignUp(baseUrl, adminCookie, "member@nowhere.test", "Member", "member");
     const memberId = await userIdByEmail(api, "member@nowhere.test");
     await db.insert(teamMembers).values({ teamId, userId: memberId, role: "member" });
 
-    const refused = await createTeamKey(baseUrl, memberCookie, teamId);
-    expect(refused.status).toBe(403);
-    const refusal = (await refused.json()) as { error: string; code?: string; teamId?: string };
-    // The contract, not the wiring: the text names the two admin roles, the
-    // ask, and the personal route. Comparing it with the constant the route
-    // returns would pass for any copy at all.
-    expect(refusal.error).toContain("team admin");
-    expect(refusal.error).toContain("organization admin");
-    expect(refusal.error).toContain("Ask an admin");
-    expect(refusal.error).toContain("Personal");
-    // The same discriminator the delete path on this resource sends.
-    expect(refusal.code).toBe("team_admin_required");
-    expect(refusal.teamId).toBe(teamId);
-    expect(await db.select().from(apikey).where(eq(apikey.teamId, teamId))).toEqual([]);
+    const createdResponse = await createTeamKey(baseUrl, memberCookie, teamId);
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json()) as CreateTeamApiKeyResponse;
+    expect(created.createdBy).toBe(memberId);
+    expect((await db.select().from(apikey).where(eq(apikey.teamId, teamId))).map((key) => key.id)).toContain(created.id);
 
-    // The same member creates a personal key without an admin. That is the
-    // action the refusal names, so it has to work.
-    const personal = await fetch(`${baseUrl}/api/auth/api-key/create`, {
+    const teamSession = await fetch(`${baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": created.key },
+      body: JSON.stringify({ workspace: await mkdtemp(join(tmpdir(), "valet-member-team-key-")) }),
+    });
+    expect(teamSession.status).toBe(201);
+    expect(((await teamSession.json()) as SessionDetail).owner).toEqual({ type: "team", id: teamId });
+
+    const personalResponse = await fetch(`${baseUrl}/api/auth/api-key/create`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: memberCookie },
-      body: JSON.stringify({ name: "proxy-key" }),
+      body: JSON.stringify({ name: "Personal script" }),
     });
-    expect(personal.status).toBe(200);
-    expect(((await personal.json()) as { key: string }).key.startsWith("vlt_")).toBe(true);
+    expect(personalResponse.status).toBe(200);
+    const personal = (await personalResponse.json()) as { key: string };
+    const personalSession = await fetch(`${baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": personal.key },
+      body: JSON.stringify({ workspace: await mkdtemp(join(tmpdir(), "valet-member-personal-key-")) }),
+    });
+    expect(personalSession.status).toBe(201);
+    expect(((await personalSession.json()) as SessionDetail).owner).toEqual({ type: "user", id: memberId });
 
-    // 2. An org member who is not on the team cannot learn that it exists.
+    const revoked = await fetch(`${baseUrl}/api/teams/${teamId}/api-keys/${created.id}`, {
+      method: "DELETE",
+      headers: { cookie: memberCookie },
+    });
+    expect(revoked.status).toBe(200);
+    expect(await db.select().from(apikey).where(eq(apikey.id, created.id))).toEqual([]);
+
+    // An org member who is not on the team cannot learn that it exists.
     const outsiderCookie = await inviteAndSignUp(baseUrl, adminCookie, "outsider@nowhere.test", "Outsider", "member");
     const hidden = await createTeamKey(baseUrl, outsiderCookie, teamId);
     expect(hidden.status).toBe(404);
     expect(((await hidden.json()) as { error: string }).error).toBe("team not found");
 
-    // 3. A team admin who is a plain org member creates the key.
-    await db
-      .update(teamMembers)
-      .set({ role: "admin" })
-      .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, memberId)));
-    const byTeamAdmin = await createTeamKey(baseUrl, memberCookie, teamId);
-    expect(byTeamAdmin.status).toBe(201);
-    expect(((await byTeamAdmin.json()) as CreateTeamApiKeyResponse).createdBy).toBe(memberId);
-
-    // 4. An org admin who never joined the team creates one too.
+    // An org admin who never joined the team retains the recovery path.
     const orgAdminCookie = await inviteAndSignUp(baseUrl, adminCookie, "orgadmin@nowhere.test", "Org Admin", "admin");
     const orgAdminId = await userIdByEmail(api, "orgadmin@nowhere.test");
     expect(await isTeamMember(db, teamId, orgAdminId)).toBe(false);
@@ -245,7 +244,7 @@ describe("team API keys", () => {
     expect(((await byOrgAdmin.json()) as CreateTeamApiKeyResponse).createdBy).toBe(orgAdminId);
   });
 
-  it("the key still works after the creating admin leaves the team", async () => {
+  it("the key still works after the creating member leaves the team", async () => {
     api = await bootTestApi({ auth: true });
     const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
@@ -289,7 +288,7 @@ describe("team API keys", () => {
     expect(((await res.json()) as SessionDetail).owner).toEqual({ type: "team", id: teamId });
   });
 
-  it("GET /api/me for a team key answers with the team, not the creating admin", async () => {
+  it("GET /api/me for a team key answers with the team, not the creating member", async () => {
     api = await bootTestApi({ auth: true });
     const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
     const teamId = await createTeam(api.baseUrl, cookie, "Platform");
@@ -364,7 +363,7 @@ describe("team API keys", () => {
     expect(dead.status).toBe(401);
   });
 
-  it.each(["team deleted", "admin demoted", "key missing", "pin throws"] as const)(
+  it.each(["team deleted", "membership removed", "key missing", "pin throws"] as const)(
     "cleans up a minted key when %s before the final pin",
     async (interleaving) => {
       let afterMint: (id: string) => Promise<void> = async () => {};
@@ -404,11 +403,11 @@ describe("team API keys", () => {
           });
           expect(deleted.status).toBe(200);
           expect(await db.select().from(teams).where(eq(teams.id, teamId))).toEqual([]);
-        } else if (interleaving === "admin demoted") {
+        } else if (interleaving === "membership removed") {
           const creatorId = rows[0]?.referenceId;
           if (!creatorId) throw new Error("Expected a key creator");
           await db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.userId, creatorId));
-          await db.update(teamMembers).set({ role: "member" }).where(eq(teamMembers.teamId, teamId));
+          await db.delete(teamMembers).where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, creatorId)));
         } else if (interleaving === "key missing") {
           await db.delete(apikey).where(eq(apikey.id, keyId));
         } else {
@@ -427,18 +426,8 @@ describe("team API keys", () => {
         headers: { "content-type": "application/json", cookie },
         body: JSON.stringify({ name: "CI" }),
       });
-      // A demotion leaves the caller on the team, so the answer names the
-      // admin rule. A deleted team stays hidden.
-      const expected = { "team deleted": 404, "admin demoted": 403, "key missing": 500, "pin throws": 500 };
+      const expected = { "team deleted": 404, "membership removed": 404, "key missing": 500, "pin throws": 500 };
       expect(response.status).toBe(expected[interleaving]);
-      if (interleaving === "admin demoted") {
-        // The lock re-check answers with the body the first check sends.
-        expect(await response.clone().json()).toMatchObject({
-          error: TEAM_KEY_ADMIN_REQUIRED,
-          code: "team_admin_required",
-          teamId,
-        });
-      }
       expect(await response.text()).not.toContain(mintedKey);
       expect(mintedId).not.toBe("");
       expect(await db.select().from(apikey).where(eq(apikey.id, mintedId))).toEqual([]);

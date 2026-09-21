@@ -19,7 +19,7 @@ export function TeamProxySettings({ teamId }: { teamId: string }) {
   }
   const team = teamsQ.data.teams.find((candidate) => candidate.id === teamId);
   if (!team) return <p role="alert">This team is unavailable. Select another workspace.</p>;
-  const canCreate = team.callerRole === "admin" || orgQ.data.callerRole === "admin";
+  const canCreate = team.callerRole !== null || orgQ.data.callerRole === "admin";
   return (
     <div className="min-w-0 max-w-full space-y-10">
       <Section title="Proxy" description={`Route Claude Code or Codex traffic through ${team.name} for spend tracking and recording.`}>
