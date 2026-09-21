@@ -6,6 +6,14 @@ metadata:
     {{- include "valet.labels" . | nindent 4 }}
 data:
   BETTER_AUTH_URL: {{ .Values.api.betterAuthUrl | quote }}
+  {{- if ne (toString .Values.api.pgPoolMax) "" }}
+  # Api-side Postgres pool size — see values.yaml (api.pgPoolMax).
+  VALET_PG_POOL_MAX: {{ .Values.api.pgPoolMax | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.api.pgPoolConnectTimeoutMs) "" }}
+  # Pool-client acquire timeout — see values.yaml (api.pgPoolConnectTimeoutMs).
+  VALET_PG_POOL_CONNECT_TIMEOUT_MS: {{ .Values.api.pgPoolConnectTimeoutMs | quote }}
+  {{- end }}
   # Injected into every sandbox pod as VALET_API_URL (see
   # packages/api/src/main.ts / host.ts) — must be reachable FROM a sandbox
   # pod, unlike BETTER_AUTH_URL (the public ingress hostname). The api
