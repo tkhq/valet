@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { WireQueueState } from "@valet/api/wire";
+import type { StreamMessage } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { ApiError } from "~/api/client";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
@@ -94,11 +95,21 @@ vi.mock("~/hooks/use-commands", () => ({
 
 import { Composer } from "./composer";
 
-function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
+function renderComposer(
+  agentStatus: "idle" | "streaming" = "idle",
+  queuedMessages: StreamMessage[] = [],
+  queuedItemCount = queuedMessages.length,
+) {
   const queryClient = new QueryClient();
   const tree = (status: "idle" | "streaming") => (
     <QueryClientProvider client={queryClient}>
-      <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus={status} />
+      <Composer
+        sessionId="orchestrator:user-1"
+        threadId="thread-1"
+        agentStatus={status}
+        queuedMessages={queuedMessages}
+        queuedItemCount={queuedItemCount}
+      />
     </QueryClientProvider>
   );
   const view = render(tree(agentStatus));
@@ -119,6 +130,66 @@ beforeEach(() => {
   abortMutateAsync.mockClear();
   addUserMessage.mockClear();
   setMessageQueueItemId.mockClear();
+});
+
+describe("Composer queued-message stack", () => {
+  it("renders queued messages in admission order and sends a selected item now", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = { ...queueState("followup"), pendingIds: ["q-1", "q-2"] };
+    const queuedMessages: StreamMessage[] = [
+      {
+        id: "message-1",
+        sessionId: "orchestrator:user-1",
+        threadId: "thread-1",
+        role: "user",
+        content: "First queued message",
+        parts: [],
+        createdAt: 1,
+        queueItemId: "q-1",
+      },
+      {
+        id: "message-2",
+        sessionId: "orchestrator:user-1",
+        threadId: "thread-1",
+        role: "user",
+        content: "Second queued message",
+        parts: [],
+        createdAt: 2,
+        queueItemId: "q-2",
+      },
+    ];
+    sendMutateAsync.mockResolvedValueOnce({ messageId: "q-3", threadId: "thread-1" });
+    renderComposer("streaming", queuedMessages);
+
+    const stack = screen.getByLabelText("Queued messages");
+    const stackText = stack.textContent ?? "";
+    expect(stackText.indexOf("First queued message")).toBeLessThan(
+      stackText.indexOf("Second queued message"),
+    );
+    const buttons = screen.getAllByRole("button", { name: "Send now" });
+    await userEvent.click(buttons[1]);
+
+    await waitFor(() =>
+      expect(sendMutateAsync).toHaveBeenCalledWith({
+        text: "",
+        threadId: "thread-1",
+        promoteItemId: "q-2",
+      }),
+    );
+    expect(setMessageQueueItemId).toHaveBeenCalledWith(
+      "orchestrator:user-1",
+      "message-2",
+      "q-3",
+    );
+  });
+
+  it("keeps unresolved pending items visible after reload", () => {
+    queueStateRef.current = { ...queueState("followup"), pendingIds: ["q-1", "q-2"] };
+    renderComposer("streaming", [], 2);
+
+    expect(screen.getByRole("status").textContent).toBe("2 queued messages are waiting.");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+  });
 });
 
 describe("Composer — compact layout", () => {

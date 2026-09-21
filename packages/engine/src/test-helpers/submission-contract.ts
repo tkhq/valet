@@ -232,6 +232,117 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(result.supersededItemIds).toContain(source.id);
     });
 
+    it("promotion steer preserves queued siblings and claims the promoted successor first", async () => {
+      const active = makeItem({ createdAt: 100, updatedAt: 100 });
+      const q1 = makeItem({ createdAt: 200, updatedAt: 200, content: "q1" });
+      const q2 = makeItem({ createdAt: 300, updatedAt: 300, content: "q2" });
+      const q3 = makeItem({ createdAt: 400, updatedAt: 400, content: "q3" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, active);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q1);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q2);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, q3);
+      await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: active.id,
+        attemptId: "att-active",
+        ownerId: "o",
+      });
+      await store.setSubmissionBlocked(
+        SESSION_ID,
+        THREAD_ID,
+        active.id,
+        true,
+        { itemId: active.id, attemptId: "att-active" },
+      );
+
+      const promoted = makeItem({
+        createdAt: 500,
+        updatedAt: 500,
+        content: q2.content,
+        metadata: { promotedFromItemId: q2.id },
+      });
+      const admitted = await store.admitSubmission(
+        SESSION_ID,
+        THREAD_ID,
+        promoted,
+        {
+          steer: true,
+          steerScope: "active-and-source",
+          promoteFromItemId: q2.id,
+        },
+      );
+
+      expect(admitted.supersededItemIds.sort()).toEqual([active.id, q2.id].sort());
+      expect((await store.getQueueItem(SESSION_ID, q1.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, q3.id))?.supersededByItemId).toBeUndefined();
+      expect((await store.getQueueItem(SESSION_ID, q2.id))?.supersededByItemId).toBe(promoted.id);
+      expect(admitted.item.createdAt).toBeLessThan(q1.createdAt);
+
+      const claimPromoted = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: promoted.id,
+        attemptId: "att-promoted",
+        ownerId: "o",
+      });
+      expect(claimPromoted?.id).toBe(promoted.id);
+      expect(
+        await store.claimSubmission({
+          sessionId: SESSION_ID,
+          threadId: THREAD_ID,
+          itemId: q1.id,
+          attemptId: "att-q1-too-soon",
+          ownerId: "o",
+        }),
+      ).toBeNull();
+      await store.reserveSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        promoted.id,
+        { outcome: "completed" },
+        { itemId: promoted.id, attemptId: "att-promoted" },
+      );
+      await store.finalizeSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        promoted.id,
+        { itemId: promoted.id, attemptId: "att-promoted" },
+      );
+
+      const claimQ1 = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: q1.id,
+        attemptId: "att-q1",
+        ownerId: "o",
+      });
+      expect(claimQ1?.id).toBe(q1.id);
+      await store.reserveSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        q1.id,
+        { outcome: "completed" },
+        { itemId: q1.id, attemptId: "att-q1" },
+      );
+      await store.finalizeSettlement(
+        SESSION_ID,
+        THREAD_ID,
+        q1.id,
+        { itemId: q1.id, attemptId: "att-q1" },
+      );
+
+      const claimQ3 = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: q3.id,
+        attemptId: "att-q3",
+        ownerId: "o",
+      });
+      expect(claimQ3?.id).toBe(q3.id);
+      expect((await store.getQueueItem(SESSION_ID, q2.id))?.status).toBe("queued");
+    });
+
     it("an idempotent replay at the cap dedups instead of throwing PendingCapError", async () => {
       const first = await store.admitSubmission(
         SESSION_ID,

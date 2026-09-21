@@ -167,6 +167,16 @@ export function SessionView({
   // live `status` events plus the durable queue state (which the WS
   // handshake seeds, so it survives a mid-turn page load or reconnect).
   const threadQueueState = useQueueStateForThread(sessionId, effectiveThreadId);
+  const queuedMessages = useMemo(() => {
+    const byItemId = new Map(
+      stream.messages
+        .filter((message) => message.role === "user" && message.queueItemId)
+        .map((message) => [message.queueItemId, message]),
+    );
+    return (threadQueueState?.pendingIds ?? [])
+      .map((itemId) => byItemId.get(itemId))
+      .filter((message) => message !== undefined);
+  }, [stream.messages, threadQueueState?.pendingIds]);
   const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
@@ -281,6 +291,8 @@ export function SessionView({
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
+            queuedMessages={queuedMessages}
+            queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
           />

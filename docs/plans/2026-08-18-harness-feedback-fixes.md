@@ -846,8 +846,8 @@ delegate pushes, branches, and PRs to a child session.
    dependent steps in one child, in order.
 3. **Check before you intervene.** child_status shows whether a child is settled or running and
    when its queue last moved — use it to decide between waiting and steering. child_read shows a
-   child's transcript; child_send delivers follow-ups — queued behind its current work by
-   default, or superseding that work with interrupt: true when the child is heading the wrong
+   child's transcript; child_send steers by default, superseding current work when the child is
+   heading the wrong direction, or queues a follow-up with queue: true when it must wait for the current
    direction. child_send also re-opens a settled child; either way its next result arrives as a
    child.settled signal.
 4. **Verify before you report.** Check the child's result against the brief before you tell

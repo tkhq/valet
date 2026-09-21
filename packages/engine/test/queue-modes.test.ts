@@ -296,10 +296,15 @@ describe("queue mode: steer (abort + new)", () => {
     faux.unregister();
   });
 
-  it("promoteQueuedItem steers the running turn without a second user entry", async () => {
+  it("promoteQueuedItem runs next while preserving queued siblings", async () => {
     const faux = registerFauxProvider({ provider: "promote-steer", tokensPerSecond: 30 });
     const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
-    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("promoted-done")]);
+    faux.setResponses([
+      fauxAssistantMessage(longText),
+      fauxAssistantMessage("promoted-q2-done"),
+      fauxAssistantMessage("q1-done"),
+      fauxAssistantMessage("q3-done"),
+    ]);
 
     const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
@@ -310,39 +315,59 @@ describe("queue mode: steer (abort + new)", () => {
       model: faux.getModel(),
     });
 
-    const r1 = await session.prompt("original");
+    const active = await session.prompt("original");
     await waitFor(() => events.some((e) => e.event.type === "text_delta"));
 
-    const r2 = await session.thread().submitPrompt("followup", { queueMode: "followup" });
-    const r3 = await session.thread().promoteQueuedItem(r2.queueItemId);
-    expect(r3.queueItemId).not.toBe(r2.queueItemId);
+    const q1 = await session.thread().submitPrompt("q1", { queueMode: "followup" });
+    const q2 = await session.thread().submitPrompt("q2", { queueMode: "followup" });
+    const q3 = await session.thread().submitPrompt("q3", { queueMode: "followup" });
+    const promotedQ2 = await session.thread().promoteQueuedItem(q2.queueItemId);
+    expect(promotedQ2.queueItemId).not.toBe(q2.queueItemId);
 
     await waitFor(async () => {
-      const items = await Promise.all([
-        store.getQueueItem(session.id, r1.queueItemId),
-        store.getQueueItem(session.id, r2.queueItemId),
-        store.getQueueItem(session.id, r3.queueItemId),
-      ]);
-      return items.every((i) => i?.status === "settled");
-    });
+      const items = await Promise.all(
+        [active, q1, q2, q3, promotedQ2].map((receipt) =>
+          store.getQueueItem(session.id, receipt.queueItemId),
+        ),
+      );
+      return items.every((item) => item?.status === "settled");
+    }, 10_000);
 
-    const a = await store.getQueueItem(session.id, r1.queueItemId);
-    expect(a?.outcome).toEqual({ outcome: "superseded" });
-    expect(a?.supersededByItemId).toBe(r3.queueItemId);
+    const activeItem = await store.getQueueItem(session.id, active.queueItemId);
+    expect(activeItem?.outcome).toEqual({ outcome: "superseded" });
+    expect(activeItem?.supersededByItemId).toBe(promotedQ2.queueItemId);
 
-    const queued = await store.getQueueItem(session.id, r2.queueItemId);
-    expect(queued?.outcome).toEqual({ outcome: "superseded" });
-    expect(queued?.supersededByItemId).toBe(r3.queueItemId);
+    const originalQ2 = await store.getQueueItem(session.id, q2.queueItemId);
+    expect(originalQ2?.outcome).toEqual({ outcome: "superseded" });
+    expect(originalQ2?.supersededByItemId).toBe(promotedQ2.queueItemId);
 
-    const promoted = await store.getQueueItem(session.id, r3.queueItemId);
+    const survivingQ1 = await store.getQueueItem(session.id, q1.queueItemId);
+    const survivingQ3 = await store.getQueueItem(session.id, q3.queueItemId);
+    expect(survivingQ1?.outcome).toEqual({ outcome: "completed" });
+    expect(survivingQ1?.supersededByItemId).toBeUndefined();
+    expect(survivingQ3?.outcome).toEqual({ outcome: "completed" });
+    expect(survivingQ3?.supersededByItemId).toBeUndefined();
+
+    const promoted = await store.getQueueItem(session.id, promotedQ2.queueItemId);
     expect(promoted?.outcome).toEqual({ outcome: "completed" });
 
     const entries = await session.readEntries("web:default");
     const userMessages = entries.filter(
-      (e): e is MessageEntry => e.type === "message" && e.role === "user",
+      (entry): entry is MessageEntry => entry.type === "message" && entry.role === "user",
     );
-    expect(userMessages.map((m) => m.content)).toEqual(["original", "followup"]);
-    expect(userMessages.map((m) => m.queueItemId)).toEqual([r1.queueItemId, r3.queueItemId]);
+    expect(userMessages.map((message) => message.content)).toEqual([
+      "original",
+      "q2",
+      "q1",
+      "q3",
+    ]);
+    expect(userMessages.filter((message) => message.content === "q2")).toHaveLength(1);
+    expect(userMessages.map((message) => message.queueItemId)).toEqual([
+      active.queueItemId,
+      promotedQ2.queueItemId,
+      q1.queueItemId,
+      q3.queueItemId,
+    ]);
 
     faux.unregister();
   });

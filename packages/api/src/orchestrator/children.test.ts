@@ -2193,7 +2193,7 @@ describe("buildChildSender", () => {
     ).toBeNull();
   });
 
-  it("steers a running child: supersedes its work, re-points the watch, and the parent gets exactly one child.settled — for the NEW submission", async () => {
+  it("steers a running child by default: supersedes its work, re-points the watch, and reports the new result", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -2217,7 +2217,7 @@ describe("buildChildSender", () => {
 
     const sender = buildChildSender(deps, watcher);
     const res = await sender(
-      { childSessionId: "child-steer", message: "stop — fix the chart instead", interrupt: true },
+      { childSessionId: "child-steer", message: "stop — fix the chart instead" },
       { parentSessionId: "parent-steer", parentThreadId: parentThread.id, actorUserId: "local-user" },
     );
     expect(res).not.toBeNull();
@@ -2254,7 +2254,7 @@ describe("buildChildSender", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
-  it("queues behind a running child by default (no interrupt): the original submission stays unsettled", async () => {
+  it("queues behind a running child with queue true: the original submission stays unsettled", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -2269,7 +2269,7 @@ describe("buildChildSender", () => {
 
     const sender = buildChildSender(deps, watcher);
     const res = await sender(
-      { childSessionId: "child-fu", message: "when you finish, also update the docs" },
+      { childSessionId: "child-fu", message: "when you finish, also update the docs", queue: true },
       { parentSessionId: "parent-fu", parentThreadId: parentThread.id, actorUserId: "local-user" },
     );
     expect(res).not.toBeNull();
@@ -2441,11 +2441,11 @@ describe("buildChildSender", () => {
     const sender = buildChildSender(deps, watcher);
     const [resA, resB] = await Promise.all([
       sender(
-        { childSessionId: "child-race", message: "first follow-up" },
+        { childSessionId: "child-race", message: "first follow-up", queue: true },
         { parentSessionId: "parent-race", parentThreadId: parentThread.id, actorUserId: "local-user" },
       ),
       sender(
-        { childSessionId: "child-race", message: "second follow-up" },
+        { childSessionId: "child-race", message: "second follow-up", queue: true },
         { parentSessionId: "parent-race", parentThreadId: parentThread.id, actorUserId: "local-user" },
       ),
     ]);

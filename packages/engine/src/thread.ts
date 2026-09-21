@@ -841,11 +841,12 @@ export class Thread {
   }
 
   /**
-   * Promote a queued followup into a steer. Admits a new item with the same
-   * content and `steer: true` so the running turn and the original queued
-   * row are superseded together. The original item is never claimed, so it
-   * does not write a second user entry. The caller remaps the optimistic
-   * bubble onto the returned `queueItemId`.
+   * Promote a queued followup into a steer. The promotion-specific steer
+   * scope supersedes the running turn and original queued source while
+   * preserving queued siblings. The successor is atomically placed at the
+   * runnable head. The original item is never claimed, so it does not write
+   * a second user entry. The caller remaps the optimistic bubble onto the
+   * returned `queueItemId`.
    */
   async promoteQueuedItem(itemId: string): Promise<PromptReceipt> {
     const store = this.session.providers.store;
@@ -870,7 +871,11 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      { steer: true, promoteFromItemId: existing.id },
+      {
+        steer: true,
+        steerScope: "active-and-source",
+        promoteFromItemId: existing.id,
+      },
     );
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);

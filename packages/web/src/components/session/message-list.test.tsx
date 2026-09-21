@@ -70,6 +70,24 @@ describe("MessageList signal routing", () => {
     ]);
     expect(screen.getByTestId("signal-card").textContent).toBe("sig-1");
   });
+
+  it("removes pending queue items from the transcript until they dispatch", () => {
+    const messages = [
+      msg({ id: "queued", role: "user", queueItemId: "q-1" }),
+      msg({ id: "settled", role: "user", queueItemId: "q-2" }),
+    ];
+    const { rerender } = render(
+      <MessageList messages={messages} threadId="t1" pendingIds={["q-1"]} />,
+    );
+
+    expect(screen.getAllByTestId("message-item").map((el) => el.textContent)).toEqual(["settled"]);
+
+    rerender(<MessageList messages={messages} threadId="t1" pendingIds={[]} />);
+    expect(screen.getAllByTestId("message-item").map((el) => el.textContent)).toEqual([
+      "queued",
+      "settled",
+    ]);
+  });
 });
 
 /**
