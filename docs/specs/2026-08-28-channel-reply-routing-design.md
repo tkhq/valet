@@ -364,5 +364,15 @@ The Slack mrkdwn formatter links `owner/repo#number` references to GitHub's
 `/issues/number` route, which also resolves pull requests. It leaves bare
 `#number` and ownerless references unchanged because they lack repository context.
 Code spans, fenced code, existing links, and URL fragments retain their content.
-This applies to complete mrkdwn messages and action text. Streamed Markdown
-chunks retain their existing formatting because references can span chunks.
+This applies to complete mrkdwn messages, action text, and generated Markdown
+content blocks. Attributed posts and long messages link references in the visible
+block as well as the notification fallback. Markdown blocks retain headings,
+bullet line breaks, tables, and original code fences. The block size check includes
+the generated links. Streamed Markdown chunks retain their existing formatting
+because references can span chunks.
+
+Optional Markdown autolinking has a synchronous work budget: at most 12,000
+characters and 256 ASCII punctuation, tab, or line-break characters. Messages
+without a `#` bypass parsing. Over-budget messages retain their original Markdown,
+including explicit links. This prevents nested link syntax from blocking the API
+event loop for seconds. The limit applies before CommonMark parsing starts.

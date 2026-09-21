@@ -10,6 +10,8 @@
  * Falls back to `section` blocks for messages exceeding the markdown limit.
  */
 
+import { linkGitHubReferencesInMarkdown } from "./transport/format.js";
+
 /** Max characters in the `text` field of chat.postMessage before we switch to blocks. */
 export const SLACK_TEXT_LIMIT = 4000;
 
@@ -55,6 +57,14 @@ export function splitText(text: string, maxLen: number): string[] {
       splitIdx = maxLen;
     }
 
+    // Keep Slack links whole when a hard split crosses a generated URL.
+    const linkStart = remaining.lastIndexOf('<', splitIdx - 1);
+    const linkEnd = remaining.indexOf('>', linkStart);
+    if (linkStart > 0 && linkEnd >= splitIdx && linkEnd - linkStart + 1 <= maxLen
+      && /^<https?:\/\/[^>\n]+>$/.test(remaining.slice(linkStart, linkEnd + 1))) {
+      splitIdx = linkStart;
+    }
+
     chunks.push(remaining.slice(0, splitIdx));
     remaining = remaining.slice(splitIdx).replace(/^\n+/, '');
   }
@@ -77,7 +87,10 @@ export function buildContentBlocks(
   maxBlocks: number = SLACK_MAX_BLOCKS,
 ): Record<string, unknown>[] {
   if (text.length <= SLACK_MARKDOWN_LIMIT) {
-    return [{ type: 'markdown', text }];
+    const markdown = linkGitHubReferencesInMarkdown(text);
+    if (markdown.length <= SLACK_MARKDOWN_LIMIT) {
+      return [{ type: 'markdown', text: markdown }];
+    }
   }
 
   // Fallback: split mrkdwn-formatted text into section blocks
