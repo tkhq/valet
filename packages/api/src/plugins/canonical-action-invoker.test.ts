@@ -101,7 +101,7 @@ describe("canonical workflow action invocation", () => {
 
   it("keeps credential secrets out of policy input, bundles, audit, and results", async () => {
     pg = await freshTestPgDb(); await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
-    const canary = "CANONICAL-SECRET-CANARY";
+    const canary = "CANONICAL-SECRET-CANARY".repeat(8_192);
     const secretCredentials: CredentialStore = {
       get: async () => ({ type: "api_key", apiKey: canary }), save: async () => {}, delete: async () => {}, list: async () => [],
     };
@@ -126,6 +126,10 @@ describe("canonical workflow action invocation", () => {
       expect(policyInput).not.toContain(canary);
       expect(JSON.stringify(result)).not.toContain(canary);
       expect(persisted).not.toContain(canary);
+      const decisions = await pg.appDb.select().from(authorizationDecisions);
+      const attempts = await pg.appDb.select().from(authorizationExecutionAttempts);
+      expect(decisions.some((row) => row.requestId.startsWith("credential-use:"))).toBe(true);
+      expect(attempts.some((row) => JSON.stringify(row.redactedResult) === '{"found":true,"authorized":true}' || JSON.stringify(row.redactedResult) === '{"authorized":true,"found":true}')).toBe(true);
     } finally { await manager.close(); }
   }, 120_000);
 });
