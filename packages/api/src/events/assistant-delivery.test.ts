@@ -10,6 +10,7 @@ import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js
 import { createAssistant, loadAssistant } from "../assistants/service.js";
 import { eq } from "drizzle-orm";
 import { assistants, users, eventDropLog } from "../schema/index.js";
+import { pluginStore } from "../services/plugin-store.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 
 const ORG = "org-1";
@@ -66,6 +67,23 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     body,
     attributes: {},
     origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const },
+  });
+
+  it("binds linked Drive scope only for a matching Slack delivery to a team", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const owner = { type: "team", id: "legal" } as const;
+    const session = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
+    for (const threadKey of ["slack:C1:1.2", "slack:C1:9.9"]) {
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner, actorUserId: USER, threadKey,
+        signal: channelSignal("review"), dispatchId: threadKey, mismatchReason: "test",
+      });
+      const thread = await session.threadByKey(threadKey);
+      if (!thread) throw new Error("delivery thread missing");
+      const binding = await pluginStore(testDb.appDb, "valet").org(ORG).get("linked-drive-threads", JSON.stringify([owner.id, session.id, thread.id]));
+      if (threadKey === "slack:C1:1.2") expect(binding?.doc).toEqual({ threadKey });
+      else expect(binding).toBeNull();
+    }
   });
 
   it("persists each delivery actor on a cached session without rebinding its owner", async () => {

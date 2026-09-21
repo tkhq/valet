@@ -109,3 +109,48 @@ Specific ID renames:
 - `drive.delete_file` -> `drive.delete_file` (same)
 
 The `unpdf` dependency (used by `drive.read_file` for PDF text extraction) can be removed from `package.json` if `read_file` is not retained.
+
+## Temporary linked-file restriction (TKAI-508)
+
+Team Google Workspace actions are restricted to directly linked files by default.
+No environment variable, team allowlist, or channel configuration is required.
+Personal and organization-owned integrations retain their current behavior.
+
+The signed Slack webhook records direct Drive and Docs links before event dispatch.
+Bot posts, edits, attachments, unfurls, and fetched history cannot grant access.
+A person must post the direct link again if it only appears in older history.
+The core plugin store records links by organization, Slack thread, and file ID.
+After existing Slack routing authorizes delivery, it binds the team assistant session and thread to that Slack thread.
+The wrapper requires this binding; creating a thread with a Slack-looking key cannot grant access.
+They survive restarts and remain available for later messages in that Slack thread.
+Deleting the Slack message does not revoke its grant.
+
+One API-owned wrapper checks every `google_workspace` action before execution.
+It covers the interactive catalog and headless workflow invoker without changing policy resolution.
+The wrapper also denies actions from another service that declares the same credential service.
+It allows only:
+
+- `drive.get_document_info` and `drive.download_file`.
+- `docs.read_document` and `docs.list_tabs`.
+- `docs.list_comments`, `docs.get_comment`, `docs.add_comment`, and `docs.reply_to_comment`.
+
+The wrapper normalizes the target to the checked file ID before execution.
+Search, folder traversal, creation, copying, moving, deletion, document text edits, Sheets actions, and new actions remain denied.
+A linked document does not authorize links inside it or its shortcut targets.
+This patch does not add binary PDF or Word extraction to the existing Google actions.
+Existing action policies and approvals still apply; an approval cannot bypass this restriction.
+
+Workflow tool and session nodes resolve their stored run origin to the same team assistant and Slack thread.
+The wrapper verifies the run's team, the definition's organization/team, and the origin session's ownership.
+Runs without an origin, unattended event-triggered runs, and ordinary child sessions cannot use this integration.
+For the supported workflow, the Slack assistant must start the workflow from the intake thread.
+Use `workflows.start_run` from that conversation so the backend records the origin.
+
+This restriction assumes trusted intake-channel participants: posting a link authorizes the connected account to access that file.
+It does not verify the sender's Google permissions, narrow OAuth scopes, or implement folder permissions.
+Use the native Google Workspace connection. Do not separately expose its token through custom MCP, sandbox environment, or 1Password secrets.
+The sandbox token cannot read the browser credential routes; the sandbox secret broker resolves 1Password references, not native OAuth credentials.
+
+Validate a linked contract, an unlinked control file, a second Slack thread, and a workflow started from the first thread.
+If rollback is needed, disconnect the team integration before removing the restriction.
+Keep the wrapper until Policies provides equivalent linked-file enforcement and passes the isolation tests.
