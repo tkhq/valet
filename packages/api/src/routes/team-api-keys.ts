@@ -72,6 +72,7 @@ async function canViewTeamKeys(
   userId: string,
   orgId: string,
 ): Promise<boolean> {
+  if (!(await isOrgMember(db, orgId, userId))) return false;
   if (await isOrgAdmin(db, orgId, userId)) return true;
   return isTeamMember(db, teamId, userId);
 }

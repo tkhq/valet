@@ -253,6 +253,9 @@ describe("team API keys", () => {
     const staleMember = await createTeamKey(baseUrl, memberCookie, teamId);
     expect(staleMember.status).toBe(404);
     expect(await db.select().from(apikey).where(and(eq(apikey.teamId, teamId), eq(apikey.name, "proxy-key")))).toHaveLength(1);
+    const staleList = await fetch(`${baseUrl}/api/teams/${teamId}/api-keys`, { headers: { cookie: memberCookie } });
+    expect(staleList.status).toBe(404);
+    expect(await staleList.json()).toEqual({ error: "team not found" });
   });
 
   it("the key still works after the creating member leaves the team", async () => {
