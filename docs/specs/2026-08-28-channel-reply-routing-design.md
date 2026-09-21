@@ -129,8 +129,12 @@ attempted origin replies become terminal failures does the host post the
 original first eligible text once as a fallback. An aborted submission never
 posts this fallback. Event redelivery cannot post it twice.
 
-**Overheard turns stay silent.** A turn with `reply="manual"` has no automatic
-reply. The agent must call a channel action when it chooses to participate.
+**Manual delivery and overheard turns.** A turn with `reply="manual"` has no
+automatic reply. Manual delivery does not itself mean the message is
+unaddressed. Slack `.message` turns receive shared guidance to stay silent by
+default for actual overheard content. They can reply to an explicit mention, a
+direct request, or a follow-up from the only other participant shown in thread
+context. The agent must call a channel action to post.
 
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the
@@ -265,19 +269,19 @@ Expected footprint:
 
 ## Invariants (alert, do not auto-repair)
 
-An addressed turn has at most one automatic assistant-text delivery: its first eligible response. Later and final text requires an explicit channel action. An overheard turn has no automatic delivery.
+An addressed turn has at most one automatic assistant-text delivery: its first eligible response. Later and final text requires an explicit channel action. A manual-delivery turn has no automatic delivery. Manual delivery does not decide whether a thread message is overheard.
 
 ## Testing
 
 - **Engine.** Channel-signal origins reach the tool context.
-- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. An overheard turn stays silent.
+- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. A manual-delivery turn has no automatic post.
   Command results and gate cards retain their existing surface checks.
 - **Slack.** `reply_to_origin` posts text exactly once.
   `reply_file_to_origin` uploads a sandbox file exactly once.
   `react_to_origin` still reacts to the triggering message.
 - **Telegram.** `telegram.reply_to_origin` posts text exactly once to the
   origin DM.
-- **Persona.** The channel instructions explain the automatic first reply and explicit later replies. They keep overheard chatter silent by default.
+- **Persona.** The channel instructions explain automatic and explicit replies. They keep actual overheard Slack content silent by default and preserve direct and two-participant follow-ups.
 - **Full `make e2e` scorecard**, per CLAUDE.md, before claiming done.
 
 ## Deviations (Part 1, as built)

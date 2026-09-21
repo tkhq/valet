@@ -69,7 +69,9 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("Later updates and the final result stay internal");
     expect(persona).toContain("reply_to_origin action for later updates and results");
     expect(persona).toContain("suppresses the automatic copy and keeps one delivery");
-    expect(persona).toContain("Stay silent unless you can add something useful");
+    expect(persona).toContain("Manual delivery prevents automatic posting");
+    expect(persona).toContain("Stay silent by default for overheard content");
+    expect(persona).toContain("only other participant's follow-up");
     expect(persona).toContain("telegram.reply_to_origin");
     expect(persona).toContain("reply_file_to_origin");
     expect(persona).not.toContain("delivery_failure");

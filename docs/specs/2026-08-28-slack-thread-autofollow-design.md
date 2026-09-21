@@ -32,13 +32,18 @@ bot on every line.
 
 - **Addressed**: a direct mention or DM. The host posts the first assistant
   text once. Later updates use `reply_to_origin`.
-- **Overheard**: a message in a followed thread without a mention. The assistant
-  stays silent unless it can add something useful. It uses
-  `reply_to_origin` or `react_to_origin` when it chooses to participate.
+- **Overheard**: a message in a followed thread that is not a direct request.
+  The assistant stays silent by default. It does not reply merely because the
+  content is relevant, general, or solicits an update.
+- **Two-participant follow-up**: when the conversation context shows that the
+  sender is the assistant's only other participant, the sender's follow-up is
+  addressed. The assistant uses `reply_to_origin` to answer it.
 
 The mode rides on `ChannelOrigin.reply: "auto" | "manual"`. The `auto` value
-enables one automatic first reply. The `manual` value keeps the turn silent
-unless an explicit Slack action posts or reacts.
+enables one automatic first reply. The `manual` value prevents automatic
+posting. It does not by itself mean the message is overheard or unaddressed:
+the origin has no participant-count field. The prompt uses the thread context
+to apply the two-participant exception.
 
 ### 2. The follow record
 
@@ -105,9 +110,15 @@ An action called with no origin returns a corrective error.
 
 ### 6. Persona guidance for a followed thread
 
-Appended when the turn is overheard: "You are following this thread. Reply with
-reply_to_origin only when you can add something useful; a light acknowledgement
-can be react_to_origin. Otherwise, do nothing." So silence is the easy default.
+The engine appends shared high-priority guidance to every Slack `.message`
+signal with `origin.reply = "manual"`. It says that manual delivery prevents
+automatic posting but does not itself mean unaddressed. It sets silence as the
+default for actual overheard content. It permits a reply only for an explicit
+@mention, a direct request, or a follow-up from the only other participant.
+The existing channel persona uses the same precedence. This guidance does not
+apply to addressed turns, DMs, schedules, non-Slack signals, or `child.settled`
+signals that inherit a Slack origin. Durable "stop until re-mentioned" state
+needs a separate followed-thread design; the guidance is not durable state.
 
 ### 7. Outcome-first wizard
 

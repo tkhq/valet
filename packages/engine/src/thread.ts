@@ -167,6 +167,15 @@ const CREDENTIAL_RELEASE_BACKOFF_MS = 4_000;
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 
+/** Turn-local guidance for manual-delivery Slack messages. `reply: "manual"`
+ * prevents automatic posting but does not decide whether content is addressed.
+ * A two-participant follow-up remains addressed by the channel convention.
+ * Durable thread muting needs state in the followed-thread model, so this
+ * instruction does not claim to provide it. */
+const SLACK_OVERHEARD_REPLY_GUIDANCE = `## Slack overheard delivery
+
+This Slack turn has manual delivery. Manual delivery prevents automatic posting. It does not by itself mean the message is unaddressed. Default to silence for overheard content. Never reply merely because the content is relevant, general, or solicits an update. Reply only to an explicit @mention, a direct request, or a follow-up from the only other participant in the thread. When the conversation context shows you are the only other participant, treat that person's follow-up as addressed and use reply_to_origin. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
+
 /** Proactive compaction stops retrying after this many consecutive failures (TKAI-306). */
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
 
@@ -3866,6 +3875,9 @@ export class Thread {
     // finally, before the role restore, so both idioms nest correctly
     // whether or not a role was applied this turn.
     const coldHintPrompt = this.applyColdHintForTurn();
+    // Followed Slack-thread signals carry `reply: "manual"`. Add the shared
+    // delivery guidance after all other turn overlays so it remains prominent.
+    const slackOverheardPrompt = this.applySlackOverheardGuidanceForTurn(item);
     // The sender line must match what entriesToAgentMessages renders for
     // this entry on reload — same gate (shared owner, non-signal), same
     // render function — or the hot and cold transcripts diverge.
@@ -3895,6 +3907,7 @@ export class Thread {
         await this.runProactiveCompaction();
       }
     } finally {
+      this.restoreSlackOverheardGuidanceAfterTurn(slackOverheardPrompt);
       this.restoreColdHintAfterTurn(coldHintPrompt);
       this.restoreRoleAfterTurn(roleOverlay);
       this.restoreRepoInstructionsAfterTurn(repoInstructionsPrompt);
@@ -3937,6 +3950,25 @@ export class Thread {
 
   private restoreColdHintAfterTurn(preHintPrompt: string): void {
     this.agent.state.systemPrompt = preHintPrompt;
+  }
+
+  /** Add the shared Slack guidance only to manual-delivery message signals. */
+  private applySlackOverheardGuidanceForTurn(item: QueueItem): string {
+    const preGuidancePrompt = this.agent.state.systemPrompt;
+    if (!isSignalContent(item.content) ||
+        !item.content.signalType.endsWith(".message") ||
+        item.content.origin?.channelType !== "slack" ||
+        item.content.origin.reply !== "manual") {
+      return preGuidancePrompt;
+    }
+    this.agent.state.systemPrompt = preGuidancePrompt
+      ? `${preGuidancePrompt}\n\n${SLACK_OVERHEARD_REPLY_GUIDANCE}`
+      : SLACK_OVERHEARD_REPLY_GUIDANCE;
+    return preGuidancePrompt;
+  }
+
+  private restoreSlackOverheardGuidanceAfterTurn(preGuidancePrompt: string): void {
+    this.agent.state.systemPrompt = preGuidancePrompt;
   }
 
   /**
