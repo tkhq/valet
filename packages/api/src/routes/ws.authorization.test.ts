@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AuthorizationRequest, PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { CreateSessionResponse, WireEvent } from "../wire/types.js";
+import { createWsFrameGate } from "./ws.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { vi.restoreAllMocks(); await api?.cleanup(); api = undefined; });
@@ -39,6 +40,20 @@ async function connect(sessionId: string, afterOpen?: (ws: WebSocket) => void): 
 }
 
 describe("WebSocket canonical authorization", () => {
+  it("bounds and serializes protected frame authorization", async () => {
+    const gate = createWsFrameGate(2);
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    expect(gate.enqueue(async () => { order.push("first-start"); await held; order.push("first-end"); })).toBe(true);
+    expect(gate.enqueue(async () => { order.push("second"); })).toBe(true);
+    expect(gate.enqueue(async () => { order.push("overflow"); })).toBe(false);
+    expect(gate.pending).toBe(2);
+    release();
+    await vi.waitFor(() => expect(gate.pending).toBe(0));
+    expect(order).toEqual(["first-start", "first-end", "second"]);
+  });
+
   it.each([
     ["session.stream.connect", "deny", "authorization_denied", 4403],
     ["session.stream.connect", "require_approval", "authorization_approval_required", 4409],
@@ -59,6 +74,24 @@ describe("WebSocket canonical authorization", () => {
     expect(outcome.closeCode).toBe(closeCode);
     expect(outcome.frames).toContainEqual(expect.objectContaining({ type: "authorization_refusal", code }));
     expect(subscribe).not.toHaveBeenCalled();
+  });
+
+  it("uses a fresh decision for each repeated frame", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession();
+    const original = api.providers.canonicalAuthorizationService.authorize.bind(api.providers.canonicalAuthorizationService);
+    const deliveries: string[] = [];
+    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request: AuthorizationRequest) => {
+      if (request.action.id !== "api_sessions.ws_pong") return original(request);
+      deliveries.push(request.requestId);
+      return effect(deliveries.length === 1 ? "allow" : "deny");
+    });
+    const outcome = await connect(sessionId, (ws) => {
+      ws.send(JSON.stringify({ type: "pong" }));
+      ws.send(JSON.stringify({ type: "pong" }));
+    });
+    expect(outcome.frames).toContainEqual(expect.objectContaining({ type: "authorization_refusal", code: "authorization_denied" }));
+    expect(new Set(deliveries).size).toBe(2);
   });
 
   it.each(["subscribe", "pong"] as const)("refuses a denied %s frame without another subscription", async (frameType) => {

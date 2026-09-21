@@ -73,6 +73,20 @@ export function createWsConnectionLifecycle() {
   };
 }
 
+export function createWsFrameGate(limit = 32) {
+  let pending = 0;
+  let tail = Promise.resolve();
+  return {
+    get pending() { return pending; },
+    enqueue(task: () => Promise<void>): boolean {
+      if (pending >= limit) return false;
+      pending += 1;
+      tail = tail.then(task, task).finally(() => { pending -= 1; });
+      return true;
+    },
+  };
+}
+
 export function registerWsRoutes(
   app: Hono<AppEnv>,
   upgradeWebSocket: UpgradeWebSocket,
@@ -91,6 +105,7 @@ export function registerWsRoutes(
 
       let seq = 0;
       const lifecycle = createWsConnectionLifecycle();
+      const frameGate = createWsFrameGate();
       // Track the most recent assistant messageId per thread so text_delta
       // events can be tagged with a real id (engine emits deltas without one).
       const activeMessageByThread = new Map<string, string>();
@@ -340,8 +355,7 @@ export function registerWsRoutes(
           }
         },
 
-        async onMessage(evt, ws) {
-          // Best-effort parse; ignore unknowns.
+        onMessage(evt, ws) {
           let frame: ClientFrame;
           try {
             const data = typeof evt.data === "string" ? evt.data : evt.data.toString();
@@ -349,25 +363,31 @@ export function registerWsRoutes(
           } catch {
             return;
           }
-          // Subscribe is implicit. Policy still audits each typed operation.
-          if (frame.type === "subscribe" || frame.type === "pong") {
+          if (frame.type !== "subscribe" && frame.type !== "pong") return;
+          const accepted = frameGate.enqueue(async () => {
+            if (lifecycle.closed) return;
             try {
               const [row] = await providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+              if (lifecycle.closed) return;
               if (!row || !(await canViewSession(providers.db, row, caller))) {
                 ws.close(4040, "session not found");
                 return;
               }
+              if (lifecycle.closed) return;
               const authorization = await authorizeWsOperation(frame.type === "subscribe" ? "session.stream.subscribe" : "session.stream.pong");
+              if (lifecycle.closed) return;
               if (authorization.envelope.decision.effect !== "allow") {
                 const approval = authorization.envelope.decision.effect === "require_approval";
                 send(ws, { type: "authorization_refusal", code: approval ? "authorization_approval_required" : "authorization_denied", message: approval ? "This WebSocket operation requires approval. Resolve the decision over REST, then reconnect." : "Policy denied this WebSocket operation.", decisionId: authorization.decisionId });
                 ws.close(approval ? 4409 : 4403, "authorization refused");
               }
             } catch {
+              if (lifecycle.closed) return;
               send(ws, { type: "authorization_refusal", code: "authorization_indeterminate", message: "Authorization failed. Reconnect before you retry." });
               ws.close(4411, "authorization indeterminate");
             }
-          }
+          });
+          if (!accepted) ws.close(4429, "too many pending frames");
         },
 
         onClose() {
