@@ -321,7 +321,7 @@ async function openAndSendDM(
   // Prefer Markdown blocks for table rendering. Fall back to
   // section blocks for very long messages (> 12K).
   if (needsContentBlocks(text)) {
-    body.blocks = buildContentBlocks(text, formattedText);
+    body.blocks = buildContentBlocks(text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
     body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
 
@@ -1048,7 +1048,7 @@ const sendMessage = action(Type.Object({
       const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
       const contentBlocks = userBlocks
         ? userBlocks.slice(0, blockBudget)
-        : buildContentBlocks(p.text, formattedText, blockBudget);
+        : buildContentBlocks(p.text, formattedText, blockBudget, { preserveSlackNativeSpans: true });
       if (hasAttribution) {
         contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
       }
@@ -1218,7 +1218,7 @@ const updateMessage = action(Type.Object({
       parse: 'none',
     };
     if (needsContentBlocks(args.text)) {
-      body.blocks = buildContentBlocks(args.text, formattedText);
+      body.blocks = buildContentBlocks(args.text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
       body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
     } else {
       body.blocks = [];

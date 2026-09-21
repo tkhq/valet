@@ -7,10 +7,11 @@
  *
  * Preferred block type is `markdown` — it renders standard markdown natively
  * (tables, headers, code blocks, etc.) without needing mrkdwn conversion.
- * Falls back to `section` blocks for messages exceeding the markdown limit.
+ * Uses `section` blocks for Slack-native spans or messages exceeding that limit.
  */
 
-import { linkGitHubReferencesInMarkdown } from "./transport/format.js";
+import { containsSlackSpans, linkGitHubReferencesInMarkdown, markdownToSlackMrkdwn, type MarkdownToSlackMrkdwnOptions } from "./transport/format.js";
+import { isTableDelimiterRow, tablesToLabeledRows } from "./table-format.js";
 
 /** Max characters in the `text` field of chat.postMessage before we switch to blocks. */
 export const SLACK_TEXT_LIMIT = 4000;
@@ -36,11 +37,7 @@ export function needsContentBlocks(text: string): boolean {
 
   // A delimiter row is enough to choose Markdown rendering. This also preserves
   // table examples inside code fences without parsing untrusted Markdown here.
-  return text.split(/\r?\n/).some((line) => {
-    if (!line.includes('|')) return false;
-    const cells = line.trim().replace(/^\||\|$/g, '').split('|');
-    return cells.every((cell) => /^[ \t]*:?-{3,}:?[ \t]*$/.test(cell));
-  });
+  return text.split(/\r?\n/).some(isTableDelimiterRow);
 }
 
 /**
@@ -70,11 +67,12 @@ export function splitText(text: string, maxLen: number): string[] {
       splitIdx = maxLen;
     }
 
-    // Keep Slack links whole when a hard split crosses a generated URL.
+    // Keep native links and mentions whole when a split crosses their spans.
     const linkStart = remaining.lastIndexOf('<', splitIdx - 1);
     const linkEnd = remaining.indexOf('>', linkStart);
     if (linkStart > 0 && linkEnd >= splitIdx && linkEnd - linkStart + 1 <= maxLen
-      && /^<https?:\/\/[^>\n]+>$/.test(remaining.slice(linkStart, linkEnd + 1))) {
+      && /^<[^<>\n]+>$/.test(remaining.slice(linkStart, linkEnd + 1))
+      && containsSlackSpans(remaining.slice(linkStart, linkEnd + 1))) {
       splitIdx = linkStart;
     }
 
@@ -88,21 +86,27 @@ export function splitText(text: string, maxLen: number): string[] {
 /**
  * Build content blocks for a message. Prefers a single `markdown` block (which
  * renders tables, headers, code blocks natively). Falls back to `section` blocks
- * with mrkdwn for messages exceeding the markdown cumulative limit.
+ * with mrkdwn for native spans or messages exceeding the markdown limit.
  *
  * @param text Raw markdown text (NOT pre-converted to Slack mrkdwn).
  * @param mrkdwnText Slack mrkdwn-formatted text, used only for section block fallback.
  * @param maxBlocks Cap the number of blocks returned.
+ * @param options Native-span policy for the labeled-row fallback.
  */
 export function buildContentBlocks(
   text: string,
   mrkdwnText: string,
   maxBlocks: number = SLACK_MAX_BLOCKS,
+  options: MarkdownToSlackMrkdwnOptions = {},
 ): Record<string, unknown>[] {
-  if (text.length <= SLACK_MARKDOWN_LIMIT) {
-    // Action input can contain deliberate user mentions, but never broadcasts.
-    const safeText = text.replace(/<!(here|channel|everyone)(\|[^>]*)?>/g, '&lt;!$1$2>');
-    const markdown = linkGitHubReferencesInMarkdown(safeText);
+  let truncatedRows = false;
+  if (containsSlackSpans(text)) {
+    // Reuse the documented mrkdwn path and its complete control-token policy.
+    const rows = tablesToLabeledRows(text, SLACK_BLOCK_TEXT_LIMIT * maxBlocks);
+    truncatedRows = rows.truncated;
+    mrkdwnText = markdownToSlackMrkdwn(rows.text, options);
+  } else if (text.length <= SLACK_MARKDOWN_LIMIT) {
+    const markdown = linkGitHubReferencesInMarkdown(text);
     if (markdown.length <= SLACK_MARKDOWN_LIMIT) {
       return [{ type: 'markdown', text: markdown }];
     }
@@ -110,7 +114,16 @@ export function buildContentBlocks(
 
   // Fallback: split mrkdwn-formatted text into section blocks
   const chunks = splitText(mrkdwnText, SLACK_BLOCK_TEXT_LIMIT);
-  return chunks.slice(0, maxBlocks).map((chunk) => ({
+  const visibleChunks = chunks.slice(0, maxBlocks);
+  if (truncatedRows || chunks.length > maxBlocks) {
+    const notice = '\n\n[Message truncated to fit Slack block limits.]';
+    const last = visibleChunks.length - 1;
+    if (last >= 0) {
+      // Reuse span-aware splitting so the notice cannot cut a mention in half.
+      visibleChunks[last] = splitText(visibleChunks[last], SLACK_BLOCK_TEXT_LIMIT - notice.length)[0] + notice;
+    }
+  }
+  return visibleChunks.map((chunk) => ({
     type: 'section',
     text: { type: 'mrkdwn', text: chunk },
   }));

@@ -962,6 +962,25 @@ describe('slack actions', () => {
     },
   );
 
+  it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
+    '%s preserves native links and mentions in readable table rows', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
+      const text = '| Owner | Doc | Channel |\n|-|-|-|\n| <@U123> <!group> | <https://example.com|the doc> | <#C0123|general> |';
+      await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
+      const init = fetchMock.mock.calls[1]?.[1];
+      if (typeof init?.body !== 'string') throw new Error('Expected a JSON request body');
+      expect(JSON.parse(init.body)).toMatchObject({ blocks: [{
+        type: 'section',
+        text: { type: 'mrkdwn', text: '*Owner*: <@U123> &lt;!group>\n*Doc*: <https://example.com|the doc>\n*Channel*: <#C0123|general>\n' },
+      }] });
+    },
+  );
+
   it('send_message converts CommonMark text to Slack mrkdwn', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));

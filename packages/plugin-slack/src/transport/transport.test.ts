@@ -1185,7 +1185,7 @@ describe("discrete sends", () => {
     const markdown = '| PR | Status |\n| --- | --- |\n| [PR](https://github.com/tkhq/mono/pull/8240) | <!channel> |';
     await transport.send(KEY, { markdown });
     const body = lastCall("chat.postMessage");
-    expect(body.blocks).toEqual([{ type: 'markdown', text: markdown.replace('<!channel>', '&lt;!channel>') }]);
+    expect(body.blocks).toEqual([{ type: 'section', text: { type: 'mrkdwn', text: '*PR*: <https://github.com/tkhq/mono/pull/8240|PR>\n*Status*: &lt;!channel>\n' } }]);
     expect(fake.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
   });
 

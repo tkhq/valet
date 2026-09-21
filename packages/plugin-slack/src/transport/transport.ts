@@ -845,7 +845,7 @@ export class SlackTransport implements ChannelTransport {
     if (needsContentBlocks(message.markdown)) {
       // One API call with blocks — never several messages (chat.postMessage is
       // limited to 1/sec/channel; see message-chunking.ts).
-      blocks = buildContentBlocks(neutralizeSlackMentions(message.markdown), formatted, SLACK_MAX_BLOCKS);
+      blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
       text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
     }
     const res = await this.postMessageAs({
