@@ -36,8 +36,8 @@ const descriptor = (kind: AuthorizationKind, label: string, fields: readonly Pol
   };
 };
 
-const delegatedContext = (kind: AuthorizationKind, obligations: PolicyContextDescriptor["obligations"]): Partial<Pick<PolicyContextDescriptor, "publishable" | "humanApproval" | "obligations" | "targets">> => ({
-  publishable: true,
+const delegatedContext = (kind: AuthorizationKind, obligations: PolicyContextDescriptor["obligations"], publishable = true): Partial<Pick<PolicyContextDescriptor, "publishable" | "humanApproval" | "obligations" | "targets">> => ({
+  publishable,
   humanApproval: false,
   obligations,
   targets: DELEGATED_EXECUTION_REGISTRY_V1.filter((entry) => entry.kind === kind).map((entry) => ({
@@ -67,7 +67,7 @@ export const POLICY_CONTEXTS = {
   "sandbox.capability": descriptor("sandbox.capability", "Sandbox capability", [field("action.id", "string", "target"), field("parameters.requested.profile", "string"), field("parameters.requested.docker", "boolean"), field("parameters.requested.browser", "boolean"), field("parameters.requested.nestedKubernetes", "boolean"), field("parameters.requested.tunnels", "boolean")], delegatedContext("sandbox.capability", ["sandbox_capabilities"])),
   "credential.use": descriptor("credential.use", "Credential use", [field("action.id", "string", "target"), field("parameters.service", "string"), field("parameters.credentialClass", "string"), field("parameters.owner.id", "string", "fact", "sensitive"), field("parameters.operation", "string")], delegatedContext("credential.use", ["credential_owner"])),
   "credential.delegate": descriptor("credential.delegate", "Credential delegation", [field("action.id", "string", "target"), field("parameters.service", "string"), field("parameters.credentialClass", "string"), field("parameters.delegateeSessionId", "string", "fact", "sensitive"), field("parameters.expiresAtMs", "timestamp")], delegatedContext("credential.delegate", ["credential_owner"])),
-  "egress.connect": descriptor("egress.connect", "Egress", [field("action.id", "string", "target"), field("parameters.destination.scheme", "string"), field("parameters.destination.host", "string", "attribute", "public", ["eq", "neq", "suffix", "in", "not_in"]), field("parameters.destination.port", "number"), field("parameters.destination.protocol", "string"), field("parameters.destination.destinationClass", "string")], delegatedContext("egress.connect", ["egress_hosts"])),
+  "egress.connect": descriptor("egress.connect", "Egress", [field("action.id", "string", "target"), field("parameters.destination.scheme", "string"), field("parameters.destination.host", "string", "attribute", "public", ["eq", "neq", "suffix", "in", "not_in"]), field("parameters.destination.port", "number"), field("parameters.destination.protocol", "string"), field("parameters.destination.destinationClass", "string")], delegatedContext("egress.connect", ["egress_hosts"], false)),
 
 } as const satisfies Record<AuthorizationKind, PolicyContextDescriptor>;
 

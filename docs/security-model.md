@@ -159,6 +159,23 @@ NET_ADMIN. The residual risk is kernel attack surface through unconfined
 seccomp and SYS_ADMIN — the same trade already accepted for rootless BuildKit
 build pods. Sandboxes that do not opt in are unchanged.
 
+## Canonical Delegation and Egress
+
+Canonical delegation currently has one enforceable edge: a root-capable
+session may create one child under an immutable delegation envelope. Child
+sessions do not receive the `task` spawner. A child, a legacy chain, a cycle,
+or an imported envelope with depth other than one fails closed as
+`nested_delegation_unsupported` before session, watch, repository, workspace,
+or sandbox effects.
+
+`egress.connect` is intentionally unavailable for policy publication and
+runtime use. Its typed result is `egress_boundary_unavailable`. Valet does not
+claim that an API-side host check controls direct sockets from a sandbox.
+Activation requires an authoritative forced proxy or network enforcement
+boundary that every sandbox connection must traverse. Until that boundary
+exists, existing network behavior is unchanged and egress policy cannot be
+published.
+
 ## Tool-Call Safety
 
 Tool and action definitions carry a `riskLevel` (`low → critical`) and may

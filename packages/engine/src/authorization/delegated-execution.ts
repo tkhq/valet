@@ -112,6 +112,19 @@ export interface CredentialDelegateAdapterInputV1 extends CommonInput {
   readonly transitive: false;
 }
 
+export class EgressBoundaryUnavailableError extends Error {
+  readonly code = "egress_boundary_unavailable";
+  constructor() {
+    super("Canonical egress authorization requires an authoritative forced-proxy or network boundary.");
+    this.name = "EgressBoundaryUnavailableError";
+  }
+}
+
+/** PR12 temporary contract: no caller may treat a host-only decision as enforcement. */
+export function assertEgressBoundaryAvailable(): never {
+  throw new EgressBoundaryUnavailableError();
+}
+
 export interface EgressConnectAdapterInputV1 extends CommonInput {
   readonly sessionId: string;
   readonly operation: "connect" | "redirect" | "listen" | "tunnel";
@@ -160,8 +173,8 @@ export function adaptCredentialDelegate(input: CredentialDelegateAdapterInputV1)
 }
 
 export function adaptEgressConnect(input: EgressConnectAdapterInputV1): DelegatedExecutionAdapterOutputV1 {
-  common(input); validId(input.sessionId); const destination = normalizeEgressDestination(input.destination);
-  return output(input, "egress.connect", `egress.${input.operation}`, "egress", "high", { operation: input.operation, destination });
+  common(input); validId(input.sessionId); normalizeEgressDestination(input.destination);
+  return assertEgressBoundaryAvailable();
 }
 
 export function normalizeEgressDestination(value: EgressConnectAdapterInputV1["destination"]): JsonObject {

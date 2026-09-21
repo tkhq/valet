@@ -10,6 +10,7 @@ import {
   assertOneLevelDelegationEnvelope,
   buildDelegatedExecutionObligationPlan,
   DELEGATED_EXECUTION_REGISTRY_V1,
+  EgressBoundaryUnavailableError,
   normalizeEgressDestination,
   type DelegationEnvelopeV1,
 } from "../src/authorization/index.js";
@@ -94,6 +95,7 @@ describe("delegated execution adapters", () => {
     for (const host of ["127.0.0.1", "localhost", "xn--e1afmkfd.xn--p1ai", "a..example.com", "[::1]"]) {
       expect(() => adaptEgressConnect({ ...common, sessionId: "session_1", operation: "connect", destination: { scheme: "https", protocol: "https", host, port: 443, destinationClass: "external" } })).toThrow(/invalid_destination/);
     }
+    expect(() => adaptEgressConnect({ ...common, sessionId: "session_1", operation: "connect", destination: { scheme: "https", protocol: "https", host: "api.example.com", port: 443, destinationClass: "external" } })).toThrow(EgressBoundaryUnavailableError);
   });
 
   it("fails closed on nested or malformed delegation", () => {
