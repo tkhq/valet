@@ -35,7 +35,12 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AttentionEvent } from "../orchestrator/attention.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
-import { ChannelHost, type ChannelHostDeps } from "./host.js";
+import {
+  ChannelHost,
+  FINAL_DELIVERY_RETRY_DELAY_MS,
+  MAX_FINAL_DELIVERY_RETRIES,
+  type ChannelHostDeps,
+} from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 
 const ORG_ID = "local-org";
@@ -502,7 +507,7 @@ describe("ChannelHost outbound delivery", () => {
     ]);
   });
 
-  it("retries final fallback after a transport failure and then deduplicates", async () => {
+  it("retries final fallback after a transport failure without another event", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const queueItemId = "qi-final-retry";
@@ -537,14 +542,10 @@ describe("ChannelHost outbound delivery", () => {
       event: { type: "message_end" as const, threadId, messageId: "final-retry-result", reason: "end_turn" as const },
     };
     await eventStream.append(finalEvent, `final-retry-failure-${randomUUID()}`);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
-
-    await eventStream.append(finalEvent, `final-retry-success-${randomUUID()}`);
     await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
       "I am checking",
       "The work is complete",
-    ]));
+    ]), { timeout: FINAL_DELIVERY_RETRY_DELAY_MS * 4 });
 
     await eventStream.append(finalEvent, `final-retry-redelivery-${randomUUID()}`);
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -552,6 +553,45 @@ describe("ChannelHost outbound delivery", () => {
       "I am checking",
       "The work is complete",
     ]);
+  });
+
+  it("stops retrying final fallback after the retry limit", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-final-retry-exhausted";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } },
+      }),
+      {
+        type: "message", id: "final-exhausted-ack", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId,
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-exhausted-ack", reason: "end_turn" } },
+      `final-exhausted-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: "final-exhausted-result", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+    }]);
+
+    fakeTransport.sendFailures = MAX_FINAL_DELIVERY_RETRIES + 1;
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-exhausted-result", reason: "end_turn" } },
+      `final-exhausted-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sendFailures).toBe(0), {
+      timeout: FINAL_DELIVERY_RETRY_DELAY_MS * (MAX_FINAL_DELIVERY_RETRIES + 3),
+    });
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS * 2));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
   });
 
   it("keeps an explicit later reply and does not auto-post the final result", async () => {
