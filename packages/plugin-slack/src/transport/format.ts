@@ -66,8 +66,29 @@ export function escapeMrkdwn(text: string): string {
 
 const GITHUB_REFERENCE = /\[[^\]]*\]\([^\n]*?\)|(?:&lt;|<)[^>\n]*>|https?:\/\/[^\s<>]+|(?<![\w./:@\\-])([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?)\/([a-zA-Z0-9_.-]+)#([1-9][0-9]*)(?![\w/#])/g;
 
+/** Bound optional autolinking before the synchronous CommonMark parser runs.
+ * Nested link syntax can take quadratic work even within Slack's size limit.
+ * Preserve complex input verbatim; explicit links still render in Slack.
+ */
+function withinAutolinkBudget(text: string): boolean {
+  if (text.length > 12_000 || !text.includes("#")) return false;
+  let punctuation = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    // All ASCII punctuation, tabs, and line breaks can affect Markdown syntax.
+    if ((code >= 33 && code <= 47) || (code >= 58 && code <= 64)
+      || (code >= 91 && code <= 96) || (code >= 123 && code <= 126)
+      || code === 9 || code === 10 || code === 13) {
+      punctuation += 1;
+      if (punctuation > 256) return false;
+    }
+  }
+  return true;
+}
+
 /** Link only Markdown text nodes, preserving the original source layout. */
 export function linkGitHubReferencesInMarkdown(text: string): string {
+  if (!withinAutolinkBudget(text)) return text;
   const tree = fromMarkdown(text);
   type MarkdownNode = typeof tree | (typeof tree.children)[number];
   const edits: { start: number; end: number; text: string }[] = [];
