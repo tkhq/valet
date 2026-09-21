@@ -94,6 +94,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { canonicalInteractivePolicyResolver } from "../authorization/canonical-interactive-resolver.js";
 import { canonicalBuiltinPolicyResolver } from "../authorization/canonical-builtin-resolver.js";
+import { withSandboxCapabilityAuthorization } from "../authorization/sandbox-capability-provider.js";
 import {
   agentSessions,
   orgs,
@@ -728,6 +729,13 @@ export class EngineHost {
   private builtinPolicyResolverInstance: BuiltinPolicyResolver | null = null;
 
   constructor(private readonly opts: EngineHostOpts) {
+    if (opts.db && opts.canonicalAuthorizationService) {
+      opts.sandboxProvider = withSandboxCapabilityAuthorization(opts.sandboxProvider, {
+        db: opts.db,
+        engineStore: opts.engineStore,
+        authorization: opts.canonicalAuthorizationService,
+      });
+    }
     const idleMinutes = opts.idleMinutes ?? 0;
     if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
       this.sweepInterval = setInterval(() => {

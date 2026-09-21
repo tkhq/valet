@@ -699,7 +699,7 @@ else := bundle if { true }
 
 execution_default := {"id":"standard.delegation.create","mode":"allow","modeRank":1,"source":"execution"} if { input.kind == "delegation.create" }
 else := {"id":"standard.agent.signal","mode":"allow","modeRank":1,"source":"execution"} if { input.kind == "agent.signal" }
-else := {"id":"standard.sandbox.bounded","mode":"allow","modeRank":1,"source":"execution"} if { input.kind == "sandbox.capability"; input.action.id in {"sandbox.provision","sandbox.replace","sandbox.profile"}; input.action.parameters.requested.profile == "headless"; input.action.parameters.requested.docker == false; input.action.parameters.requested.browser == false; input.action.parameters.requested.nestedKubernetes == false; input.action.parameters.requested.tunnels == false; count(input.action.parameters.requested.ports) == 0; count(input.action.parameters.requested.capabilities) == 0 }
+else := {"id":"standard.sandbox.bounded","mode":"allow","modeRank":1,"source":"execution"} if { input.kind == "sandbox.capability"; input.action.id in {"sandbox.provision","sandbox.replace","sandbox.profile"}; input.action.parameters.requested == input.action.parameters.effective; input.action.parameters.requested.nestedKubernetes == false; input.action.parameters.requested.tunnels == false; count(input.action.parameters.requested.ports) == 0 }
 else := {"id":"standard.credential.use","mode":"allow","modeRank":1,"source":"execution"} if { input.kind == "credential.use" }
 else := {"id":"standard.privilege_expansion","mode":"deny","modeRank":3,"source":"execution"} if { input.kind in {"sandbox.capability","credential.delegate","egress.connect"} }
 else := {"id":"standard.execution.deny","mode":"deny","modeRank":3,"source":"execution"} if { true }

@@ -23,12 +23,13 @@ import {
   type SandboxStatus,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, authorizationDecisions, authorizationExecutionAttempts } from "../schema/index.js";
 
 /** Records every `SandboxCreateOpts` it's asked to create a sandbox with —
  * everything else delegates to `VirtualSandbox`/a trivial in-memory map,
  * mirroring `gateway-proxy.test.ts`'s `GatewayTestSandboxProvider`. */
 class RecordingSandboxProvider implements SandboxProvider {
+  constructor(private readonly supportsDocker = true) {}
   readonly backend = "recording-test";
   readonly createCalls: SandboxCreateOpts[] = [];
   private sandboxes = new Map<string, VirtualSandbox>();
@@ -41,6 +42,7 @@ class RecordingSandboxProvider implements SandboxProvider {
       tunnels: false,
       warmPool: false,
       hibernation: false,
+      dockerSupport: this.supportsDocker,
       customImage: false,
       coldStartEstimateMs: 0,
     };
@@ -109,6 +111,10 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     for (const call of provider.createCalls) {
       expect(call.image).toBe("ghcr.io/example/sandbox:full");
     }
+    const decisions = await api.providers.db.select().from(authorizationDecisions);
+    const attempts = await api.providers.db.select().from(authorizationExecutionAttempts);
+    expect(decisions.some((row) => row.requestId.startsWith("sandbox-create:") && row.effect === "allow")).toBe(true);
+    expect(attempts.some((row) => row.outcome === "completed" && JSON.stringify(row.redactedResult) === '{"authorized":true}')).toBe(true);
   });
 
   it("leaves SandboxCreateOpts.image undefined when no defaultImage is configured", async () => {
@@ -267,6 +273,17 @@ describe("EngineHost defaultImage → SandboxCreateOpts.image", () => {
     expect(provider.createCalls[0]!.docker).toBe(true);
     // And the profile stays headless — only the image lineage changes.
     expect(provider.createCalls[0]!.profile).toBe("headless");
+  });
+
+  it("rejects Docker before provider create when the provider cannot enforce it", async () => {
+    const provider = new RecordingSandboxProvider(false);
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = "unsupported-docker";
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({ id: sessionId, userId: "local-user", orgId: "local-org", workspace: "/tmp/unsupported-docker", status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", docker: true, createdAt: now, updatedAt: now });
+    const session = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp/unsupported-docker", docker: true });
+    await expect(session.attachment.ensureReady({ timeoutMs: 500 })).rejects.toThrow();
+    expect(provider.createCalls).toEqual([]);
   });
 
   it("falls through to defaultImage when defaultImages is not set (backwards compat)", async () => {

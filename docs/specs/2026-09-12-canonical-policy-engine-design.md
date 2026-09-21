@@ -811,7 +811,9 @@ The `task`, `child_read`, `child_send`, and cross-orchestrator signal paths each
 
 Built-in tools go through the same pre-execution adapter as plugin actions. File and shell tools can use capability decisions rather than action-specific policy. The local sandbox remains the enforcement boundary for filesystem and process access.
 
-Sandbox creation requests authorize profile, Docker, CPU, memory, image, mounts, terminal access, and provider-specific capabilities. Credential decisions bind service, credential owner, delegation source, session or workflow owner, and requested use. Secret material is resolved only after an allow decision and never enters policy input.
+The API authorizes sandbox creation at the `SandboxProvider.create` boundary. This boundary covers initial provision and replacement. The request includes requested and effective profile, resource class, Docker, browser, tunnel, port, and capability values. The provider must advertise support for each enforced capability. An unsupported Docker request fails before provider creation. Policy obligations can only reduce the profile and Docker settings. The API reserves execution immediately before provider creation. It stores only a bounded completion marker.
+
+Credential decisions bind service, credential owner, delegation source, session or workflow owner, and requested use. Secret material is resolved only after an allow decision and never enters policy input.
 
 Egress decisions bind normalized scheme, host, port, action, session, and declared scope. DNS resolution and network enforcement remain in the egress control. Policy supplies the allowed destination and obligations. Rebinding, redirects, and IP-range checks remain enforcement concerns.
 
