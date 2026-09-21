@@ -28,6 +28,15 @@ api:
 
   port: 8787
 
+  # Postgres connection pool for the api process. pgPoolMax maps to
+  # VALET_PG_POOL_MAX (api default 30). pgPoolConnectTimeoutMs maps to
+  # VALET_PG_POOL_CONNECT_TIMEOUT_MS (api default 30000) — how long a query
+  # waits for a free pool client before it errors; 0 waits forever. Empty →
+  # omit the env vars and use the api defaults. Keep pgPoolMax below the
+  # database's max_connections minus its reserved/superuser slots.
+  pgPoolMax: ""
+  pgPoolConnectTimeoutMs: ""
+
   # Requests cover the measured usage: 0.12 CPU cores and 880 MiB of memory.
   resources:
     requests:

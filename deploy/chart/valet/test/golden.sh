@@ -176,6 +176,25 @@ if grep -q 'name: valet-postgres' "$TMP_DIR/external.yaml"; then
 fi
 pass "external render: DATABASE_URL from externalDatabase.url, bundled postgres resources absent"
 
+# --- api pg pool env: omitted by default, rendered when set --------------
+if grep -q 'VALET_PG_POOL_MAX' "$TMP_DIR/bundled.yaml"; then
+  fail "default render: VALET_PG_POOL_MAX rendered with empty api.pgPoolMax"
+fi
+if grep -q 'VALET_PG_POOL_CONNECT_TIMEOUT_MS' "$TMP_DIR/bundled.yaml"; then
+  fail "default render: VALET_PG_POOL_CONNECT_TIMEOUT_MS rendered with empty api.pgPoolConnectTimeoutMs"
+fi
+pass "default render: pg pool env omitted (api defaults apply)"
+
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set api.pgPoolMax=50 \
+  --set api.pgPoolConnectTimeoutMs=0 \
+  > "$TMP_DIR/pg-pool.yaml"
+grep -q 'VALET_PG_POOL_MAX: "50"' "$TMP_DIR/pg-pool.yaml" \
+  || fail "pool render: VALET_PG_POOL_MAX not rendered from api.pgPoolMax"
+grep -q 'VALET_PG_POOL_CONNECT_TIMEOUT_MS: "0"' "$TMP_DIR/pg-pool.yaml" \
+  || fail "pool render: explicit api.pgPoolConnectTimeoutMs=0 (no timeout) not rendered"
+pass "pool render: pg pool env wired from api.pgPoolMax / api.pgPoolConnectTimeoutMs"
+
 # --- VALET_SANDBOX_API_URL: pod-reachable in-cluster Service DNS ---------
 grep -q 'VALET_SANDBOX_API_URL: "http://valet-api.default.svc.cluster.local:80"' "$TMP_DIR/bundled.yaml" \
   || fail "ConfigMap VALET_SANDBOX_API_URL is not the api Service's in-cluster DNS name"

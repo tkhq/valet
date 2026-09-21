@@ -213,6 +213,37 @@ export function shouldSeedLocalIdentity(authConfigured: boolean): boolean {
   return !authConfigured;
 }
 
+/**
+ * Pool size for the `DATABASE_URL` path (`VALET_PG_POOL_MAX`, default 30).
+ * pg's own default of 10 saturates under the api's background pollers: the
+ * agents-dev incident of 2026-09-21 measured a steady ~9,000-deep pool wait
+ * queue (~4.6s per checkout), which turned every authenticated request into
+ * 15-40s of sequential queue waits. Zero, negative, or non-numeric values
+ * fall back to the default — a pool with no capacity cannot serve boot.
+ */
+export function resolvePgPoolMax(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_PG_POOL_MAX;
+  if (raw === undefined || raw === "") return 30;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return 30;
+  return Math.floor(n);
+}
+
+/**
+ * How long a query waits for a free pool client before it errors
+ * (`VALET_PG_POOL_CONNECT_TIMEOUT_MS`, default 30s, maps to pg's
+ * `connectionTimeoutMillis`). pg's default of 0 waits forever, so pool
+ * exhaustion presents as an unbounded silent hang instead of an error that
+ * names the cause. Zero, negative, or non-numeric → 0 (no timeout).
+ */
+export function resolvePgPoolConnectTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_PG_POOL_CONNECT_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return 30_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+
 export const LOCAL_USER = {
   id: "local-user",
   email: "local@dev",
@@ -238,7 +269,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   let source: Pool | PGlite;
   if (opts.databaseUrl) {
-    source = new Pool({ connectionString: opts.databaseUrl });
+    source = new Pool({
+      connectionString: opts.databaseUrl,
+      max: resolvePgPoolMax(process.env),
+      connectionTimeoutMillis: resolvePgPoolConnectTimeoutMs(process.env),
+    });
   } else {
     mkdirSync(opts.pgDataDir, { recursive: true });
     // Bundled single-binary: PGlite's default `import.meta.url`-relative wasm
