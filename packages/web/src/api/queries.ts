@@ -512,6 +512,12 @@ export function useAbortThread(sessionId: string) {
   });
 }
 
+export function useResumeThread(sessionId: string) {
+  return useMutation<{ ok: true }, Error, { threadId: string }>({
+    mutationFn: ({ threadId }) => api.resumeThread(sessionId, threadId),
+  });
+}
+
 // ── Notification preferences (web delivery, Phase 4 decision 19/22) ─────
 
 export function useNotificationPreferences(

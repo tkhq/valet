@@ -967,9 +967,31 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const thread = engineSession.threadById(threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
+  const rawBody = await c.req.text();
+  if (rawBody.trim().length === 0) {
+    // Clients loaded before target-bound Stop cannot identify the turn that
+    // the gesture saw. Never guess: a delayed bodyless retry could otherwise
+    // abort the queued successor. The durable error event gives those tabs a
+    // visible reload instruction instead of only a rejected fetch in console.
+    await engineSession.emit({
+      type: "error",
+      threadId,
+      code: "client_update_required",
+      error: "Valet was updated. Reload this page, then select Stop again.",
+      recoverable: true,
+    });
+    return c.json(
+      {
+        error: "This Stop request came from an older client.",
+        corrective: "Reload this page, then select Stop again.",
+      },
+      409,
+    );
+  }
+
   let body: AbortThreadRequest;
   try {
-    body = (await c.req.json()) as AbortThreadRequest;
+    body = JSON.parse(rawBody) as AbortThreadRequest;
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
@@ -978,6 +1000,21 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   }
 
   await thread.interrupt(body.targetItemId);
+  return c.json({ ok: true });
+});
+
+// A queue can be busy without an active Stop target while paused or between
+// durable claims. This control resumes a paused queue and kicks an unpaused
+// queue without stamping abort intent on any submission.
+messagesRouter.post("/:id/threads/:threadId/resume", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { engineSession } = result;
+
+  const threadId = c.req.param("threadId");
+  if (!engineSession.threadById(threadId)) return c.json({ error: "thread not found" }, 404);
+
+  await engineSession.resume({ threadId });
   return c.json({ ok: true });
 });
 

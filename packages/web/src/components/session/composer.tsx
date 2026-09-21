@@ -8,9 +8,9 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { ArrowUp, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, Paperclip, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
-import { useAbortThread, useSendPrompt } from "~/api/queries";
+import { useAbortThread, useResumeThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
 import {
   queueBusy,
@@ -256,6 +256,7 @@ export function Composer({
   }, [prefillNonce]);
   const send = useSendPrompt(sessionId);
   const abort = useAbortThread(sessionId);
+  const resume = useResumeThread(sessionId);
   // The textarea disables while a send is in flight, which drops focus to
   // <body>. Refocus when the send settles so the user can type the next
   // message or command immediately (covers Enter sends and Send clicks).
@@ -646,6 +647,16 @@ export function Composer({
     }
   }
 
+  async function runQueue() {
+    if (!threadId || resume.isPending) return;
+    setSubmitError(null);
+    try {
+      await resume.mutateAsync({ threadId });
+    } catch (err) {
+      setSubmitError(apiErrorDetail(err, "The queue did not start. Try again."));
+    }
+  }
+
   // Escape interrupts the running turn — parity with the Stop button —
   // from anywhere on the chat tab, not just the textarea. Window-level
   // because focus often sits outside the textarea mid-turn (it disables
@@ -935,7 +946,7 @@ export function Composer({
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
               </span>
             </span>
-            {working && (
+            {working && queueState?.activeItemId && (
               <Button
                 type="button"
                 variant="secondary"
@@ -945,12 +956,27 @@ export function Composer({
                   expanded ? "px-3" : "w-11 p-0",
                 )}
                 onClick={() => void stop()}
-                disabled={!threadId || !queueState?.activeItemId || abort.isPending}
+                disabled={!threadId || abort.isPending}
                 aria-label="Stop"
                 title="Stop (Esc)"
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
                 <span className={cn(!expanded && "sr-only")}>Stop</span>
+              </Button>
+            )}
+            {working && !queueState?.activeItemId && (queueState?.pendingIds.length ?? 0) > 0 && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="lg"
+                className={cn("h-11 shrink-0 rounded-full", expanded ? "px-3" : "w-11 p-0")}
+                onClick={() => void runQueue()}
+                disabled={!threadId || resume.isPending}
+                aria-label="Run queued messages"
+                title="Run queued messages"
+              >
+                <Play className="h-3.5 w-3.5 fill-current" aria-hidden />
+                <span className={cn(!expanded && "sr-only")}>Run queue</span>
               </Button>
             )}
             <Button
@@ -998,11 +1024,20 @@ function QueueIndicator({
 }) {
   if (!queueState) return null;
   const parts: string[] = [];
+<<<<<<< HEAD
+=======
+  if (queueState.pendingIds.length > 0) {
+    parts.push(`${queueState.pendingIds.length} queued`);
+  }
+  if (queueState.collectingIds.length > 0) {
+    parts.push("Collecting messages");
+  }
+>>>>>>> 9d9662b5d (fix: recover queued work without unsafe stop fallback)
   if (queueState.status === "paused") {
-    parts.push("paused");
+    parts.push("Paused");
   }
   if (parts.length === 0) return null;
   return (
-    <div className="mb-2 text-xs text-muted">{parts.join(" • ")}</div>
+    <div role="status" className="mb-2 text-xs text-muted">{parts.join(" • ")}</div>
   );
 }

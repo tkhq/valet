@@ -11,7 +11,7 @@
  *     abort route against it after the item is running, asserting the
  *     submission settles `aborted` end-to-end through a live claim.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { CreateSessionResponse, CreateThreadResponse, SendPromptResponse } from "../wire/types.js";
 
@@ -56,6 +56,43 @@ describe("POST /threads/:threadId/abort", () => {
 
     const res = await abortTurn(api.baseUrl, sessionId, "nope", "item-1");
     expect(res.status).toBe(404);
+  });
+
+  it("rejects a legacy bodyless Stop with a visible reload event and never guesses a target", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+    await thread.pause();
+    const successor = await thread.submitPrompt("successor", {});
+    const interrupt = vi.spyOn(thread, "interrupt");
+    const emit = vi.spyOn(engineSession, "emit");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/abort`, {
+      method: "POST",
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "This Stop request came from an older client.",
+      corrective: "Reload this page, then select Stop again.",
+    });
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith({
+      type: "error",
+      threadId: thread.id,
+      code: "client_update_required",
+      error: "Valet was updated. Reload this page, then select Stop again.",
+      recoverable: true,
+    });
+    const item = await api.providers.engineStore.getQueueItem(sessionId, successor.queueItemId);
+    expect(item?.status).toBe("queued");
+    expect(item?.abortRequestedAt).toBeUndefined();
+    await thread.abort();
   });
 
   it("requires the queue item captured by the Stop gesture", async () => {
@@ -113,6 +150,33 @@ describe("POST /threads/:threadId/abort", () => {
     const item = await api.providers.engineStore.getQueueItem(sessionId, receipt.queueItemId);
     expect(item?.status).toBe("queued");
     expect(item?.abortRequestedAt).toBeUndefined();
+    await thread.abort();
+  });
+
+  it("kicks an already-unpaused queue without aborting its item", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+    // Suppress submit's automatic kick so the route receives the exact
+    // unpaused-but-queued recovery state shown by the web control.
+    const kick = vi.spyOn(thread, "kick").mockResolvedValue();
+    const receipt = await thread.submitPrompt("say hello", {});
+    kick.mockClear();
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/resume`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(kick).toHaveBeenCalledOnce();
+    expect((await thread.currentQueueState()).status).toBe("queued");
+    expect((await api.providers.engineStore.getQueueItem(sessionId, receipt.queueItemId))?.abortRequestedAt)
+      .toBeUndefined();
     await thread.abort();
   });
 

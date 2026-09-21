@@ -500,7 +500,7 @@ The reachability graph is closed and authorized at call time: a thread may read 
 - `thread.prompt(text, opts)` — submit a prompt
 - `thread.interrupt(targetItemId)` — abort the active prompt and immediately start the next queued prompt unless the thread is paused
 - `thread.abort()` — abort the active prompt and clear this thread's queue during teardown
-- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
+- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue; `resume()` also retries an unpaused queue with no local claim
 - `thread.skill(name, opts)` — invoke a named skill
 - `thread.shell(command)` — execute a shell command (recorded in history)
 - `thread.readThread(key)` — read messages from a sibling thread
@@ -1177,7 +1177,7 @@ On restore, the engine reloads the blocked thread, reloads the decision gate, an
 **Controls:**
 - `thread.interrupt(targetItemId)` — abort only the active prompt and preserve this thread's queue; start its next prompt unless paused
 - `thread.abort()` — abort all unsettled work on this thread during teardown
-- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue
+- `thread.pause()` / `thread.resume()` — freeze/unfreeze this thread's queue; `resume()` also retries an unpaused queue with no local claim
 - `session.abort()` — abort all threads
 - `session.pause()` / `session.resume()` — freeze/unfreeze all thread queues
 - Session-wide idle = all threads idle
@@ -2321,7 +2321,7 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/prompt` | Prompt a specific thread |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/abort` | Interrupt the active turn named by `targetItemId` and preserve queued submissions |
 | `POST` | `/api/sessions/:sessionId/threads/:threadId/pause` | Pause this thread |
-| `POST` | `/api/sessions/:sessionId/threads/:threadId/resume` | Resume this thread |
+| `POST` | `/api/sessions/:sessionId/threads/:threadId/resume` | Resume this thread and retry its durable queue |
 | `GET` | `/api/sessions/:sessionId/decision-gates` | List pending and recent terminal gates |
 | `POST` | `/api/sessions/:sessionId/decision-gates/:gateId/resolve` | Resolve a pending gate |
 | `POST` | `/api/sessions/:sessionId/decision-gates/:gateId/withdraw` | Withdraw a pending gate |
@@ -2333,6 +2333,10 @@ The shared API package owns route behavior. Adapters own authentication middlewa
 | `GET`/`POST` | `/api/admin/submissions...` | Operator surface (required for V1): list submissions with lifecycle state, force-settle a wedged submission, inspect leases |
 
 Prompt routes accept the same `PromptOptions` shape as the engine API. WebSocket prompt/control messages are optional conveniences over the same route semantics; they must not define separate behavior.
+
+The thread abort request contains the `targetItemId` that was active when the user selected Stop. The engine stamps abort intent only when that item is still `running` or `blocked_on_decision_gate`. A delayed retry cannot target a successor. During a rolling deploy, a bodyless request from an older client returns `409` and emits `client_update_required`. The client must reload before it selects Stop again. The server must not infer a target for a bodyless request.
+
+The thread resume route clears a paused state and starts the durable queue. It also retries an unpaused queue that has no local claim. This recovery action does not stamp abort intent on queued or collecting items.
 
 ### Cloudflare Adapter (`packages/adapter-cloudflare/`)
 

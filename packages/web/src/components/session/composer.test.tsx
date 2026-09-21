@@ -17,6 +17,7 @@ import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
+const resumeMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const sendState = { pending: false };
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
 const addUserMessage = vi.fn(() => "user-opt-1");
@@ -48,6 +49,10 @@ vi.mock("~/api/queries", async (importOriginal) => {
       isPending: false,
       mutateAsync: abortMutateAsync,
       mutate: abortMutate,
+    }),
+    useResumeThread: () => ({
+      isPending: false,
+      mutateAsync: resumeMutateAsync,
     }),
   };
 });
@@ -128,6 +133,7 @@ beforeEach(() => {
   sendMutateAsync.mockReset();
   sendMutateAsync.mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
   abortMutateAsync.mockClear();
+  resumeMutateAsync.mockClear();
   addUserMessage.mockClear();
   setMessageQueueItemId.mockClear();
 });
@@ -354,6 +360,27 @@ describe("Composer — stop button", () => {
     };
     renderComposer("idle");
     expect(screen.getByRole("button", { name: /stop/i })).toBeDefined();
+  });
+
+  it("offers an actionable Run queue control when busy work has no active Stop target", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = {
+      mode: "followup",
+      status: "queued",
+      activeItemId: undefined,
+      pendingIds: ["q-9"],
+      collectingIds: [],
+    };
+    renderComposer("idle");
+
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    const run = screen.getByRole("button", { name: "Run queued messages" }) as HTMLButtonElement;
+    expect(run.disabled).toBe(false);
+    expect(screen.getByRole("status").textContent).toContain("1 queued");
+
+    await userEvent.click(run);
+    expect(resumeMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1" });
+    expect(abortMutateAsync).not.toHaveBeenCalled();
   });
 });
 

@@ -878,6 +878,11 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/abort`,
       body,
     ),
+  resumeThread: (sessionId: string, threadId: string) =>
+    request<{ ok: true }>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/resume`,
+    ),
 
   // slash commands
   listCommands: (sessionId: string) =>

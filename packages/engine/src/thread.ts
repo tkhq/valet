@@ -1362,10 +1362,13 @@ export class Thread {
   }
 
   async resume(): Promise<void> {
-    if (!this.paused) return;
-    this.paused = false;
-    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
-    await this.emitQueueState();
+    if (this.paused) {
+      this.paused = false;
+      await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
+      await this.emitQueueState();
+    }
+    // Resume is also the explicit recovery control for a durable queued item
+    // with no local claim (for example, after credential release).
     void this.kick();
   }
 
