@@ -1,5 +1,5 @@
 /** Shared deletion operations for direct requests and approved requests. */
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt, lte } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { apikey, assistants, credentials, teamDeletionRequests } from "../schema/index.js";
@@ -32,16 +32,27 @@ export async function deleteTeamApiKey(db: AppDb, actor: Actor, teamId: string, 
     await tx.delete(apikey).where(where);
     // A member can revoke a shared key directly. Settle any review request for
     // the key in this transaction so an admin never approves a deleted key.
-    const settled = await tx.update(teamDeletionRequests).set({
-      status: "approved", decidedBy: actor.userId, decidedAt: Date.now(),
-      decisionNote: "API key was revoked directly.", lastRefusal: null,
-    }).where(and(
+    const now = Date.now();
+    const pending = and(
+      eq(teamDeletionRequests.orgId, actor.orgId),
       eq(teamDeletionRequests.teamId, teamId),
       eq(teamDeletionRequests.resourceType, "api_key"),
       eq(teamDeletionRequests.resourceId, keyId),
       eq(teamDeletionRequests.status, "pending"),
-    )).returning({ id: teamDeletionRequests.id });
-    for (const request of settled) await markAttentionNotificationsRead(tx, "review", request.id);
+    );
+    // Match replacement-request expiry handling. An expired request is not
+    // an approval by the member who later revokes the key.
+    const expired = await tx.update(teamDeletionRequests).set({
+      status: "declined", decidedAt: now,
+      decisionNote: "Expired. Open a new request if deletion is still needed.",
+    }).where(and(pending, lte(teamDeletionRequests.expiresAt, now)))
+      .returning({ id: teamDeletionRequests.id });
+    const settled = await tx.update(teamDeletionRequests).set({
+      status: "approved", decidedBy: actor.userId, decidedAt: now,
+      decisionNote: "API key was revoked directly.", lastRefusal: null,
+    }).where(and(pending, gt(teamDeletionRequests.expiresAt, now)))
+      .returning({ id: teamDeletionRequests.id });
+    for (const request of [...expired, ...settled]) await markAttentionNotificationsRead(tx, "review", request.id);
   });
 }
 /** Returns sessions for teardown only after the enclosing transaction commits. */

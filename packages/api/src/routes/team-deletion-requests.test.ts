@@ -165,6 +165,22 @@ describe("team deletion requests", () => {
     const requestId = await submit("credential", "linear");
     expect((await call(`${requests()}/${requestId}/approve`, "POST", {}, admin)).status).toBe(200);
   });
+  it("does not approve an expired request when a member revokes its key", async () => {
+    const now = new Date();
+    const { db } = api.providers;
+    await db.insert(apikey).values({ id: "expired_key", teamId, name: "Expired key", key: "hash", referenceId: admin, createdAt: now, updatedAt: now });
+    const requestId = await submit("api_key", "expired_key");
+    await db.update(teamDeletionRequests).set({ expiresAt: Date.now() - 1 }).where(eq(teamDeletionRequests.id, requestId));
+    expect((await call(`${requests()}/${requestId}/approve`, "POST", {}, admin)).status).toBe(409);
+    expect((await call(`/teams/${teamId}/api-keys/expired_key`, "DELETE")).status).toBe(200);
+    expect(await db.select().from(apikey).where(eq(apikey.id, "expired_key"))).toEqual([]);
+    const [request] = await db.select().from(teamDeletionRequests).where(eq(teamDeletionRequests.id, requestId));
+    expect(request).toMatchObject({ status: "declined", decidedBy: null, decisionNote: "Expired. Open a new request if deletion is still needed." });
+    const notices = await db.select().from(notifications).where(eq(notifications.title, "Review deletion of Expired key"));
+    expect(notices.length).toBeGreaterThan(0);
+    expect(notices.every((notice) => notice.readAt !== null)).toBe(true);
+  });
+
   it("retires every request notification when an admin deletes a team directly", async () => {
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Direct deletion", creatorUserId: admin });
     await addMember(api.providers.db, { teamId: team.id, userId: member, role: "member" });

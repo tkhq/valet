@@ -9,6 +9,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as authModule from "../auth/index.js";
+import * as requestPrincipal from "../lib/request-principal.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { isTeamMember } from "../services/teams.js";
 import { apikey, orgMembers, teamMembers, teams, users } from "../schema/index.js";
@@ -226,6 +227,12 @@ describe("team API keys", () => {
       ["GET", "/api/workflows"],
       ["GET", "/api/me"],
     ];
+    // Model the pre-rollout reader: it does not understand proxyOnly, but
+    // still resolves referenceId to a user before promoting a team principal.
+    const oldReader = vi.spyOn(requestPrincipal, "isProxyOnlyApiKey").mockReturnValue(false);
+    const [stored] = await db.select({ referenceId: apikey.referenceId }).from(apikey).where(eq(apikey.id, created.id));
+    expect(stored.referenceId).toBe(`team-proxy:${created.id}`);
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.id, stored.referenceId))).toEqual([]);
     for (const [method, path] of forbidden) {
       const response = await fetch(`${baseUrl}${path}`, {
         method, headers: { "content-type": "application/json", "x-api-key": created.key },
@@ -233,6 +240,7 @@ describe("team API keys", () => {
       });
       expect(response.status, `${method} ${path}`).toBe(401);
     }
+    oldReader.mockRestore();
     expect((await fetch(`${baseUrl}/api/sessions/${target.id}`, { headers: { cookie: adminCookie } })).status).toBe(200);
     const listed = await fetch(`${baseUrl}/api/teams/${teamId}/api-keys`, { headers: { cookie: memberCookie } });
     expect(await listed.json()).toMatchObject({ keys: [expect.objectContaining({ id: created.id, proxyOnly: true })] });

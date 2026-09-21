@@ -155,13 +155,17 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
       const admin = await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, teamId);
       proxyOnly = !admin;
       const pin = JSON.stringify({ teamId, createdBy: user.id, proxyOnly });
-      await tx.update(apikey).set({ metadata: pin, teamId }).where(eq(apikey.id, created.id));
+      // Old API replicas require referenceId to resolve to a real user before
+      // promoting a team principal. A non-user reference fails closed there,
+      // even when that replica does not understand the proxyOnly marker.
+      const referenceId = proxyOnly ? `team-proxy:${created.id}` : user.id;
+      await tx.update(apikey).set({ metadata: pin, teamId, referenceId }).where(eq(apikey.id, created.id));
       const stamped = await tx
-        .select({ metadata: apikey.metadata, teamId: apikey.teamId })
+        .select({ metadata: apikey.metadata, teamId: apikey.teamId, referenceId: apikey.referenceId })
         .from(apikey)
         .where(eq(apikey.id, created.id))
         .limit(1);
-      return stamped[0]?.teamId === teamId &&
+      return stamped[0]?.teamId === teamId && stamped[0].referenceId === referenceId &&
         teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId &&
         isProxyOnlyApiKey(stamped[0].metadata) === proxyOnly
         ? "pinned"
