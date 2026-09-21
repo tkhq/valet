@@ -39,9 +39,16 @@ export interface ResolveSnapshot {
     bakedSha: string;
     recipe: RecipeStep[];
     bakeId: string;
+    /** Recorded compressed image size (`bakes.size_bytes`), or null when the
+     * measurement failed. Sizes the workspace floor (TKAI-538). */
+    sizeBytes: number | null;
   } | null;
   /** Org base bake image ref — phase 4 feature, null until then. */
   baseBakeRef: string | null;
+  /** Recorded compressed size of the base bake image (`bakes.size_bytes`),
+   * or null. Only meaningful when `baseBakeRef` is the selected image and
+   * `repoBake` is null (TKAI-538). */
+  baseBakeSizeBytes?: number | null;
   /**
    * Repos bound to this session in position order. `targetDir` is supplied
    * by the caller (Task 14 adds persistence); `RepoBinding` does not carry
@@ -61,6 +68,11 @@ export interface StepSpec {
 export interface SandboxSpec {
   image: string;
   steps: StepSpec[];
+  /** Recorded compressed size of the SELECTED image (`bakes.size_bytes`), or
+   * null for the stock image (no bake row) or an unmeasured bake. Drives the
+   * create-time workspace floor (TKAI-538); not part of the spec hash, since
+   * the image ref already changes when the bake changes. */
+  imageSizeBytes: number | null;
 }
 
 // ── Hashing helpers ───────────────────────────────────────────────────────
@@ -83,7 +95,16 @@ function sha256(input: string): string {
  *    the head SHA (spec decision 2: world-state excluded from the spec hash).
  */
 export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
+  // Size travels with the image from the SAME resolution that selects it, so
+  // the workspace floor can never diverge from the image that boots (TKAI-538).
+  // The repo bake wins, then the base bake; the stock image has no bake row and
+  // no recorded size.
   const image = snap.repoBake?.imageRef ?? snap.baseBakeRef ?? snap.stockImage;
+  const imageSizeBytes = snap.repoBake
+    ? snap.repoBake.sizeBytes
+    : snap.baseBakeRef
+      ? snap.baseBakeSizeBytes ?? null
+      : null;
 
   const steps: StepSpec[] = [];
 
@@ -117,7 +138,7 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     steps.push({ id: `clone:${fullName}`, hash: sha256(cloneInput), critical: true });
   }
 
-  return { image, steps };
+  return { image, steps, imageSizeBytes };
 }
 
 // ── specHash ──────────────────────────────────────────────────────────────

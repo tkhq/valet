@@ -52,6 +52,10 @@ export interface PrebuildResolution {
    * (`prebuilds.recipe.recipe`). Empty when the snapshot had none or was
    * unparseable — fetch-on-start then skips conditional reinstall. */
   recipe: RecipeStep[];
+  /** Recorded compressed image size (`bakes.size_bytes`), or null when the
+   * push-time measurement failed. Feeds the create-time workspace floor
+   * (TKAI-538) from the SAME bake row that selects the image. */
+  sizeBytes: number | null;
 }
 
 /** Best-effort extraction of `RecipeStep[]` from the `prebuilds.recipe` jsonb
@@ -139,6 +143,7 @@ export async function resolvePrebuildImage(
       prebuildId: prebuild.id,
       bakedSha: prebuild.commitSha,
       recipe: parseRecipeSteps(prebuild.recipe),
+      sizeBytes: prebuild.sizeBytes ?? null,
     };
   } catch (err) {
     console.error(`prebuild resolution failed for session ${meta.orgId}/${meta.repos?.[0]?.fullName ?? "?"}:`, err);

@@ -50,7 +50,12 @@ export {
   sandboxCrName,
 } from "./manifest.js";
 
-export { clampStorageRequest } from "./quantity.js";
+export {
+  clampStorageRequest,
+  imageAwareWorkspaceFloor,
+  liftWorkspaceStorageToImageFloor,
+  IMAGE_WORKSPACE_FLOOR_FACTOR,
+} from "./quantity.js";
 
 export {
   RANCHER_DESKTOP_CONTEXT,

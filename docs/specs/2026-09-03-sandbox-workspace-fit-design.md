@@ -273,10 +273,16 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
   an infra alert on its rate, and a dashboard panel.
 - Growth ramps slowly by design (double per ~6h per volume). A session
   that needs several doublings (a multi-GiB prebuilt bake staged onto a
-  1Gi claim) fails for multiple cooldown cycles. Part C (the repo-declared
-  size, TKAI-385) is the manual fix; INFERRED create-time sizing from
-  known inputs (the bake row's staged size, GitHub's packed repo size)
-  remains open — TKAI-382.
+  1Gi claim) fails for multiple cooldown cycles. Worse, `valet-home-init`
+  seeds the baked home (`/root/.local` and siblings) into the claim before
+  the sandbox is Running, so a first-boot seed that overflows the claim
+  crashloops in the init container and never reaches the grow path at all
+  (TKAI-538). Part C (the repo-declared size, TKAI-385) is one fix; INFERRED
+  create-time sizing from the bake row's recorded compressed size now lifts
+  the claim to a per-image floor when the repo declares nothing larger
+  (TKAI-538, `imageAwareWorkspaceFloor`). Inferring from GitHub's packed
+  repo size remains open — TKAI-382. The deploy default stays 1Gi, so small
+  images are still billed at 1Gi.
 - Grown PVCs are invisible to capacity planning: nothing reports
   provisioned-vs-used or counts grown volumes. The
   `valet.dev/workspace-grow-at` annotation makes grown claims queryable;

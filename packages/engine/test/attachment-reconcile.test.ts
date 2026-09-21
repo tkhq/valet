@@ -32,6 +32,7 @@ class RecordingProvider implements SandboxProvider {
   readonly backend = "recording";
   createImages: (string | undefined)[] = [];
   createResources: SandboxCreateOpts["resources"][] = [];
+  createWorkspaceStorage: (string | undefined)[] = [];
   preserveResourcesOnAdopt: boolean[] = [];
   preserveResourceFieldsOnAdopt: SandboxCreateOpts["preserveResourceFieldsOnAdopt"][] = [];
   destroyCalls: string[] = [];
@@ -95,6 +96,7 @@ class RecordingProvider implements SandboxProvider {
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     this.createImages.push(opts.image);
     this.createResources.push(opts.resources === undefined ? undefined : { ...opts.resources });
+    this.createWorkspaceStorage.push(opts.workspaceStorage);
     this.preserveResourcesOnAdopt.push(opts.preserveResourcesOnAdopt === true);
     this.preserveResourceFieldsOnAdopt.push(opts.preserveResourceFieldsOnAdopt);
     const preservesOnAdopt = opts.preserveResourcesOnAdopt ||
@@ -182,6 +184,24 @@ describe("SandboxAttachment.reconcile", () => {
     const sb = att.current();
     if (!sb) throw new Error("expected ready sandbox");
     expect((await readAppliedState(sb))?.resources).toEqual({ cpu: 4, memory: "8Gi" });
+  });
+
+  it("cold provision applies the desired workspace storage over the create-opts value (TKAI-538)", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({
+      specHash: "h1", steps: [], workspaceStorage: "3Gi",
+    });
+    await reachReady(provider, fake, { workspaceStorage: "1Gi" });
+
+    expect(provider.createWorkspaceStorage).toEqual(["3Gi"]);
+  });
+
+  it("keeps the create-opts workspace storage when the desired spec omits it", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [] });
+    await reachReady(provider, fake, { workspaceStorage: "4Gi" });
+
+    expect(provider.createWorkspaceStorage).toEqual(["4Gi"]);
   });
 
   it("cold provision with no resource opinion keeps the existing create resources", async () => {

@@ -45,7 +45,7 @@ async function resolveBaseImage(
   orgId: string,
   provider: SandboxProvider,
   preflight?: PrebuildPreflightOpts,
-): Promise<string | null> {
+): Promise<{ imageRef: string; sizeBytes: number | null } | null> {
   try {
     if (!provider.capabilities().customImage) return null;
 
@@ -85,7 +85,7 @@ async function resolveBaseImage(
       }
     }
 
-    return bake.imageRef;
+    return { imageRef: bake.imageRef, sizeBytes: bake.sizeBytes ?? null };
   } catch (err) {
     console.error(`base image resolution failed for org ${orgId}:`, err);
     return null;
@@ -115,7 +115,7 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
   // Single image lineage: every bake chains on the full base, so repo bakes
   // (prebuilds) are safe for EVERY session shape — docker and full-profile
   // included — and the base lookup needs no per-session profile.
-  const [prebuild, baseBakeRef] = await Promise.all([
+  const [prebuild, baseBake] = await Promise.all([
     resolvePrebuildImage(db, meta, provider, preflight),
     db ? resolveBaseImage(db, meta.orgId, provider, preflight) : Promise.resolve(null),
   ]);
@@ -129,9 +129,11 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
           bakedSha: prebuild.bakedSha,
           recipe: prebuild.recipe,
           bakeId: prebuild.prebuildId,
+          sizeBytes: prebuild.sizeBytes,
         }
       : null,
-    baseBakeRef,
+    baseBakeRef: baseBake?.imageRef ?? null,
+    baseBakeSizeBytes: baseBake?.sizeBytes ?? null,
     // Bindings already carry targetDir from meta (loadSessionMeta supplies it).
     repos: repos.map((binding) => ({ ...binding })),
     userName: meta.userName,

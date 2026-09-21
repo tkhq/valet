@@ -71,6 +71,7 @@ import {
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
+import { imageAwareWorkspaceFloor, liftWorkspaceStorageToImageFloor } from "@valet/sandbox-kubernetes";
 import {
   applySandboxResourceOverrides,
   resolveRepoResources,
@@ -1603,6 +1604,24 @@ export class EngineHost {
       }
 
       const spec = computeSpec(snap);
+      // Workspace floor for the resolved image (TKAI-538). `valet-home-init`
+      // seeds the baked home (`/root/.local` and siblings) into the claim
+      // before any clone, so a claim smaller than the image crashloops on
+      // ENOSPC in the init container, which the runtime grow path never sees
+      // (it runs only once the sandbox is Running). Derive the floor from the
+      // SAME resolved bake that selected `spec.image`, so size and image can
+      // never diverge. Surface a desired `workspaceStorage` ONLY when the floor
+      // raises the claim above the repo-declared size; otherwise leave the
+      // create-opts value (repo-declared, or the deploy default) as the sole
+      // authority, which preserves the create-time flag semantics including
+      // withhold-on-read-failure. The provider still clamps to its max.
+      const imageFloor =
+        spec.imageSizeBytes != null ? imageAwareWorkspaceFloor(spec.imageSizeBytes) : null;
+      let workspaceStorage: string | undefined;
+      if (imageFloor) {
+        const lifted = liftWorkspaceStorageToImageFloor(repoFlags.workspaceStorage, imageFloor);
+        if (lifted !== repoFlags.workspaceStorage) workspaceStorage = lifted;
+      }
       const steps = buildPrepSteps(snap, spec.steps, onStartRef);
       // Scanner bootstrap (Valet Security): a security persona cell installs
       // gitleaks + semgrep + sec-preflight AFTER the clone/bind steps, so the
@@ -1622,6 +1641,7 @@ export class EngineHost {
         ...(repoFlags.preserveResourceFields !== undefined
           ? { preserveResourceFields: repoFlags.preserveResourceFields }
           : {}),
+        ...(workspaceStorage !== undefined ? { workspaceStorage } : {}),
       };
     };
   }
