@@ -24,7 +24,7 @@ Every row below was read, not inferred. "Member" means a live row in `team_membe
 | Content source, workflows or templates | Admin (`services/content-sources.ts:328-340`) | n/a | Admin (`content-sources.ts:562-566`) | 404 |
 | Content source, skills only | Member (`content-sources.ts:376-380`) | n/a | Admin (`content-sources.ts:562-566`) | 404 |
 | Credential | Admin (`routes/credentials.ts:143-149`) | Admin | Admin (`routes/credentials.ts:765-771`) | 404 |
-| API key | Admin (`routes/team-api-keys.ts:101`) | n/a | Admin (`routes/team-api-keys.ts:158`) | 404 |
+| API key | Member | n/a | Member | the key is revoked directly |
 | Assistant or session | Member | Admin (`services/session-access.ts:106-114`) | Admin | 404 |
 | Memory file | Admin (`routes/memory.ts:132-135`) | Admin | Admin | 404 |
 | 1Password lease | Admin (`routes/teams.ts:740`) | Admin | Admin (`routes/teams.ts:780`) | 404 |
@@ -65,6 +65,8 @@ Nothing in the repository models a pending request. `notifications` carries one 
 
 **3. The flow accepts six resource types, and the type set is a table, not a switch.** A request names `resourceType` from `workflow | skill | content_source | credential | api_key | team`, plus a `resourceId`. A registry in one module maps each type onto three existing functions: the read predicate that decides whether the requester may see the resource, the admin predicate, and the delete function. Approval calls that delete function with the deciding admin as the actor. Nothing in this flow reimplements a delete, so `refuseRepoOwned`, the unsettled-run check, the ownership advisory lock and the mirrored-content cascade all still run, in the same order, under the same authority.
 
+A team API key is the exception to approval-only deletion. A current team member can revoke it directly. The revoke transaction approves only matching unexpired pending API-key deletion requests and records the revoking member. It marks expired pending requests declined with the expiry note, as replacement-request submission does. It marks review notifications read for both groups. An admin cannot later approve a request for a key that no longer exists.
+
 For `credential` the `resourceId` is the service name, which is the credential's identity inside a team (`credentials` is keyed on `(owner_type, owner_id, service)`, `schema/index.ts:1315`). For `team` the `resourceId` is the team id itself. Assistants, sessions and memory files are out of this pass; decision 14 says why.
 
 **4. A request is a new row, in `team_deletion_requests`.** The three candidate rails were read and rejected for stated reasons. A decision gate cannot hold it: a gate is identified by a session, a thread and a queue item, it is answered by a live in-process promise, and this repository has already shipped a wedge where a gate that lost its waiter blocked its thread with no way out. An `action_policies` row cannot hold it: those rows authorize an agent's plugin action, and their principals are org and user. A `notifications` row cannot hold it: the table stores one row per recipient with no state a decision could write, so a request with three admins would be three rows and the first answer would leave two live.
@@ -89,7 +91,7 @@ Two indexes: a partial unique index on `(team_id, resource_type, resource_id) wh
 
 `markGateNotificationsRead` marks a gate's notifications read by a `n-approval-{gateId}-` prefix match and its own comment asks any producer under another kind to extend it (`attention.ts:184-194`). It is generalized to take the kind and the dedupe key, so deciding a request marks the admins' rows read the same way answering a gate does. The gate caller passes `"approval"` and keeps its behavior.
 
-**6. A member who is refused sees 403 and the request, not 404.** When the caller is a live member of the team, every delete path in decision 3's table answers 403 with a body that carries `code: "team_admin_required"`, the `teamId`, and the id of the open request when one exists. A caller who is not a member of that team, and any cross-org caller, keeps the 404 they get today.
+**6. A member who is refused sees 403 and the request, not 404.** When the caller is a live member of the team, every delete path in decision 3's table except API keys answers 403 with a body that carries `code: "team_admin_required"`, the `teamId`, and the id of the open request when one exists. A caller who is not a member of that team, and any cross-org caller, keeps the 404 they get today.
 
 This is a deliberate exception to existence hiding, and it is safe because it discloses nothing. The member could already list the resource through the read routes named in the Context. The 403 body repeats no resource name back to the caller. And the convention already carves this case out in its own words at `routes/teams.ts:172-179`: 404 is for unauthorized callers, and a 404 to somebody who can see the thing is a lie they cannot act on. The change makes the code match the rule it already wrote down.
 
@@ -127,7 +129,7 @@ Each task is one commit. Schema edits go into `packages/api/migrations/pg/0000_a
 
 4. **Attention.** Add `review` to `AttentionKind`, replace the `kind === "escalation"` test in `resolveAudience` with a two-kind admin set, and generalize `markGateNotificationsRead` into a kind-plus-key form with the gate caller passing `"approval"`. Extend `packages/api/src/orchestrator/attention.test.ts` so a `review` event on a team owner reaches admins only.
 
-5. **Routes.** Add `/api/teams/:id/deletion-requests` with list, submit, approve, decline and withdraw, all behind `refuseTeamApiKey`. Return decision 6's 403 body from the five delete sites: `routes/workflows.ts`, `routes/skills.ts` for stored skills and for sources, `routes/credentials.ts` and `routes/team-api-keys.ts`, plus `DELETE /api/teams/:id`. Assert in tests that a non-member still receives 404 at every one of them.
+5. **Routes.** Add `/api/teams/:id/deletion-requests` with list, submit, approve, decline and withdraw, all behind `refuseTeamApiKey`. Return decision 6's 403 body from the workflow, skill, content-source, credential, and team delete sites. Let a current team member revoke a team API key directly. In that revoke transaction, approve matching pending API-key requests and retire their review notifications. Assert in tests that a non-member still receives 404 at every one of them.
 
 6. **Wire and web.** Add the request types to `packages/api/src/wire/types.ts`, the `review` kind to `NotificationKind`, and "Review" to `KIND_LABEL`. Add the deletion-requests block and the member Delete label to `packages/web/src/components/settings/teams-panel.tsx`.
 
@@ -146,6 +148,8 @@ A second submission for one resource returns the first request and writes no sec
 A `review` event for a team owner produces notification rows for the team's admins and for nobody else.
 
 A requester removed from the team leaves the request answerable, and approving it still deletes the resource.
+
+A direct team API-key revocation approves any matching pending request and retires its review notifications.
 
 ## Non-goals
 

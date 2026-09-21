@@ -9,7 +9,7 @@ This is not an announcement blocker. TKAI-205 is integration credentials (`Crede
 
 ## Scope
 
-A team admin can create, list, and revoke API keys that authenticate as the team principal. A personal `vlt_` key cannot create team-owned sessions or start team-owned workflows. There is no `OwnerPicker`. The workspace switcher supplies `teamId`.
+A team member can create, list, and revoke API keys that authenticate as the team principal. A personal `vlt_` key cannot create team-owned sessions or start team-owned workflows. There is no `OwnerPicker`. The workspace switcher supplies `teamId`.
 
 ## Context
 
@@ -21,23 +21,25 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
 ## Decisions
 
-1. **Keep the better-auth table.** Do not add `team_api_keys`. Put `{ teamId, createdBy }` in `apikey.metadata`, and the same team id in a Valet-owned nullable `apikey.team_id` column with an index. The auth ladder reads the metadata (it is what `verifyApiKey` returns); the team list and revoke read the column. One UPDATE writes both, and create re-reads both before it returns the secret. The list projects the summary columns only; the hash never leaves the table. `referenceId` stays the creating admin so the vendor plugin keeps a user row. The personal list filter recomputes `total` and refuses an unknown response shape instead of passing it through.
+1. **Keep the better-auth table.** Do not add `team_api_keys`. Put `{ teamId, createdBy }` in `apikey.metadata`, and the same team id in a Valet-owned nullable `apikey.team_id` column with an index. The auth ladder reads the metadata (it is what `verifyApiKey` returns); the team list and revoke read the column. One UPDATE writes both, and create re-reads both before it returns the secret. The list projects the summary columns only; the hash never leaves the table. `referenceId` stays the creating admin for full API keys. Proxy-only keys use a non-user reference, `team-proxy:{keyId}`. The creator remains in `metadata.createdBy`. Old API readers require a real user before promoting a team principal, so they also reject these keys during rolling deployments. The inference proxy resolves ownership from the team pin without a user lookup. The personal list filter recomputes `total` and refuses an unknown response shape instead of passing it through.
 
-2. **The key survives the creating admin leaving.** Revoke is `canAdministerTeam` or org admin. A membership check on the creating admin at request time would kill CI when that person leaves, which is the failure this ticket exists to close. Record `createdBy` in metadata for audit.
+2. **The key survives the creating member leaving.** Any current organization member who is also a team member, or an organization admin, can revoke it. A membership check on the creator at request time would kill CI when that person leaves, which is the failure this ticket exists to close. Record `createdBy` in metadata for audit.
 
 3. **Auth ladder promotes the principal.** After `verifyApiKey`, if metadata has `teamId`, require that the team still exists in the same org and set the request principal to `{ type: "team", id: teamId }`. Keep the creating user on the context for audit only. Routes that already accept a team owner (`POST /api/sessions`, workflow start) use that principal.
 
 4. **Create, list, and revoke follow the workspace switcher.** Settings → API keys is the page. `CreateScopeLine` states the active workspace. Personal keys stay on personal scope. Team keys appear when the switcher is a team. Do not add an `OwnerPicker`. Do not bury the form under Organization → Teams: that page is not the switcher, and a create that used the switcher there would lie about the place.
 
-5. **Authority is limited to team session and workflow routes.** A team key may read, run, and change its team-owned sessions and workflows, and delete sessions, subject to route and resource guards. Deleting a workflow definition requires a human team or organization admin; a team key receives 403 (TKAI-430). It is not a read-only key. It cannot change org settings, other teams, or personal resources. The middleware allowlist is GET `/api/me`, `/api/sessions` and paths below it, `/api/workflows` and paths below it, and POST `/api/teams/:id/orchestrator` for the key's own team. The match is on path segments, so `/api/sessionsX` is refused.
+5. **Member-created keys are proxy-only.** The create transaction stamps `metadata.proxyOnly` from the locked membership roles. Members receive `true`; team and organization admins receive `false`. The general API identity resolver rejects proxy-only keys before constructing a principal, including on optional-auth artifact routes. The inference proxy still attributes these keys to the team. Personal key updates cannot remove the restriction. List and create responses expose `proxyOnly` so settings can label each key. Legacy admin-created keys without this field retain their authority. A role change after mint does not change a key's scope; revoke and recreate it when needed.
 
-   `valet send` without `--session` targets the caller's default assistant. For a team key that is the team's, reached through `POST /api/teams/:id/orchestrator` with no membership check on the creating admin. The CLI reads `GET /api/me` once per command and posts the team route when the answer has `role: "team"`; a personal credential keeps posting `/api/orchestrator`.
+   **Admin-created key authority is limited to team session and workflow routes.** A team key may read, run, and change its team-owned sessions and workflows, and delete sessions, subject to route and resource guards. Deleting a workflow definition requires a human team or organization admin; a team key receives 403 (TKAI-430). It is not a read-only key. It cannot change org settings, other teams, or personal resources. The middleware allowlist is GET `/api/me`, `/api/sessions` and paths below it, `/api/workflows` and paths below it, and POST `/api/teams/:id/orchestrator` for the key's own team. The match is on path segments, so `/api/sessionsX` is refused.
 
-   Every session and workflow check reads the request principal, never `c.var.user`. On a team key `c.var.user` is the creating admin, and `agent_sessions.userId` on every row that admin touched is that admin, so a check on the user would hand the key the admin's personal sessions. `canViewSession`, `canAdministerSession`, `canResolveSessionGate` and `WorkflowOwner` all take the principal. The gateway proxy, sandbox replace and `sandbox-jwt` gate on direct ownership (`isSessionDirectOwner`); `sandbox-jwt` refuses a team key because the token binds one user.
+   `valet send` without `--session` targets the caller's default assistant. For a team key that is the team's, reached through `POST /api/teams/:id/orchestrator` with no membership check on the creating member. The CLI reads `GET /api/me` once per command and posts the team route when the answer has `role: "team"`; a personal credential keeps posting `/api/orchestrator`.
 
-   `GET /api/me` answers a team key with the team (`TeamMeResponse`: id, name, orgId, `role: "team"`, no email), not the creating admin. The route stays on the allow-list rather than refusing, because `valet login` verifies a key through it and `valet send` reads the team id off the answer to find the team's default assistant. `PATCH /api/me` stays refused.
+   Every session and workflow check reads the request principal, never `c.var.user`. On a team key `c.var.user` is the creating member, and `agent_sessions.userId` on every row that member touched is that member, so a check on the user would hand the key the creating member's personal sessions. `canViewSession`, `canAdministerSession`, `canResolveSessionGate` and `WorkflowOwner` all take the principal. The gateway proxy, sandbox replace and `sandbox-jwt` gate on direct ownership (`isSessionDirectOwner`); `sandbox-jwt` refuses a team key because the token binds one user.
 
-   The LLM gateway (`/proxy/*`) accepts verified team keys with a live team and matching stored team pin. It records team ownership without billing the creating admin. Organization gateway enablement and credential mode still apply. Team Proxy settings reuse the team key controls. See `2026-08-26-llm-proxy-mitm-design.md`.
+   `GET /api/me` answers a team key with the team (`TeamMeResponse`: id, name, orgId, `role: "team"`, no email), not the creating member. The route stays on the allow-list rather than refusing, because `valet login` verifies a key through it and `valet send` reads the team id off the answer to find the team's default assistant. `PATCH /api/me` stays refused.
+
+   The LLM gateway (`/proxy/*`) accepts verified team keys with a live team and matching stored team pin. It records team ownership without billing the creating member. Organization gateway enablement and credential mode still apply. Team Proxy settings reuse the team key controls. See `2026-08-26-llm-proxy-mitm-design.md`.
 
    Routes mounted before the scope gate apply it themselves. The pre-auth artifact router resolves its caller through `resolveOptionalIdentity`, which returns the principal with the user. A team key there counts as anonymous: it reads a public artifact, and it is refused with a 403 that names the fix on an org-visibility artifact and on every comment route.
 
@@ -47,7 +49,7 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
 ## Open question (default above)
 
-If review prefers "key dies when the creating admin leaves," invert decision 2 and check `isTeamMember(createdBy)` on every request. The recommended default is survival plus admin revoke.
+If review prefers "key dies when the creating member leaves," invert decision 2 and check `isTeamMember(createdBy)` on every request. The recommended default is survival plus team-member revoke.
 
 ## Out of scope
 
@@ -57,7 +59,7 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 
 ## Implementation
 
-1. On create, require `canAdministerTeam` for the workspace `teamId`. Stamp `{ teamId, createdBy }` in metadata and `team_id` in one SQL statement after `createApiKey`; re-read both before returning the secret. The final authorization check, stamp, and read share the team ownership lock with deletion.
+1. On create, require live organization membership and team membership for the workspace `teamId`; an organization admin can create for a team they did not join. Stamp `{ teamId, createdBy }` in metadata and `team_id` in one SQL statement after `createApiKey`; re-read both before returning the secret. The final authorization check, stamp, and read share the team ownership lock with deletion.
 2. List filters on the indexed `team_id` column and projects the summary columns. Personal list omits team keys on the server and recomputes `total`.
 3. Extend the auth ladder to promote a team-metadata key to a team principal. Reject the key if the team is gone or belongs to another org.
 4. Session and workflow create paths use `resolveCreateOwner`. A team principal skips membership but still requires the team row under the ownership lock.
@@ -69,11 +71,11 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 ## Testing
 
 - `packages/api/src/middleware/auth.ladder.test.ts` — team-metadata key authenticates as the team; a deleted team is an invalid key.
-- `packages/api/src/routes/team-api-keys.test.ts` — create/list/revoke gates; the `team_id` column agrees with the metadata; departed admin does not kill the key; a personal create cannot stamp `teamId`; a team key cannot create a personal assistant; `GET /api/me` answers with the team and `PATCH` is refused.
+- `packages/api/src/routes/team-api-keys.test.ts` — create/list/revoke gates; the `team_id` column agrees with the metadata; departed creator does not kill the key; a personal create cannot stamp `teamId`; a team key cannot create a personal assistant; `GET /api/me` answers with the team and `PATCH` is refused.
 - `packages/api/src/routes/team-api-keys.access.test.ts` — one admin, one personal and one team session: the key reads, rates, opens the socket, reaches the gateway and the security surface of the team session only, is refused on `sandbox-jwt`, and wakes its own team's orchestrator only.
 - `packages/api/src/routes/team-api-keys.workflows.test.ts` — the key lists, schedules and previews team workflows only.
 - `packages/api/src/routes/team-api-keys.artifacts.test.ts` — the pre-auth artifact router: public read as anonymous, org read and comments refused.
-- `packages/api/src/proxy/principal.test.ts` — the LLM gateway resolves the team without consulting the creating admin and rejects invalid team pins.
+- `packages/api/src/proxy/principal.test.ts` — the LLM gateway resolves the team without consulting the creating member and rejects invalid team pins.
 - `packages/api/src/lib/request-principal.test.ts` — the allow-list matches path segments and the key's own team orchestrator.
 - `packages/api/src/cli/client.test.ts` — `ensureOrchestrator` follows `GET /api/me`.
 - `packages/api/src/lib/personal-api-key-list.test.ts` — the personal list drops team rows, recomputes `total`, and refuses an unknown shape.
@@ -82,7 +84,7 @@ If review prefers "key dies when the creating admin leaves," invert decision 2 a
 
 ## Done when
 
-A `vlt_` key created in a team workspace starts a team-owned session. A personal key cannot. Revoke from the team workspace kills the key. The creating admin can leave the team and the key still works until a team admin revokes it. A signed-in user cannot mint a team principal through `/api/auth/api-key/create`. The key reads nothing outside its team: not the creating admin's sessions, workflows, triggers, memory or artifacts, and not another team's orchestrator. `valet send` with the key and no `--session` prompts the team's default assistant.
+An admin-created `vlt_` key in a team workspace starts a team-owned session. A personal key cannot create a team session. A member-created team key works only with the inference proxy and cannot authenticate to session or workflow APIs. Revoke from the team workspace kills the key. The creating member can leave the team and the key still works until a team member revokes it. A signed-in user cannot mint a team principal through `/api/auth/api-key/create`. The key reads nothing outside its team: not the creating member's sessions, workflows, triggers, memory or artifacts, and not another team's orchestrator. `valet send` with the key and no `--session` prompts the team's default assistant.
 
 ## Deviations from this design (recorded at implementation)
 
@@ -93,7 +95,7 @@ A `vlt_` key created in a team workspace starts a team-owned session. A personal
 
 Deleting a team removes its API key rows in the same transaction. Keys belonging to other teams and personal keys remain. Authentication already refuses keys whose team is missing; this change removes the stored rows as well.
 
-Concurrent key creation uses the same `lockTeamForOwnership(tx, teamId)` lock as team deletion (#624). Better-auth mints outside the transaction. After minting, the route takes the lock and rechecks the team in the caller's org and the caller's administration rights. The route writes and verifies both team pins through `tx` before releasing the lock. It never calls the outer database handle inside that transaction.
+Concurrent key creation uses the same `lockTeamForOwnership(tx, teamId)` lock as team deletion (#624). Better-auth mints outside the transaction. After minting, the route takes the lock and rechecks the team in the caller's org and the caller's live organization membership plus team membership, or organization-admin role. The route writes and verifies both team pins through `tx` before releasing the lock. It never calls the outer database handle inside that transaction.
 
 If deletion or lost authorization wins, creation returns 404 without the secret. A failed pin returns 500 without the secret. After the transaction settles, the route deletes the minted row on either failure, including transaction errors. If creation wins, team deletion removes the pinned row through its existing cleanup.
 
@@ -106,27 +108,13 @@ The team key form states its mutation authority and lifetime before creation. Th
 
 TKAI-430 narrows workflow-definition deletion to human administrators. Team-key copy names this restriction; session deletion and other allowed workflow operations remain available.
 
-Team key controls discard drafts and revealed secrets after access errors or loss of admin rights. Late creation responses cannot reveal secrets after those transitions. The notice distinguishes visible key names from secrets, which are shown only once at creation.
+Team key controls discard drafts and revealed secrets after access errors or loss of team access. Late creation responses cannot reveal secrets after those transitions. The notice distinguishes visible key names from secrets, which are shown only once at creation.
 
 
-### Create refusal copy (TKAI-483)
+### Member API key management
 
-`POST /api/teams/:id/api-keys` answered every rejected caller with a 404 and the text "team not found". That answer is correct for a caller who cannot see the team. It is wrong for a member of the team, who already sees the team, its key names, and the workspace switcher entry. The member reads it as a broken route.
+A team API key is a shared credential. Member-created keys work only with the inference proxy. Admin-created keys can also call the Valet API. Every team member with a live organization membership can create, list, and revoke keys for that team. An organization admin retains the same access when they are not a team member. A user outside the team receives a 404.
 
-The create path now sorts the caller into three cases through one helper:
+The workspace switcher selects the owner. A key created in the personal workspace creates user-owned sessions. An admin-created key in the team workspace creates team-owned sessions. A member-created team key records proxy usage against the team without gaining session administration rights.
 
-- A team admin or an organization admin creates the key.
-- A member of the team who is not an admin gets a 403 that names the rule and two actions: ask an admin of this team, or switch to the personal workspace and create a personal key.
-- Everyone else keeps the 404 that hides the team.
-
-The same helper runs again inside the team ownership lock, so a demotion that committed before the lock was taken gets the same answer as one that landed before the create began. The minted key is still deleted on every refusal, and no secret is returned.
-
-A demotion committing while the transaction runs is serialized too, but not by the advisory lock. The membership writers in `services/teams.ts` and the organization role writer in `services/org.ts` take no team ownership lock, so they commit independently of it. The create transaction therefore holds the two rows the gate reads, the caller's `team_members` row and their `org_members` row, with a share lock before it reads them. A role update or a membership delete blocks on that until the create commits, so the re-check cannot read a role that is about to change. `services/team-deletion-access.ts` holds the same two rows the same way.
-
-Share rather than update, because two concurrent creates on one team need not serialize against each other, only against a writer. A caller with no row locks nothing, which is the promotion direction rather than the revocation one: somebody holding no membership cannot lose an authority they never had, and the read that follows refuses them.
-
-The wider gap stands. Every other team-scoped write that re-checks authority under the ownership lock has the same exposure, because the membership writers still take no lock. Closing it in general means those writers sharing the advisory lock, which is a change to them rather than to this route.
-
-The 403 body carries `code: "team_admin_required"` and `teamId`, the same discriminator `TeamAdminRequiredError` sends when the delete path on this resource refuses a member. One client branch therefore answers both refusals, and a client can tell this 403 from the signed-out 403 on the same endpoint. The create refusal does not reuse the error class: that class carries deletion-request wording and a `teamAdminRefusal` lookup for a pending request. A create has no such request, so the body carries no `requestId`.
-
-This changes no permission. A member could not create a team key before, and cannot now.
+The create route rechecks organization and team membership after it mints a key and before it pins the key to the team. The route holds the caller's membership and organization rows while it makes this check. If removal or deletion wins, the route deletes the minted key and returns no secret.

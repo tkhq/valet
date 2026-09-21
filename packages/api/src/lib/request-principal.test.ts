@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isProxyOnlyApiKey,
   clientMetadataHasTeamId,
   coerceApiKeyMetadata,
   parseApiKeyMetadata,
@@ -149,5 +150,14 @@ describe("teamApiKeyPathAllowed", () => {
     expect(teamApiKeyPathAllowed("/api/teams/team_1", "GET", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/teams/team_1/members", "POST", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/orchestrator", "POST", TEAM)).toBe(false);
+  });
+});
+
+describe("proxy-only API key metadata", () => {
+  it("reads both vendor metadata formats while retaining legacy admin keys", () => {
+    expect(isProxyOnlyApiKey({ teamId: "team_1", proxyOnly: true })).toBe(true);
+    expect(isProxyOnlyApiKey('{"teamId":"team_1","proxyOnly":true}')).toBe(true);
+    expect(isProxyOnlyApiKey({ teamId: "team_1" })).toBe(false);
+    expect(isProxyOnlyApiKey({ teamId: "team_1", proxyOnly: false })).toBe(false);
   });
 });

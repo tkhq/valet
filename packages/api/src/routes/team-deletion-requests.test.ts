@@ -143,20 +143,42 @@ describe("team deletion requests", () => {
     }
   });
 
-  it("gates credentials and API keys and exposes no secret fields in targets", async () => {
+  it("gates credentials, lets members revoke API keys, and hides secrets", async () => {
     await api.providers.engineCredentials.save({ type: "team", id: teamId }, "linear", { type: "api_key", apiKey: "sentinel-do-not-expose" });
     const path = `/credentials/linear?scope=team&teamId=${teamId}`;
     expect((await call(path, "DELETE")).status).toBe(403);
     expect((await call(path, "DELETE", undefined, "outsider")).status).toBe(404);
     const now = new Date();
     await api.providers.db.insert(apikey).values({ id: "delete_key", teamId, name: "Test key", key: "sentinel-key-hash", referenceId: admin, createdAt: now, updatedAt: now });
-    expect((await call(`/teams/${teamId}/api-keys/delete_key`, "DELETE")).status).toBe(403);
+    const apiKeyRequestId = await submit("api_key", "delete_key");
+    const [notice] = await api.providers.db.select().from(notifications).where(eq(notifications.title, "Review deletion of Test key"));
+    expect(notice.readAt).toBeNull();
+    expect((await call(`/teams/${teamId}/api-keys/delete_key`, "DELETE")).status).toBe(200);
+    expect(await api.providers.db.select().from(apikey).where(eq(apikey.id, "delete_key"))).toEqual([]);
+    const [request] = await api.providers.db.select().from(teamDeletionRequests).where(eq(teamDeletionRequests.id, apiKeyRequestId));
+    expect(request).toMatchObject({ status: "approved", decidedBy: member, decisionNote: "API key was revoked directly." });
+    const [settledNotice] = await api.providers.db.select().from(notifications).where(eq(notifications.id, notice.id));
+    expect(settledNotice.readAt).not.toBeNull();
+    expect((await call(`${requests()}/${apiKeyRequestId}/approve`, "POST", {}, admin)).status).toBe(409);
     const targets = await (await call(`${requests()}/targets`)).text();
     expect(targets).not.toContain("sentinel");
-    for (const [kind, id] of [["credential", "linear"], ["api_key", "delete_key"]]) {
-      const requestId = await submit(kind, id);
-      expect((await call(`${requests()}/${requestId}/approve`, "POST", {}, admin)).status).toBe(200);
-    }
+    const requestId = await submit("credential", "linear");
+    expect((await call(`${requests()}/${requestId}/approve`, "POST", {}, admin)).status).toBe(200);
+  });
+  it("does not approve an expired request when a member revokes its key", async () => {
+    const now = new Date();
+    const { db } = api.providers;
+    await db.insert(apikey).values({ id: "expired_key", teamId, name: "Expired key", key: "hash", referenceId: admin, createdAt: now, updatedAt: now });
+    const requestId = await submit("api_key", "expired_key");
+    await db.update(teamDeletionRequests).set({ expiresAt: Date.now() - 1 }).where(eq(teamDeletionRequests.id, requestId));
+    expect((await call(`${requests()}/${requestId}/approve`, "POST", {}, admin)).status).toBe(409);
+    expect((await call(`/teams/${teamId}/api-keys/expired_key`, "DELETE")).status).toBe(200);
+    expect(await db.select().from(apikey).where(eq(apikey.id, "expired_key"))).toEqual([]);
+    const [request] = await db.select().from(teamDeletionRequests).where(eq(teamDeletionRequests.id, requestId));
+    expect(request).toMatchObject({ status: "declined", decidedBy: null, decisionNote: "Expired. Open a new request if deletion is still needed." });
+    const notices = await db.select().from(notifications).where(eq(notifications.title, "Review deletion of Expired key"));
+    expect(notices.length).toBeGreaterThan(0);
+    expect(notices.every((notice) => notice.readAt !== null)).toBe(true);
   });
 
   it("retires every request notification when an admin deletes a team directly", async () => {

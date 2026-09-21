@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { apikey, llmProxyRequests, orgMembers, teams } from "../schema/index.js";
+import { apikey, llmProxyRequests, orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { setProxySettings } from "../services/org.js";
 
@@ -28,15 +28,37 @@ describe("shared team proxy key", () => {
       method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Proxy team" }),
     });
     expect(create.status).toBe(201);
+    const invite = await fetch(`${baseUrl}/api/org/invites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ role: "member" }),
+    });
+    expect(invite.status).toBe(200);
+    const inviteBody = await invite.json();
+    if (!inviteBody || typeof inviteBody !== "object" || !("code" in inviteBody) || typeof inviteBody.code !== "string") {
+      throw new Error("Expected an invite code");
+    }
+    const memberSignup = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Member", email: "proxy-member@example.test", password: "correct-horse-battery", inviteCode: inviteBody.code }),
+    });
+    expect(memberSignup.status).toBe(200);
+    const memberCookie = memberSignup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
+    if (!memberCookie) throw new Error("Expected a member signup session cookie");
+    const [member] = await providers.db.select({ id: users.id }).from(users).where(eq(users.email, "proxy-member@example.test")).limit(1);
+    if (!member) throw new Error("Expected a member user");
     const teamBody = await create.json();
     if (!teamBody || typeof teamBody !== "object" || !("team" in teamBody)) throw new Error("Expected team response");
     const team = teamBody.team;
     if (!team || typeof team !== "object" || !("id" in team) || typeof team.id !== "string" || !("orgId" in team) || typeof team.orgId !== "string") throw new Error("Expected team identity");
+    await providers.db.insert(teamMembers).values({ teamId: team.id, userId: member.id, role: "member" });
     const keyResponse = await fetch(`${baseUrl}/api/teams/${team.id}/api-keys`, {
-      method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Shared proxy" }),
+      method: "POST", headers: { "content-type": "application/json", cookie: memberCookie }, body: JSON.stringify({ name: "Shared proxy" }),
     });
     expect(keyResponse.status).toBe(201);
     const keyBody = await keyResponse.json();
+    expect(keyBody).toMatchObject({ proxyOnly: true });
     if (!keyBody || typeof keyBody !== "object"
       || !("id" in keyBody) || typeof keyBody.id !== "string"
       || !("key" in keyBody) || typeof keyBody.key !== "string"
@@ -51,21 +73,21 @@ describe("shared team proxy key", () => {
       const url = input instanceof Request ? input.url : String(input);
       return url.startsWith("https://api.openai.com/") ? upstream(input, init) : nativeFetch(input, init);
     });
-    async function proxy(providerKey?: string) {
+    async function proxy(apiKey: string, providerKey?: string) {
       return fetch(`${baseUrl}/proxy/openai/v1/chat/completions`, {
         method: "POST", headers: {
-          "content-type": "application/json", "x-api-key": key.key,
+          "content-type": "application/json", "x-api-key": apiKey,
           ...(providerKey ? { authorization: `Bearer ${providerKey}` } : {}),
         }, body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hello" }] }),
       });
     }
     await setProxySettings(providers.db, team.orgId, { enabled: false, mode: "passthrough" });
-    expect((await proxy("approved-provider-key")).status).toBe(403);
+    expect((await proxy(key.key, "approved-provider-key")).status).toBe(403);
     expect(upstream).not.toHaveBeenCalled();
     await setProxySettings(providers.db, team.orgId, { enabled: true });
-    expect((await proxy()).status).toBe(400);
+    expect((await proxy(key.key)).status).toBe(400);
     expect(upstream).not.toHaveBeenCalled();
-    const forwarded = await proxy("approved-provider-key");
+    const forwarded = await proxy(key.key, "approved-provider-key");
     expect(forwarded.status).toBe(200);
     await forwarded.text();
     expect(new Headers(upstream.mock.calls[0][1]?.headers).get("authorization")).toBe("Bearer approved-provider-key");
@@ -73,26 +95,40 @@ describe("shared team proxy key", () => {
     await expect.poll(async () => providers.db.select().from(llmProxyRequests).where(eq(llmProxyRequests.apiKeyId, key.id))).toEqual([
       expect.objectContaining({ orgId: team.orgId, teamId: team.id, userId: null, totalTokens: 120 }),
     ]);
+    const personalResponse = await fetch(`${baseUrl}/api/auth/api-key/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: memberCookie },
+      body: JSON.stringify({ name: "Personal proxy" }),
+    });
+    expect(personalResponse.status).toBe(200);
+    const personal = (await personalResponse.json()) as { id: string; key: string };
+    expect((await proxy(personal.key, "member-provider-key")).status).toBe(200);
+    await expect.poll(async () => providers.db.select().from(llmProxyRequests).where(eq(llmProxyRequests.apiKeyId, personal.id))).toEqual([
+      expect.objectContaining({ orgId: team.orgId, teamId: null, userId: member.id, totalTokens: 120 }),
+    ]);
     const costs = await providers.db.execute(sql`SELECT user_id, owner_type, owner_id FROM cost_entries WHERE use_case = 'proxy'`);
-    expect(costs).toMatchObject({ rows: [{ user_id: null, owner_type: "team", owner_id: team.id }] });
+    expect(costs).toMatchObject({ rows: expect.arrayContaining([
+      { user_id: null, owner_type: "team", owner_id: team.id },
+      { user_id: member.id, owner_type: "user", owner_id: member.id },
+    ]) });
     const provider = await createLlmProvider(providers.db, { orgId: team.orgId, kind: "openai", name: "Org proxy" });
     await providers.engineCredentials.save({ type: "org", id: team.orgId }, `llm:${provider.id}`, { type: "api_key", apiKey: "org-provider-key" });
     await setProxySettings(providers.db, team.orgId, { mode: "centralized" });
-    expect((await proxy("ignored-personal-key")).status).toBe(200);
+    expect((await proxy(key.key, "ignored-personal-key")).status).toBe(200);
     expect(new Headers(upstream.mock.calls.at(-1)?.[1]?.headers).get("authorization")).toBe("Bearer org-provider-key");
     // A shared key must not inherit its creating admin's governance authority.
     expect((await fetch(`${baseUrl}/api/proxy/settings`, {
       method: "PUT", headers: { "x-api-key": key.key, "content-type": "application/json" }, body: JSON.stringify({ enabled: false }),
-    })).status).toBe(403);
+    })).status).toBe(401);
     if (!key.createdBy) throw new Error("Expected key creator");
     await providers.db.delete(orgMembers).where(and(eq(orgMembers.orgId, team.orgId), eq(orgMembers.userId, key.createdBy)));
-    expect((await proxy("approved-provider-key")).status).toBe(200);
+    expect((await proxy(key.key, "approved-provider-key")).status).toBe(200);
     await providers.db.update(apikey).set({ teamId: "different-team" }).where(eq(apikey.id, key.id));
-    expect((await proxy("approved-provider-key")).status).toBe(401);
+    expect((await proxy(key.key, "approved-provider-key")).status).toBe(401);
     await providers.db.update(apikey).set({ teamId: team.id }).where(eq(apikey.id, key.id));
     await providers.db.delete(teams).where(eq(teams.id, team.id));
-    expect((await proxy("approved-provider-key")).status).toBe(401);
+    expect((await proxy(key.key, "approved-provider-key")).status).toBe(401);
     await providers.db.delete(apikey).where(eq(apikey.id, key.id));
-    expect((await proxy("approved-provider-key")).status).toBe(401);
+    expect((await proxy(key.key, "approved-provider-key")).status).toBe(401);
   });
 });

@@ -7,19 +7,18 @@ import { deleteTeamApiKey } from "../services/team-resource-deletion.js";
  * `verifyApiKey` returns); the list and revoke paths read the column. One
  * UPDATE writes both, and create re-reads both before it returns the
  * secret, so the two cannot disagree on a row this route made. Revoke is
- * a row delete so a later team admin can kill a key the creating admin no
- * longer owns.
+ * a row delete so a later team member can kill a key after its creator leaves.
  */
 import { Hono } from "hono";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { requireActingUser } from "../middleware/auth.js";
-import { apikey, orgMembers, teamMembers } from "../schema/index.js";
-import { canAdministerTeam, getTeamInOrg, isTeamMember, lockTeamForOwnership } from "../services/teams.js";
-import { TEAM_ADMIN_REQUIRED_CODE } from "../services/team-deletion-access.js";
-import { isOrgAdmin } from "../services/org.js";
-import { parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
+import { apikey } from "../schema/index.js";
+import { getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
+import { isOrgAdmin, isOrgMember } from "../services/org.js";
+import { isProxyOnlyApiKey, parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import type { CreateTeamApiKeyResponse, ListTeamApiKeysResponse, TeamApiKeySummary } from "../wire/types.js";
 
 export const teamApiKeysRouter = new Hono<AppEnv>();
@@ -27,83 +26,23 @@ export const teamApiKeysRouter = new Hono<AppEnv>();
 const TEAM_KEY_AUTH_REQUIRED =
   "Team API keys need a signed-in session. Sign in and open the team workspace.";
 
-/**
- * Refusal copy for a team member who is not an admin. The member already
- * knows the team exists, so the answer names the rule and the two actions
- * that get them a key. A caller who cannot see the team at all keeps the
- * 404 that hides it.
- */
-export const TEAM_KEY_ADMIN_REQUIRED =
-  "Only a team admin or an organization admin can create a key for this team. " +
-  "Ask an admin of this team to create the key. " +
-  "To create your own key, set the workspace switcher to Personal.";
+/** Whether the caller may create or revoke keys for this team. */
+type TeamKeyAccess = "allowed" | "hidden";
 
 /**
- * The refusal body for that member. It carries the shared
- * `team_admin_required` code, the same discriminator the delete path on this
- * resource sends, so one client branch answers both. It carries no
- * `requestId`: a deletion request has no create counterpart.
+ * Team keys are shared team credentials. A team member can manage them; an
+ * organization admin retains access for a team they did not join.
  */
-function adminRequiredBody(teamId: string) {
-  return { error: TEAM_KEY_ADMIN_REQUIRED, code: TEAM_ADMIN_REQUIRED_CODE, teamId };
-}
-
-/** What the caller may do with team keys on this team. */
-type TeamKeyCreateAccess = "allowed" | "member-only" | "hidden";
-
-/**
- * One definition of the create gate, used by the first check and by the
- * re-check inside the ownership lock, so the two cannot drift.
- */
-async function teamKeyCreateAccess(
+async function teamKeyAccess(
   db: AppQueryable,
   orgId: string,
   teamId: string,
   userId: string,
-): Promise<TeamKeyCreateAccess> {
+): Promise<TeamKeyAccess> {
   const team = await getTeamInOrg(db, orgId, teamId);
-  if (!team) return "hidden";
-  if (await canAdministerTeam(db, teamId, userId)) return "allowed";
-  return (await isTeamMember(db, teamId, userId)) ? "member-only" : "hidden";
-}
-
-/**
- * Hold the two rows the create gate reads, so a demotion that commits while
- * this transaction runs serializes behind it instead of racing it.
- *
- * The ownership advisory lock serializes this route against team deletion,
- * and nothing else. The membership writers take no such lock: `addMember`
- * and `removeMember` in `services/teams.ts`, and the organization role
- * writer in `services/org.ts`, each commit on their own. Without the row
- * locks below, a demotion could commit between the re-check's read and this
- * transaction's commit, and the key would be pinned for a caller who had
- * already lost the authority to create it.
- *
- * Share, not update. Two concurrent creates on one team need not serialize
- * against each other, only against a writer, and a role UPDATE or a
- * membership DELETE blocks on a share lock until this transaction commits.
- * `services/team-deletion-access.ts` holds the same two rows the same way.
- *
- * A caller with no row locks nothing, which is the promotion direction
- * rather than the revocation one. Somebody who holds no membership cannot
- * lose an authority they never had, and the read that follows refuses them.
- */
-async function holdCallerAuthority(
-  tx: AppQueryable,
-  orgId: string,
-  teamId: string,
-  userId: string,
-): Promise<void> {
-  await tx
-    .select({ role: teamMembers.role })
-    .from(teamMembers)
-    .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)))
-    .for("share");
-  await tx
-    .select({ role: orgMembers.role })
-    .from(orgMembers)
-    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)))
-    .for("share");
+  if (!team || !(await isOrgMember(db, orgId, userId))) return "hidden";
+  if (await isOrgAdmin(db, orgId, userId)) return "allowed";
+  return (await isTeamMember(db, teamId, userId)) ? "allowed" : "hidden";
 }
 
 async function canViewTeamKeys(
@@ -112,6 +51,7 @@ async function canViewTeamKeys(
   userId: string,
   orgId: string,
 ): Promise<boolean> {
+  if (!(await isOrgMember(db, orgId, userId))) return false;
   if (await isOrgAdmin(db, orgId, userId)) return true;
   return isTeamMember(db, teamId, userId);
 }
@@ -149,6 +89,7 @@ function toSummary(row: SummaryRow): TeamApiKeySummary {
     createdAt: row.createdAt.getTime(),
     lastRequest: row.lastRequest ? row.lastRequest.getTime() : null,
     createdBy: createdByFromMetadata(metadata),
+    proxyOnly: isProxyOnlyApiKey(metadata),
   };
 }
 
@@ -179,9 +120,8 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   }
   const { db } = c.var.providers;
   const teamId = c.req.param("id");
-  const access = await teamKeyCreateAccess(db, user.orgId, teamId, user.id);
+  const access = await teamKeyAccess(db, user.orgId, teamId, user.id);
   if (access === "hidden") return c.json({ error: "team not found" }, 404);
-  if (access === "member-only") return c.json(adminRequiredBody(teamId), 403);
 
   let raw: unknown;
   try {
@@ -204,30 +144,30 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   if (!created?.key) {
     return c.json({ error: "Couldn't create the API key. Sign in again and retry." }, 500);
   }
-  let pinResult: "pinned" | "not-found" | "forbidden" | "failed" = "failed";
+  let pinResult: "pinned" | "failed" = "failed";
+  let proxyOnly = true;
   try {
     pinResult = await db.transaction(async (tx) => {
       // Serialize the final pin with deleteTeam. All reads use tx: an outer
       // database call here would deadlock PGlite's single writer.
-      await lockTeamForOwnership(tx, teamId);
-      // Hold the rows the gate reads before reading them, so a demotion
-      // landing during this transaction cannot commit underneath it.
-      await holdCallerAuthority(tx, user.orgId, teamId, user.id);
-      // A demotion that lands before the lock, or while it is held, gets the
-      // same answer the first check gives, so the caller reads one rule.
-      const current = await teamKeyCreateAccess(tx, user.orgId, teamId, user.id);
-      if (current === "hidden") return "not-found";
-      if (current === "member-only") return "forbidden";
-
-      const pin = JSON.stringify({ teamId, createdBy: user.id });
-      await tx.update(apikey).set({ metadata: pin, teamId }).where(eq(apikey.id, created.id));
+      // Use the locked membership snapshot for both authorization and scope.
+      // A demotion before mint completion must never produce a full API key.
+      const admin = await lockTeamDeletionAccess(tx, { orgId: user.orgId, userId: user.id }, teamId);
+      proxyOnly = !admin;
+      const pin = JSON.stringify({ teamId, createdBy: user.id, proxyOnly });
+      // Old API replicas require referenceId to resolve to a real user before
+      // promoting a team principal. A non-user reference fails closed there,
+      // even when that replica does not understand the proxyOnly marker.
+      const referenceId = proxyOnly ? `team-proxy:${created.id}` : user.id;
+      await tx.update(apikey).set({ metadata: pin, teamId, referenceId }).where(eq(apikey.id, created.id));
       const stamped = await tx
-        .select({ metadata: apikey.metadata, teamId: apikey.teamId })
+        .select({ metadata: apikey.metadata, teamId: apikey.teamId, referenceId: apikey.referenceId })
         .from(apikey)
         .where(eq(apikey.id, created.id))
         .limit(1);
-      return stamped[0]?.teamId === teamId &&
-        teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId
+      return stamped[0]?.teamId === teamId && stamped[0].referenceId === referenceId &&
+        teamIdFromApiKeyMetadata(parseApiKeyMetadata(stamped[0].metadata)) === teamId &&
+        isProxyOnlyApiKey(stamped[0].metadata) === proxyOnly
         ? "pinned"
         : "failed";
     });
@@ -238,8 +178,6 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
       await db.delete(apikey).where(eq(apikey.id, created.id));
     }
   }
-  if (pinResult === "not-found") return c.json({ error: "team not found" }, 404);
-  if (pinResult === "forbidden") return c.json(adminRequiredBody(teamId), 403);
   if (pinResult === "failed") {
     return c.json({ error: "Couldn't pin the API key to this team. Retry the create." }, 500);
   }
@@ -251,6 +189,7 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
     createdAt: created.createdAt.getTime(),
     key: created.key,
     createdBy: user.id,
+    proxyOnly,
   };
   return c.json(resp, 201);
 });

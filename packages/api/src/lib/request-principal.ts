@@ -41,6 +41,11 @@ export function parseApiKeyMetadata(raw: string | null | undefined): Record<stri
   }
 }
 
+/** Member-created team keys authenticate only at the inference proxy. */
+export function isProxyOnlyApiKey(metadata: unknown): boolean {
+  return coerceApiKeyMetadata(metadata)?.proxyOnly === true;
+}
+
 /** True when a better-auth create/update body tries to write `metadata.teamId`. */
 export function clientMetadataHasTeamId(body: unknown): boolean {
   if (!isPlainObject(body)) return false;

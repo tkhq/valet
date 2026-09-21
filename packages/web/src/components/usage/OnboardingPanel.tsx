@@ -379,7 +379,7 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
           </p>
           {blocked && (
             <div id={blockedHelpId} className="mb-4 space-y-2 text-sm text-muted">
-              <p>Only a team admin or an organization admin can create a shared key for this team. Ask an admin of this team to create the key.</p>
+              <p>You do not have access to create a shared key for this team. Ask a team member to create the key.</p>
               {settingsQuery.data?.mode === "passthrough" ? (
                 <p>This gateway runs in pass-through mode. To create your own key, set the workspace switcher to Personal. This page then makes a personal proxy key, and you must also supply your own provider key with it.</p>
               ) : (
@@ -396,7 +396,7 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
             onClick={() => {
               if (creation.canCreate && !creation.isPending) creation.create(setCreatedKey);
             }}
-            // A blocked member must still reach this control with the
+            // A blocked user must still reach this control with the
             // keyboard, or the explanation above it is never announced on
             // focus. `disabled` removes a button from the tab order, so the
             // permission refusal is inert, not disabled. The click guard

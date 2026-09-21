@@ -102,7 +102,7 @@ export function TeamApiKeysSection({ teamId }: { teamId: string }) {
   if (!team) {
     return <p role="alert" className="text-sm text-muted">This team is unavailable. Select another workspace.</p>;
   }
-  const canMutate = team.callerRole === "admin" || orgQ.data.callerRole === "admin";
+  const canMutate = team.callerRole !== null || orgQ.data.callerRole === "admin";
   return <TeamApiKeyControls key={`${teamId}:${canMutate}`} teamId={teamId} keys={keysQ.data} canMutate={canMutate} />;
 }
 
@@ -116,12 +116,13 @@ function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys:
   return (
     <div className="min-w-0 max-w-full space-y-4">
       <div className="space-y-2 text-sm leading-relaxed text-muted">
-        <p>Team members can see key names. Only team or organization admins can create or revoke keys.</p>
+        <p>Team members can create and revoke shared keys. Team members can see key names.</p>
         <p>Secrets are shown once. Share only with intended users.</p>
         <details>
           <summary className="cursor-pointer font-medium text-ink">Key access and lifetime</summary>
           <ul className="mt-2 list-disc space-y-2 pl-5">
-            <li>Keys can read, run, and change this team's sessions and workflows, and delete sessions.</li>
+            <li>Keys created by members work only with the inference proxy.</li>
+            <li>Keys created by team or organization admins can also read, run, and change this team's sessions and workflows, and delete sessions.</li>
             <li>Workflow deletion requires a person with team or organization admin access. Keys cannot manage organization settings or other teams.</li>
             <li>Keys remain valid after their creator leaves. Revoke a key to stop access.</li>
           </ul>
@@ -153,8 +154,8 @@ function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys:
       {keys.length === 0 && (
         <p className="py-4 text-sm text-muted">
           {canMutate
-            ? `No API keys in ${place} yet. Create one to call the API as this team.`
-            : `No API keys in ${place} yet. A team admin can create one.`}
+            ? `No API keys in ${place} yet. Create one to use the proxy as this team.`
+            : `No API keys in ${place} yet. Select a team workspace to create one.`}
         </p>
       )}
 
@@ -170,6 +171,7 @@ function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys:
               createdAt={key.createdAt}
               lastRequest={key.lastRequest}
               createdByLabel={creatorLabel(key.createdBy, directoryQ.data?.users)}
+              accessLabel={key.proxyOnly ? "Proxy only" : "API and proxy"}
               revokeDisabled={!canMutate}
             />
           ))}
@@ -323,6 +325,7 @@ function TeamApiKeyRow({
   createdAt,
   lastRequest,
   createdByLabel,
+  accessLabel,
   revokeDisabled,
 }: {
   teamId: string;
@@ -332,6 +335,7 @@ function TeamApiKeyRow({
   createdAt: Date | number;
   lastRequest: Date | number | null;
   createdByLabel: string | null;
+  accessLabel: string;
   revokeDisabled?: boolean;
 }) {
   const revokeKey = useRevokeTeamApiKey(teamId);
@@ -342,6 +346,7 @@ function TeamApiKeyRow({
       createdAt={createdAt}
       lastRequest={lastRequest}
       createdByLabel={createdByLabel}
+      accessLabel={accessLabel}
       revokeDisabled={revokeDisabled}
       pending={revokeKey.isPending}
       onRevoke={(done) => revokeKey.mutate(apiKeyId, { onSuccess: done })}
@@ -355,6 +360,7 @@ function ApiKeyRow({
   createdAt,
   lastRequest,
   createdByLabel,
+  accessLabel,
   onRevoke,
   pending,
   revokeDisabled,
@@ -365,6 +371,7 @@ function ApiKeyRow({
   lastRequest: Date | number | null;
   /** Team rows only. A personal key has one possible creator. */
   createdByLabel?: string | null;
+  accessLabel?: string;
   onRevoke: (done: () => void) => void;
   pending: boolean;
   revokeDisabled?: boolean;
@@ -376,6 +383,7 @@ function ApiKeyRow({
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-ink">{name ?? "Unnamed key"}</div>
         <div className="truncate font-mono text-xs text-muted">{start ?? "…"}</div>
+        {accessLabel && <div className="text-xs text-muted">{accessLabel}</div>}
       </div>
       {createdByLabel && (
         <div className="hidden shrink-0 text-xs text-muted sm:block">{createdByLabel}</div>
