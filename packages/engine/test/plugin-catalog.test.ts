@@ -603,6 +603,66 @@ describe("pluginCatalogTools: call_tool", () => {
     faux.unregister();
   });
 
+  it("uses trusted action metadata for a distinct credential decision", async () => {
+    let providerReads = 0;
+    let actionDecisions = 0;
+    let binding: import("../src/index.js").CredentialActionBinding | undefined;
+    const plugin: ActionPlugin = {
+      service: "github",
+      credentialService: "github",
+      credentialClass: "oauth2",
+      actions: [{
+        id: "github.read_private",
+        name: "Read private data",
+        description: "Read private data.",
+        riskLevel: "low",
+        parameters: Type.Object({}),
+        execute: async (_args, ctx) => {
+          await ctx.credentials.get();
+          return { success: true };
+        },
+      }],
+    };
+    const [, callTool] = pluginCatalogTools({ plugins: [plugin] });
+    const result = await callTool.execute(
+      { tool_id: "github.read_private", params: {}, summary: "read private data" },
+      makeCtx({
+        owner: { type: "team", id: "team-1" },
+        credentials: {
+          get: async () => { providerReads++; return { accessToken: "SECRET-CANARY" }; },
+          request: async () => { providerReads++; return { accessToken: "SECRET-CANARY" }; },
+        },
+        policyResolver: {
+          resolve: async () => {
+            actionDecisions++;
+            return { mode: "allow", provenance: { baseMode: "allow", source: "org_policy" } };
+          },
+        },
+        credentialProviderForAction: (_provider, trusted) => {
+          binding = trusted;
+          return {
+            get: async () => { throw new Error("credential use denied"); },
+            request: async () => { throw new Error("credential use denied"); },
+          };
+        },
+      }),
+    );
+
+    expect(actionDecisions).toBe(1);
+    expect(providerReads).toBe(0);
+    expect(result.text).toContain("credential use denied");
+    expect(binding).toMatchObject({
+      organizationId: "o1",
+      actorUserId: "u1",
+      owner: { type: "team", id: "team-1" },
+      service: "github",
+      credentialClass: "oauth2",
+      actionId: "github.read_private",
+      operation: "plugin",
+      sessionId: "s1",
+    });
+  });
+
   it("unknown tool_id → tool result text reports it without dispatching", async () => {
     const { plugin, calls } = makeMockPlugin();
     const tools = pluginCatalogTools({ plugins: [plugin] });

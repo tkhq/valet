@@ -95,6 +95,7 @@ import type { CanonicalAuthorizationService } from "../authorization/canonical-a
 import { canonicalInteractivePolicyResolver } from "../authorization/canonical-interactive-resolver.js";
 import { canonicalBuiltinPolicyResolver } from "../authorization/canonical-builtin-resolver.js";
 import { withSandboxCapabilityAuthorization } from "../authorization/sandbox-capability-provider.js";
+import { withCredentialUseAuthorization } from "../authorization/credential-use-provider.js";
 import {
   agentSessions,
   orgs,
@@ -1089,6 +1090,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     // Runner tools sit before the plugin tools so the loop surface reads
     // first in the tool list. The toolConfig mirrors the orchestrator's
     // (apiBaseUrl + internal token for the sec_* HTTP seam; child
@@ -1161,6 +1163,7 @@ export class EngineHost {
             ...(policyResolver ? { policyResolver } : {}),
           ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
           ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
@@ -1188,6 +1191,7 @@ export class EngineHost {
           ...(policyResolver ? { policyResolver } : {}),
           ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+          ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
           ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
@@ -1659,6 +1663,17 @@ export class EngineHost {
    * only its own rows. Returns `undefined` without an app db (db-less tests),
    * so plugin actions then see no `pluginStore` — the pre-store behavior.
    */
+  private getCredentialProviderForAction(): import("@valet/engine").CredentialProviderForAction | undefined {
+    const db = this.opts.db;
+    const authorization = this.opts.canonicalAuthorizationService;
+    if (!db || !authorization) return undefined;
+    return (provider, binding) => withCredentialUseAuthorization(provider, {
+      db,
+      authorization,
+      binding,
+    });
+  }
+
   private getPluginStoreFactory(): ((pluginName: string) => PluginStore) | undefined {
     const db = this.opts.db;
     if (!db) return undefined;
@@ -2536,6 +2551,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, [], behavior);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistantId);
     const sessionOptions = {
@@ -2547,6 +2563,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
       ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
@@ -3526,6 +3543,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     const parentAssistant = this.opts.db
       ? await loadAssistantBySessionId(this.opts.db, opts.parentSessionId)
       : undefined;
@@ -3605,6 +3623,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
       ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
@@ -3754,6 +3773,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -3764,6 +3784,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
       ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,

@@ -1048,6 +1048,8 @@ export class Session {
       // no queueItemId; gated command audits key on (resumeKey, ordinal)
       // with an empty turn scope, matching their gate-ordinal scoping.
       policyResolver: this.options.policyResolver,
+      credentialProviderForAction: this.options.credentialProviderForAction,
+      actionInvocationId: uid("command-action"),
       signal: new AbortController().signal,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
         if (requestDecision) return requestDecision(req);

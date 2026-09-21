@@ -150,8 +150,12 @@ export function withCredentialUseAuthorization(
       cache.set(targetService, pending);
       return pending;
     },
-    request(service, reason): Promise<Credential> {
-      return inner.request(service, reason);
+    async request(service, reason): Promise<Credential> {
+      const credential = await this.get(service);
+      if (!credential) {
+        throw new Error(`credential ${service} not connected: ${reason}`);
+      }
+      return credential;
     },
   };
 }

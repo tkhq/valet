@@ -119,6 +119,8 @@ export interface ActionPlugin {
   safeParameterProjection?: SafeParameterProjectionV1;
   /** Override credential service name (defaults to `service`). */
   credentialService?: string;
+  /** Trusted catalog class used by credential authorization. */
+  credentialClass?: string;
   /**
    * The plugin's actions are unusable without a connected credential.
    * When set and no credential resolves, `list_tools` HIDES this
@@ -1289,12 +1291,28 @@ async function executeAction(
   // and writes only its own rows (plugin-store design). The base ToolContext is
   // turn-scoped and plugin-agnostic; the factory it carries re-scopes here.
   const pluginStore = ctx.pluginStoreFactory?.(entry.service);
+  const baseCredentials = scopedCredentialProvider(ctx, credentialService);
+  const credentials = ctx.credentialProviderForAction
+    ? ctx.credentialProviderForAction(baseCredentials, {
+        organizationId: ctx.orgId,
+        actorUserId: ctx.userId,
+        principal: ctx.owner ?? { type: "user", id: ctx.userId },
+        owner: ctx.owner ?? { type: "user", id: ctx.userId },
+        service: credentialService,
+        credentialClass: entry.plugin.credentialClass ?? "stored",
+        actionId: qualifiedId(entry),
+        operation: "plugin",
+        sessionId: ctx.sessionId,
+        ...(ctx.sessionPurpose === "child" ? { childSessionId: ctx.sessionId } : {}),
+        invocationId: `${ctx.actionInvocationId ?? "direct"}:${audit?.input.resumeKey ?? `${qualifiedId(entry)}:${boundedArgsKey(stableJson(args ?? {}))}`}`,
+      })
+    : baseCredentials;
   const actionCtx: PluginActionContext = {
     ...ctx,
     actionId: entry.action.id,
     service: entry.service,
     summary,
-    credentials: scopedCredentialProvider(ctx, credentialService),
+    credentials,
     ...(pluginStore ? { pluginStore } : {}),
   };
 
